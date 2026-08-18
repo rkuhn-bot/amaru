@@ -90,6 +90,7 @@ Other guiding principles:
 
 - **amaru-observability**: restore wrapping-span identity on every product tracing stack (console, JSON, OTEL, TUI) and stop double-quoting CBOR string scalars such as header hashes. Each event inlines only its wrapping span's fields; `parents` is a name array; child lines refer to the parent by id. Console uses a Java-style abbreviated path (`e.t:g.r`). Encoding is specified in EDR-033. ([#1208](https://github.com/pragma-org/amaru/issues/1208))
 - **amaru-node**: when OTLP is enabled, `Telemetry` starts the same process/build gauges as the product binary (`process_*`, `cardano_node_metrics_cardano_*`) so embedders such as `run_until` satisfy the e2e metrics contract.
+- **amaru-node**: `Telemetry` (used by `run_until`) now uses the product CBOR-aware tracing layers so structured log properties decode to numbers and strings instead of diagnostic byte strings.
 - **amaru-consensus**: make `select_chain` handle already-validated tips idempotently so concurrent startup recovery cannot terminate the stage. ([#1124](https://github.com/pragma-org/amaru/pull/1124))
 - **amaru**: store nonces with both packaged bootstrap headers so the "nonces present ⇔ header validated" invariant holds after bootstrap. ([#1124](https://github.com/pragma-org/amaru/pull/1124))
 - **amaru-ledger**: reject governance proposals whose previous action does not match the enacted root nor an in-flight proposal of the same purpose. ([#1090][], [#932][])
