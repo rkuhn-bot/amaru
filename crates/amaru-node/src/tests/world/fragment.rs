@@ -55,6 +55,8 @@ pub struct FragmentMeta {
     pub latest_snapshot_epoch: u64,
     pub target_epoch: u64,
     pub peer: String,
+    /// Last header after the snapshot that has a stored body. Display form of [`Point`].
+    pub fragment_head: String,
 }
 
 /// Parse `<slot>.<hash>` the same way `amaru-bootstrap` does.
