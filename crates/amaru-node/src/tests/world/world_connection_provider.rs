@@ -99,14 +99,6 @@ struct WorldInner {
     endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
     /// Next connection ID to assign.
     next_conn_id: ConnectionId,
-    /// Pending connect operations waiting for Connected.
-    pending_connects: BTreeMap<ConnectionId, oneshot::Sender<std::io::Result<ConnectionId>>>,
-    /// Pending accept operations waiting for Accepted.
-    pending_accepts: BTreeMap<SocketAddr, VecDeque<oneshot::Sender<std::io::Result<(Peer, ConnectionId)>>>>,
-    /// Pending send operations waiting for SendAck (multiple per conn).
-    pending_sends: BTreeMap<ConnectionId, VecDeque<oneshot::Sender<std::io::Result<()>>>>,
-    /// Pending recv operations waiting for Deliver.
-    pending_recvs: BTreeMap<ConnectionId, PendingRecv>,
 }
 
 struct Listener {
@@ -129,11 +121,6 @@ struct ConnectionEndpoint {
     peer_conn_id: Arc<Mutex<Option<ConnectionId>>>,
 }
 
-struct PendingRecv {
-    bytes_needed: NonZeroUsize,
-    completion: oneshot::Sender<std::io::Result<NonEmptyBytes>>,
-}
-
 impl WorldConnectionProvider {
     pub fn new() -> Self {
         Self {
@@ -145,10 +132,6 @@ impl WorldConnectionProvider {
                 listeners: BTreeMap::new(),
                 endpoints: BTreeMap::new(),
                 next_conn_id: ConnectionId::initial(),
-                pending_connects: BTreeMap::new(),
-                pending_accepts: BTreeMap::new(),
-                pending_sends: BTreeMap::new(),
-                pending_recvs: BTreeMap::new(),
             })),
         }
     }
