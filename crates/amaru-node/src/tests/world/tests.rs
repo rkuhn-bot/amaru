@@ -21,7 +21,8 @@ use amaru_protocols::network_effects::{
     ReceiveError, RecvEffect, SendEffect, SendError,
 };
 use amaru_pure_stage::{
-    Effect, Instant, Name, StageGraph, StageResponse, register_data_deserializer, register_effect_deserializer,
+    Effect, ExternalEffect, Instant, Name, SendData, StageGraph, StageResponse, register_data_deserializer,
+    register_effect_deserializer,
     simulation::{Fifo, SimulationBuilder},
     trace_buffer::{TraceBuffer, TraceEntry},
 };
@@ -57,12 +58,32 @@ fn provider() -> Arc<WorldConnectionProvider> {
     Arc::new(WorldConnectionProvider::new(SEED))
 }
 
-fn clock(nanos: u64) -> TraceEntry {
-    TraceEntry::Clock(Instant::at_offset(Duration::from_nanos(nanos), Duration::ZERO))
+fn te_state<T: SendData + Clone>(stage: impl AsRef<str>, state: &T) -> TraceEntry {
+    TraceEntry::State { stage: Name::from(stage.as_ref()), state: Box::new(state.clone()) }
 }
 
-fn resume_external(stage: &str, response: impl amaru_pure_stage::SendData) -> TraceEntry {
-    TraceEntry::Resume { stage: Name::from(stage), response: StageResponse::ExternalResponse(Box::new(response)) }
+fn te_input<T: SendData + Clone>(stage: impl AsRef<str>, msg: &T) -> TraceEntry {
+    TraceEntry::Input { stage: Name::from(stage.as_ref()), input: Box::new(msg.clone()) }
+}
+
+fn te_clock(instant: Instant) -> TraceEntry {
+    TraceEntry::Clock(instant)
+}
+
+fn te_clock_nanos(nanos: u64) -> TraceEntry {
+    te_clock(Instant::at_offset(Duration::from_nanos(nanos), Duration::ZERO))
+}
+
+fn te_resume(stage: impl AsRef<str>, response: StageResponse) -> TraceEntry {
+    TraceEntry::resume(stage, response)
+}
+
+fn te_resume_external(stage: impl AsRef<str>, response: impl SendData) -> TraceEntry {
+    te_resume(stage, StageResponse::ExternalResponse(Box::new(response)))
+}
+
+fn te_effect(at_stage: impl AsRef<str>, effect: impl ExternalEffect) -> TraceEntry {
+    TraceEntry::suspend(Effect::external(at_stage, Box::new(effect)))
 }
 
 fn pair_ids() -> (ConnectionId, ConnectionId) {
@@ -92,8 +113,8 @@ fn trace_guards() -> amaru_pure_stage::DeserializerGuards {
     guards
 }
 
-fn resume_unit(stage: &str) -> TraceEntry {
-    TraceEntry::Resume { stage: Name::from(stage), response: StageResponse::Unit }
+fn te_resume_unit(stage: impl AsRef<str>) -> TraceEntry {
+    te_resume(stage, StageResponse::Unit)
 }
 
 #[tokio::test]
@@ -177,59 +198,56 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
         ]
     );
 
-    let mut expected = vec![
-        TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) },
-        TraceEntry::State { stage: Name::from("node_b-1"), state: Box::new(()) },
-        TraceEntry::Input { stage: Name::from("node_a-1"), input: Box::new(()) },
-        resume_unit("node_a-1"),
-        TraceEntry::suspend(Effect::external("node_a-1", Box::new(ListenEffect { addr: listener_addr }))),
-        resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
-        TraceEntry::suspend(Effect::external("node_a-1", Box::new(AcceptEffect { listener_addr }))),
-        TraceEntry::Input { stage: Name::from("node_b-1"), input: Box::new(()) },
-        resume_unit("node_b-1"),
-        TraceEntry::suspend(Effect::external(
-            "node_b-1",
-            Box::new(ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
-        )),
-        clock(t_connected),
-        clock(t_connected),
-        resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
-        TraceEntry::suspend(Effect::external("node_b-1", Box::new(SendEffect { conn: initiator, data: msg.clone() }))),
-        resume_external("node_b-1", Ok::<(), SendError>(())),
-        TraceEntry::State { stage: Name::from("node_b-1"), state: Box::new(()) },
-    ];
+    let mut expected = Vec::new();
+    expected.extend([
+        te_state("node_a-1", &()),
+        te_state("node_b-1", &()),
+        te_input("node_a-1", &()),
+        te_resume_unit("node_a-1"),
+        te_effect("node_a-1", ListenEffect { addr: listener_addr }),
+        te_resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
+        te_effect("node_a-1", AcceptEffect { listener_addr }),
+        te_input("node_b-1", &()),
+        te_resume_unit("node_b-1"),
+        te_effect("node_b-1", ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
+        te_clock_nanos(t_connected),
+        te_clock_nanos(t_connected),
+        te_resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
+        te_effect("node_b-1", SendEffect { conn: initiator, data: msg.clone() }),
+        te_resume_external("node_b-1", Ok::<(), SendError>(())),
+        te_state("node_b-1", &()),
+    ]);
     if t_accepted <= t_deliver {
-        expected.push(clock(t_accepted));
-        expected.push(clock(t_accepted));
-        expected.push(resume_external(
-            "node_a-1",
-            Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
-        ));
-        expected.push(TraceEntry::suspend(Effect::external(
-            "node_a-1",
-            Box::new(RecvEffect { conn: responder, bytes: NonZeroUsize::new(12).unwrap() }),
-        )));
+        expected.extend([
+            te_clock_nanos(t_accepted),
+            te_clock_nanos(t_accepted),
+            te_resume_external(
+                "node_a-1",
+                Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
+            ),
+            te_effect("node_a-1", RecvEffect { conn: responder, bytes: NonZeroUsize::new(12).unwrap() }),
+        ]);
         if t_deliver > t_accepted {
-            expected.push(clock(t_deliver));
-            expected.push(clock(t_deliver));
+            expected.extend([te_clock_nanos(t_deliver), te_clock_nanos(t_deliver)]);
         }
-        expected.push(resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
-        expected.push(TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) });
+        expected.extend([
+            te_resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)),
+            te_state("node_a-1", &()),
+        ]);
     } else {
-        expected.push(clock(t_deliver));
-        expected.push(clock(t_deliver));
-        expected.push(clock(t_accepted));
-        expected.push(clock(t_accepted));
-        expected.push(resume_external(
-            "node_a-1",
-            Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
-        ));
-        expected.push(TraceEntry::suspend(Effect::external(
-            "node_a-1",
-            Box::new(RecvEffect { conn: responder, bytes: NonZeroUsize::new(12).unwrap() }),
-        )));
-        expected.push(resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
-        expected.push(TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) });
+        expected.extend([
+            te_clock_nanos(t_deliver),
+            te_clock_nanos(t_deliver),
+            te_clock_nanos(t_accepted),
+            te_clock_nanos(t_accepted),
+            te_resume_external(
+                "node_a-1",
+                Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
+            ),
+            te_effect("node_a-1", RecvEffect { conn: responder, bytes: NonZeroUsize::new(12).unwrap() }),
+            te_resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)),
+            te_state("node_a-1", &()),
+        ]);
     }
     assert_trace(&trace, &expected);
 }
@@ -387,27 +405,27 @@ async fn test_listen_before_connect_attempt_arrives() {
         TraceEntry::State { stage: Name::from("node_b-1"), state: Box::new(()) },
         TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) },
         TraceEntry::Input { stage: Name::from("node_b-1"), input: Box::new(()) },
-        resume_unit("node_b-1"),
+        te_resume_unit("node_b-1"),
         TraceEntry::suspend(Effect::external(
             "node_b-1",
             Box::new(ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
         )),
         TraceEntry::Input { stage: Name::from("node_a-1"), input: Box::new(()) },
-        resume_unit("node_a-1"),
+        te_resume_unit("node_a-1"),
         TraceEntry::suspend(Effect::external("node_a-1", Box::new(ListenEffect { addr: listener_addr }))),
-        resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
+        te_resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
         TraceEntry::suspend(Effect::external("node_a-1", Box::new(AcceptEffect { listener_addr }))),
-        clock(t_attempt),
-        clock(t_attempt),
-        resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
+        te_clock_nanos(t_attempt),
+        te_clock_nanos(t_attempt),
+        te_resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
         TraceEntry::suspend(Effect::external("node_b-1", Box::new(SendEffect { conn: initiator, data: msg.clone() }))),
-        resume_external("node_b-1", Ok::<(), SendError>(())),
+        te_resume_external("node_b-1", Ok::<(), SendError>(())),
         TraceEntry::State { stage: Name::from("node_b-1"), state: Box::new(()) },
     ];
     if t_accepted <= t_deliver {
-        expected.push(clock(t_accepted));
-        expected.push(clock(t_accepted));
-        expected.push(resume_external(
+        expected.push(te_clock_nanos(t_accepted));
+        expected.push(te_clock_nanos(t_accepted));
+        expected.push(te_resume_external(
             "node_a-1",
             Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
         ));
@@ -416,17 +434,17 @@ async fn test_listen_before_connect_attempt_arrives() {
             Box::new(RecvEffect { conn: responder, bytes: NonZeroUsize::new(2).unwrap() }),
         )));
         if t_deliver > t_accepted {
-            expected.push(clock(t_deliver));
-            expected.push(clock(t_deliver));
+            expected.push(te_clock_nanos(t_deliver));
+            expected.push(te_clock_nanos(t_deliver));
         }
-        expected.push(resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
+        expected.push(te_resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
         expected.push(TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) });
     } else {
-        expected.push(clock(t_deliver));
-        expected.push(clock(t_deliver));
-        expected.push(clock(t_accepted));
-        expected.push(clock(t_accepted));
-        expected.push(resume_external(
+        expected.push(te_clock_nanos(t_deliver));
+        expected.push(te_clock_nanos(t_deliver));
+        expected.push(te_clock_nanos(t_accepted));
+        expected.push(te_clock_nanos(t_accepted));
+        expected.push(te_resume_external(
             "node_a-1",
             Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
         ));
@@ -434,7 +452,7 @@ async fn test_listen_before_connect_attempt_arrives() {
             "node_a-1",
             Box::new(RecvEffect { conn: responder, bytes: NonZeroUsize::new(2).unwrap() }),
         )));
-        expected.push(resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
+        expected.push(te_resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
         expected.push(TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) });
     }
     assert_trace(&trace, &expected);
@@ -695,13 +713,13 @@ async fn test_connect_refused_at_attempt_arrival() {
         &[
             TraceEntry::State { stage: Name::from("node-1"), state: Box::new(()) },
             TraceEntry::Input { stage: Name::from("node-1"), input: Box::new(()) },
-            resume_unit("node-1"),
+            te_resume_unit("node-1"),
             TraceEntry::suspend(Effect::external(
                 "node-1",
                 Box::new(ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
             )),
-            clock(t_attempt),
-            resume_external(
+            te_clock_nanos(t_attempt),
+            te_resume_external(
                 "node-1",
                 Err::<ConnectionId, ConnectError>(ConnectError::new(listener_addr.into(), "connection refused")),
             ),
