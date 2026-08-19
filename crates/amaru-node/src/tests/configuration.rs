@@ -73,6 +73,8 @@ pub struct NodeTestConfig {
     pub chain_dir: Option<PathBuf>,
     /// Simulation clock offset so production header validation sees fragment slots as not-in-the-future.
     pub global_epoch_offset: Option<Duration>,
+    /// When set, overrides [`Config::target_upstream_peers`] (production default is 3).
+    pub target_upstream_peers: Option<usize>,
 }
 
 impl Debug for NodeTestConfig {
@@ -117,6 +119,7 @@ impl Default for NodeTestConfig {
             ledger_dir: None,
             chain_dir: None,
             global_epoch_offset: None,
+            target_upstream_peers: None,
         }
     }
 }
@@ -256,6 +259,13 @@ impl NodeTestConfig {
         self
     }
 
+    /// Cap outbound peers. World tests that only need one hop set this to 1 so a real
+    /// ledger's registered relays do not open extra connects.
+    pub fn with_target_upstream_peers(mut self, n: usize) -> Self {
+        self.target_upstream_peers = Some(n);
+        self
+    }
+
     /// Given a list of block headers:
     ///
     /// - Store them in the chain store.
@@ -299,6 +309,9 @@ impl NodeTestConfig {
         config.ledger_config.era_history = self.era_history().clone();
         config.ledger_config.network = self.network_name;
         config.listen_address = self.listen_address.clone();
+        if let Some(n) = self.target_upstream_peers {
+            config.target_upstream_peers = n;
+        }
 
         if let Some(ledger_dir) = &self.ledger_dir {
             config.ledger_config.ledger_store = RocksDbConfig::new(ledger_dir.clone());
