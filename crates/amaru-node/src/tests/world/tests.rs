@@ -157,7 +157,7 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
             HeapLogEntry {
                 sequence: 0,
                 time_nanos: t_connected,
-                kind: HeapLogKind::Connected { initiator_conn: initiator, listener: listener_addr },
+                kind: HeapLogKind::ConnectAttempt { target: listener_addr },
             },
             HeapLogEntry { sequence: 2, time_nanos: t_connected, kind: HeapLogKind::SendAck { conn: initiator } },
             HeapLogEntry {
@@ -263,13 +263,11 @@ async fn test_horizon_cuts_keepalive() {
     assert_eq!(world.peek_next_event_time(), Some(1500), "Event at t=1500 should still be on heap (not popped)");
 }
 
-/// Connect parks first; listen then resolves; Connected completes the matching listener.
+/// Connected completes the pending connect for that listener, not a process-wide FIFO.
 #[tokio::test]
 async fn test_pending_connect_matches_listener() {
-    let _guards = trace_guards();
     let handle = tokio::runtime::Handle::current();
     let provider = provider();
-    let trace = TraceBuffer::new_shared(100, 1_000_000);
     let addr1: SocketAddr = "127.0.0.1:9101".parse().unwrap();
     let addr2: SocketAddr = "127.0.0.1:9102".parse().unwrap();
     let got1 = observed::<Vec<u8>>();
@@ -279,7 +277,7 @@ async fn test_pending_connect_matches_listener() {
 
     let listen = |name: &'static str, addr: SocketAddr, slot: Observed<Vec<u8>>| {
         let provider = provider.clone();
-        let mut graph = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
+        let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo);
         graph.resources().put::<ConnectionsResource>(provider);
         let stage = graph.stage(name, move |_state: (), _unit: (), eff| {
             let slot = slot.clone();
@@ -298,7 +296,7 @@ async fn test_pending_connect_matches_listener() {
     };
     let connect = |name: &'static str, addr: SocketAddr, payload: &'static [u8]| {
         let provider = provider.clone();
-        let mut graph = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
+        let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo);
         graph.resources().put::<ConnectionsResource>(provider);
         let stage = graph.stage(name, move |_state: (), _unit: (), eff| async move {
             let net = Network::new(&eff);
@@ -323,95 +321,122 @@ async fn test_pending_connect_matches_listener() {
     world.run_to_completion().await;
     assert_eq!(got1.lock().as_deref(), Some(b"one".as_ref()));
     assert_eq!(got2.lock().as_deref(), Some(b"two".as_ref()));
+}
 
-    let mut ids = ConnectionId::initial();
-    let c1 = ids.get_and_increment();
-    let r1 = ids.get_and_increment();
-    let c2 = ids.get_and_increment();
-    let r2 = ids.get_and_increment();
-    let one = NonEmptyBytes::try_from(Bytes::from("one")).unwrap();
-    let two = NonEmptyBytes::try_from(Bytes::from("two")).unwrap();
-    let t_acc2 = wire_delay_nanos(SEED, 3);
-    let t_acc1 = wire_delay_nanos(SEED, 1);
-    let t_conn1 = wire_delay_nanos(SEED, 0);
-    let t_conn2 = wire_delay_nanos(SEED, 2);
-    let t_del1 = t_conn1 + wire_delay_nanos(SEED, 4);
-    let t_del2 = t_conn2 + wire_delay_nanos(SEED, 5);
+/// Connect is a wire hop: listen after send but before SYN arrival still succeeds.
+#[tokio::test]
+async fn test_listen_before_connect_attempt_arrives() {
+    let _guards = trace_guards();
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let trace = TraceBuffer::new_shared(100, 1_000_000);
+    let listener_addr: SocketAddr = "127.0.0.1:9110".parse().unwrap();
+    let received = observed::<Vec<u8>>();
+    let received_a = received.clone();
 
+    let mut graph_b = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
+    graph_b.resources().put::<ConnectionsResource>(provider.clone());
+    let stage_b = graph_b.stage("node_b", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("ok")).unwrap()).await.unwrap();
+    });
+    let stage_b = graph_b.wire_up(stage_b, ());
+    let mut sim_b = graph_b.run(&handle);
+    sim_b.enqueue_msg(&stage_b, [()]);
+
+    let mut graph_a = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
+    graph_a.resources().put::<ConnectionsResource>(provider.clone());
+    let stage_a = graph_a.stage("node_a", move |_state: (), _unit: (), eff| {
+        let received_a = received_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener_addr).await.unwrap();
+            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
+            let bytes = net.recv(conn, NonZeroUsize::new(2).unwrap()).await.unwrap();
+            set_observed(&received_a, bytes.as_ref().to_vec());
+        }
+    });
+    let stage_a = graph_a.wire_up(stage_a, ());
+    let mut sim_a = graph_a.run(&handle);
+    sim_a.enqueue_msg(&stage_a, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim_b, sim_a]);
+    world.run_to_completion().await;
+    assert_eq!(received.lock().as_deref(), Some(b"ok".as_ref()));
+
+    let (initiator, responder) = pair_ids();
+    let initiator_sock = initiator_addr(initiator);
+    let t_attempt = wire_delay_nanos(SEED, 0);
+    let t_accepted = t_attempt + wire_delay_nanos(SEED, 1);
+    let t_deliver = t_attempt + wire_delay_nanos(SEED, 2);
+    assert!((WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(&t_attempt));
+    let log = world.take_heap_log();
+    assert_eq!(
+        log[0],
+        HeapLogEntry {
+            sequence: 0,
+            time_nanos: t_attempt,
+            kind: HeapLogKind::ConnectAttempt { target: listener_addr },
+        }
+    );
+    assert!(log.iter().any(|e| e.kind == HeapLogKind::SendAck { conn: initiator }));
+
+    let msg = NonEmptyBytes::try_from(Bytes::from("ok")).unwrap();
     let mut expected = vec![
-        TraceEntry::State { stage: Name::from("c1-1"), state: Box::new(()) },
-        TraceEntry::State { stage: Name::from("c2-1"), state: Box::new(()) },
-        TraceEntry::State { stage: Name::from("l1-1"), state: Box::new(()) },
-        TraceEntry::State { stage: Name::from("l2-1"), state: Box::new(()) },
-        TraceEntry::Input { stage: Name::from("c1-1"), input: Box::new(()) },
-        resume_unit("c1-1"),
+        TraceEntry::State { stage: Name::from("node_b-1"), state: Box::new(()) },
+        TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) },
+        TraceEntry::Input { stage: Name::from("node_b-1"), input: Box::new(()) },
+        resume_unit("node_b-1"),
         TraceEntry::suspend(Effect::external(
-            "c1-1",
-            Box::new(ConnectEffect { addr: addr1.into(), timeout: Duration::from_secs(1) }),
+            "node_b-1",
+            Box::new(ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
         )),
-        TraceEntry::Input { stage: Name::from("c2-1"), input: Box::new(()) },
-        resume_unit("c2-1"),
-        TraceEntry::suspend(Effect::external(
-            "c2-1",
-            Box::new(ConnectEffect { addr: addr2.into(), timeout: Duration::from_secs(1) }),
-        )),
-        TraceEntry::Input { stage: Name::from("l1-1"), input: Box::new(()) },
-        resume_unit("l1-1"),
-        TraceEntry::suspend(Effect::external("l1-1", Box::new(ListenEffect { addr: addr1 }))),
-        resume_external("l1-1", Ok::<SocketAddr, ListenError>(addr1)),
-        TraceEntry::suspend(Effect::external("l1-1", Box::new(AcceptEffect { listener_addr: addr1 }))),
-        TraceEntry::Input { stage: Name::from("l2-1"), input: Box::new(()) },
-        resume_unit("l2-1"),
-        TraceEntry::suspend(Effect::external("l2-1", Box::new(ListenEffect { addr: addr2 }))),
-        resume_external("l2-1", Ok::<SocketAddr, ListenError>(addr2)),
-        TraceEntry::suspend(Effect::external("l2-1", Box::new(AcceptEffect { listener_addr: addr2 }))),
+        TraceEntry::Input { stage: Name::from("node_a-1"), input: Box::new(()) },
+        resume_unit("node_a-1"),
+        TraceEntry::suspend(Effect::external("node_a-1", Box::new(ListenEffect { addr: listener_addr }))),
+        resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
+        TraceEntry::suspend(Effect::external("node_a-1", Box::new(AcceptEffect { listener_addr }))),
+        clock(t_attempt),
+        clock(t_attempt),
+        resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
+        TraceEntry::suspend(Effect::external("node_b-1", Box::new(SendEffect { conn: initiator, data: msg.clone() }))),
+        resume_external("node_b-1", Ok::<(), SendError>(())),
+        TraceEntry::State { stage: Name::from("node_b-1"), state: Box::new(()) },
     ];
-    for _ in 0..4 {
-        expected.push(clock(t_acc2));
+    if t_accepted <= t_deliver {
+        expected.push(clock(t_accepted));
+        expected.push(clock(t_accepted));
+        expected.push(resume_external(
+            "node_a-1",
+            Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
+        ));
+        expected.push(TraceEntry::suspend(Effect::external(
+            "node_a-1",
+            Box::new(RecvEffect { conn: responder, bytes: NonZeroUsize::new(2).unwrap() }),
+        )));
+        if t_deliver > t_accepted {
+            expected.push(clock(t_deliver));
+            expected.push(clock(t_deliver));
+        }
+        expected.push(resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
+        expected.push(TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) });
+    } else {
+        expected.push(clock(t_deliver));
+        expected.push(clock(t_deliver));
+        expected.push(clock(t_accepted));
+        expected.push(clock(t_accepted));
+        expected.push(resume_external(
+            "node_a-1",
+            Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
+        ));
+        expected.push(TraceEntry::suspend(Effect::external(
+            "node_a-1",
+            Box::new(RecvEffect { conn: responder, bytes: NonZeroUsize::new(2).unwrap() }),
+        )));
+        expected.push(resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)));
+        expected.push(TraceEntry::State { stage: Name::from("node_a-1"), state: Box::new(()) });
     }
-    expected.push(resume_external(
-        "l2-1",
-        Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_addr(c2)), r2)),
-    ));
-    expected.push(TraceEntry::suspend(Effect::external(
-        "l2-1",
-        Box::new(RecvEffect { conn: r2, bytes: NonZeroUsize::new(3).unwrap() }),
-    )));
-    for _ in 0..4 {
-        expected.push(clock(t_acc1));
-    }
-    expected.push(resume_external(
-        "l1-1",
-        Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_addr(c1)), r1)),
-    ));
-    expected.push(TraceEntry::suspend(Effect::external(
-        "l1-1",
-        Box::new(RecvEffect { conn: r1, bytes: NonZeroUsize::new(3).unwrap() }),
-    )));
-    for _ in 0..4 {
-        expected.push(clock(t_conn1));
-    }
-    expected.push(resume_external("c1-1", Ok::<ConnectionId, ConnectError>(c1)));
-    expected.push(TraceEntry::suspend(Effect::external("c1-1", Box::new(SendEffect { conn: c1, data: one.clone() }))));
-    expected.push(resume_external("c1-1", Ok::<(), SendError>(())));
-    expected.push(TraceEntry::State { stage: Name::from("c1-1"), state: Box::new(()) });
-    for _ in 0..4 {
-        expected.push(clock(t_conn2));
-    }
-    expected.push(resume_external("c2-1", Ok::<ConnectionId, ConnectError>(c2)));
-    expected.push(TraceEntry::suspend(Effect::external("c2-1", Box::new(SendEffect { conn: c2, data: two.clone() }))));
-    expected.push(resume_external("c2-1", Ok::<(), SendError>(())));
-    expected.push(TraceEntry::State { stage: Name::from("c2-1"), state: Box::new(()) });
-    for _ in 0..4 {
-        expected.push(clock(t_del1));
-    }
-    expected.push(resume_external("l1-1", Ok::<NonEmptyBytes, ReceiveError>(one)));
-    expected.push(TraceEntry::State { stage: Name::from("l1-1"), state: Box::new(()) });
-    for _ in 0..4 {
-        expected.push(clock(t_del2));
-    }
-    expected.push(resume_external("l2-1", Ok::<NonEmptyBytes, ReceiveError>(two)));
-    expected.push(TraceEntry::State { stage: Name::from("l2-1"), state: Box::new(()) });
     assert_trace(&trace, &expected);
 }
 
@@ -467,7 +492,7 @@ async fn test_send_before_accept_delivers() {
             HeapLogEntry {
                 sequence: 0,
                 time_nanos: d_connected,
-                kind: HeapLogKind::Connected { initiator_conn: initiator, listener: listener_addr },
+                kind: HeapLogKind::ConnectAttempt { target: listener_addr },
             },
             HeapLogEntry { sequence: 1, time_nanos: d_connected, kind: HeapLogKind::SendAck { conn: initiator } },
             HeapLogEntry {
@@ -627,14 +652,16 @@ async fn test_listen_same_port_errors() {
 }
 
 #[tokio::test]
-async fn test_connect_without_listener_errors() {
+async fn test_connect_refused_at_attempt_arrival() {
+    let _guards = trace_guards();
     let handle = tokio::runtime::Handle::current();
     let provider = provider();
+    let trace = TraceBuffer::new_shared(100, 1_000_000);
     let listener_addr: SocketAddr = "127.0.0.1:9600".parse().unwrap();
     let failed = observed::<bool>();
     let failed_b = failed.clone();
 
-    let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo);
+    let mut graph = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
     graph.resources().put::<ConnectionsResource>(provider.clone());
     let stage = graph.stage("node", move |_state: (), _unit: (), eff| {
         let failed_b = failed_b.clone();
@@ -650,6 +677,37 @@ async fn test_connect_without_listener_errors() {
     let mut world = WorldLoop::new(provider, vec![sim]);
     world.run_to_completion().await;
     assert_eq!(*failed.lock(), Some(true));
+
+    let t_attempt = wire_delay_nanos(SEED, 0);
+    assert_ne!(t_attempt, 0);
+    assert!((WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(&t_attempt));
+    assert_eq!(
+        world.take_heap_log(),
+        vec![HeapLogEntry {
+            sequence: 0,
+            time_nanos: t_attempt,
+            kind: HeapLogKind::ConnectAttempt { target: listener_addr },
+        }]
+    );
+
+    assert_trace(
+        &trace,
+        &[
+            TraceEntry::State { stage: Name::from("node-1"), state: Box::new(()) },
+            TraceEntry::Input { stage: Name::from("node-1"), input: Box::new(()) },
+            resume_unit("node-1"),
+            TraceEntry::suspend(Effect::external(
+                "node-1",
+                Box::new(ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
+            )),
+            clock(t_attempt),
+            resume_external(
+                "node-1",
+                Err::<ConnectionId, ConnectError>(ConnectError::new(listener_addr.into(), "connection refused")),
+            ),
+            TraceEntry::State { stage: Name::from("node-1"), state: Box::new(()) },
+        ],
+    );
 }
 
 #[tokio::test]
@@ -744,8 +802,8 @@ async fn test_latency_is_one_to_five_ms() {
     let hop = world
         .take_heap_log()
         .into_iter()
-        .find(|e| matches!(e.kind, HeapLogKind::Connected { .. } | HeapLogKind::Deliver { .. }));
-    let hop = hop.expect("Connected or Deliver on the heap log");
+        .find(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. } | HeapLogKind::Deliver { .. }));
+    let hop = hop.expect("ConnectAttempt or Deliver on the heap log");
     assert_ne!(hop.time_nanos, 0, "wire hop must be delayed");
     assert!(
         (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(&hop.time_nanos),

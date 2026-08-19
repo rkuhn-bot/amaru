@@ -68,8 +68,8 @@ impl Default for WorldConnectionProvider {
 pub enum NetworkEvent {
     /// Completes a parked `accept()` via the world loop.
     Accepted { listener: SocketAddr, responder_conn: ConnectionId, initiator_addr: SocketAddr },
-    /// Completes a parked `connect()` via the world loop.
-    Connected { initiator_conn: ConnectionId, listener: SocketAddr },
+    /// SYN arrival for an outbound `connect()`. Listener is checked only when this pops.
+    ConnectAttempt { target: SocketAddr },
     /// Completes a parked `send()` via the world loop.
     SendAck { conn: ConnectionId },
     /// Delivers bytes to `conn`'s inbox and may complete a parked `recv()`.
@@ -99,7 +99,7 @@ pub struct HeapLogEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeapLogKind {
     Accepted { listener: SocketAddr, responder_conn: ConnectionId, initiator_addr: SocketAddr },
-    Connected { initiator_conn: ConnectionId, listener: SocketAddr },
+    ConnectAttempt { target: SocketAddr },
     SendAck { conn: ConnectionId },
     Deliver { conn: ConnectionId, data_len: usize },
     Close { conn: ConnectionId },
@@ -116,9 +116,7 @@ impl From<&HeapEntry> for HeapLogEntry {
                     responder_conn: *responder_conn,
                     initiator_addr: *initiator_addr,
                 },
-                NetworkEvent::Connected { initiator_conn, listener } => {
-                    HeapLogKind::Connected { initiator_conn: *initiator_conn, listener: *listener }
-                }
+                NetworkEvent::ConnectAttempt { target } => HeapLogKind::ConnectAttempt { target: *target },
                 NetworkEvent::SendAck { conn } => HeapLogKind::SendAck { conn: *conn },
                 NetworkEvent::Deliver { conn, data } => HeapLogKind::Deliver { conn: *conn, data_len: data.len() },
                 NetworkEvent::Close { conn } => HeapLogKind::Close { conn: *conn },
@@ -229,10 +227,10 @@ impl WorldConnectionProvider {
         schedule_wire_locked(&mut inner, event);
     }
 
-    /// Pair a parked connect with an existing listener and schedule `Connected`.
-    pub fn pair_connect(&self, listener: SocketAddr) -> ConnectionId {
+    /// Pair a connect that has arrived at `target` if a listener is bound there.
+    pub fn pair_if_listening(&self, target: SocketAddr) -> Option<ConnectionId> {
         let mut inner = self.inner.lock();
-        pair_connect_locked(&mut inner, listener)
+        inner.listeners.contains_key(&target).then(|| pair_connect_locked(&mut inner, target))
     }
 
     /// Add data to an endpoint inbox (Deliver).
@@ -323,7 +321,7 @@ fn install_handshake_locked(inner: &mut WorldInner, listener: SocketAddr) -> Opt
     Some((handshake.responder_conn, handshake.initiator_addr))
 }
 
-/// Pair an outbound connect with an existing listener and schedule `Connected`.
+/// Pair an arrived connect with an existing listener.
 /// Both endpoints (and both `peer_conn_id`s) are installed here so a send after
 /// connect completion can Deliver before accept takes the handshake.
 fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> ConnectionId {
@@ -353,7 +351,6 @@ fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> Conne
         initiator_addr: SocketAddr::from(([127, 0, 0, 1], 5000 + initiator_conn.as_u64() as u16)),
     });
 
-    schedule_wire_locked(inner, NetworkEvent::Connected { initiator_conn, listener: target_addr });
     initiator_conn
 }
 
@@ -382,11 +379,9 @@ impl ConnectionProvider for WorldConnectionProvider {
     }
 
     fn connect(&self, addrs: Vec<SocketAddr>, _timeout: Duration) -> BoxFuture<'static, std::io::Result<ConnectionId>> {
-        let mut inner = self.inner.lock();
-        if let Some(target_addr) = addrs.iter().copied().find(|a| inner.listeners.contains_key(a)) {
-            pair_connect_locked(&mut inner, target_addr);
+        if let Some(target) = addrs.first().copied() {
+            self.schedule_wire(NetworkEvent::ConnectAttempt { target });
         }
-        drop(inner);
         Box::pin(std::future::pending())
     }
 
