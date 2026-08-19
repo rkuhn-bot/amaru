@@ -197,6 +197,50 @@ impl WorldConnectionProvider {
         self.inner.lock().heap.iter().next().map(|e| e.time_nanos)
     }
 
+    /// Manually schedule an event at a specific time (for testing).
+    pub fn schedule_event_at(&self, time_nanos: u64, event: NetworkEvent) {
+        let mut inner = self.inner.lock();
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        inner.heap.insert(HeapEntry { time_nanos, sequence, event });
+    }
+
+    /// Register a pending connect (called by WorldLoop).
+    pub fn register_pending_connect(&self, _stage_name: amaru_pure_stage::Name) {
+        // For now, no-op. Tracking handled in WorldLoop.
+    }
+
+    /// Execute Deliver event (handles recv completion internally).
+    pub fn execute_event_for_deliver(&self, entry: HeapEntry) {
+        if let NetworkEvent::Deliver { conn, data } = entry.event {
+            let mut inner = self.inner.lock();
+            if let Some(endpoint) = inner.endpoints.get_mut(&conn) {
+                endpoint.inbox.push_back(data);
+            }
+            if let Some(pending) = inner.pending_recvs.remove(&conn) {
+                if let Some(endpoint) = inner.endpoints.get_mut(&conn) {
+                    Self::try_complete_recv_internal(&mut inner.pending_recvs, conn, endpoint, pending);
+                }
+            }
+        }
+    }
+
+    /// Execute Close event (handles cleanup internally).
+    pub fn execute_event_for_close(&self, entry: HeapEntry) {
+        if let NetworkEvent::Close { conn } = entry.event {
+            let mut inner = self.inner.lock();
+            inner.endpoints.remove(&conn);
+            if let Some(mut queue) = inner.pending_sends.remove(&conn) {
+                while let Some(tx) = queue.pop_front() {
+                    let _ = tx.send(Err(std::io::Error::other("connection closed")));
+                }
+            }
+            if let Some(pending) = inner.pending_recvs.remove(&conn) {
+                let _ = pending.completion.send(Err(std::io::Error::other("connection closed")));
+            }
+        }
+    }
+
     /// Execute one popped event: resolve its completion future.
     pub fn execute_event(&self, entry: HeapEntry) {
         let mut inner = self.inner.lock();
