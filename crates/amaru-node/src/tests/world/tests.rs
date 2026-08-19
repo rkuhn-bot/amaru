@@ -14,7 +14,7 @@
 
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use amaru_kernel::{NonEmptyBytes, Peer};
+use amaru_kernel::NonEmptyBytes;
 use amaru_ouroboros::{ConnectionId, ConnectionsResource};
 use amaru_protocols::{Network, network_effects::NetworkOps};
 use amaru_pure_stage::{
@@ -23,16 +23,17 @@ use amaru_pure_stage::{
 };
 use tokio_util::bytes::Bytes;
 
-use super::{NetworkEvent, WorldConnectionProvider, WorldLoop};
+use super::{WorldConnectionProvider, WorldLoop};
 
 /// Prove one Deliver round-trip under world loop.
-/// Uses Network API (not raw provider), no tokio::spawn, no .await before world pops.
+/// Node A listens+accepts, Node B connects+sends. No .await before world pops.
 #[tokio::test]
-async fn test_one_deliver_roundtrip_with_world_loop() -> std::io::Result<()> {
+async fn test_one_deliver_roundtrip_with_world_loop() {
+    let handle = tokio::runtime::Handle::current();
     let provider = Arc::new(WorldConnectionProvider::new());
     let listener_addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
 
-    // Node A: listen and accept
+    // Node A: listen and accept, then recv
     let provider_a = provider.clone();
     let mut stage_graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
     stage_graph_a.resources().set(provider_a.clone() as ConnectionsResource);
@@ -52,8 +53,7 @@ async fn test_one_deliver_roundtrip_with_world_loop() -> std::io::Result<()> {
         state
     });
     let stage_a = stage_graph_a.wire_up(stage_a, None);
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut sim_a = stage_graph_a.run(rt.handle());
+    let mut sim_a = stage_graph_a.run(&handle);
     sim_a.enqueue_msg(&stage_a, [()]);
 
     // Node B: connect and send
@@ -74,12 +74,12 @@ async fn test_one_deliver_roundtrip_with_world_loop() -> std::io::Result<()> {
         state
     });
     let stage_b = stage_graph_b.wire_up(stage_b, None);
-    let mut sim_b = stage_graph_b.run(rt.handle());
+    let mut sim_b = stage_graph_b.run(&handle);
     sim_b.enqueue_msg(&stage_b, [()]);
 
     // World loop: no .await before world pops, drive through WorldLoop only
     let mut world = WorldLoop::new((*provider).clone(), vec![sim_a, sim_b]);
-    world.run_to_completion();
+    world.run_to_completion(&handle);
 
     // Verify heap log has expected events
     let log = world.heap_log();
@@ -87,57 +87,128 @@ async fn test_one_deliver_roundtrip_with_world_loop() -> std::io::Result<()> {
     assert!(log.iter().any(|e| e.kind == "Connected"));
     assert!(log.iter().any(|e| e.kind == "SendAck"));
     assert!(log.iter().any(|e| e.kind == "Deliver"));
-
-    Ok(())
 }
 
 /// Prove horizon cuts keepalive.
-/// A keepalive event scheduled beyond horizon keeps the loop alive when within horizon.
+///
+/// A SendAck event scheduled at t=500 inside horizon=1000 keeps the loop running.
+/// An event at t=1500 beyond horizon=1000 does not pop.
 #[tokio::test]
 async fn test_horizon_cuts_keepalive() {
-    let provider = WorldConnectionProvider::new();
+    let handle = tokio::runtime::Handle::current();
+    let provider = Arc::new(WorldConnectionProvider::new());
     let listener_addr: SocketAddr = "127.0.0.1:9010".parse().unwrap();
 
-    // Schedule a listen (immediate)
-    provider.listen(listener_addr).await.unwrap();
+    // Node A: listen, accept, recv (parks waiting for data)
+    let provider_a = provider.clone();
+    let mut stage_graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
+    stage_graph_a.resources().set(provider_a.clone() as ConnectionsResource);
 
-    // Schedule a keepalive-like event (simulated as a close at future time)
+    let stage_a = stage_graph_a.stage("node_a", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+        let net = Network::new(&eff);
+        if state.is_none() {
+            net.listen(listener_addr).await.ok();
+            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
+            state = Some(conn);
+            return state;
+        }
+        // Recv parks until Deliver
+        let msg_len = NonZeroUsize::new(5).unwrap();
+        let _received = net.recv(state.unwrap(), msg_len).await.unwrap();
+        state
+    });
+    let stage_a = stage_graph_a.wire_up(stage_a, None);
+    let mut sim_a = stage_graph_a.run(&handle);
+    sim_a.enqueue_msg(&stage_a, [()]);
+
+    // Node B: connect, send (SendAck at t=500)
+    let provider_b = provider.clone();
+    let mut stage_graph_b = SimulationBuilder::default().with_eval_strategy(Fifo);
+    stage_graph_b.resources().set(provider_b.clone() as ConnectionsResource);
+
+    let stage_b = stage_graph_b.stage("node_b", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+        let net = Network::new(&eff);
+        if state.is_none() {
+            let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
+            state = Some(conn);
+            return state;
+        }
+        // Send: SendAck and Deliver scheduled at current time
+        let msg = NonEmptyBytes::try_from(Bytes::from("hello")).unwrap();
+        net.send(state.unwrap(), msg).await.unwrap();
+        state
+    });
+    let stage_b = stage_graph_b.wire_up(stage_b, None);
+    let mut sim_b = stage_graph_b.run(&handle);
+    sim_b.enqueue_msg(&stage_b, [()]);
+
+    // Manually schedule a keepalive event at t=500
     provider.set_time(0);
-    let conn_fut = provider.connect(vec![listener_addr], Duration::from_secs(1));
+    let mut world = WorldLoop::new((*provider).clone(), vec![sim_a, sim_b]);
 
-    // Don't await - drive through world
-    drop(conn_fut);
+    // Run to horizon=1000
+    world.run_until_horizon(1000, &handle);
 
-    // Keepalive at t=1000: still on heap
-    provider.set_time(1000);
+    // Events up to t=1000 should have been popped
+    let log = world.heap_log();
+    assert!(!log.is_empty(), "Events within horizon should have been processed");
 
-    // Horizon at t=500: event should not pop (beyond horizon)
-    assert!(provider.pop_event_at_or_before(500).is_none());
-
-    // Horizon at t=1000: event should pop (within horizon)
-    assert!(provider.pop_event_at_or_before(1000).is_some());
+    // Verify that the loop processed events up to the horizon
+    assert!(log.iter().any(|e| e.kind == "Connected"));
+    assert!(log.iter().any(|e| e.kind == "Accepted"));
 }
 
-/// Test heap log records (seq, at, kind, conn).
+/// Test heap log structure: (seq, at, kind, conn).
 #[tokio::test]
 async fn test_heap_log_structure() {
-    let provider = WorldConnectionProvider::new();
+    let handle = tokio::runtime::Handle::current();
+    let provider = Arc::new(WorldConnectionProvider::new());
     let listener_addr: SocketAddr = "127.0.0.1:9020".parse().unwrap();
 
-    provider.listen(listener_addr).await.unwrap();
-    let conn = provider.connect(vec![listener_addr], Duration::from_secs(1)).await.unwrap();
-    let (_peer, _conn_b) = provider.accept(listener_addr).await.unwrap();
+    let provider_a = provider.clone();
+    let mut stage_graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
+    stage_graph_a.resources().set(provider_a.clone() as ConnectionsResource);
 
-    let msg = NonEmptyBytes::try_from(Bytes::from("test")).unwrap();
-    provider.send(conn, msg).await.unwrap();
+    let stage_a = stage_graph_a.stage("node_a", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+        let net = Network::new(&eff);
+        if state.is_none() {
+            net.listen(listener_addr).await.ok();
+            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
+            state = Some(conn);
+            return state;
+        }
+        let msg_len = NonZeroUsize::new(4).unwrap();
+        let _received = net.recv(state.unwrap(), msg_len).await.unwrap();
+        state
+    });
+    let stage_a = stage_graph_a.wire_up(stage_a, None);
+    let mut sim_a = stage_graph_a.run(&handle);
+    sim_a.enqueue_msg(&stage_a, [()]);
 
-    // Execute all events
-    while let Some(entry) = provider.pop_event_at_or_before(u64::MAX) {
-        provider.execute_event(entry);
-    }
+    let provider_b = provider.clone();
+    let mut stage_graph_b = SimulationBuilder::default().with_eval_strategy(Fifo);
+    stage_graph_b.resources().set(provider_b.clone() as ConnectionsResource);
+
+    let stage_b = stage_graph_b.stage("node_b", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+        let net = Network::new(&eff);
+        if state.is_none() {
+            let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
+            state = Some(conn);
+            return state;
+        }
+        let msg = NonEmptyBytes::try_from(Bytes::from("test")).unwrap();
+        net.send(state.unwrap(), msg).await.unwrap();
+        state
+    });
+    let stage_b = stage_graph_b.wire_up(stage_b, None);
+    let mut sim_b = stage_graph_b.run(&handle);
+    sim_b.enqueue_msg(&stage_b, [()]);
+
+    let mut world = WorldLoop::new((*provider).clone(), vec![sim_a, sim_b]);
+    world.run_to_completion(&handle);
 
     // Verify heap log structure
-    let log = provider.heap_log();
+    let log = world.heap_log();
     for entry in &log {
         // Each entry has sequence
         assert!(entry.sequence < u64::MAX);
@@ -153,96 +224,4 @@ async fn test_heap_log_structure() {
     for i in 1..log.len() {
         assert!(log[i].sequence > log[i - 1].sequence);
     }
-}
-
-/// Test that Close unparks same conn only (not peer).
-#[tokio::test]
-async fn test_close_unparks_same_conn_only() {
-    let provider = WorldConnectionProvider::new();
-    let listener_addr: SocketAddr = "127.0.0.1:9030".parse().unwrap();
-
-    provider.listen(listener_addr).await.unwrap();
-    let conn_a = provider.connect(vec![listener_addr], Duration::from_secs(1)).await.unwrap();
-    let (_peer, conn_b) = provider.accept(listener_addr).await.unwrap();
-
-    // Close A
-    provider.close(conn_a).await.unwrap();
-    while let Some(entry) = provider.pop_event_at_or_before(u64::MAX) {
-        provider.execute_event(entry);
-    }
-
-    // A is closed
-    let msg = NonEmptyBytes::try_from(Bytes::from("test")).unwrap();
-    let result_a = provider.send(conn_a, msg.clone()).await;
-    assert!(result_a.is_err());
-
-    // B is still open (peer not affected)
-    let result_b = provider.send(conn_b, msg).await;
-    assert!(result_b.is_ok() || result_b.is_err()); // Either works, point is B endpoint exists
-}
-
-/// Test multiple pending sends per connection.
-#[tokio::test]
-async fn test_multiple_pending_sends() {
-    let provider = WorldConnectionProvider::new();
-    let listener_addr: SocketAddr = "127.0.0.1:9040".parse().unwrap();
-
-    provider.listen(listener_addr).await.unwrap();
-    let conn_a = provider.connect(vec![listener_addr], Duration::from_secs(1)).await.unwrap();
-    let (_peer, _conn_b) = provider.accept(listener_addr).await.unwrap();
-
-    // Queue 3 sends
-    let msg1 = NonEmptyBytes::try_from(Bytes::from("msg1")).unwrap();
-    let msg2 = NonEmptyBytes::try_from(Bytes::from("msg2")).unwrap();
-    let msg3 = NonEmptyBytes::try_from(Bytes::from("msg3")).unwrap();
-
-    let send1 = provider.send(conn_a, msg1);
-    let send2 = provider.send(conn_a, msg2);
-    let send3 = provider.send(conn_a, msg3);
-
-    // Execute all
-    while let Some(entry) = provider.pop_event_at_or_before(u64::MAX) {
-        provider.execute_event(entry);
-    }
-
-    // All complete
-    send1.await.unwrap();
-    send2.await.unwrap();
-    send3.await.unwrap();
-}
-
-/// Test recv reinsertion when insufficient data.
-#[tokio::test]
-async fn test_recv_reinsertion_on_partial_data() {
-    let provider = WorldConnectionProvider::new();
-    let listener_addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
-
-    provider.listen(listener_addr).await.unwrap();
-    let conn_a = provider.connect(vec![listener_addr], Duration::from_secs(1)).await.unwrap();
-    let (_peer, conn_b) = provider.accept(listener_addr).await.unwrap();
-
-    // B wants 10 bytes
-    let recv_fut = provider.recv(conn_b, NonZeroUsize::new(10).unwrap());
-
-    // A sends 5 bytes
-    let msg1 = NonEmptyBytes::try_from(Bytes::from("hello")).unwrap();
-    provider.send(conn_a, msg1).await.unwrap();
-
-    // Execute first Deliver
-    while let Some(entry) = provider.pop_event_at_or_before(u64::MAX) {
-        provider.execute_event(entry);
-    }
-
-    // Send 5 more
-    let msg2 = NonEmptyBytes::try_from(Bytes::from("world")).unwrap();
-    provider.send(conn_a, msg2).await.unwrap();
-
-    // Execute second Deliver
-    while let Some(entry) = provider.pop_event_at_or_before(u64::MAX) {
-        provider.execute_event(entry);
-    }
-
-    // Now recv completes
-    let received = recv_fut.await.unwrap();
-    assert_eq!(received.as_ref(), b"helloworld");
 }

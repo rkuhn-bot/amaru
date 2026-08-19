@@ -12,20 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
-
 use amaru_pure_stage::simulation::{Blocked, SimulationRunning};
+use tokio::runtime::Handle;
 
 use super::{HeapEntry, WorldConnectionProvider};
 
-/// World loop over N SimulationRunning graphs.
+/// World loop over N SimulationRunning graphs + WorldConnectionProvider heap.
 ///
-/// Uses only PUBLIC SimulationRunning API:
-/// - receive_inputs, has_runnable, try_effect, handle_effect
-/// - await_external_effect (to complete UntilResolved futures)
-///
-/// Pattern: exhaust all newly-ready graphs, pop-if-at≤horizon, execute event,
-/// await external effects to complete stages, repeat.
+/// Uses only PUBLIC SimulationRunning API. Pattern: exhaust newly-ready graphs
+/// (receive_inputs, has_runnable, try_effect, handle_effect), else pop-if-at≤horizon,
+/// execute, await external effects on all graphs, repeat.
 pub struct WorldLoop {
     provider: WorldConnectionProvider,
     graphs: Vec<SimulationRunning>,
@@ -38,11 +34,9 @@ impl WorldLoop {
 
     /// Run until no more events at-or-before horizon.
     ///
-    /// After pop/execute, calls await_external_effect to complete UntilResolved
-    /// futures and resume stages from Blocked::Busy.
-    pub fn run_until_horizon(&mut self, horizon_nanos: u64) -> tokio::runtime::Handle {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+    /// Uses the provided tokio Handle (from the test's #[tokio::test] runtime).
+    pub fn run_until_horizon(&mut self, horizon_nanos: u64, handle: &Handle) {
+        handle.block_on(async {
             loop {
                 // Exhaust all newly-ready graphs
                 loop {
@@ -67,10 +61,10 @@ impl WorldLoop {
 
                 // Pop one event if at≤horizon
                 if let Some(entry) = self.provider.pop_event_at_or_before(horizon_nanos) {
-                    self.provider.execute_event(entry);
+                    self.provider.set_time(entry.time_nanos);
+                    self.provider.execute_event(entry.event);
 
-                    // Complete UntilResolved futures: await_external_effect polls pending_computations
-                    // and delivers results via provide_external_result, making stages runnable again
+                    // After execute_event, await_external_effect on all graphs to complete UntilResolved futures
                     for graph in &mut self.graphs {
                         graph.await_external_effect().await;
                     }
@@ -79,12 +73,11 @@ impl WorldLoop {
                 }
             }
         });
-        rt.handle().clone()
     }
 
     /// Run until no more events and all graphs idle/terminated.
-    pub fn run_to_completion(&mut self) -> tokio::runtime::Handle {
-        self.run_until_horizon(u64::MAX)
+    pub fn run_to_completion(&mut self, handle: &Handle) {
+        self.run_until_horizon(u64::MAX, handle)
     }
 
     /// Get the event log.
