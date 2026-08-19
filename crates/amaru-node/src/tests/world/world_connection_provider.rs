@@ -223,20 +223,27 @@ impl ConnectionProvider for WorldConnectionProvider {
     fn accept(&self, listener_addr: SocketAddr) -> BoxFuture<'static, std::io::Result<(Peer, ConnectionId)>> {
         let inner = self.inner.clone();
         Box::pin(async move {
-            let (rx, pending) = {
-                let mut w = inner.lock();
-                let listener = w.listeners.get_mut(&listener_addr).ok_or_else(|| {
-                    std::io::Error::other(format!("no listener at {listener_addr}"))
-                })?;
-                if let Some(pending) = listener.pending_connects.pop_front() {
-                    return Ok((Peer::from_addr(&pending.initiator_addr), w.next_conn_id.get_and_increment()));
-                }
-                let (tx, rx) = oneshot::channel();
-                (rx, tx)
-            };
-            // Store pending accept and return Pending
-            // For now, simplified: just return error if no pending connects
-            rx.await.map_err(|_| std::io::Error::other("accept cancelled"))?
+            let mut w = inner.lock();
+            let listener = w
+                .listeners
+                .get_mut(&listener_addr)
+                .ok_or_else(|| std::io::Error::other(format!("no listener at {listener_addr}")))?;
+
+            if let Some(pending) = listener.pending_connects.pop_front() {
+                let responder_conn_id = w.next_conn_id.get_and_increment();
+                let initiator_peer_conn_id = pending.initiator_peer_conn_id_slot;
+
+                // Register responder endpoint
+                w.endpoints.insert(responder_conn_id, pending.responder_endpoint);
+
+                // Link initiator to responder
+                *initiator_peer_conn_id.lock() = Some(responder_conn_id);
+
+                let _ = pending.completion.send(Ok((Peer::from_addr(&pending.initiator_addr), responder_conn_id)));
+                return Ok((Peer::from_addr(&pending.initiator_addr), responder_conn_id));
+            }
+
+            Err(std::io::Error::other("no pending connections"))
         })
     }
 
@@ -244,14 +251,14 @@ impl ConnectionProvider for WorldConnectionProvider {
         let inner = self.inner.clone();
         Box::pin(async move {
             let mut w = inner.lock();
-            let target_addr = addrs.into_iter().find(|a| w.listeners.contains_key(a)).ok_or_else(|| {
-                std::io::Error::other("no listener found")
-            })?;
+            let target_addr = addrs
+                .into_iter()
+                .find(|a| w.listeners.contains_key(a))
+                .ok_or_else(|| std::io::Error::other("no listener found"))?;
 
             let initiator_conn_id = w.next_conn_id.get_and_increment();
-            let responder_conn_id = w.next_conn_id.get_and_increment();
 
-            let initiator_peer_conn_id_slot = Arc::new(Mutex::new(Some(responder_conn_id)));
+            let initiator_peer_conn_id_slot = Arc::new(Mutex::new(None));
             let responder_peer_conn_id_slot = Arc::new(Mutex::new(Some(initiator_conn_id)));
 
             let initiator_endpoint = ConnectionEndpoint {
@@ -266,14 +273,28 @@ impl ConnectionProvider for WorldConnectionProvider {
                 peer_conn_id: responder_peer_conn_id_slot,
             };
 
+            // Register initiator endpoint immediately
             w.endpoints.insert(initiator_conn_id, initiator_endpoint);
-            w.endpoints.insert(responder_conn_id, responder_endpoint);
+
+            // Queue connection for accept to complete
+            let (tx, _rx) = oneshot::channel();
+            let listener = w.listeners.get_mut(&target_addr).unwrap();
+            listener.pending_connects.push_back(PendingConnect {
+                responder_endpoint,
+                initiator_addr: SocketAddr::from(([127, 0, 0, 1], 5000 + initiator_conn_id.as_u64() as u16)),
+                initiator_peer_conn_id_slot,
+                completion: tx,
+            });
 
             Ok(initiator_conn_id)
         })
     }
 
-    fn connect_addrs(&self, addr: ToSocketAddrs, timeout: Duration) -> BoxFuture<'static, std::io::Result<ConnectionId>> {
+    fn connect_addrs(
+        &self,
+        addr: ToSocketAddrs,
+        timeout: Duration,
+    ) -> BoxFuture<'static, std::io::Result<ConnectionId>> {
         let inner = self.inner.clone();
         Box::pin(async move {
             let addrs = addr.to_socket_addrs().map_err(std::io::Error::other)?;
@@ -287,9 +308,10 @@ impl ConnectionProvider for WorldConnectionProvider {
         Box::pin(async move {
             let (rx, peer_conn_id) = {
                 let mut w = inner.lock();
-                let endpoint = w.endpoints.get(&conn).ok_or_else(|| {
-                    std::io::Error::other(format!("connection {conn} not found"))
-                })?;
+                let endpoint = w
+                    .endpoints
+                    .get(&conn)
+                    .ok_or_else(|| std::io::Error::other(format!("connection {conn} not found")))?;
                 let peer_conn_id = *endpoint.peer_conn_id.lock();
                 let (tx, rx) = oneshot::channel();
                 w.pending_sends.insert(conn, tx);
@@ -300,10 +322,8 @@ impl ConnectionProvider for WorldConnectionProvider {
             let provider = WorldConnectionProvider { inner: inner.clone() };
             provider.schedule_event(0, NetworkEvent::SendAck { conn });
             if let Some(peer_id) = peer_conn_id {
-                provider.schedule_event(0, NetworkEvent::Deliver {
-                    conn: peer_id,
-                    data: Bytes::copy_from_slice(&data),
-                });
+                provider
+                    .schedule_event(0, NetworkEvent::Deliver { conn: peer_id, data: Bytes::copy_from_slice(&data) });
             }
 
             rx.await.map_err(|_| std::io::Error::other("send cancelled"))?
@@ -315,9 +335,10 @@ impl ConnectionProvider for WorldConnectionProvider {
         Box::pin(async move {
             let (rx, ready) = {
                 let mut w = inner.lock();
-                let endpoint = w.endpoints.get_mut(&conn).ok_or_else(|| {
-                    std::io::Error::other(format!("connection {conn} not found"))
-                })?;
+                let endpoint = w
+                    .endpoints
+                    .get_mut(&conn)
+                    .ok_or_else(|| std::io::Error::other(format!("connection {conn} not found")))?;
 
                 while let Some(data) = endpoint.inbox.pop_front() {
                     endpoint.read_buffer.extend_from_slice(&data);
