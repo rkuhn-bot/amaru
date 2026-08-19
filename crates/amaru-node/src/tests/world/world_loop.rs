@@ -15,8 +15,10 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     net::SocketAddr,
+    num::NonZeroUsize,
 };
 
+use amaru_kernel::NonEmptyBytes;
 use amaru_ouroboros::ConnectionId;
 use amaru_protocols::network_effects::{
     AcceptEffect, AcceptError, ConnectEffect, ConnectError, ReceiveError, RecvEffect, SendEffect, SendError,
@@ -45,7 +47,7 @@ pub struct WorldLoop {
 enum OperationKey {
     Accept(SocketAddr),
     Send(ConnectionId),
-    Recv(ConnectionId),
+    Recv(ConnectionId, NonZeroUsize), // Include bytes_needed for Recv completion
 }
 
 impl WorldLoop {
@@ -126,13 +128,76 @@ impl WorldLoop {
                             None
                         }
                     }
-                    NetworkEvent::Deliver { .. } => {
-                        self.provider.execute_event_for_deliver(entry);
-                        continue;
+                    NetworkEvent::Deliver { conn, data } => {
+                        // Add data to inbox
+                        self.provider.deliver_to_inbox(*conn, data.clone());
+
+                        // Try to complete pending Recv
+                        let recv_key = self
+                            .pending_ops
+                            .keys()
+                            .find(|k| matches!(k, OperationKey::Recv(c, _) if c == conn))
+                            .cloned();
+
+                        if let Some(OperationKey::Recv(_, bytes_needed)) = recv_key {
+                            if let Some((graph_idx, stage_name)) =
+                                self.pending_ops.remove(&OperationKey::Recv(*conn, bytes_needed))
+                            {
+                                if let Some(result) = self.provider.try_complete_recv(*conn, bytes_needed) {
+                                    Some((
+                                        graph_idx,
+                                        stage_name,
+                                        Box::new(result) as Box<dyn amaru_pure_stage::SendData>,
+                                    ))
+                                } else {
+                                    // Not enough data yet, re-insert
+                                    self.pending_ops
+                                        .insert(OperationKey::Recv(*conn, bytes_needed), (graph_idx, stage_name));
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     }
-                    NetworkEvent::Close { .. } => {
-                        self.provider.execute_event_for_close(entry);
-                        continue;
+                    NetworkEvent::Close { conn } => {
+                        self.provider.close_endpoint(*conn);
+
+                        // Resume parked Send or Recv on this conn
+                        if let Some((graph_idx, stage_name)) = self.pending_ops.remove(&OperationKey::Send(*conn)) {
+                            Some((
+                                graph_idx,
+                                stage_name,
+                                Box::new(Err::<(), SendError>(SendError::IoError(std::io::Error::other(
+                                    "connection closed",
+                                )))) as Box<dyn amaru_pure_stage::SendData>,
+                            ))
+                        } else {
+                            // Try Recv
+                            let recv_key = self
+                                .pending_ops
+                                .keys()
+                                .find(|k| matches!(k, OperationKey::Recv(c, _) if c == conn))
+                                .cloned();
+                            if let Some(key @ OperationKey::Recv(_, _)) = recv_key {
+                                if let Some((graph_idx, stage_name)) = self.pending_ops.remove(&key) {
+                                    Some((
+                                        graph_idx,
+                                        stage_name,
+                                        Box::new(Err::<NonEmptyBytes, ReceiveError>(ReceiveError::IoError(
+                                            std::io::Error::other("connection closed"),
+                                        )))
+                                            as Box<dyn amaru_pure_stage::SendData>,
+                                    ))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
                     }
                 };
 
@@ -166,7 +231,7 @@ impl WorldLoop {
             } else if let Some(send) = eff_any.downcast_ref::<SendEffect>() {
                 self.pending_ops.insert(OperationKey::Send(send.conn), (graph_idx, at_stage.clone()));
             } else if let Some(recv) = eff_any.downcast_ref::<RecvEffect>() {
-                self.pending_ops.insert(OperationKey::Recv(recv.conn), (graph_idx, at_stage.clone()));
+                self.pending_ops.insert(OperationKey::Recv(recv.conn, recv.bytes), (graph_idx, at_stage.clone()));
             }
         }
     }
