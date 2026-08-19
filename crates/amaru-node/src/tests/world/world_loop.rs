@@ -57,6 +57,8 @@ pub struct WorldLoop {
     /// Pending connects keyed by destination listener, not a process-wide FIFO.
     pending_connects: BTreeMap<SocketAddr, VecDeque<(usize, Name)>>,
     pending_accepts: BTreeMap<SocketAddr, VecDeque<(usize, Name)>>,
+    /// Accepts already paired on `ConnectAttempt` and waiting for the matching `Accepted` hop.
+    claimed_accepts: BTreeMap<SocketAddr, VecDeque<(usize, Name)>>,
     pending_sends: BTreeMap<ConnectionId, VecDeque<(usize, Name)>>,
     pending_recvs: BTreeMap<ConnectionId, VecDeque<(usize, Name, NonZeroUsize)>>,
 }
@@ -84,6 +86,7 @@ impl WorldLoop {
             graph_on_heap,
             pending_connects: BTreeMap::new(),
             pending_accepts: BTreeMap::new(),
+            claimed_accepts: BTreeMap::new(),
             pending_sends: BTreeMap::new(),
             pending_recvs: BTreeMap::new(),
         };
@@ -97,8 +100,17 @@ impl WorldLoop {
         &self.graphs[index]
     }
 
+    /// Borrow the node graphs owned by this world.
+    pub fn graphs(&self) -> &[SimulationRunning] {
+        &self.graphs
+    }
+
     /// Run until no more heap events or graph wakes at-or-before horizon.
-    pub async fn run_until_horizon(&mut self, horizon_nanos: u64) {
+    ///
+    /// Synchronous: the loop never waits on wall-clock time. Production graphs may
+    /// `Handle::block_on` `DurationDist::Zero` effects, which cannot run inside an
+    /// existing Tokio context.
+    pub fn run_until_horizon(&mut self, horizon_nanos: u64) {
         while let Some(entry) = self.provider.pop_at_or_before(horizon_nanos) {
             if self.cancelled.remove(&entry.sequence) {
                 continue;
@@ -267,14 +279,22 @@ impl WorldLoop {
                     return Vec::new();
                 };
                 if let Some(initiator_conn) = self.provider.pair_if_listening(*target) {
-                    if self.pending_accepts.get(target).is_some_and(|q| !q.is_empty())
-                        && let Some((responder_conn, initiator_addr)) = self.provider.take_handshake(*target)
-                    {
-                        self.provider.schedule_wire(NetworkEvent::Accepted {
-                            listener: *target,
-                            responder_conn,
-                            initiator_addr,
-                        });
+                    // Pair at most one queued accept per ConnectAttempt. Extra inbound
+                    // handshakes stay queued until a later accept() posts.
+                    if let Some(waiting) = self.pending_accepts.get_mut(target).and_then(|q| q.pop_front()) {
+                        if self.pending_accepts.get(target).is_some_and(|q| q.is_empty()) {
+                            self.pending_accepts.remove(target);
+                        }
+                        if let Some((responder_conn, initiator_addr)) = self.provider.take_handshake(*target) {
+                            self.claimed_accepts.entry(*target).or_default().push_back(waiting);
+                            self.provider.schedule_wire(NetworkEvent::Accepted {
+                                listener: *target,
+                                responder_conn,
+                                initiator_addr,
+                            });
+                        } else {
+                            self.pending_accepts.entry(*target).or_default().push_front(waiting);
+                        }
                     }
                     vec![(
                         graph_idx,
@@ -293,12 +313,18 @@ impl WorldLoop {
                 }
             }
             NetworkEvent::Accepted { listener, responder_conn, initiator_addr } => {
-                if let Some((graph_idx, stage_name)) =
-                    self.pending_accepts.get_mut(listener).and_then(|q| q.pop_front())
-                {
-                    if self.pending_accepts.get(listener).is_some_and(|q| q.is_empty()) {
-                        self.pending_accepts.remove(listener);
-                    }
+                let waiting = self
+                    .claimed_accepts
+                    .get_mut(listener)
+                    .and_then(|q| q.pop_front())
+                    .or_else(|| self.pending_accepts.get_mut(listener).and_then(|q| q.pop_front()));
+                if self.claimed_accepts.get(listener).is_some_and(|q| q.is_empty()) {
+                    self.claimed_accepts.remove(listener);
+                }
+                if self.pending_accepts.get(listener).is_some_and(|q| q.is_empty()) {
+                    self.pending_accepts.remove(listener);
+                }
+                if let Some((graph_idx, stage_name)) = waiting {
                     let peer = Peer::from_addr(initiator_addr);
                     vec![(
                         graph_idx,
@@ -342,8 +368,8 @@ impl WorldLoop {
     }
 
     /// Run until no more events and all graphs idle/terminated.
-    pub async fn run_to_completion(&mut self) {
-        self.run_until_horizon(u64::MAX).await;
+    pub fn run_to_completion(&mut self) {
+        self.run_until_horizon(u64::MAX);
         self.assert_graphs_settled();
     }
 

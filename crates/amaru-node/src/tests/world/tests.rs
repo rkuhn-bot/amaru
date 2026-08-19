@@ -14,11 +14,17 @@
 
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use amaru_kernel::{NonEmptyBytes, Peer};
+use amaru_kernel::{
+    BlockHeight, Hash, NetworkPoint, NonEmptyBytes, PREPROD_GLOBAL_PARAMETERS, Peer, Slot, any_headers_chain_with_root,
+    utils::tests::run_strategy,
+};
 use amaru_ouroboros::{ConnectionId, ConnectionsResource};
-use amaru_protocols::network_effects::{
-    AcceptEffect, AcceptError, ConnectEffect, ConnectError, ListenEffect, ListenError, Network, NetworkOps,
-    ReceiveError, RecvEffect, SendEffect, SendError,
+use amaru_protocols::{
+    network_effects::{
+        AcceptEffect, AcceptError, ConnectEffect, ConnectError, ListenEffect, ListenError, Network, NetworkOps,
+        ReceiveError, RecvEffect, SendEffect, SendError,
+    },
+    store_effects::ResourceParameters,
 };
 use amaru_pure_stage::{
     Effect, Instant, Name, StageGraph, StageResponse, assert_trace_match_filter, register_data_deserializer,
@@ -32,8 +38,9 @@ use tokio_util::bytes::Bytes;
 
 use super::{
     GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
-    WorldConnectionProvider, WorldLoop, wire_delay_nanos,
+    WorldConnectionProvider, WorldLoop, build_world_node, wire_delay_nanos,
 };
+use crate::tests::configuration::NodeTestConfig;
 
 const SEED: u64 = 0xA11CE;
 
@@ -133,7 +140,7 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
     sim_b.enqueue_msg(&stage_b, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    world.run_to_completion().await;
+    world.run_to_completion();
 
     assert_eq!(received.lock().as_deref(), Some(b"hello from B".as_ref()));
 
@@ -247,7 +254,7 @@ async fn test_horizon_cuts_keepalive() {
     provider.schedule_event_at(1500, NetworkEvent::Close { conn: conn_out });
 
     let mut world = WorldLoop::new(provider, vec![]);
-    world.run_until_horizon(1000).await;
+    world.run_until_horizon(1000);
 
     assert_heap_log(
         world.take_heap_log(),
@@ -311,7 +318,7 @@ async fn test_pending_connect_matches_listener() {
             listen("l2", addr2, g2),
         ],
     );
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(got1.lock().as_deref(), Some(b"one".as_ref()));
     assert_eq!(got2.lock().as_deref(), Some(b"two".as_ref()));
 }
@@ -355,7 +362,7 @@ async fn test_listen_before_connect_attempt_arrives() {
     sim_a.enqueue_msg(&stage_a, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_b, sim_a]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(received.lock().as_deref(), Some(b"ok".as_ref()));
 
     let (initiator, responder) = pair_ids();
@@ -461,7 +468,7 @@ async fn test_send_before_accept_delivers() {
     sim_b.enqueue_msg(&stage_b, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(received.lock().as_deref(), Some(b"ping".as_ref()));
 
     let (initiator, responder) = pair_ids();
@@ -541,7 +548,7 @@ async fn test_mux_recv_header_then_leftover_body() {
     sim_b.enqueue_msg(&stage_b, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(header.lock().as_deref(), Some(b"AB".as_ref()));
     assert_eq!(body.lock().as_deref(), Some(b"CDEF".as_ref()));
 }
@@ -583,7 +590,7 @@ async fn test_close_fails_peer_recv() {
     sim_b.enqueue_msg(&stage_b, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert!(recv_err.lock().as_ref().is_some_and(|s| s.contains("connection closed")));
 }
 
@@ -609,7 +616,7 @@ async fn test_wait_resumes_without_heap_event() {
     sim.enqueue_msg(&stage, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*done.lock(), Some(true));
 }
 
@@ -636,7 +643,7 @@ async fn test_listen_same_port_errors() {
     sim.enqueue_msg(&stage, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*second.lock(), Some(true));
 }
 
@@ -664,7 +671,7 @@ async fn test_connect_refused_at_attempt_arrival() {
     sim.enqueue_msg(&stage, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*failed.lock(), Some(true));
 
     let t_attempt = wire_delay_nanos(SEED, 0);
@@ -746,7 +753,7 @@ async fn test_send_recv_on_closed_peer_reset() {
     sim_b.enqueue_msg(&stage_b, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*recv_err.lock(), Some(true));
     assert_eq!(*send_err.lock(), Some(true));
 }
@@ -787,7 +794,7 @@ async fn test_latency_is_one_to_five_ms() {
     sim_b.enqueue_msg(&stage_b, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(received.lock().as_deref(), Some(b"z".as_ref()));
 
     let hop = world
@@ -845,7 +852,7 @@ async fn test_equal_time_graph_wake_and_network_event_are_one_heap() {
     assert_eq!(deliver.time_nanos, wake.time_nanos);
     assert!(deliver.sequence < wake.sequence);
 
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*ran.lock(), Some(true));
 
     let log = world.take_heap_log();
@@ -886,7 +893,7 @@ async fn test_equal_time_wait_and_deliver_share_one_heap() {
     sim.enqueue_msg(&stage, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim]);
-    world.run_until_horizon(hop_time.saturating_sub(1)).await;
+    world.run_until_horizon(hop_time.saturating_sub(1));
     assert_eq!(*woke.lock(), None, "Wait must not complete before the shared timestamp");
 
     let deliver =
@@ -901,7 +908,7 @@ async fn test_equal_time_wait_and_deliver_share_one_heap() {
     assert_eq!(at_hop[0].time_nanos, at_hop[1].time_nanos);
     assert!(at_hop[0].sequence < at_hop[1].sequence);
 
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*woke.lock(), Some(true));
     let popped: Vec<_> = world.take_heap_log().into_iter().filter(|e| e.time_nanos == hop_time).collect();
     assert_eq!(popped, at_hop, "pop order at the shared timestamp must match heap (time, sequence)");
@@ -950,7 +957,7 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
     sim.enqueue_msg(&stage, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim]);
-    world.run_until_horizon(deliver_at).await;
+    world.run_until_horizon(deliver_at);
     assert_eq!(*done.lock(), None, "graph must still be sleeping when the earlier Deliver pops");
     let log = world.heap_log();
     assert!(log.iter().any(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }));
@@ -959,7 +966,7 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
     }));
     assert_eq!(world.peek_next_event_time(), Some(wake_at));
 
-    world.run_to_completion().await;
+    world.run_to_completion();
     assert_eq!(*done.lock(), Some(true));
     let log = by_time_seq(world.take_heap_log());
     let deliver_seq =
@@ -973,4 +980,79 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
         .expect("Sleeping graph wake")
         .sequence;
     assert!(deliver_seq < wake_seq, "earlier Deliver must have a lower sequence than the later graph wake");
+}
+
+/// Two production-shaped nodes (`build_node` × SimulationBuilder × SimulationRunning)
+/// over one WorldConnectionProvider, driven only by WorldLoop. A third node would need
+/// the listen-side accept interval (100ms Wait) to be woken; that is left to a later PR
+/// so keepalive Waits stay un-woken.
+///
+/// Proves they boot, connect, and put at least one header on the wire. Does not claim
+/// tip equality and does not load a preprod fragment. `k` stays at the production value.
+/// Horizon covers 1–5ms wire hops but stays under the 100ms accept interval.
+///
+/// Not `#[tokio::test]`: production graphs issue DurationDist::Zero effects whose `run()`
+/// may be Pending on the first poll, and SimulationRunning then `Handle::block_on`s them.
+/// That panics inside an existing Tokio context. WorldLoop is therefore synchronous.
+#[test]
+fn test_world_owns_production_nodes_boot_connect_exchange() {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let handle = runtime.handle().clone();
+    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+
+    let conway_start_slot = Slot::from(68_774_400);
+    let root_point = NetworkPoint::Specific(conway_start_slot, Hash::new([0u8; 32]));
+    let headers = run_strategy(any_headers_chain_with_root(2, root_point.with_height(BlockHeight::from(0))));
+
+    let listen_a = "127.0.0.1:9311";
+    let listen_b = "127.0.0.1:9310";
+    let peer_a = Peer::new(listen_a);
+
+    let node_a = NodeTestConfig::default()
+        .with_no_upstream_peers()
+        .with_listen_address(listen_a)
+        .with_seed(11)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_validated_blocks(headers);
+    let node_b = NodeTestConfig::default()
+        .with_upstream_peer(peer_a)
+        .with_listen_address(listen_b)
+        .with_seed(12)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000));
+
+    let connections: ConnectionsResource = provider.clone();
+    let sim_a = build_world_node(&node_a, connections.clone(), &handle).expect("node A");
+    let sim_b = build_world_node(&node_b, connections, &handle).expect("node B");
+
+    let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
+    // Wire hops are 1–5ms; stay under the 100ms listen-side accept Wait.
+    world.run_until_horizon(50_000_000);
+
+    for graph in world.graphs() {
+        let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
+        assert_eq!(
+            params.consensus_security_param, PREPROD_GLOBAL_PARAMETERS.consensus_security_param,
+            "world nodes must keep production k"
+        );
+        assert_eq!(params.consensus_security_param, 2160);
+    }
+
+    let log = world.heap_log();
+    assert!(
+        log.iter().any(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })),
+        "nodes must connect: {log:?}"
+    );
+    assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::Accepted { .. })), "nodes must accept: {log:?}");
+    assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::SendAck { .. })), "nodes must send: {log:?}");
+    assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::Deliver { .. })), "nodes must deliver: {log:?}");
+
+    let exchanged = world.graphs().iter().any(|graph| {
+        graph.trace_buffer().lock().hydrate_without_timestamps().iter().any(trace_mentions_header_or_block)
+    });
+    assert!(exchanged, "expected at least one header or block on the wire under WorldLoop; heap={log:?}");
+}
+
+fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
+    let text = format!("{entry:?}");
+    text.contains("RollForward") || text.contains("ValidateHeader") || text.contains("HeaderContent")
 }
