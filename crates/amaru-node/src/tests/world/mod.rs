@@ -21,7 +21,10 @@
 mod world_connection_provider;
 mod world_loop;
 
-pub use world_connection_provider::{HeapEntry, HeapLogEntry, HeapLogKind, NetworkEvent, WorldConnectionProvider};
+pub use world_connection_provider::{
+    HeapEntry, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
+    WorldConnectionProvider, wire_delay_nanos,
+};
 pub use world_loop::WorldLoop;
 
 #[cfg(test)]

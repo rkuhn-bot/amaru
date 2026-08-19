@@ -29,6 +29,23 @@ use amaru_pure_stage::BoxFuture;
 use parking_lot::Mutex;
 use tokio_util::bytes::{Bytes, BytesMut};
 
+/// Inclusive one-way wire delay range, in nanoseconds.
+pub const WIRE_DELAY_MIN_NANOS: u64 = 1_000_000;
+pub const WIRE_DELAY_MAX_NANOS: u64 = 5_000_000;
+
+/// Deterministic delay for wire hop `index` of `seed`, uniformly in `[1ms, 5ms]`.
+pub fn wire_delay_nanos(seed: u64, index: u64) -> u64 {
+    let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
+    WIRE_DELAY_MIN_NANOS + mix % (WIRE_DELAY_MAX_NANOS - WIRE_DELAY_MIN_NANOS + 1)
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
 /// Discrete-event network simulator for deterministic testing.
 ///
 /// Provider methods schedule heap events synchronously and return a Future that
@@ -42,7 +59,7 @@ pub struct WorldConnectionProvider {
 
 impl Default for WorldConnectionProvider {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 
@@ -115,6 +132,8 @@ struct WorldInner {
     heap_log: Vec<HeapLogEntry>,
     next_sequence: u64,
     current_time_nanos: u64,
+    seed: u64,
+    latency_samples: u64,
     listeners: BTreeMap<SocketAddr, Listener>,
     endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
     next_conn_id: ConnectionId,
@@ -136,13 +155,15 @@ struct ConnectionEndpoint {
 }
 
 impl WorldConnectionProvider {
-    pub fn new() -> Self {
+    pub fn new(seed: u64) -> Self {
         Self {
             inner: Mutex::new(WorldInner {
                 heap: BinaryHeap::new(),
                 heap_log: Vec::new(),
                 next_sequence: 0,
                 current_time_nanos: 0,
+                seed,
+                latency_samples: 0,
                 listeners: BTreeMap::new(),
                 endpoints: BTreeMap::new(),
                 next_conn_id: ConnectionId::initial(),
@@ -202,6 +223,18 @@ impl WorldConnectionProvider {
         schedule_event_locked(&mut inner, time_nanos, event);
     }
 
+    /// Schedule a one-way wire hop at `now + delay` (`delay` ∈ `[1ms, 5ms]`).
+    pub fn schedule_wire(&self, event: NetworkEvent) {
+        let mut inner = self.inner.lock();
+        schedule_wire_locked(&mut inner, event);
+    }
+
+    /// Pair a parked connect with an existing listener and schedule `Connected`.
+    pub fn pair_connect(&self, listener: SocketAddr) -> ConnectionId {
+        let mut inner = self.inner.lock();
+        pair_connect_locked(&mut inner, listener)
+    }
+
     /// Add data to an endpoint inbox (Deliver).
     pub fn deliver_to_inbox(&self, conn: ConnectionId, data: Bytes) {
         let mut inner = self.inner.lock();
@@ -255,6 +288,13 @@ fn schedule_event_locked(inner: &mut WorldInner, time_nanos: u64, event: Network
     let sequence = inner.next_sequence;
     inner.next_sequence += 1;
     inner.heap.push(Reverse(HeapEntry { time_nanos, sequence, event }));
+}
+
+fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) {
+    let delay = wire_delay_nanos(inner.seed, inner.latency_samples);
+    inner.latency_samples += 1;
+    let time_nanos = inner.current_time_nanos + delay;
+    schedule_event_locked(inner, time_nanos, event);
 }
 
 fn try_complete_recv_locked(
@@ -313,8 +353,7 @@ fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> Conne
         initiator_addr: SocketAddr::from(([127, 0, 0, 1], 5000 + initiator_conn.as_u64() as u16)),
     });
 
-    let time_nanos = inner.current_time_nanos;
-    schedule_event_locked(inner, time_nanos, NetworkEvent::Connected { initiator_conn, listener: target_addr });
+    schedule_wire_locked(inner, NetworkEvent::Connected { initiator_conn, listener: target_addr });
     initiator_conn
 }
 
@@ -333,10 +372,8 @@ impl ConnectionProvider for WorldConnectionProvider {
     fn accept(&self, listener_addr: SocketAddr) -> BoxFuture<'static, std::io::Result<(Peer, ConnectionId)>> {
         let mut inner = self.inner.lock();
         if let Some((responder_conn, initiator_addr)) = install_handshake_locked(&mut inner, listener_addr) {
-            let time_nanos = inner.current_time_nanos;
-            schedule_event_locked(
+            schedule_wire_locked(
                 &mut inner,
-                time_nanos,
                 NetworkEvent::Accepted { listener: listener_addr, responder_conn, initiator_addr },
             );
         }
@@ -375,9 +412,8 @@ impl ConnectionProvider for WorldConnectionProvider {
             let peer_id = inner.endpoints[&conn].peer_conn_id;
             let time_nanos = inner.current_time_nanos;
             schedule_event_locked(&mut inner, time_nanos, NetworkEvent::SendAck { conn });
-            schedule_event_locked(
+            schedule_wire_locked(
                 &mut inner,
-                time_nanos,
                 NetworkEvent::Deliver { conn: peer_id, data: Bytes::copy_from_slice(&data) },
             );
         }

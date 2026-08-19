@@ -27,7 +27,8 @@ use std::{
 use amaru_kernel::Peer;
 use amaru_ouroboros::{ConnectionId, ToSocketAddrs};
 use amaru_protocols::network_effects::{
-    AcceptEffect, AcceptError, ConnectEffect, ConnectError, ReceiveError, RecvEffect, SendEffect, SendError,
+    AcceptEffect, AcceptError, ConnectEffect, ConnectError, ListenEffect, ReceiveError, RecvEffect, SendEffect,
+    SendError,
 };
 use amaru_pure_stage::{
     Effect, Instant, Name, SendData,
@@ -54,6 +55,7 @@ pub struct WorldLoop {
 type Completion = (usize, Name, Box<dyn SendData>);
 
 enum Posted {
+    Listen { addr: SocketAddr },
     Connect { stage: Name, addr: ToSocketAddrs },
     Accept { stage: Name, listener: SocketAddr },
     Send { stage: Name, conn: ConnectionId },
@@ -78,8 +80,6 @@ impl WorldLoop {
     /// Run until no more heap events or graph wakeups at-or-before horizon.
     pub async fn run_until_horizon(&mut self, horizon_nanos: u64) {
         loop {
-            self.exhaust_ready_graphs();
-
             let heap_time = self.provider.peek_next_event_time();
             let wakeup_time = self.next_graph_wakeup_nanos();
             let next = match (heap_time, wakeup_time) {
@@ -89,6 +89,9 @@ impl WorldLoop {
                 (None, None) => None,
             };
             let Some(next) = next else {
+                if self.fail_orphaned_connects() {
+                    continue;
+                }
                 break;
             };
             if next > horizon_nanos {
@@ -108,12 +111,20 @@ impl WorldLoop {
         }
     }
 
-    fn next_graph_wakeup_nanos(&self) -> Option<u64> {
-        self.graphs
-            .iter()
-            .filter_map(|g| g.next_wakeup())
-            .map(|t| u64::try_from(t.sim_elapsed().as_nanos()).expect("sim time fits u64"))
-            .min()
+    fn next_graph_wakeup_nanos(&mut self) -> Option<u64> {
+        let now = self.provider.current_time_nanos();
+        let mut sleep: Option<u64> = None;
+        for graph in &mut self.graphs {
+            graph.receive_inputs();
+            if graph.has_runnable() {
+                return Some(now);
+            }
+            if let Some(t) = graph.next_wakeup() {
+                let nanos = u64::try_from(t.sim_elapsed().as_nanos()).expect("sim time fits u64");
+                sleep = Some(sleep.map_or(nanos, |s| s.min(nanos)));
+            }
+        }
+        sleep
     }
 
     fn advance_clocks(&mut self, time_nanos: u64) {
@@ -166,9 +177,19 @@ impl WorldLoop {
 
     fn track_or_complete(&mut self, graph_idx: usize, posted: Posted) {
         match posted {
+            Posted::Listen { addr } => {
+                if self.provider.has_listener(addr) {
+                    let n = self.pending_connects.get(&addr).map(|q| q.len()).unwrap_or(0);
+                    for _ in 0..n {
+                        self.provider.pair_connect(addr);
+                    }
+                }
+            }
             Posted::Connect { stage, addr } => {
                 let addrs = addr.clone().to_socket_addrs().unwrap_or_default();
-                if let Some(listener) = addrs.into_iter().find(|a| self.provider.has_listener(*a)) {
+                if let Some(listener) =
+                    addrs.iter().copied().find(|a| self.provider.has_listener(*a)).or_else(|| addrs.first().copied())
+                {
                     self.pending_connects.entry(listener).or_default().push_back((graph_idx, stage));
                 } else {
                     self.resume((
@@ -250,10 +271,11 @@ impl WorldLoop {
                 if self.pending_accepts.get(listener).is_some_and(|q| !q.is_empty())
                     && let Some((responder_conn, initiator_addr)) = self.provider.take_handshake(*listener)
                 {
-                    self.provider.schedule_event(
-                        0,
-                        NetworkEvent::Accepted { listener: *listener, responder_conn, initiator_addr },
-                    );
+                    self.provider.schedule_wire(NetworkEvent::Accepted {
+                        listener: *listener,
+                        responder_conn,
+                        initiator_addr,
+                    });
                 }
                 out
             }
@@ -292,7 +314,7 @@ impl WorldLoop {
                 let peer = self.provider.close_endpoint(*conn);
                 let out = fail_pending_on(&mut self.pending_sends, &mut self.pending_recvs, *conn);
                 if let Some(peer) = peer {
-                    self.provider.schedule_event(0, NetworkEvent::Close { conn: peer });
+                    self.provider.schedule_wire(NetworkEvent::Close { conn: peer });
                 }
                 out
             }
@@ -345,6 +367,26 @@ impl WorldLoop {
     pub fn peek_next_event_time(&self) -> Option<u64> {
         self.provider.peek_next_event_time()
     }
+
+    fn fail_orphaned_connects(&mut self) -> bool {
+        let addrs: Vec<SocketAddr> =
+            self.pending_connects.keys().copied().filter(|addr| !self.provider.has_listener(*addr)).collect();
+        let mut any = false;
+        for addr in addrs {
+            if let Some(queue) = self.pending_connects.remove(&addr) {
+                for (graph_idx, stage) in queue {
+                    any = true;
+                    self.resume((
+                        graph_idx,
+                        stage,
+                        Box::new(Err::<ConnectionId, ConnectError>(ConnectError::new(addr.into(), "no listener")))
+                            as Box<dyn SendData>,
+                    ));
+                }
+            }
+        }
+        any
+    }
 }
 
 fn classify_network(effect: &Effect) -> Option<Posted> {
@@ -354,7 +396,9 @@ fn classify_network(effect: &Effect) -> Option<Posted> {
         return None;
     };
     let eff_any = &**eff as &dyn Any;
-    if let Some(connect) = eff_any.downcast_ref::<ConnectEffect>() {
+    if let Some(listen) = eff_any.downcast_ref::<ListenEffect>() {
+        Some(Posted::Listen { addr: listen.addr })
+    } else if let Some(connect) = eff_any.downcast_ref::<ConnectEffect>() {
         Some(Posted::Connect { stage: at_stage.clone(), addr: connect.addr.clone() })
     } else if let Some(accept) = eff_any.downcast_ref::<AcceptEffect>() {
         Some(Posted::Accept { stage: at_stage.clone(), listener: accept.listener_addr })
