@@ -1055,11 +1055,13 @@ fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
 }
 
 /// A real preprod fragment, produced by `run_until` after bootstrap, is disseminated over
-/// `WorldConnectionProvider`. One node is primed from the `run_until` store; the other starts
-/// from the bootstrap store only and must receive the fragment HEAD.
+/// `WorldConnectionProvider`. Node A is primed from that store (not `with_validated_blocks` on a
+/// synthetic `any_headers_chain`). Node B starts from bootstrap only and must receive the
+/// fragment HEAD on the mux.
 ///
-/// Tip is the production `cmp_tip` result after validation (height, then earlier slot). For this
-/// linear fragment that is the HEAD, not `headers.first()`.
+/// Tip equality is asserted only after B has the fragment HEAD: production `cmp_tip` after
+/// production `CanValidateHeaders`, with production `k` (2160). This is not CP(k), not Genesis
+/// Condition B, and not paper *s*.
 ///
 /// Requires on-disk stores from `tests/fixtures/world-preprod-fragment/README.md`.
 /// Not `#[tokio::test]`: production graphs may `Handle::block_on` DurationDist::Zero effects.
@@ -1175,25 +1177,45 @@ fn test_world_disseminates_preprod_fragment() {
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
         assert_eq!(params.consensus_security_param, PREPROD_GLOBAL_PARAMETERS.consensus_security_param);
-        assert_eq!(params.consensus_security_param, 2160);
+        assert_eq!(params.consensus_security_param, 2160, "production k, not chain_length");
     }
 
-    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
     let receiver_after = world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("receiver store");
-    let primed_tip = primed_after.get_best_chain_tip();
-    let receiver_tip = receiver_after.get_best_chain_tip();
-    let log = world.heap_log();
-    assert_eq!(primed_tip, fragment_head_point, "primed tip after WorldLoop; receiver={receiver_tip}; heap={log:?}");
-    assert_eq!(
-        receiver_tip, fragment_head_point,
-        "every honest node must adopt the fragment HEAD after WorldLoop; primed={primed_tip}; heap={log:?}"
+    assert!(
+        receiver_after.load_header(&fragment_head_point.hash()).is_some(),
+        "receiving node must have the fragment HEAD before tip equality is compared"
     );
 
     let head_hash = head.hash().to_string();
     let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
-    let receiver_got_head = receiver_traces.iter().any(|entry| format!("{entry:?}").contains(&head_hash));
+    let receiver_mux_got_head = receiver_traces.iter().any(|entry| {
+        let text = format!("{entry:?}");
+        let on_mux = text.contains("mux-")
+            || text.contains("HeaderContent")
+            || text.contains("RollForward")
+            || text.contains("chainsync");
+        on_mux && text.contains(&head_hash)
+    });
     assert!(
-        receiver_got_head,
-        "receiving node traces must mention fragment HEAD {head_hash} (not the primed node's local stages); traces={receiver_traces:?}"
+        receiver_mux_got_head,
+        "B must receive the fragment HEAD on the mux (receiver graph only); head={head_hash}"
     );
+
+    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
+    let primed_tip = primed_after.get_best_chain_tip();
+    let receiver_tip = receiver_after.get_best_chain_tip();
+    let primed_header = primed_after.load_header(&primed_tip.hash()).expect("primed tip header");
+    let receiver_header = receiver_after.load_header(&receiver_tip.hash()).expect("receiver tip header");
+    assert_eq!(
+        cmp_tip(Some(&receiver_header), Some(head)),
+        Ordering::Equal,
+        "receiver tip must be cmp_tip-equal to the fragment HEAD after production validation"
+    );
+    assert_eq!(
+        cmp_tip(Some(&primed_header), Some(head)),
+        Ordering::Equal,
+        "primed tip must be cmp_tip-equal to the fragment HEAD after production validation"
+    );
+    assert_eq!(receiver_tip, fragment_head_point);
+    assert_eq!(primed_tip, fragment_head_point);
 }
