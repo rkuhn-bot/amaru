@@ -13,15 +13,12 @@
 // limitations under the License.
 
 use amaru_pure_stage::simulation::{Blocked, SimulationRunning};
-use tokio::runtime::Handle;
 
-use super::{HeapEntry, WorldConnectionProvider};
+use super::WorldConnectionProvider;
 
 /// World loop over N SimulationRunning graphs + WorldConnectionProvider heap.
 ///
-/// Uses only PUBLIC SimulationRunning API. Pattern: exhaust newly-ready graphs
-/// (receive_inputs, has_runnable, try_effect, handle_effect), else pop-if-at≤horizon,
-/// execute, await external effects on all graphs, repeat.
+/// ASYNC method (no block_on, no Runtime::new). Awaited by #[tokio::test].
 pub struct WorldLoop {
     provider: WorldConnectionProvider,
     graphs: Vec<SimulationRunning>,
@@ -34,50 +31,49 @@ impl WorldLoop {
 
     /// Run until no more events at-or-before horizon.
     ///
-    /// Uses the provided tokio Handle (from the test's #[tokio::test] runtime).
-    pub fn run_until_horizon(&mut self, horizon_nanos: u64, handle: &Handle) {
-        handle.block_on(async {
+    /// ASYNC method awaited by test. NO block_on, NO Runtime::new.
+    /// Pattern: exhaust ready, pop-if-at≤horizon, execute, await_external_effect.
+    pub async fn run_until_horizon(&mut self, horizon_nanos: u64) {
+        loop {
+            // Exhaust all newly-ready graphs
             loop {
-                // Exhaust all newly-ready graphs
-                loop {
-                    let mut any_ready = false;
-                    for graph in &mut self.graphs {
-                        graph.receive_inputs();
-                        while graph.has_runnable() {
-                            match graph.try_effect() {
-                                Ok(effect) => {
-                                    graph.handle_effect(effect);
-                                    any_ready = true;
-                                }
-                                Err(Blocked::Busy { .. }) => break,
-                                Err(_) => break,
+                let mut any_ready = false;
+                for graph in &mut self.graphs {
+                    graph.receive_inputs();
+                    while graph.has_runnable() {
+                        match graph.try_effect() {
+                            Ok(effect) => {
+                                graph.handle_effect(effect);
+                                any_ready = true;
                             }
+                            Err(Blocked::Busy { .. }) => break,
+                            Err(_) => break,
                         }
                     }
-                    if !any_ready {
-                        break;
-                    }
                 }
-
-                // Pop one event if at≤horizon
-                if let Some(entry) = self.provider.pop_event_at_or_before(horizon_nanos) {
-                    self.provider.set_time(entry.time_nanos);
-                    self.provider.execute_event(entry.event);
-
-                    // After execute_event, await_external_effect on all graphs to complete UntilResolved futures
-                    for graph in &mut self.graphs {
-                        graph.await_external_effect().await;
-                    }
-                } else {
+                if !any_ready {
                     break;
                 }
             }
-        });
+
+            // Pop one event if at≤horizon
+            if let Some(entry) = self.provider.pop_event_at_or_before(horizon_nanos) {
+                self.provider.set_time(entry.time_nanos);
+                self.provider.execute_event(entry); // Fixed: pass full HeapEntry
+
+                // await_external_effect on all graphs (will complete if futures ready)
+                for graph in &mut self.graphs {
+                    graph.await_external_effect().await;
+                }
+            } else {
+                break;
+            }
+        }
     }
 
     /// Run until no more events and all graphs idle/terminated.
-    pub fn run_to_completion(&mut self, handle: &Handle) {
-        self.run_until_horizon(u64::MAX, handle)
+    pub async fn run_to_completion(&mut self) {
+        self.run_until_horizon(u64::MAX).await
     }
 
     /// Get the event log.
