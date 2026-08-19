@@ -24,9 +24,9 @@ use std::{
 
 use amaru_pure_stage::{
     DeserializerGuards, DurationDist, ExternalEffect, ExternalEffectAPI, Resources, StageGraph,
-    assert_trace_does_not_contain, assert_trace_match, register_data_deserializer, register_effect_deserializer,
-    simulation::SimulationBuilder, tm_clock, tm_clock_between, tm_external_effect, tm_input, tm_state,
-    trace_buffer::TraceBuffer,
+    assert_trace_does_not_contain, assert_trace_match, assert_trace_match_filter, register_data_deserializer,
+    register_effect_deserializer, simulation::SimulationBuilder, tm_clock, tm_clock_between, tm_effect,
+    tm_external_effect, tm_input, tm_resume, tm_resume_external, tm_resume_unit, tm_state, trace_buffer::TraceBuffer,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -138,6 +138,41 @@ fn zero_does_not_advance_the_clock() {
         &running,
         &[tm_clock(Duration::ZERO), tm_clock_between(Duration::ZERO, Duration::from_secs(1000))],
     );
+    let (running, _guards) = run_once::<ZeroWork>(1);
+    assert_trace_match(
+        &running,
+        &[
+            tm_state("work-1", &()),
+            tm_input("work-1", &1u32),
+            tm_external_effect::<ZeroWork>("work-1"),
+            tm_state("work-1", &()),
+        ],
+    );
+}
+
+#[test]
+fn assert_trace_match_filter_drops_matched_actuals() {
+    let (running, _guards) = run_once::<ZeroWork>(1);
+    assert_trace_match_filter(
+        &running,
+        &[
+            tm_state("work-1", &()),
+            tm_input("work-1", &1u32),
+            tm_resume_unit("work-1"),
+            tm_effect("work-1", ZeroWork),
+            tm_resume_external("work-1", ()),
+            tm_state("work-1", &()),
+        ],
+        &[],
+    );
+
+    let (running, _guards) = run_once::<ZeroWork>(1);
+    assert_trace_match_filter(
+        &running,
+        &[tm_input("work-1", &1u32), tm_effect("work-1", ZeroWork)],
+        &[tm_resume(), tm_state("work-1", &())],
+    );
+
     let (running, _guards) = run_once::<ZeroWork>(1);
     assert_trace_match(
         &running,

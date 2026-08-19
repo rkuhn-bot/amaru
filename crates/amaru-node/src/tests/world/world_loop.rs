@@ -75,6 +75,10 @@ impl WorldLoop {
         }
     }
 
+    pub fn graph(&self, index: usize) -> &SimulationRunning {
+        &self.graphs[index]
+    }
+
     /// Run until no more heap events or graph wakeups at-or-before horizon.
     pub async fn run_until_horizon(&mut self, horizon_nanos: u64) {
         loop {
