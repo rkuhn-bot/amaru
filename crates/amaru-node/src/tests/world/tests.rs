@@ -1053,3 +1053,125 @@ fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
     let text = format!("{entry:?}");
     text.contains("RollForward") || text.contains("ValidateHeader") || text.contains("HeaderContent")
 }
+
+/// A real preprod fragment, produced by `run_until` after bootstrap, is disseminated over
+/// `WorldConnectionProvider`. One node is primed from the `run_until` store; the other starts
+/// from the bootstrap store only and must receive the fragment HEAD.
+///
+/// Tip is the production `cmp_tip` result after validation (height, then earlier slot). For this
+/// linear fragment that is the HEAD, not `headers.first()`.
+///
+/// Requires on-disk stores from `tests/fixtures/world-preprod-fragment/README.md`.
+/// Not `#[tokio::test]`: production graphs may `Handle::block_on` DurationDist::Zero effects.
+#[test]
+#[ignore = "requires preprod fragment stores; see tests/fixtures/world-preprod-fragment/README.md"]
+fn test_world_disseminates_preprod_fragment() {
+    use std::cmp::Ordering;
+
+    use amaru_consensus::stages::select_chain::cmp_tip;
+    use amaru_kernel::{IsHeader, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer};
+    use amaru_ouroboros::BaseReadChainStore;
+    use amaru_protocols::store_effects::ResourceHeaderStore;
+
+    use super::fragment::{
+        copy_dir, fixture_root, fragment_headers_to_tip, load_committed_meta, open_chain_store, stores_ready,
+    };
+
+    let root = fixture_root();
+    assert!(stores_ready(&root), "preprod fragment stores missing under {}; follow README.md", root.display());
+    let meta = load_committed_meta(&root).expect("meta.json");
+    assert_eq!(meta.peer, "sleipnir.rkuhn.info:3001");
+
+    let primed_tmp = tempfile::tempdir().expect("primed temp");
+    let receiver_tmp = tempfile::tempdir().expect("receiver temp");
+    copy_dir(&root.join("primed/chain"), &primed_tmp.path().join("chain")).expect("copy primed chain");
+    copy_dir(&root.join("primed/ledger"), &primed_tmp.path().join("ledger")).expect("copy primed ledger");
+    copy_dir(&root.join("bootstrap/chain"), &receiver_tmp.path().join("chain")).expect("copy bootstrap chain");
+    copy_dir(&root.join("bootstrap/ledger"), &receiver_tmp.path().join("ledger")).expect("copy bootstrap ledger");
+
+    let primed_chain_path = primed_tmp.path().join("chain");
+    let fragment_head = {
+        let store = open_chain_store(&primed_chain_path).expect("open primed chain");
+        let tip = store.get_best_chain_tip();
+        store.load_header(&tip.hash()).unwrap_or_else(|| panic!("primed store missing tip header {tip}"))
+    };
+    let fragment_head_point = fragment_head.point();
+    let offset = PREPROD_ERA_HISTORY
+        .slot_to_relative_time_unchecked_horizon(fragment_head.slot())
+        .expect("fragment slot in era history")
+        + Duration::from_secs(30);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let handle = runtime.handle().clone();
+    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+
+    let listen_primed = "127.0.0.1:9321";
+    let listen_receiver = "127.0.0.1:9320";
+    let peer_primed = Peer::new(listen_primed);
+
+    let node_primed = NodeTestConfig::default()
+        .with_no_upstream_peers()
+        .with_listen_address(listen_primed)
+        .with_seed(21)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_ledger_dir(primed_tmp.path().join("ledger"))
+        .with_chain_dir(primed_tmp.path().join("chain"))
+        .with_global_epoch_offset(offset);
+    let node_receiver = NodeTestConfig::default()
+        .with_upstream_peer(peer_primed)
+        .with_listen_address(listen_receiver)
+        .with_seed(22)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_ledger_dir(receiver_tmp.path().join("ledger"))
+        .with_chain_dir(receiver_tmp.path().join("chain"))
+        .with_global_epoch_offset(offset);
+
+    let connections: ConnectionsResource = provider.clone();
+    let sim_primed = build_world_node(&node_primed, connections.clone(), &handle).expect("primed node");
+    let sim_receiver = build_world_node(&node_receiver, connections, &handle).expect("receiver node");
+
+    let primed_store = sim_primed.resources().get::<ResourceHeaderStore>().expect("primed chain store");
+    let receiver_store = sim_receiver.resources().get::<ResourceHeaderStore>().expect("receiver chain store");
+    let primed_tip_before = primed_store.get_best_chain_tip();
+    let receiver_tip_before = receiver_store.get_best_chain_tip();
+    assert_eq!(primed_tip_before, fragment_head_point, "primed tip must be the fragment HEAD, not the first header");
+    assert_ne!(receiver_tip_before, primed_tip_before, "receiver must start without the fragment (bootstrap tip only)");
+
+    let fragment = fragment_headers_to_tip(primed_store.as_ref(), &receiver_tip_before, &primed_tip_before)
+        .expect("linear fragment from bootstrap tip to HEAD");
+    let head = fragment.last().expect("fragment has a HEAD");
+    assert_eq!(head.point(), fragment_head_point);
+    for earlier in &fragment[..fragment.len() - 1] {
+        assert_eq!(
+            cmp_tip(Some(head), Some(earlier)),
+            Ordering::Greater,
+            "linear fragment HEAD must win cmp_tip against earlier headers"
+        );
+    }
+
+    let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
+    world.run_until_horizon(0);
+
+    for graph in world.graphs() {
+        let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
+        assert_eq!(params.consensus_security_param, PREPROD_GLOBAL_PARAMETERS.consensus_security_param);
+        assert_eq!(params.consensus_security_param, 2160);
+    }
+
+    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
+    let receiver_after = world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("receiver store");
+    assert_eq!(primed_after.get_best_chain_tip(), fragment_head_point);
+    assert_eq!(
+        receiver_after.get_best_chain_tip(),
+        fragment_head_point,
+        "every honest node must adopt the fragment HEAD after WorldLoop"
+    );
+
+    let head_hash = head.hash().to_string();
+    let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
+    let receiver_got_head = receiver_traces.iter().any(|entry| format!("{entry:?}").contains(&head_hash));
+    assert!(
+        receiver_got_head,
+        "receiving node traces must mention fragment HEAD {head_hash} (not the primed node's local stages); traces={receiver_traces:?}"
+    );
+}
