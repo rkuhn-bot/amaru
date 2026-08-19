@@ -192,6 +192,11 @@ impl WorldConnectionProvider {
         self.inner.lock().heap_log.clone()
     }
 
+    /// Peek at the next event time without popping.
+    pub fn peek_next_event_time(&self) -> Option<u64> {
+        self.inner.lock().heap.iter().next().map(|e| e.time_nanos)
+    }
+
     /// Execute one popped event: resolve its completion future.
     pub fn execute_event(&self, entry: HeapEntry) {
         let mut inner = self.inner.lock();

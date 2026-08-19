@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use amaru_pure_stage::simulation::SimulationRunning;
+use std::future::Future;
+
+use amaru_pure_stage::simulation::{Blocked, SimulationRunning};
 
 use super::{HeapEntry, WorldConnectionProvider};
 
 /// World loop over N SimulationRunning graphs.
 ///
-/// Implements the required pattern:
-/// - Exhaust every newly-ready graph
-/// - while-ready-else-pop-if-at≤horizon
-/// - No tokio::time::sleep, no tokio::spawn as the runner, no wall-clock
+/// Uses only PUBLIC SimulationRunning API:
+/// - receive_inputs, has_runnable, try_effect, handle_effect
+/// - await_external_effect (to complete UntilResolved futures)
+///
+/// Pattern: exhaust all newly-ready graphs, pop-if-at≤horizon, execute event,
+/// await external effects to complete stages, repeat.
 pub struct WorldLoop {
     provider: WorldConnectionProvider,
     graphs: Vec<SimulationRunning>,
@@ -34,44 +38,62 @@ impl WorldLoop {
 
     /// Run until no more events at-or-before horizon.
     ///
-    /// Pattern: exhaust all newly-ready graphs, then pop one event if at≤horizon,
-    /// execute it, repeat. Returns when no events are ready within horizon.
-    pub fn run_until_horizon(&mut self, horizon_nanos: u64) {
-        loop {
-            // Exhaust all newly-ready graphs
+    /// After pop/execute, calls await_external_effect to complete UntilResolved
+    /// futures and resume stages from Blocked::Busy.
+    pub fn run_until_horizon(&mut self, horizon_nanos: u64) -> tokio::runtime::Handle {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
             loop {
-                let mut any_ready = false;
-                for graph in &mut self.graphs {
-                    graph.receive_inputs();
-                    while graph.has_runnable() {
-                        if let Some(_blocked) = graph.run_effect() {
-                            break;
+                // Exhaust all newly-ready graphs
+                loop {
+                    let mut any_ready = false;
+                    for graph in &mut self.graphs {
+                        graph.receive_inputs();
+                        while graph.has_runnable() {
+                            match graph.try_effect() {
+                                Ok(effect) => {
+                                    graph.handle_effect(effect);
+                                    any_ready = true;
+                                }
+                                Err(Blocked::Busy { .. }) => break,
+                                Err(_) => break,
+                            }
                         }
-                        any_ready = true;
+                    }
+                    if !any_ready {
+                        break;
                     }
                 }
-                if !any_ready {
+
+                // Pop one event if at≤horizon
+                if let Some(entry) = self.provider.pop_event_at_or_before(horizon_nanos) {
+                    self.provider.execute_event(entry);
+
+                    // Complete UntilResolved futures: await_external_effect polls pending_computations
+                    // and delivers results via provide_external_result, making stages runnable again
+                    for graph in &mut self.graphs {
+                        graph.await_external_effect().await;
+                    }
+                } else {
                     break;
                 }
             }
-
-            // Pop one event if at≤horizon
-            if let Some(entry) = self.provider.pop_event_at_or_before(horizon_nanos) {
-                self.provider.execute_event(entry);
-            } else {
-                break;
-            }
-        }
+        });
+        rt.handle().clone()
     }
 
-    /// Run until no more events and all graphs are idle/terminated.
-    pub fn run_to_completion(&mut self) {
-        let horizon = u64::MAX;
-        self.run_until_horizon(horizon);
+    /// Run until no more events and all graphs idle/terminated.
+    pub fn run_to_completion(&mut self) -> tokio::runtime::Handle {
+        self.run_until_horizon(u64::MAX)
     }
 
     /// Get the event log.
     pub fn heap_log(&self) -> Vec<super::HeapLogEntry> {
         self.provider.heap_log()
+    }
+
+    /// Check if any events remain on heap before horizon.
+    pub fn has_events_before(&self, horizon_nanos: u64) -> bool {
+        self.provider.peek_next_event_time().map_or(false, |t| t <= horizon_nanos)
     }
 }
