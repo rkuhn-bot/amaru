@@ -19,8 +19,10 @@
 //! scheduling SendAck and Deliver events on a heap ordered by simulated time.
 
 mod world_connection_provider;
+mod world_loop;
 
-pub use world_connection_provider::WorldConnectionProvider;
+pub use world_connection_provider::{HeapEntry, HeapLogEntry, NetworkEvent, WorldConnectionProvider};
+pub use world_loop::WorldLoop;
 
 #[cfg(test)]
 mod tests;
