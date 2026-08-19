@@ -184,6 +184,12 @@ pub struct ConnectError {
     error: String,
 }
 
+impl ConnectError {
+    pub fn new(addr: ToSocketAddrs, error: impl Display) -> Self {
+        Self { addr, error: error.to_string() }
+    }
+}
+
 impl Display for ConnectError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let ConnectError { addr, error } = self;
