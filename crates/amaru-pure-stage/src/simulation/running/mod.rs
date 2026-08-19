@@ -416,6 +416,8 @@ impl SimulationRunning {
         if pending.result.is_none() {
             return;
         }
+        // World-provided UntilResolved results abandon the stored Future.
+        self.pending_computations.remove(at_stage);
         let pending = self.external_inflight.remove(at_stage).expect("just checked");
         let Some(data) = self.stages.get_mut(at_stage) else {
             tracing::warn!(name = %at_stage, "stage was terminated, skipping external effect delivery");

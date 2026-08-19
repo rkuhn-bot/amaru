@@ -15,63 +15,51 @@
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use amaru_kernel::NonEmptyBytes;
-use amaru_ouroboros::{ConnectionId, ConnectionsResource};
-use amaru_protocols::{Network, network_effects::NetworkOps};
+use amaru_ouroboros::ConnectionsResource;
+use amaru_protocols::network_effects::{Network, NetworkOps};
 use amaru_pure_stage::{
     StageGraph,
     simulation::{Fifo, SimulationBuilder},
 };
 use tokio_util::bytes::Bytes;
 
-use super::{HeapEntry, NetworkEvent, WorldConnectionProvider, WorldLoop};
+use super::{NetworkEvent, WorldConnectionProvider, WorldLoop};
 
-/// Prove one Deliver round-trip under world loop.
-/// Node A listens+accepts, Node B connects+sends. No .await before world pops.
+/// Prove one Deliver round-trip under the world loop.
+/// Node A listens+accepts+recv, Node B connects+sends. Driven only by WorldLoop.
 #[tokio::test]
 async fn test_one_deliver_roundtrip_with_world_loop() {
     let handle = tokio::runtime::Handle::current();
     let provider = Arc::new(WorldConnectionProvider::new());
     let listener_addr: SocketAddr = "127.0.0.1:9000".parse().unwrap();
 
-    // Node A: listen and accept, then recv
     let provider_a = provider.clone();
     let mut stage_graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
-    stage_graph_a.resources().set(provider_a.clone() as ConnectionsResource);
+    stage_graph_a.resources().put::<ConnectionsResource>(provider_a.clone());
 
-    let stage_a = stage_graph_a.stage("node_a", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+    let stage_a = stage_graph_a.stage("node_a", move |_state: (), _unit: (), eff| async move {
         let net = Network::new(&eff);
-        if state.is_none() {
-            net.listen(listener_addr).await.ok();
-            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
-            state = Some(conn);
-            return state;
-        }
+        net.listen(listener_addr).await.unwrap();
+        let (_peer, conn) = net.accept(listener_addr).await.unwrap();
         let msg_len = NonZeroUsize::new("hello from B".len()).unwrap();
-        let received = net.recv(state.unwrap(), msg_len).await.unwrap();
+        let received = net.recv(conn, msg_len).await.unwrap();
         assert_eq!(received.as_ref(), b"hello from B");
-        state
     });
-    let stage_a = stage_graph_a.wire_up(stage_a, None);
+    let stage_a = stage_graph_a.wire_up(stage_a, ());
     let mut sim_a = stage_graph_a.run(&handle);
     sim_a.enqueue_msg(&stage_a, [()]);
 
-    // Node B: connect and send
     let provider_b = provider.clone();
     let mut stage_graph_b = SimulationBuilder::default().with_eval_strategy(Fifo);
-    stage_graph_b.resources().set(provider_b.clone() as ConnectionsResource);
+    stage_graph_b.resources().put::<ConnectionsResource>(provider_b.clone());
 
-    let stage_b = stage_graph_b.stage("node_b", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+    let stage_b = stage_graph_b.stage("node_b", move |_state: (), _unit: (), eff| async move {
         let net = Network::new(&eff);
-        if state.is_none() {
-            let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
-            state = Some(conn);
-            return state;
-        }
+        let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
         let msg = NonEmptyBytes::try_from(Bytes::from("hello from B")).unwrap();
-        net.send(state.unwrap(), msg).await.unwrap();
-        state
+        net.send(conn, msg).await.unwrap();
     });
-    let stage_b = stage_graph_b.wire_up(stage_b, None);
+    let stage_b = stage_graph_b.wire_up(stage_b, ());
     let mut sim_b = stage_graph_b.run(&handle);
     sim_b.enqueue_msg(&stage_b, [()]);
 
@@ -85,7 +73,7 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
     assert!(log.iter().any(|e| e.kind == "Deliver"));
 }
 
-/// Prove horizon cuts keepalive.
+/// Horizon cuts keepalive.
 ///
 /// Schedule two explicit heap events:
 /// - keepalive at t_in=100 (≤ H=1000)
@@ -98,29 +86,21 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
 async fn test_horizon_cuts_keepalive() {
     let provider = WorldConnectionProvider::new();
 
-    // Manually schedule two events on the heap
-    // Event 1: Close at t=100 (within horizon)
     let conn_in = amaru_ouroboros::ConnectionId::initial();
     provider.schedule_event_at(100, NetworkEvent::Close { conn: conn_in });
 
-    // Event 2: Close at t=1500 (beyond horizon)
     let conn_out = amaru_ouroboros::ConnectionId::initial();
     provider.schedule_event_at(1500, NetworkEvent::Close { conn: conn_out });
 
     let mut world = WorldLoop::new(provider, vec![]);
-
-    // Run to horizon=1000
     world.run_until_horizon(1000).await;
 
-    // t_in=100 should be in heap_log
     let log = world.heap_log();
     assert!(log.iter().any(|e| e.time_nanos == 100 && e.kind == "Close"), "Event at t=100 should be in log");
-
-    // t_out=1500 should still be on heap
     assert_eq!(world.peek_next_event_time(), Some(1500), "Event at t=1500 should still be on heap (not popped)");
 }
 
-/// Test heap log structure: (seq, at, kind, conn).
+/// Heap log structure: (seq, at, kind, conn).
 #[tokio::test]
 async fn test_heap_log_structure() {
     let handle = tokio::runtime::Handle::current();
@@ -129,40 +109,30 @@ async fn test_heap_log_structure() {
 
     let provider_a = provider.clone();
     let mut stage_graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
-    stage_graph_a.resources().set(provider_a.clone() as ConnectionsResource);
+    stage_graph_a.resources().put::<ConnectionsResource>(provider_a.clone());
 
-    let stage_a = stage_graph_a.stage("node_a", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+    let stage_a = stage_graph_a.stage("node_a", move |_state: (), _unit: (), eff| async move {
         let net = Network::new(&eff);
-        if state.is_none() {
-            net.listen(listener_addr).await.ok();
-            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
-            state = Some(conn);
-            return state;
-        }
+        net.listen(listener_addr).await.unwrap();
+        let (_peer, conn) = net.accept(listener_addr).await.unwrap();
         let msg_len = NonZeroUsize::new(4).unwrap();
-        let _received = net.recv(state.unwrap(), msg_len).await.unwrap();
-        state
+        let _received = net.recv(conn, msg_len).await.unwrap();
     });
-    let stage_a = stage_graph_a.wire_up(stage_a, None);
+    let stage_a = stage_graph_a.wire_up(stage_a, ());
     let mut sim_a = stage_graph_a.run(&handle);
     sim_a.enqueue_msg(&stage_a, [()]);
 
     let provider_b = provider.clone();
     let mut stage_graph_b = SimulationBuilder::default().with_eval_strategy(Fifo);
-    stage_graph_b.resources().set(provider_b.clone() as ConnectionsResource);
+    stage_graph_b.resources().put::<ConnectionsResource>(provider_b.clone());
 
-    let stage_b = stage_graph_b.stage("node_b", async move |mut state: Option<ConnectionId>, _unit: (), eff| {
+    let stage_b = stage_graph_b.stage("node_b", move |_state: (), _unit: (), eff| async move {
         let net = Network::new(&eff);
-        if state.is_none() {
-            let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
-            state = Some(conn);
-            return state;
-        }
+        let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
         let msg = NonEmptyBytes::try_from(Bytes::from("test")).unwrap();
-        net.send(state.unwrap(), msg).await.unwrap();
-        state
+        net.send(conn, msg).await.unwrap();
     });
-    let stage_b = stage_graph_b.wire_up(stage_b, None);
+    let stage_b = stage_graph_b.wire_up(stage_b, ());
     let mut sim_b = stage_graph_b.run(&handle);
     sim_b.enqueue_msg(&stage_b, [()]);
 
@@ -171,8 +141,6 @@ async fn test_heap_log_structure() {
 
     let log = world.heap_log();
     for entry in &log {
-        assert!(entry.sequence < u64::MAX);
-        assert!(entry.time_nanos <= u64::MAX);
         assert!(!entry.kind.is_empty());
         assert!(entry.conn.is_some());
     }
