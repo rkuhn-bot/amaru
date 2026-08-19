@@ -1,4 +1,4 @@
-// Copyright 2025 PRAGMA
+// Copyright 2026 PRAGMA
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,18 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod action;
-pub(crate) mod test_data;
+//! World-based connection provider for deterministic simulation testing.
+//!
+//! This module implements EDR-011 discrete-event simulation for network effects.
+//! The WorldConnectionProvider owns completion of UntilResolved connection futures,
+//! scheduling SendAck and Deliver events on a heap ordered by simulated time.
+
+mod world_connection_provider;
+
+pub use world_connection_provider::WorldConnectionProvider;
 
 #[cfg(test)]
-mod test_cases;
-
-pub use action::Action;
-
-pub mod assertions;
-pub mod configuration;
-pub mod in_memory_connection_provider;
-pub mod node;
-pub mod nodes;
-pub mod setup;
-pub mod world;
+mod tests;
