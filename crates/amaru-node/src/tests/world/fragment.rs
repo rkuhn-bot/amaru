@@ -117,7 +117,11 @@ pub fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
         if entry.file_type()?.is_dir() {
             copy_dir(&entry.path(), &dest)?;
         } else {
-            fs::copy(entry.path(), dest)?;
+            match fs::copy(entry.path(), &dest) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            }
         }
     }
     Ok(())
@@ -221,7 +225,9 @@ mod tests {
         let root = fixture_root();
         assert!(stores_ready(&root), "stores missing under {}", root.display());
         let meta = load_committed_meta(&root).expect("meta.json");
-        let store = open_chain_store(&root.join("primed/chain")).expect("open primed chain");
+        let tmp = tempfile::tempdir().expect("copy primed chain");
+        copy_dir(&root.join("primed/chain"), &tmp.path().join("chain")).expect("copy primed chain");
+        let store = open_chain_store(&tmp.path().join("chain")).expect("open primed chain");
         let snapshot = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
         let fragment = linear_fragment_with_bodies(&store, snapshot).expect("fragment with bodies");
         let head = fragment.last().expect("HEAD");
