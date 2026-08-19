@@ -5,5 +5,6 @@
   "latest_snapshot_epoch": 306,
   "target_epoch": 307,
   "peer": "sleipnir.rkuhn.info:3001",
-  "produced_by": "crates/amaru-node/examples/run_until.rs"
+  "produced_by": "crates/amaru-node/examples/run_until.rs",
+  "fragment_head": "130982572.fc787e2c9da9901e54bffd63f9e96f98bddd6e528def909f24b9c5da3afbb865(5052858)"
 }

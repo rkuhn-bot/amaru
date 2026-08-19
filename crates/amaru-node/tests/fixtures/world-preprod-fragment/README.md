@@ -48,8 +48,8 @@ cargo run --release --bin amaru -- node bootstrap \
   --ledger-dir "$ROOT/bootstrap/ledger"
 
 # 2. Copy bootstrap → primed, then sync the next epoch from sleipnir
-cp -a "$ROOT/bootstrap/chain" "$ROOT/primed/chain"
-cp -a "$ROOT/bootstrap/ledger" "$ROOT/primed/ledger"
+rm -rf "$ROOT/primed"
+cp -a "$ROOT/bootstrap" "$ROOT/primed"
 
 cargo run --release -p amaru-node --example run_until -- \
   --network preprod \
@@ -61,6 +61,9 @@ cargo run --release -p amaru-node --example run_until -- \
 
 The primed store is the `run_until` output. The receiver node in the test is
 copied from `bootstrap/` (no fragment). Do not commit `bootstrap/` or `primed/`.
+
+`meta.json`'s `fragment_head` is the last header after the snapshot that has a
+stored body (the linear HEAD). It is not the first epoch-boundary header.
 
 ## Run the dissemination test
 

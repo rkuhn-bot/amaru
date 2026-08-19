@@ -18,6 +18,7 @@
 //! [`WorldConnectionProvider`] owns the one physical `(time, sequence)` heap of
 //! network events and graph wakes. [`WorldLoop`] is the only popper.
 
+#[cfg(test)]
 mod fragment;
 mod nodes;
 mod world_connection_provider;

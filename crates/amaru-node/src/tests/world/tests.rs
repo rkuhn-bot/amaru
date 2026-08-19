@@ -1074,7 +1074,8 @@ fn test_world_disseminates_preprod_fragment() {
     use amaru_protocols::store_effects::ResourceHeaderStore;
 
     use super::fragment::{
-        copy_dir, fixture_root, fragment_headers_to_tip, load_committed_meta, open_chain_store, stores_ready,
+        copy_dir, fixture_root, header_hash_from_snapshot_point, linear_fragment_to_head, linear_fragment_with_bodies,
+        load_committed_meta, open_chain_store, stores_ready,
     };
 
     let root = fixture_root();
@@ -1090,12 +1091,26 @@ fn test_world_disseminates_preprod_fragment() {
     copy_dir(&root.join("bootstrap/ledger"), &receiver_tmp.path().join("ledger")).expect("copy bootstrap ledger");
 
     let primed_chain_path = primed_tmp.path().join("chain");
-    let fragment_head = {
+    let snapshot_hash = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
+    let (fragment_head, fragment) = {
         let store = open_chain_store(&primed_chain_path).expect("open primed chain");
-        let tip = store.get_best_chain_tip();
-        store.load_header(&tip.hash()).unwrap_or_else(|| panic!("primed store missing tip header {tip}"))
+        let fragment = linear_fragment_with_bodies(&store, snapshot_hash).expect("disseminable fragment");
+        let head = fragment.last().cloned().expect("fragment has a HEAD");
+        let walked = linear_fragment_to_head(&store, snapshot_hash, head.clone()).expect("parent walk to HEAD");
+        assert_eq!(walked.last().map(|h| h.point()), Some(head.point()));
+        (head, fragment)
     };
     let fragment_head_point = fragment_head.point();
+    let head = fragment.last().expect("fragment has a HEAD");
+    assert_eq!(head.point(), fragment_head_point, "linear fragment HEAD is the last header, not first()");
+    assert_eq!(format!("{fragment_head_point}"), meta.fragment_head);
+    for earlier in &fragment[..fragment.len() - 1] {
+        assert_eq!(
+            cmp_tip(Some(head), Some(earlier)),
+            Ordering::Greater,
+            "linear fragment HEAD must win cmp_tip against earlier headers"
+        );
+    }
     let offset = PREPROD_ERA_HISTORY
         .slot_to_relative_time_unchecked_horizon(fragment_head.slot())
         .expect("fragment slot in era history")
@@ -1130,24 +1145,27 @@ fn test_world_disseminates_preprod_fragment() {
     let sim_primed = build_world_node(&node_primed, connections.clone(), &handle).expect("primed node");
     let sim_receiver = build_world_node(&node_receiver, connections, &handle).expect("receiver node");
 
-    let primed_store = sim_primed.resources().get::<ResourceHeaderStore>().expect("primed chain store");
-    let receiver_store = sim_receiver.resources().get::<ResourceHeaderStore>().expect("receiver chain store");
-    let primed_tip_before = primed_store.get_best_chain_tip();
-    let receiver_tip_before = receiver_store.get_best_chain_tip();
-    assert_eq!(primed_tip_before, fragment_head_point, "primed tip must be the fragment HEAD, not the first header");
-    assert_ne!(receiver_tip_before, primed_tip_before, "receiver must start without the fragment (bootstrap tip only)");
-
-    let fragment = fragment_headers_to_tip(primed_store.as_ref(), &receiver_tip_before, &primed_tip_before)
-        .expect("linear fragment from bootstrap tip to HEAD");
-    let head = fragment.last().expect("fragment has a HEAD");
-    assert_eq!(head.point(), fragment_head_point);
-    for earlier in &fragment[..fragment.len() - 1] {
-        assert_eq!(
-            cmp_tip(Some(head), Some(earlier)),
-            Ordering::Greater,
-            "linear fragment HEAD must win cmp_tip against earlier headers"
-        );
-    }
+    let primed_store = {
+        let store = sim_primed.resources().get::<ResourceHeaderStore>().expect("primed chain store");
+        Arc::clone(&*store)
+    };
+    let receiver_store = {
+        let store = sim_receiver.resources().get::<ResourceHeaderStore>().expect("receiver chain store");
+        Arc::clone(&*store)
+    };
+    assert!(
+        primed_store.load_header(&fragment_head_point.hash()).is_some(),
+        "primed store must still hold the fragment HEAD after production realign"
+    );
+    assert!(
+        receiver_store.load_header(&fragment_head_point.hash()).is_none(),
+        "receiver must start without the fragment HEAD"
+    );
+    assert_ne!(
+        receiver_store.get_best_chain_tip(),
+        fragment_head_point,
+        "receiver best tip starts at bootstrap, not the fragment HEAD"
+    );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
     world.run_until_horizon(0);
@@ -1160,11 +1178,13 @@ fn test_world_disseminates_preprod_fragment() {
 
     let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
     let receiver_after = world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("receiver store");
-    assert_eq!(primed_after.get_best_chain_tip(), fragment_head_point);
+    let primed_tip = primed_after.get_best_chain_tip();
+    let receiver_tip = receiver_after.get_best_chain_tip();
+    let log = world.heap_log();
+    assert_eq!(primed_tip, fragment_head_point, "primed tip after WorldLoop; receiver={receiver_tip}; heap={log:?}");
     assert_eq!(
-        receiver_after.get_best_chain_tip(),
-        fragment_head_point,
-        "every honest node must adopt the fragment HEAD after WorldLoop"
+        receiver_tip, fragment_head_point,
+        "every honest node must adopt the fragment HEAD after WorldLoop; primed={primed_tip}; heap={log:?}"
     );
 
     let head_hash = head.hash().to_string();

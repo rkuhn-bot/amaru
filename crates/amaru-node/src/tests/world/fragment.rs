@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use amaru_kernel::{Epoch, EraHistory, Header, Point, Slot};
+use amaru_kernel::{Epoch, EraHistory, Header, HeaderHash, IsHeader, Slot};
 use amaru_ouroboros::BaseReadChainStore;
 use amaru_stores::rocksdb::{RocksDbConfig, consensus::RocksDBStore};
 use serde::Deserialize;
@@ -125,30 +125,59 @@ pub fn open_chain_store(chain_dir: &Path) -> anyhow::Result<RocksDBStore> {
     Ok(RocksDBStore::open(&RocksDbConfig::new(chain_dir.to_path_buf()))?)
 }
 
-/// Headers on the best chain from `after` (exclusive) through `tip` (inclusive).
+/// Hash part of a `<slot>.<hash>` bootstrap index point.
+pub fn header_hash_from_snapshot_point(point: &str) -> anyhow::Result<HeaderHash> {
+    let hash = point
+        .split_once('.')
+        .map(|(_, hash)| hash)
+        .ok_or_else(|| anyhow::anyhow!("invalid snapshot point format: {point}"))?;
+    hash.parse().map_err(|e| anyhow::anyhow!("invalid snapshot hash in {point}: {e}"))
+}
+
+/// Headers on the parent chain from `after` (exclusive) through `head` (inclusive).
 ///
 /// For a linear fragment this ends at the fragment HEAD, not the first header after the intersection.
-pub fn fragment_headers_to_tip(
+pub fn linear_fragment_to_head(
     store: &dyn BaseReadChainStore,
-    after: &Point,
-    tip: &Point,
+    after: HeaderHash,
+    head: Header,
 ) -> anyhow::Result<Vec<Header>> {
-    if *tip == Point::Origin {
-        anyhow::bail!("primed chain tip is Origin");
-    }
-    let mut headers = Vec::new();
-    let mut cursor = after.clone();
+    let mut headers = vec![head.clone()];
+    let mut current = head;
     loop {
-        let Some(next) = store.next_best_chain(&cursor) else {
-            anyhow::bail!("best chain does not reach tip {tip} from {after}");
+        let Some(parent) = current.parent() else {
+            anyhow::bail!("reached origin before snapshot {after}");
         };
-        let header = store.load_header(&next.hash()).ok_or_else(|| anyhow::anyhow!("missing header for {next}"))?;
-        headers.push(header);
-        if next == *tip {
+        if parent == after {
+            headers.reverse();
             return Ok(headers);
         }
+        current = store.load_header(&parent).ok_or_else(|| anyhow::anyhow!("missing parent {parent}"))?;
+        headers.push(current.clone());
+    }
+}
+
+/// Best-chain headers after `after` that already have bodies.
+///
+/// `run_until` can leave headers ahead of the last stored block. The disseminable HEAD is the
+/// last header in this list, not the first header after the snapshot.
+pub fn linear_fragment_with_bodies(store: &dyn BaseReadChainStore, after: HeaderHash) -> anyhow::Result<Vec<Header>> {
+    let Some(mut cursor) = store.load_point(&after) else {
+        anyhow::bail!("snapshot header {after} is not in the store");
+    };
+    let mut headers = Vec::new();
+    while let Some(next) = store.next_best_chain(&cursor) {
+        if !store.has_block(&next.hash())? {
+            break;
+        }
+        let header = store.load_header(&next.hash()).ok_or_else(|| anyhow::anyhow!("missing header for {next}"))?;
+        headers.push(header);
         cursor = next;
     }
+    if headers.is_empty() {
+        anyhow::bail!("primed store has no fragment bodies after {after}");
+    }
+    Ok(headers)
 }
 
 #[cfg(test)]
@@ -176,10 +205,36 @@ mod tests {
 
     #[test]
     fn test_parse_slot_from_bootstrap_point() {
+        let point = "130982398.6b78e3cbc65e4cc9ca036c03ab125697b9a31954f55219bf7ad5397d63286c43";
+        assert_eq!(parse_slot_from_point(point).unwrap(), 130_982_398);
         assert_eq!(
-            parse_slot_from_point("130982398.6b78e3cbc65e4cc9ca036c03ab125697b9a31954f55219bf7ad5397d63286c43")
-                .unwrap(),
-            130_982_398
+            header_hash_from_snapshot_point(point).unwrap().to_string(),
+            "6b78e3cbc65e4cc9ca036c03ab125697b9a31954f55219bf7ad5397d63286c43"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires preprod fragment stores; see tests/fixtures/world-preprod-fragment/README.md"]
+    fn test_primed_store_fragment_head_is_last_header_with_body() {
+        let root = fixture_root();
+        assert!(stores_ready(&root), "stores missing under {}", root.display());
+        let meta = load_committed_meta(&root).expect("meta.json");
+        let store = open_chain_store(&root.join("primed/chain")).expect("open primed chain");
+        let snapshot = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
+        let fragment = linear_fragment_with_bodies(&store, snapshot).expect("fragment with bodies");
+        let head = fragment.last().expect("HEAD");
+        let walked = linear_fragment_to_head(&store, snapshot, head.clone()).expect("parent walk");
+        assert_eq!(walked.last().map(|h| h.point()), Some(head.point()));
+        assert_eq!(
+            format!("{}", head.point()),
+            meta.fragment_head,
+            "meta.fragment_head must be the last header, not first()"
+        );
+        assert!(fragment.len() >= 2, "fragment must be more than a single header");
+        assert_ne!(
+            format!("{}", fragment[0].point()),
+            meta.fragment_head,
+            "HEAD must not be the first header after the snapshot"
         );
     }
 }
