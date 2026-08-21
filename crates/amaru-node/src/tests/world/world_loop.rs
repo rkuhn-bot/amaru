@@ -77,11 +77,12 @@ impl From<&WorldHeapEntry> for HeapLogEntry {
     }
 }
 
-/// World loop over N SimulationRunning graphs + one `(time, sequence)` heap.
+/// World loop: one `(time, sequence)` heap of network events and graph wakes.
 ///
-/// The provider heap stays network-only. After effects schedule wire events, those
-/// entries are merged here. Graph wakes (`has_runnable` → `now`, else `next_wakeup`)
-/// use the same sequence counter. The loop pops the next item — network or graph.
+/// [`SimulationRunning`] bodies live in `graphs` by index so a heap entry can name
+/// them (`WorldHeapItem::Graph`). That Vec is not a scheduler — a graph runs only
+/// when its wake is popped. The provider heap stays network-only and is merged
+/// here (`take_scheduled_events`) with the same sequence counter (`alloc_sequence`).
 /// Completes Network UntilResolved effects only via `resume_external_box`.
 pub struct WorldLoop {
     provider: Arc<WorldConnectionProvider>,
@@ -440,6 +441,22 @@ impl WorldLoop {
     /// Peek next event time on the unified heap.
     pub fn peek_next_event_time(&self) -> Option<u64> {
         self.peek_entry().map(|entry| entry.time_nanos)
+    }
+
+    /// Live unified-heap contents (not pop order), excluding cancelled graph wakes.
+    ///
+    /// Sorted by `(time, sequence)` so tests can assert a graph wake and a
+    /// `NetworkEvent` share one heap before the loop pops either.
+    pub fn heap_contents(&self) -> Vec<HeapLogEntry> {
+        let mut entries: Vec<_> = self
+            .heap
+            .iter()
+            .map(|Reverse(entry)| entry)
+            .filter(|entry| !self.cancelled.contains(&entry.sequence))
+            .map(HeapLogEntry::from)
+            .collect();
+        entries.sort_by_key(|e| (e.time_nanos, e.sequence));
+        entries
     }
 }
 

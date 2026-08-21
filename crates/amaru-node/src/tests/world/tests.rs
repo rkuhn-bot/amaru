@@ -21,10 +21,11 @@ use amaru_protocols::network_effects::{
     ReceiveError, RecvEffect, SendEffect, SendError,
 };
 use amaru_pure_stage::{
-    StageGraph, assert_trace_match_filter, register_data_deserializer, register_effect_deserializer,
+    Effect, Instant, Name, StageGraph, StageResponse, assert_trace_match_filter, register_data_deserializer,
+    register_effect_deserializer,
     simulation::{Fifo, SimulationBuilder},
     tm_clock, tm_effect, tm_input, tm_resume_external, tm_resume_unit, tm_state,
-    trace_buffer::TraceBuffer,
+    trace_buffer::{TraceBuffer, TraceEntry},
 };
 use parking_lot::Mutex;
 use tokio_util::bytes::Bytes;
@@ -802,25 +803,29 @@ async fn test_latency_is_one_to_five_ms() {
     );
 }
 
-/// A graph Wait/ready-now and a wire hop at the same nanos share one `(time, sequence)` order.
-/// The hop is scheduled first, so it pops before the graph wake — not "all graphs then one hop".
+/// A ready-now graph wake and a `NetworkEvent` at the same nanos are one heap.
+///
+/// `Deliver` is scheduled first (seq 0). The graph is then placed on that same heap
+/// as `GraphWake` (seq 1). Both at t=0. The loop must pop `Deliver` then the graph —
+/// not run the graph to park and only then the hop. `heap_contents` is checked
+/// **before** the loop so both items are first-class heap entries, not a Vec scan.
 #[tokio::test]
-async fn test_equal_time_graph_wake_and_hop_use_heap_sequence() {
+async fn test_equal_time_graph_wake_and_network_event_are_one_heap() {
+    let _guards = trace_guards();
     let handle = tokio::runtime::Handle::current();
     let provider = provider();
-    let hop_time = 2_000_000;
+    let trace = TraceBuffer::new_shared(100, 1_000_000);
     let hop_conn = ConnectionId::initial();
-    provider.schedule_event_at(hop_time, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
+    provider.schedule_event_at(0, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
 
-    let woke = observed::<u64>();
-    let woke_a = woke.clone();
-    let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo);
+    let ran = observed::<bool>();
+    let ran_a = ran.clone();
+    let mut graph = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
     graph.resources().put::<ConnectionsResource>(provider.clone());
-    let stage = graph.stage("equal", move |_state: (), _unit: (), eff| {
-        let woke_a = woke_a.clone();
+    let stage = graph.stage("ready", move |_state: (), _unit: (), _eff| {
+        let ran_a = ran_a.clone();
         async move {
-            eff.wait(Duration::from_nanos(hop_time)).await;
-            set_observed(&woke_a, hop_time);
+            set_observed(&ran_a, true);
         }
     });
     let stage = graph.wire_up(stage, ());
@@ -828,21 +833,93 @@ async fn test_equal_time_graph_wake_and_hop_use_heap_sequence() {
     sim.enqueue_msg(&stage, [()]);
 
     let mut world = WorldLoop::new(provider, vec![sim]);
-    world.run_to_completion().await;
-    assert_eq!(*woke.lock(), Some(hop_time));
+    assert_eq!(*ran.lock(), None, "graph must not run until its heap entry is popped");
+    let deliver =
+        HeapLogEntry { sequence: 0, time_nanos: 0, kind: HeapLogKind::Deliver { conn: hop_conn, data_len: 1 } };
+    let wake = graph_wake(1, 0, 0, GraphWakeReason::Runnable);
+    assert_eq!(
+        world.heap_contents(),
+        vec![deliver, wake],
+        "graph wake and NetworkEvent must already share one heap at the same nanos"
+    );
+    assert_eq!(deliver.time_nanos, wake.time_nanos);
+    assert!(deliver.sequence < wake.sequence);
 
-    let at_hop: Vec<_> = by_time_seq(world.take_heap_log()).into_iter().filter(|e| e.time_nanos == hop_time).collect();
-    assert!(
-        at_hop.iter().any(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }),
-        "expected Deliver at equal time: {at_hop:?}"
+    world.run_to_completion().await;
+    assert_eq!(*ran.lock(), Some(true));
+
+    let log = world.take_heap_log();
+    assert_eq!(&log[..2], &[deliver, wake], "pop order must follow (time, sequence), not all-graphs-then-hop");
+
+    assert_trace_match_filter(
+        world.graph(0),
+        &[tm_state("ready-1", &()), tm_input("ready-1", &()), tm_resume_unit("ready-1"), tm_state("ready-1", &())],
+        &[],
     );
+}
+
+/// A sleeping graph wake and a `Deliver` at the same nanos sit on one heap before either pops.
+/// Pop order follows `(time, sequence)` — the hop is not deferred until the graph parks.
+#[tokio::test]
+async fn test_equal_time_wait_and_deliver_share_one_heap() {
+    let _guards = trace_guards();
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let trace = TraceBuffer::new_shared(100, 1_000_000);
+    let hop_time = 2_000_000;
+    let hop_conn = ConnectionId::initial();
+    provider.schedule_event_at(hop_time, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
+
+    let woke = observed::<bool>();
+    let woke_a = woke.clone();
+    let mut graph = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
+    graph.resources().put::<ConnectionsResource>(provider.clone());
+    let stage = graph.stage("waiter", move |_state: (), _unit: (), eff| {
+        let woke_a = woke_a.clone();
+        async move {
+            eff.wait(Duration::from_nanos(hop_time)).await;
+            set_observed(&woke_a, true);
+        }
+    });
+    let stage = graph.wire_up(stage, ());
+    let mut sim = graph.run(&handle);
+    sim.enqueue_msg(&stage, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim]);
+    world.run_until_horizon(hop_time.saturating_sub(1)).await;
+    assert_eq!(*woke.lock(), None, "Wait must not complete before the shared timestamp");
+
+    let deliver =
+        HeapLogEntry { sequence: 0, time_nanos: hop_time, kind: HeapLogKind::Deliver { conn: hop_conn, data_len: 1 } };
+    let at_hop: Vec<_> = world.heap_contents().into_iter().filter(|e| e.time_nanos == hop_time).collect();
+    assert_eq!(at_hop.len(), 2, "Deliver and GraphWake must both be on the heap at {hop_time}: {at_hop:?}");
+    assert_eq!(at_hop[0], deliver);
     assert!(
-        at_hop.iter().any(|e| matches!(e.kind, HeapLogKind::GraphWake { reason: GraphWakeReason::Sleeping, .. })),
-        "expected Sleeping graph wake at equal time: {at_hop:?}"
+        matches!(at_hop[1].kind, HeapLogKind::GraphWake { reason: GraphWakeReason::Sleeping, graph: 0 }),
+        "expected Sleeping graph wake: {at_hop:?}"
     );
-    assert!(
-        matches!(at_hop[0].kind, HeapLogKind::Deliver { .. }),
-        "hop has the lower sequence so it must pop before the graph, got {at_hop:?}"
+    assert_eq!(at_hop[0].time_nanos, at_hop[1].time_nanos);
+    assert!(at_hop[0].sequence < at_hop[1].sequence);
+
+    world.run_to_completion().await;
+    assert_eq!(*woke.lock(), Some(true));
+    let popped: Vec<_> = world.take_heap_log().into_iter().filter(|e| e.time_nanos == hop_time).collect();
+    assert_eq!(popped, at_hop, "pop order at the shared timestamp must match heap (time, sequence)");
+
+    let wait = Duration::from_nanos(hop_time);
+    assert_trace_match_filter(
+        world.graph(0),
+        &[
+            tm_state("waiter-1", &()),
+            tm_input("waiter-1", &()),
+            tm_resume_unit("waiter-1"),
+            TraceEntry::suspend(Effect::Wait { at_stage: Name::from("waiter-1"), duration: wait }).into(),
+            tm_clock(wait),
+            TraceEntry::resume("waiter-1", StageResponse::WaitResponse(Instant::at_offset(wait, Duration::ZERO)))
+                .into(),
+            tm_state("waiter-1", &()),
+        ],
+        &[],
     );
 }
 
