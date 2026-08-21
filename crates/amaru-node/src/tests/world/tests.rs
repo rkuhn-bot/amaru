@@ -182,14 +182,13 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
         tm_state("node_a-1", &()),
         tm_state("node_b-1", &()),
         tm_input("node_a-1", &()),
+        tm_input("node_b-1", &()),
         tm_resume_unit("node_a-1"),
         tm_effect("node_a-1", ListenEffect { addr: listener_addr }),
         tm_resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
         tm_effect("node_a-1", AcceptEffect { listener_addr }),
-        tm_input("node_b-1", &()),
         tm_resume_unit("node_b-1"),
         tm_effect("node_b-1", ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
-        tm_clock(Duration::from_nanos(t_connected)),
         tm_clock(Duration::from_nanos(t_connected)),
         tm_resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
         tm_effect("node_b-1", SendEffect { conn: initiator, data: msg.clone() }),
@@ -199,7 +198,6 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
     if t_accepted <= t_deliver {
         expected.extend([
             tm_clock(Duration::from_nanos(t_accepted)),
-            tm_clock(Duration::from_nanos(t_accepted)),
             tm_resume_external(
                 "node_a-1",
                 Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
@@ -207,7 +205,7 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
             tm_effect("node_a-1", RecvEffect { conn: responder, bytes: NonZeroUsize::new(12).unwrap() }),
         ]);
         if t_deliver > t_accepted {
-            expected.extend([tm_clock(Duration::from_nanos(t_deliver)), tm_clock(Duration::from_nanos(t_deliver))]);
+            expected.extend([tm_clock(Duration::from_nanos(t_deliver))]);
         }
         expected.extend([
             tm_resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)),
@@ -215,9 +213,6 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
         ]);
     } else {
         expected.extend([
-            tm_clock(Duration::from_nanos(t_deliver)),
-            tm_clock(Duration::from_nanos(t_deliver)),
-            tm_clock(Duration::from_nanos(t_accepted)),
             tm_clock(Duration::from_nanos(t_accepted)),
             tm_resume_external(
                 "node_a-1",
@@ -383,14 +378,13 @@ async fn test_listen_before_connect_attempt_arrives() {
         tm_state("node_b-1", &()),
         tm_state("node_a-1", &()),
         tm_input("node_b-1", &()),
+        tm_input("node_a-1", &()),
         tm_resume_unit("node_b-1"),
         tm_effect("node_b-1", ConnectEffect { addr: listener_addr.into(), timeout: Duration::from_secs(1) }),
-        tm_input("node_a-1", &()),
         tm_resume_unit("node_a-1"),
         tm_effect("node_a-1", ListenEffect { addr: listener_addr }),
         tm_resume_external("node_a-1", Ok::<SocketAddr, ListenError>(listener_addr)),
         tm_effect("node_a-1", AcceptEffect { listener_addr }),
-        tm_clock(Duration::from_nanos(t_attempt)),
         tm_clock(Duration::from_nanos(t_attempt)),
         tm_resume_external("node_b-1", Ok::<ConnectionId, ConnectError>(initiator)),
         tm_effect("node_b-1", SendEffect { conn: initiator, data: msg.clone() }),
@@ -400,7 +394,6 @@ async fn test_listen_before_connect_attempt_arrives() {
     if t_accepted <= t_deliver {
         expected.extend([
             tm_clock(Duration::from_nanos(t_accepted)),
-            tm_clock(Duration::from_nanos(t_accepted)),
             tm_resume_external(
                 "node_a-1",
                 Ok::<(Peer, ConnectionId), AcceptError>((Peer::from_addr(&initiator_sock), responder)),
@@ -408,7 +401,7 @@ async fn test_listen_before_connect_attempt_arrives() {
             tm_effect("node_a-1", RecvEffect { conn: responder, bytes: NonZeroUsize::new(2).unwrap() }),
         ]);
         if t_deliver > t_accepted {
-            expected.extend([tm_clock(Duration::from_nanos(t_deliver)), tm_clock(Duration::from_nanos(t_deliver))]);
+            expected.extend([tm_clock(Duration::from_nanos(t_deliver))]);
         }
         expected.extend([
             tm_resume_external("node_a-1", Ok::<NonEmptyBytes, ReceiveError>(msg)),
@@ -416,9 +409,6 @@ async fn test_listen_before_connect_attempt_arrives() {
         ]);
     } else {
         expected.extend([
-            tm_clock(Duration::from_nanos(t_deliver)),
-            tm_clock(Duration::from_nanos(t_deliver)),
-            tm_clock(Duration::from_nanos(t_accepted)),
             tm_clock(Duration::from_nanos(t_accepted)),
             tm_resume_external(
                 "node_a-1",

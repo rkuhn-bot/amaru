@@ -139,11 +139,8 @@ impl WorldLoop {
 
     /// Run until no more heap events or graph wakes at-or-before horizon.
     pub async fn run_until_horizon(&mut self, horizon_nanos: u64) {
-        loop {
-            let Some(next) = self.peek_entry() else {
-                break;
-            };
-            if next.time_nanos > horizon_nanos {
+        while let Some(next_time) = self.peek_next_event_time() {
+            if next_time > horizon_nanos {
                 break;
             }
             let Reverse(entry) = self.heap.pop().expect("peeked");
