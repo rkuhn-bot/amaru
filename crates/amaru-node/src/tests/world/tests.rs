@@ -27,10 +27,10 @@ use amaru_protocols::{
     store_effects::ResourceParameters,
 };
 use amaru_pure_stage::{
-    Effect, Instant, Name, StageGraph, StageResponse, assert_trace_match_filter, register_data_deserializer,
-    register_effect_deserializer,
+    Effect, Instant, Name, StageGraph, StageResponse, TraceMatch, assert_trace_match_filter,
+    register_data_deserializer, register_effect_deserializer,
     simulation::{Fifo, SimulationBuilder},
-    tm_clock, tm_effect, tm_input, tm_resume_external, tm_resume_unit, tm_state,
+    tm_clock, tm_effect, tm_external_effect_any, tm_input, tm_resume_external, tm_resume_unit, tm_state,
     trace_buffer::{TraceBuffer, TraceEntry},
 };
 use parking_lot::Mutex;
@@ -1086,16 +1086,18 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
 /// the listen-side accept interval (100ms Wait) to be woken; that is left to a later PR
 /// so keepalive Waits stay un-woken.
 ///
-/// Proves they boot, connect, and put at least one header on the wire. Does not claim
-/// tip equality and does not load a preprod fragment. `k` stays at the production value.
-/// Opt-in long-tail payload delay; horizon covers the per-send Deliver cap (not Praos Δ)
-/// plus the 1–5ms handshake hop.
+/// Proves they boot, connect, and put at least one header on the wire (typed
+/// chainsync `RollForward` or `ValidateHeaderEffect`). Does not claim tip equality
+/// and does not load a preprod fragment. `k` stays at the production value.
+/// Long-tail payload delay is a world setting, not a theorem. Horizon only runs
+/// far enough for sampled Deliveries to pop; it is not a Praos deadline.
 ///
 /// Not `#[tokio::test]`: production graphs issue DurationDist::Zero effects whose `run()`
 /// may be Pending on the first poll, and SimulationRunning then `Handle::block_on`s them.
 /// That panics inside an existing Tokio context. WorldLoop is therefore synchronous.
 #[test]
 fn test_world_owns_production_nodes_boot_connect_exchange() {
+    let _guards = fragment_trace_guards();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let handle = runtime.handle().clone();
     let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
@@ -1125,7 +1127,7 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
     let sim_b = build_world_node(&node_b, connections, &handle).expect("node B");
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    // Cover handshake hops plus the long-tail per-send Deliver cap (not Praos Δ).
+    // World coverage so a sampled long-tail Deliver can pop. Not a Praos deadline.
     world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(WIRE_DELAY_MAX_NANOS));
 
     for graph in world.graphs() {
@@ -1143,15 +1145,15 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::SendAck { .. })), "nodes must send: {log:?}");
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::Deliver { .. })), "nodes must deliver: {log:?}");
 
-    let exchanged = world.graphs().iter().any(|graph| {
-        graph.trace_buffer().lock().hydrate_without_timestamps().iter().any(trace_mentions_header_or_block)
+    let header_on_wire = world.graphs().iter().any(|graph| {
+        graph
+            .trace_buffer()
+            .lock()
+            .hydrate_without_timestamps()
+            .iter()
+            .any(|entry| tm_chainsync_roll_forward() == *entry || tm_validate_header() == *entry)
     });
-    assert!(exchanged, "expected at least one header or block on the wire under WorldLoop; heap={log:?}");
-}
-
-fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
-    let text = format!("{entry:?}");
-    text.contains("RollForward") || text.contains("ValidateHeader") || text.contains("HeaderContent")
+    assert!(header_on_wire, "expected a typed chainsync RollForward or ValidateHeaderEffect; heap={log:?}");
 }
 
 /// A real preprod fragment, produced by `run_until` after bootstrap, is disseminated over
@@ -1159,10 +1161,11 @@ fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
 /// synthetic `any_headers_chain`). Node B starts from bootstrap only and must receive the
 /// fragment HEAD on the mux.
 ///
-/// Tip equality is asserted only after B has the fragment HEAD in store and a typed chainsync
-/// `RollForward` of that hash, plus a typed `ValidateHeaderEffect` on B. Comparison is production
-/// `cmp_tip` after production `CanValidateHeaders`, with production `k` (2160). This is not CP(k),
-/// not Genesis Condition B, and not paper *s*.
+/// B's `cmp_tip` equals the fragment HEAD after production `CanValidateHeaders`, once those
+/// headers have arrived. Long-tail payload delay is a world setting, not a theorem. Horizon
+/// only runs the world far enough for sampled Deliveries to pop; it is not a Praos deadline
+/// and not a paper time bound. This is not P-diff, not Δ=5, not inbox-by-sl+6, not P-join,
+/// and not 2Δ. `k` stays at the production value (2160).
 ///
 /// `target_upstream_peers=1` is isolation (one intended hop). Dest-keyed pairing already completes
 /// `Connected` only for the connect that targeted that listener.
@@ -1292,7 +1295,7 @@ fn test_world_disseminates_preprod_fragment() {
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
-    // Cover the long-tail per-send Deliver cap plus the previous chainsync hop budget.
+    // World coverage so sampled long-tail Deliveries can pop. Not a Praos deadline.
     world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(2_000_000_000));
 
     for graph in world.graphs() {
@@ -1383,11 +1386,23 @@ fn entry_chainsync_roll_forward_hash(entry: &TraceEntry) -> Option<amaru_kernel:
     }
 }
 
+/// Typed chainsync `RollForward` on Send or Input. Specific matcher, next to the test.
+fn tm_chainsync_roll_forward() -> TraceMatch<'static> {
+    TraceMatch::Property(
+        Box::new(|entry| entry_chainsync_roll_forward_hash(entry).is_some()),
+        "chainsync RollForward".to_string(),
+    )
+}
+
+/// Typed `ValidateHeaderEffect` on any stage. Downcasts the effect; no `header()` accessor.
+fn tm_validate_header() -> TraceMatch<'static> {
+    tm_external_effect_any::<amaru_consensus::effects::ValidateHeaderEffect>()
+}
+
 /// Typed `ValidateHeaderEffect` on this graph whose Debug names `hash`.
 ///
-/// `ValidateHeaderEffect` does not expose the header; there is no shared `tm_*` matcher for
-/// "this header" either. Do not treat a substring OR on `RollForward`/`ValidateHeader`/`HeaderContent`
-/// as this proof.
+/// `ValidateHeaderEffect` does not expose the header. Do not treat a substring OR on
+/// `RollForward`/`ValidateHeader`/`HeaderContent` as this proof.
 fn entry_is_validate_header_of(entry: &TraceEntry, hash: &amaru_kernel::HeaderHash) -> bool {
     let TraceEntry::Suspend(Effect::External { effect, .. }) = entry else {
         return false;
@@ -1395,5 +1410,5 @@ fn entry_is_validate_header_of(entry: &TraceEntry, hash: &amaru_kernel::HeaderHa
     let Some(typed) = effect.cast_ref::<amaru_consensus::effects::ValidateHeaderEffect>() else {
         return false;
     };
-    format!("{typed:?}").contains(&hash.to_string())
+    tm_validate_header() == *entry && format!("{typed:?}").contains(&hash.to_string())
 }
