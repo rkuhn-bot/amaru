@@ -38,8 +38,8 @@ use tokio_util::bytes::Bytes;
 
 use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
-    NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider, WorldLoop, build_world_node,
-    payload_delay_nanos, wire_delay_nanos,
+    LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider,
+    WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos, wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -841,30 +841,48 @@ fn test_default_payload_delay_matches_wire_hop() {
     }
 }
 
-/// Two honest payloads sent at the same instant sit on the one physical heap at their
-/// sampled delays. Seed `209_514` draws different delays, one within 10µs of the 5-slot
-/// cap. Pop order follows those times — a sorted `assert_heap_log` cannot hide a missing
-/// late payload.
+/// Seeded long-tail samples stay in the 1–5ms hop for the majority, with at least one
+/// sample orders of magnitude later. A uniform draw over `[1ms, 5s]` fails this.
 #[test]
-fn test_honest_payloads_sit_on_heap_at_sampled_delays() {
-    const PAYLOAD_SEED: u64 = 209_514;
-    let min = WIRE_DELAY_MIN_NANOS;
-    let max = HONEST_PAYLOAD_DELAY_MAX_NANOS;
-    let d0 = payload_delay_nanos(PAYLOAD_SEED, 0, min, max);
-    let d1 = payload_delay_nanos(PAYLOAD_SEED, 1, min, max);
-    assert_ne!(d0, d1, "payload samples must differ");
+fn test_long_tail_payload_delay_is_not_uniform_over_five_slots() {
+    const N: u64 = 256;
+    let samples: Vec<u64> = (0..N).map(|index| long_tail_payload_delay_nanos(SEED, index)).collect();
+    let short = samples.iter().filter(|d| (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(d)).count();
+    let long =
+        samples.iter().filter(|d| (LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS).contains(d)).count();
     assert!(
-        (min..=max).contains(&d0) && (min..=max).contains(&d1),
-        "payload delays {d0} and {d1} must stay in [{min}, {max}]"
+        short * 2 > samples.len(),
+        "most samples must stay in the 1–5ms hop, not a uniform [1ms, 5s] draw; short={short}/{}",
+        samples.len()
     );
-    assert!(d0.max(d1) >= max.saturating_sub(10_000), "one payload must land near the 5-slot cap, got {d0} and {d1}");
+    assert!(long >= 1, "at least one sample must land in the long-tail bucket (>= 1s), got none");
     assert!(
-        d0.min(d1) > WIRE_DELAY_MAX_NANOS,
-        "the earlier payload must still exceed the 1–5ms hop, got {}",
-        d0.min(d1)
+        samples.iter().all(|d| {
+            (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(d)
+                || (LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS).contains(d)
+        }),
+        "every sample must be a short hop or a long-tail hop within the per-send cap: {samples:?}"
+    );
+    let again: Vec<u64> = (0..N).map(|index| long_tail_payload_delay_nanos(SEED, index)).collect();
+    assert_eq!(samples, again, "long-tail samples must be deterministic for a seed");
+}
+
+/// Two honest payloads sent at the same instant — one short hop, one long-tail — sit on
+/// the one physical heap at those times. Seed `7` draws that pair. Pop the short first;
+/// the long one stays on the heap. A sorted `assert_heap_log` cannot hide a missing late payload.
+#[test]
+fn test_short_and_long_tail_payloads_sit_on_one_heap() {
+    const PAYLOAD_SEED: u64 = 7;
+    let d0 = long_tail_payload_delay_nanos(PAYLOAD_SEED, 0);
+    let d1 = long_tail_payload_delay_nanos(PAYLOAD_SEED, 1);
+    let short_band = WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS;
+    let long_band = LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS;
+    assert!(
+        (short_band.contains(&d0) && long_band.contains(&d1)) || (long_band.contains(&d0) && short_band.contains(&d1)),
+        "seed {PAYLOAD_SEED} must draw one short hop and one long-tail payload, got {d0} and {d1}"
     );
 
-    let provider = Arc::new(WorldConnectionProvider::with_honest_payload_delay(PAYLOAD_SEED));
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(PAYLOAD_SEED));
     let (conn0, conn1) = pair_ids();
     provider.schedule_payload(NetworkEvent::Deliver { conn: conn0, data: Bytes::from_static(b"p0") });
     provider.schedule_payload(NetworkEvent::Deliver { conn: conn1, data: Bytes::from_static(b"p1") });
@@ -879,12 +897,12 @@ fn test_honest_payloads_sit_on_heap_at_sampled_delays() {
         vec![early, late],
         "both payloads must already sit on the one heap at their sampled times"
     );
-    assert_ne!(early.time_nanos, late.time_nanos);
-    assert_eq!(late.time_nanos, d0.max(d1), "the later heap entry is the near-5-slot payload");
+    assert!(short_band.contains(&early.time_nanos), "the earlier heap entry must be the short hop");
+    assert!(long_band.contains(&late.time_nanos), "the later heap entry must be the long-tail payload");
 
     world.run_until_horizon(early.time_nanos);
-    assert_eq!(world.take_heap_log(), vec![early], "earlier payload must pop first, not a sorted log of both");
-    assert_eq!(world.heap_contents(), vec![late], "later payload must still be on the heap at the 5-slot delay");
+    assert_eq!(world.take_heap_log(), vec![early], "short payload must pop first, not a sorted log of both");
+    assert_eq!(world.heap_contents(), vec![late], "long-tail payload must still be on the heap");
 
     world.run_until_horizon(late.time_nanos);
     assert_eq!(world.take_heap_log(), vec![late]);
@@ -1070,7 +1088,8 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
 ///
 /// Proves they boot, connect, and put at least one header on the wire. Does not claim
 /// tip equality and does not load a preprod fragment. `k` stays at the production value.
-/// Horizon covers 1–5ms wire hops but stays under the 100ms accept interval.
+/// Opt-in long-tail payload delay; horizon covers the per-send Deliver cap (not Praos Δ)
+/// plus the 1–5ms handshake hop.
 ///
 /// Not `#[tokio::test]`: production graphs issue DurationDist::Zero effects whose `run()`
 /// may be Pending on the first poll, and SimulationRunning then `Handle::block_on`s them.
@@ -1079,7 +1098,7 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
 fn test_world_owns_production_nodes_boot_connect_exchange() {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let handle = runtime.handle().clone();
-    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
 
     let conway_start_slot = Slot::from(68_774_400);
     let root_point = NetworkPoint::Specific(conway_start_slot, Hash::new([0u8; 32]));
@@ -1106,8 +1125,8 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
     let sim_b = build_world_node(&node_b, connections, &handle).expect("node B");
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    // Wire hops are 1–5ms; stay under the 100ms listen-side accept Wait.
-    world.run_until_horizon(50_000_000);
+    // Cover handshake hops plus the long-tail per-send Deliver cap (not Praos Δ).
+    world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(WIRE_DELAY_MAX_NANOS));
 
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
@@ -1208,7 +1227,7 @@ fn test_world_disseminates_preprod_fragment() {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let handle = runtime.handle().clone();
-    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
 
     let listen_primed = "127.0.0.1:9321";
     let listen_receiver = "127.0.0.1:9320";
@@ -1273,8 +1292,8 @@ fn test_world_disseminates_preprod_fragment() {
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
-    // Connect is a 1–5ms hop; horizon 0 never delivers. Cover many chainsync RollForward hops.
-    world.run_until_horizon(2_000_000_000);
+    // Cover the long-tail per-send Deliver cap plus the previous chainsync hop budget.
+    world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(2_000_000_000));
 
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
