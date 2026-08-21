@@ -41,11 +41,12 @@ pub fn build_world_node(
     connections: ConnectionsResource,
     tokio_handle: &Handle,
 ) -> anyhow::Result<SimulationRunning> {
+    let offset = node_config.global_epoch_offset.unwrap_or(start_in_era().relative_time);
     let mut stage_graph = SimulationBuilder::default()
         .with_seed(node_config.seed)
         .with_mailbox_size(node_config.mailbox_size)
         .with_trace_buffer(node_config.trace_buffer.clone())
-        .with_global_epoch_offset(start_in_era().relative_time);
+        .with_global_epoch_offset(offset);
 
     let node_config = node_config.clone().with_connections(connections);
     let config = node_config.make_node_configuration()?;

@@ -98,6 +98,15 @@ fn trace_guards() -> amaru_pure_stage::DeserializerGuards {
     guards
 }
 
+/// Hydrate production-graph traces as typed chainsync / header-validation values.
+fn fragment_trace_guards() -> amaru_pure_stage::DeserializerGuards {
+    let mut guards = amaru_protocols::deserializers::register_deserializers();
+    guards.push(register_data_deserializer::<amaru_consensus::stages::track_peers::TrackPeersMsg>().boxed());
+    guards.push(register_data_deserializer::<amaru_protocols::chainsync::ChainSyncInitiatorMsg>().boxed());
+    guards.push(register_effect_deserializer::<amaru_consensus::effects::ValidateHeaderEffect>().boxed());
+    guards
+}
+
 #[tokio::test]
 async fn test_one_deliver_roundtrip_with_world_loop() {
     let _guards = trace_guards();
@@ -1052,4 +1061,248 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
 fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
     let text = format!("{entry:?}");
     text.contains("RollForward") || text.contains("ValidateHeader") || text.contains("HeaderContent")
+}
+
+/// A real preprod fragment, produced by `run_until` after bootstrap, is disseminated over
+/// `WorldConnectionProvider`. Node A is primed from that store (not `with_validated_blocks` on a
+/// synthetic `any_headers_chain`). Node B starts from bootstrap only and must receive the
+/// fragment HEAD on the mux.
+///
+/// Tip equality is asserted only after B has the fragment HEAD in store and a typed chainsync
+/// `RollForward` of that hash, plus a typed `ValidateHeaderEffect` on B. Comparison is production
+/// `cmp_tip` after production `CanValidateHeaders`, with production `k` (2160). This is not CP(k),
+/// not Genesis Condition B, and not paper *s*.
+///
+/// `target_upstream_peers=1` is isolation (one intended hop). Dest-keyed pairing already completes
+/// `Connected` only for the connect that targeted that listener.
+///
+/// Requires on-disk stores from `tests/fixtures/world-preprod-fragment/README.md`.
+/// Not `#[tokio::test]`: production graphs may `Handle::block_on` DurationDist::Zero effects.
+#[test]
+#[ignore = "requires preprod fragment stores; see tests/fixtures/world-preprod-fragment/README.md"]
+fn test_world_disseminates_preprod_fragment() {
+    use std::cmp::Ordering;
+
+    use amaru_consensus::stages::select_chain::cmp_tip;
+    use amaru_kernel::{IsHeader, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer};
+    use amaru_ouroboros::BaseReadChainStore;
+    use amaru_protocols::store_effects::ResourceHeaderStore;
+
+    use super::fragment::{
+        copy_dir, fixture_root, header_hash_from_snapshot_point, linear_fragment_to_head, linear_fragment_with_bodies,
+        load_committed_meta, open_chain_store, stores_ready,
+    };
+
+    let _guards = fragment_trace_guards();
+
+    let root = fixture_root();
+    assert!(stores_ready(&root), "preprod fragment stores missing under {}; follow README.md", root.display());
+    let meta = load_committed_meta(&root).expect("meta.json");
+    assert_eq!(meta.peer, "sleipnir.rkuhn.info:3001");
+
+    let primed_tmp = tempfile::tempdir().expect("primed temp");
+    let receiver_tmp = tempfile::tempdir().expect("receiver temp");
+    copy_dir(&root.join("primed/chain"), &primed_tmp.path().join("chain")).expect("copy primed chain");
+    copy_dir(&root.join("primed/ledger"), &primed_tmp.path().join("ledger")).expect("copy primed ledger");
+    copy_dir(&root.join("bootstrap/chain"), &receiver_tmp.path().join("chain")).expect("copy bootstrap chain");
+    copy_dir(&root.join("bootstrap/ledger"), &receiver_tmp.path().join("ledger")).expect("copy bootstrap ledger");
+
+    let primed_chain_path = primed_tmp.path().join("chain");
+    let snapshot_hash = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
+    let meta_head = {
+        let store = open_chain_store(&primed_chain_path).expect("open primed chain");
+        let fragment = linear_fragment_with_bodies(&store, snapshot_hash).expect("disseminable fragment");
+        let head = fragment.last().cloned().expect("fragment has a HEAD");
+        let walked = linear_fragment_to_head(&store, snapshot_hash, head.clone()).expect("parent walk to HEAD");
+        assert_eq!(walked.last().map(|h| h.point()), Some(head.point()));
+        assert_eq!(
+            head.point(),
+            fragment.last().expect("HEAD").point(),
+            "linear fragment HEAD is the last header, not first()"
+        );
+        assert_eq!(format!("{}", head.point()), meta.fragment_head);
+        assert_ne!(
+            format!("{}", fragment[0].point()),
+            meta.fragment_head,
+            "HEAD must not be the first header after the snapshot"
+        );
+        head
+    };
+
+    let offset = PREPROD_ERA_HISTORY
+        .slot_to_relative_time_unchecked_horizon(meta_head.slot())
+        .expect("fragment slot in era history")
+        + Duration::from_secs(30);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let handle = runtime.handle().clone();
+    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+
+    let listen_primed = "127.0.0.1:9321";
+    let listen_receiver = "127.0.0.1:9320";
+    let peer_primed = Peer::new(listen_primed);
+
+    // Isolation: one intended hop. Dest-keyed pairing still owns handshake matching.
+    let node_primed = NodeTestConfig::default()
+        .with_no_upstream_peers()
+        .with_listen_address(listen_primed)
+        .with_seed(21)
+        .with_target_upstream_peers(1)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_ledger_dir(primed_tmp.path().join("ledger"))
+        .with_chain_dir(primed_tmp.path().join("chain"))
+        .with_global_epoch_offset(offset);
+    let node_receiver = NodeTestConfig::default()
+        .with_upstream_peer(peer_primed)
+        .with_listen_address(listen_receiver)
+        .with_seed(22)
+        .with_target_upstream_peers(1)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_ledger_dir(receiver_tmp.path().join("ledger"))
+        .with_chain_dir(receiver_tmp.path().join("chain"))
+        .with_global_epoch_offset(offset);
+
+    let connections: ConnectionsResource = provider.clone();
+    let sim_primed = build_world_node(&node_primed, connections.clone(), &handle).expect("primed node");
+    let sim_receiver = build_world_node(&node_receiver, connections, &handle).expect("receiver node");
+
+    let primed_store = {
+        let store = sim_primed.resources().get::<ResourceHeaderStore>().expect("primed chain store");
+        Arc::clone(&*store)
+    };
+    let receiver_store = {
+        let store = sim_receiver.resources().get::<ResourceHeaderStore>().expect("receiver chain store");
+        Arc::clone(&*store)
+    };
+
+    // `build_node` realigns the best chain to the ledger tip. The HEAD WorldLoop serves is that
+    // post-realign tip, not the last stored body recorded before open.
+    let served_tip = primed_store.get_best_chain_tip();
+    let served_head = primed_store
+        .load_header(&served_tip.hash())
+        .unwrap_or_else(|| panic!("primed store missing served tip header {served_tip}"));
+    assert!(primed_store.has_block(&served_tip.hash()).expect("has_block"), "served tip must have a stored body");
+    assert_ne!(served_tip.hash(), snapshot_hash, "served tip must be after the snapshot");
+    let served_fragment = linear_fragment_to_head(primed_store.as_ref(), snapshot_hash, served_head.clone())
+        .expect("parent walk from snapshot to served tip");
+    assert_eq!(served_fragment.last().map(|h| h.point()), Some(served_tip));
+    for earlier in &served_fragment[..served_fragment.len() - 1] {
+        assert_eq!(
+            cmp_tip(Some(&served_head), Some(earlier)),
+            Ordering::Greater,
+            "served HEAD must win cmp_tip against earlier headers"
+        );
+    }
+    assert!(receiver_store.load_header(&served_tip.hash()).is_none(), "receiver must start without the served HEAD");
+    assert_ne!(
+        receiver_store.get_best_chain_tip(),
+        served_tip,
+        "receiver best tip starts at bootstrap, not the served HEAD"
+    );
+
+    let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
+    // Connect is a 1–5ms hop; horizon 0 never delivers. Cover many chainsync RollForward hops.
+    world.run_until_horizon(2_000_000_000);
+
+    for graph in world.graphs() {
+        let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
+        assert_eq!(params.consensus_security_param, PREPROD_GLOBAL_PARAMETERS.consensus_security_param);
+        assert_eq!(params.consensus_security_param, 2160, "production k, not chain_length");
+    }
+
+    let receiver_after = world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("receiver store");
+    assert!(
+        receiver_after.load_header(&served_tip.hash()).is_some(),
+        "receiving node must have the served HEAD in store before tip equality is compared"
+    );
+
+    let head_hash = served_head.hash();
+    let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
+    let receiver_got_roll_forward =
+        receiver_traces.iter().any(|entry| entry_chainsync_roll_forward_hash(entry) == Some(head_hash));
+    assert!(
+        receiver_got_roll_forward,
+        "B must see a typed chainsync RollForward of the served HEAD (not a Debug substring OR); head={head_hash}"
+    );
+    let receiver_validated = receiver_traces.iter().any(|entry| entry_is_validate_header_of(entry, &head_hash));
+    assert!(receiver_validated, "B must run production ValidateHeaderEffect on the served HEAD; head={head_hash}");
+
+    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
+    let primed_tip = primed_after.get_best_chain_tip();
+    let receiver_tip = receiver_after.get_best_chain_tip();
+    let primed_header = primed_after.load_header(&primed_tip.hash()).expect("primed tip header");
+    let receiver_header = receiver_after.load_header(&receiver_tip.hash()).expect("receiver tip header");
+    assert_eq!(
+        cmp_tip(Some(&receiver_header), Some(&served_head)),
+        Ordering::Equal,
+        "receiver tip must be cmp_tip-equal to the served HEAD after production validation"
+    );
+    assert_eq!(
+        cmp_tip(Some(&primed_header), Some(&served_head)),
+        Ordering::Equal,
+        "primed tip must be cmp_tip-equal to the served HEAD after production validation"
+    );
+    assert_eq!(receiver_tip, served_tip);
+    assert_eq!(primed_tip, served_tip);
+}
+
+fn header_from_content(content: &amaru_protocols::chainsync::HeaderContent) -> Option<amaru_kernel::Header> {
+    amaru_kernel::from_cbor(&content.cbor)
+}
+
+fn roll_forward_hash_from_result(
+    msg: &amaru_protocols::chainsync::InitiatorResult,
+) -> Option<amaru_kernel::HeaderHash> {
+    match msg {
+        amaru_protocols::chainsync::InitiatorResult::RollForward(content, _) => {
+            header_from_content(content).map(|h| amaru_kernel::IsHeader::hash(&h))
+        }
+        amaru_protocols::chainsync::InitiatorResult::Initialize
+        | amaru_protocols::chainsync::InitiatorResult::IntersectFound(_, _)
+        | amaru_protocols::chainsync::InitiatorResult::IntersectNotFound(_)
+        | amaru_protocols::chainsync::InitiatorResult::RollBackward(_, _)
+        | amaru_protocols::chainsync::InitiatorResult::Terminated => None,
+    }
+}
+
+fn send_data_chainsync_roll_forward_hash(data: &dyn amaru_pure_stage::SendData) -> Option<amaru_kernel::HeaderHash> {
+    use amaru_consensus::stages::track_peers::TrackPeersMsg;
+    use amaru_protocols::chainsync::ChainSyncInitiatorMsg;
+
+    if let Ok(msg) = data.cast_ref::<ChainSyncInitiatorMsg>() {
+        return roll_forward_hash_from_result(&msg.msg);
+    }
+    if let Ok(TrackPeersMsg::FromUpstream(msg)) = data.cast_ref::<TrackPeersMsg>() {
+        return roll_forward_hash_from_result(&msg.msg);
+    }
+    None
+}
+
+/// Typed chainsync RollForward of a header hash on this graph. Not a Debug substring OR.
+fn entry_chainsync_roll_forward_hash(entry: &TraceEntry) -> Option<amaru_kernel::HeaderHash> {
+    match entry {
+        TraceEntry::Suspend(Effect::Send { msg, .. }) => send_data_chainsync_roll_forward_hash(msg.as_ref()),
+        TraceEntry::Input { input, .. } => send_data_chainsync_roll_forward_hash(input.as_ref()),
+        TraceEntry::Suspend(_)
+        | TraceEntry::Resume { .. }
+        | TraceEntry::Clock(_)
+        | TraceEntry::State { .. }
+        | TraceEntry::Terminated { .. }
+        | TraceEntry::InvalidBytes(..) => None,
+    }
+}
+
+/// Typed `ValidateHeaderEffect` on this graph whose Debug names `hash`.
+///
+/// `ValidateHeaderEffect` does not expose the header; there is no shared `tm_*` matcher for
+/// "this header" either. Do not treat a substring OR on `RollForward`/`ValidateHeader`/`HeaderContent`
+/// as this proof.
+fn entry_is_validate_header_of(entry: &TraceEntry, hash: &amaru_kernel::HeaderHash) -> bool {
+    let TraceEntry::Suspend(Effect::External { effect, .. }) = entry else {
+        return false;
+    };
+    let Some(typed) = effect.cast_ref::<amaru_consensus::effects::ValidateHeaderEffect>() else {
+        return false;
+    };
+    format!("{typed:?}").contains(&hash.to_string())
 }
