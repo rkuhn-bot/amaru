@@ -70,7 +70,7 @@ pub fn payload_delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64
 /// Uses the same `splitmix64` stream as [`delay_nanos`]. Not uniform over `[1ms, 5s]`.
 pub fn long_tail_payload_delay_nanos(seed: u64, index: u64) -> u64 {
     let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
-    let (min_nanos, max_nanos) = if (mix >> 32) % LONG_TAIL_PAYLOAD_EVERY == 0 {
+    let (min_nanos, max_nanos) = if (mix >> 32).is_multiple_of(LONG_TAIL_PAYLOAD_EVERY) {
         (LONG_TAIL_PAYLOAD_MIN_NANOS, HONEST_PAYLOAD_DELAY_MAX_NANOS)
     } else {
         (WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS)
