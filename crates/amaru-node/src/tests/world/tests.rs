@@ -1038,10 +1038,7 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
     }
 
     let log = world.heap_log();
-    assert!(
-        log.iter().any(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })),
-        "nodes must connect: {log:?}"
-    );
+    assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })), "nodes must connect: {log:?}");
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::Accepted { .. })), "nodes must accept: {log:?}");
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::SendAck { .. })), "nodes must send: {log:?}");
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::Deliver { .. })), "nodes must deliver: {log:?}");
