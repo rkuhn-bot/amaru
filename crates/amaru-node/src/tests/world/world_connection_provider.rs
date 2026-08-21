@@ -95,7 +95,17 @@ pub struct HeapLogEntry {
     pub kind: HeapLogKind,
 }
 
-/// Everything from [`NetworkEvent`] except `Deliver`'s payload (kept as `data_len`).
+/// Why a graph was placed on the unified heap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GraphWakeReason {
+    /// `has_runnable()` at this time — wake immediately (`now`).
+    Runnable,
+    /// Sleeping until `next_wakeup`.
+    Sleeping,
+}
+
+/// Everything from [`NetworkEvent`] except `Deliver`'s payload (kept as `data_len`),
+/// plus first-class graph wakes so tests can assert heap interleaving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeapLogKind {
     Accepted { listener: SocketAddr, responder_conn: ConnectionId, initiator_addr: SocketAddr },
@@ -103,6 +113,7 @@ pub enum HeapLogKind {
     SendAck { conn: ConnectionId },
     Deliver { conn: ConnectionId, data_len: usize },
     Close { conn: ConnectionId },
+    GraphWake { graph: usize, reason: GraphWakeReason },
 }
 
 impl From<&HeapEntry> for HeapLogEntry {
@@ -206,6 +217,29 @@ impl WorldConnectionProvider {
     /// Peek at the next event time without popping.
     pub fn peek_next_event_time(&self) -> Option<u64> {
         self.inner.lock().heap.peek().map(|Reverse(e)| e.time_nanos)
+    }
+
+    /// Drain scheduled network events without recording them in the heap log.
+    ///
+    /// [`super::WorldLoop`] merges these onto the unified `(time, sequence)` heap.
+    pub fn take_scheduled_events(&self) -> Vec<HeapEntry> {
+        let mut inner = self.inner.lock();
+        let mut events = Vec::with_capacity(inner.heap.len());
+        while let Some(Reverse(entry)) = inner.heap.pop() {
+            events.push(entry);
+        }
+        events
+    }
+
+    /// Allocate the next heap sequence number for a graph wake (or any non-network item).
+    ///
+    /// Network events already consume this counter in [`schedule_event_locked`]. Sharing it
+    /// keeps one `(time, sequence)` order across both kinds.
+    pub fn alloc_sequence(&self) -> u64 {
+        let mut inner = self.inner.lock();
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
+        sequence
     }
 
     /// Manually schedule an event at a specific time (for testing).

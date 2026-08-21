@@ -30,8 +30,8 @@ use parking_lot::Mutex;
 use tokio_util::bytes::Bytes;
 
 use super::{
-    HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider,
-    WorldLoop, wire_delay_nanos,
+    GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
+    WorldConnectionProvider, WorldLoop, wire_delay_nanos,
 };
 
 const SEED: u64 = 0xA11CE;
@@ -48,6 +48,19 @@ fn set_observed<T>(slot: &Observed<T>, value: T) {
 
 fn provider() -> Arc<WorldConnectionProvider> {
     Arc::new(WorldConnectionProvider::new(SEED))
+}
+
+fn by_time_seq(mut log: Vec<HeapLogEntry>) -> Vec<HeapLogEntry> {
+    log.sort_by_key(|e| (e.time_nanos, e.sequence));
+    log
+}
+
+fn assert_heap_log(actual: Vec<HeapLogEntry>, expected: Vec<HeapLogEntry>) {
+    assert_eq!(by_time_seq(actual), by_time_seq(expected));
+}
+
+fn graph_wake(sequence: u64, time_nanos: u64, graph: usize, reason: GraphWakeReason) -> HeapLogEntry {
+    HeapLogEntry { sequence, time_nanos, kind: HeapLogKind::GraphWake { graph, reason } }
 }
 
 fn pair_ids() -> (ConnectionId, ConnectionId) {
@@ -132,31 +145,37 @@ async fn test_one_deliver_roundtrip_with_world_loop() {
     let t_accepted = t_connected + d_accepted;
     let t_deliver = t_connected + d_deliver;
     let msg = NonEmptyBytes::try_from(Bytes::from("hello from B")).unwrap();
-    assert_eq!(
-        world.take_heap_log(),
-        vec![
-            HeapLogEntry {
-                sequence: 0,
-                time_nanos: t_connected,
-                kind: HeapLogKind::ConnectAttempt { target: listener_addr },
+    let mut expected_log = vec![
+        graph_wake(0, 0, 0, GraphWakeReason::Runnable),
+        graph_wake(1, 0, 1, GraphWakeReason::Runnable),
+        HeapLogEntry {
+            sequence: 2,
+            time_nanos: t_connected,
+            kind: HeapLogKind::ConnectAttempt { target: listener_addr },
+        },
+        graph_wake(4, t_connected, 1, GraphWakeReason::Runnable),
+        HeapLogEntry { sequence: 5, time_nanos: t_connected, kind: HeapLogKind::SendAck { conn: initiator } },
+        graph_wake(7, t_connected, 1, GraphWakeReason::Runnable),
+        HeapLogEntry {
+            sequence: 3,
+            time_nanos: t_accepted,
+            kind: HeapLogKind::Accepted {
+                listener: listener_addr,
+                responder_conn: responder,
+                initiator_addr: initiator_sock,
             },
-            HeapLogEntry { sequence: 2, time_nanos: t_connected, kind: HeapLogKind::SendAck { conn: initiator } },
-            HeapLogEntry {
-                sequence: 1,
-                time_nanos: t_accepted,
-                kind: HeapLogKind::Accepted {
-                    listener: listener_addr,
-                    responder_conn: responder,
-                    initiator_addr: initiator_sock,
-                },
-            },
-            HeapLogEntry {
-                sequence: 3,
-                time_nanos: t_deliver,
-                kind: HeapLogKind::Deliver { conn: responder, data_len: 12 }
-            },
-        ]
-    );
+        },
+        graph_wake(8, t_accepted, 0, GraphWakeReason::Runnable),
+        HeapLogEntry {
+            sequence: 6,
+            time_nanos: t_deliver,
+            kind: HeapLogKind::Deliver { conn: responder, data_len: 12 },
+        },
+    ];
+    if t_deliver > t_accepted {
+        expected_log.push(graph_wake(9, t_deliver, 0, GraphWakeReason::Runnable));
+    }
+    assert_heap_log(world.take_heap_log(), expected_log);
 
     let mut expected = Vec::new();
     expected.extend([
@@ -234,9 +253,9 @@ async fn test_horizon_cuts_keepalive() {
     let mut world = WorldLoop::new(provider, vec![]);
     world.run_until_horizon(1000).await;
 
-    assert_eq!(
+    assert_heap_log(
         world.take_heap_log(),
-        vec![HeapLogEntry { sequence: 0, time_nanos: 100, kind: HeapLogKind::Close { conn: conn_in } }]
+        vec![HeapLogEntry { sequence: 0, time_nanos: 100, kind: HeapLogKind::Close { conn: conn_in } }],
     );
     assert_eq!(world.peek_next_event_time(), Some(1500), "Event at t=1500 should still be on heap (not popped)");
 }
@@ -349,16 +368,14 @@ async fn test_listen_before_connect_attempt_arrives() {
     let t_accepted = t_attempt + wire_delay_nanos(SEED, 1);
     let t_deliver = t_attempt + wire_delay_nanos(SEED, 2);
     assert!((WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(&t_attempt));
-    let log = world.take_heap_log();
-    assert_eq!(
-        log[0],
-        HeapLogEntry {
-            sequence: 0,
-            time_nanos: t_attempt,
-            kind: HeapLogKind::ConnectAttempt { target: listener_addr },
-        }
-    );
+    let log = by_time_seq(world.take_heap_log());
+    let attempt = log
+        .iter()
+        .find(|e| e.kind == HeapLogKind::ConnectAttempt { target: listener_addr })
+        .expect("ConnectAttempt on the unified heap");
+    assert_eq!(attempt.time_nanos, t_attempt);
     assert!(log.iter().any(|e| e.kind == HeapLogKind::SendAck { conn: initiator }));
+    assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::GraphWake { .. })));
 
     let msg = NonEmptyBytes::try_from(Bytes::from("ok")).unwrap();
     let mut expected = Vec::new();
@@ -461,26 +478,32 @@ async fn test_send_before_accept_delivers() {
     let d_connected = wire_delay_nanos(SEED, 0);
     let d_deliver = wire_delay_nanos(SEED, 1);
     let d_accepted = wire_delay_nanos(SEED, 2);
-    assert_eq!(
+    assert_heap_log(
         world.take_heap_log(),
         vec![
+            graph_wake(0, 0, 0, GraphWakeReason::Runnable),
+            graph_wake(1, 0, 1, GraphWakeReason::Runnable),
+            graph_wake(2, 10_000_000, 0, GraphWakeReason::Sleeping),
             HeapLogEntry {
-                sequence: 0,
+                sequence: 3,
                 time_nanos: d_connected,
                 kind: HeapLogKind::ConnectAttempt { target: listener_addr },
             },
-            HeapLogEntry { sequence: 1, time_nanos: d_connected, kind: HeapLogKind::SendAck { conn: initiator } },
+            graph_wake(4, d_connected, 1, GraphWakeReason::Runnable),
+            HeapLogEntry { sequence: 5, time_nanos: d_connected, kind: HeapLogKind::SendAck { conn: initiator } },
+            graph_wake(7, d_connected, 1, GraphWakeReason::Runnable),
             HeapLogEntry {
-                sequence: 2,
+                sequence: 6,
                 time_nanos: d_connected + d_deliver,
                 kind: HeapLogKind::Deliver { conn: responder, data_len: 4 },
             },
             HeapLogEntry {
-                sequence: 3,
+                sequence: 8,
                 time_nanos: 10_000_000 + d_accepted,
                 kind: HeapLogKind::Accepted { listener: listener_addr, responder_conn: responder, initiator_addr },
             },
-        ]
+            graph_wake(9, 10_000_000 + d_accepted, 0, GraphWakeReason::Runnable),
+        ],
     );
 }
 
@@ -656,13 +679,17 @@ async fn test_connect_refused_at_attempt_arrival() {
     let t_attempt = wire_delay_nanos(SEED, 0);
     assert_ne!(t_attempt, 0);
     assert!((WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(&t_attempt));
-    assert_eq!(
+    assert_heap_log(
         world.take_heap_log(),
-        vec![HeapLogEntry {
-            sequence: 0,
-            time_nanos: t_attempt,
-            kind: HeapLogKind::ConnectAttempt { target: listener_addr },
-        }]
+        vec![
+            graph_wake(0, 0, 0, GraphWakeReason::Runnable),
+            HeapLogEntry {
+                sequence: 1,
+                time_nanos: t_attempt,
+                kind: HeapLogKind::ConnectAttempt { target: listener_addr },
+            },
+            graph_wake(2, t_attempt, 0, GraphWakeReason::Runnable),
+        ],
     );
 
     assert_trace_match_filter(
@@ -783,4 +810,100 @@ async fn test_latency_is_one_to_five_ms() {
         "wire hop time {} not in 1ms..=5ms",
         hop.time_nanos
     );
+}
+
+/// A graph Wait/ready-now and a wire hop at the same nanos share one `(time, sequence)` order.
+/// The hop is scheduled first, so it pops before the graph wake — not "all graphs then one hop".
+#[tokio::test]
+async fn test_equal_time_graph_wake_and_hop_use_heap_sequence() {
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let hop_time = 2_000_000;
+    let hop_conn = ConnectionId::initial();
+    provider.schedule_event_at(hop_time, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
+
+    let woke = observed::<u64>();
+    let woke_a = woke.clone();
+    let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph.resources().put::<ConnectionsResource>(provider.clone());
+    let stage = graph.stage("equal", move |_state: (), _unit: (), eff| {
+        let woke_a = woke_a.clone();
+        async move {
+            eff.wait(Duration::from_nanos(hop_time)).await;
+            set_observed(&woke_a, hop_time);
+        }
+    });
+    let stage = graph.wire_up(stage, ());
+    let mut sim = graph.run(&handle);
+    sim.enqueue_msg(&stage, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim]);
+    world.run_to_completion().await;
+    assert_eq!(*woke.lock(), Some(hop_time));
+
+    let at_hop: Vec<_> = by_time_seq(world.take_heap_log()).into_iter().filter(|e| e.time_nanos == hop_time).collect();
+    assert!(
+        at_hop.iter().any(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }),
+        "expected Deliver at equal time: {at_hop:?}"
+    );
+    assert!(
+        at_hop.iter().any(|e| matches!(e.kind, HeapLogKind::GraphWake { reason: GraphWakeReason::Sleeping, .. })),
+        "expected Sleeping graph wake at equal time: {at_hop:?}"
+    );
+    assert!(
+        matches!(at_hop[0].kind, HeapLogKind::Deliver { .. }),
+        "hop has the lower sequence so it must pop before the graph, got {at_hop:?}"
+    );
+}
+
+/// A sleeping graph is scheduled at `next_wakeup` and does not run before that time
+/// while an earlier Deliver can complete.
+#[tokio::test]
+async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let deliver_at = 1_000_000;
+    let wake_at = 10_000_000;
+    let hop_conn = ConnectionId::initial();
+    provider.schedule_event_at(deliver_at, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
+
+    let done = observed::<bool>();
+    let done_a = done.clone();
+    let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph.resources().put::<ConnectionsResource>(provider.clone());
+    let stage = graph.stage("late", move |_state: (), _unit: (), eff| {
+        let done_a = done_a.clone();
+        async move {
+            eff.wait(Duration::from_nanos(wake_at)).await;
+            set_observed(&done_a, true);
+        }
+    });
+    let stage = graph.wire_up(stage, ());
+    let mut sim = graph.run(&handle);
+    sim.enqueue_msg(&stage, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim]);
+    world.run_until_horizon(deliver_at).await;
+    assert_eq!(*done.lock(), None, "graph must still be sleeping when the earlier Deliver pops");
+    let log = world.heap_log();
+    assert!(log.iter().any(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }));
+    assert!(!log.iter().any(|e| {
+        matches!(e.kind, HeapLogKind::GraphWake { reason: GraphWakeReason::Sleeping, .. }) && e.time_nanos == wake_at
+    }));
+    assert_eq!(world.peek_next_event_time(), Some(wake_at));
+
+    world.run_to_completion().await;
+    assert_eq!(*done.lock(), Some(true));
+    let log = by_time_seq(world.take_heap_log());
+    let deliver_seq =
+        log.iter().find(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }).expect("Deliver").sequence;
+    let wake_seq = log
+        .iter()
+        .find(|e| {
+            matches!(e.kind, HeapLogKind::GraphWake { reason: GraphWakeReason::Sleeping, .. })
+                && e.time_nanos == wake_at
+        })
+        .expect("Sleeping graph wake")
+        .sequence;
+    assert!(deliver_seq < wake_seq, "earlier Deliver must have a lower sequence than the later graph wake");
 }
