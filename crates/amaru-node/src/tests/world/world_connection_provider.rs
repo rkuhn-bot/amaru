@@ -48,9 +48,11 @@ fn splitmix64(mut z: u64) -> u64 {
 
 /// Discrete-event network simulator for deterministic testing.
 ///
-/// Provider methods schedule heap events synchronously and return a Future that
-/// [`super::WorldLoop`] completes via `resume_external_box` / `provide_external_result`.
-/// There is no oneshot table and the provider never wakes a peer.
+/// Owns the one physical `(time, sequence)` heap: network hops and graph wakes.
+/// [`super::WorldLoop`] is the only popper. Provider methods enqueue onto that
+/// heap and return a Future that the loop completes via `resume_external_box` /
+/// `provide_external_result`. There is no oneshot table and the provider never
+/// wakes a peer.
 ///
 /// Cloning is the use-site's job (`Arc<WorldConnectionProvider>`).
 pub struct WorldConnectionProvider {
@@ -78,13 +80,21 @@ pub enum NetworkEvent {
     Close { conn: ConnectionId },
 }
 
-/// Heap entry: (time_nanos, sequence, event)
-/// Ordered by (time, sequence) for deterministic FIFO at same time.
+/// First-class unified heap item: a delayed network event or a graph wake.
+///
+/// Ordered by `(time_nanos, sequence)` so Wait/ready-now and wire hops share one order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct HeapEntry {
+pub struct WorldHeapEntry {
     pub time_nanos: u64,
     pub sequence: u64,
-    pub event: NetworkEvent,
+    pub item: WorldHeapItem,
+}
+
+/// Payload of a [`WorldHeapEntry`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorldHeapItem {
+    Network(NetworkEvent),
+    Graph { index: usize, reason: GraphWakeReason },
 }
 
 /// Logged form of a popped heap event. `Copy` so the log never owns heap data.
@@ -116,29 +126,31 @@ pub enum HeapLogKind {
     GraphWake { graph: usize, reason: GraphWakeReason },
 }
 
-impl From<&HeapEntry> for HeapLogEntry {
-    fn from(entry: &HeapEntry) -> Self {
+impl From<&WorldHeapEntry> for HeapLogEntry {
+    fn from(entry: &WorldHeapEntry) -> Self {
         HeapLogEntry {
             sequence: entry.sequence,
             time_nanos: entry.time_nanos,
-            kind: match &entry.event {
-                NetworkEvent::Accepted { listener, responder_conn, initiator_addr } => HeapLogKind::Accepted {
-                    listener: *listener,
-                    responder_conn: *responder_conn,
-                    initiator_addr: *initiator_addr,
+            kind: match &entry.item {
+                WorldHeapItem::Network(event) => match event {
+                    NetworkEvent::Accepted { listener, responder_conn, initiator_addr } => HeapLogKind::Accepted {
+                        listener: *listener,
+                        responder_conn: *responder_conn,
+                        initiator_addr: *initiator_addr,
+                    },
+                    NetworkEvent::ConnectAttempt { target } => HeapLogKind::ConnectAttempt { target: *target },
+                    NetworkEvent::SendAck { conn } => HeapLogKind::SendAck { conn: *conn },
+                    NetworkEvent::Deliver { conn, data } => HeapLogKind::Deliver { conn: *conn, data_len: data.len() },
+                    NetworkEvent::Close { conn } => HeapLogKind::Close { conn: *conn },
                 },
-                NetworkEvent::ConnectAttempt { target } => HeapLogKind::ConnectAttempt { target: *target },
-                NetworkEvent::SendAck { conn } => HeapLogKind::SendAck { conn: *conn },
-                NetworkEvent::Deliver { conn, data } => HeapLogKind::Deliver { conn: *conn, data_len: data.len() },
-                NetworkEvent::Close { conn } => HeapLogKind::Close { conn: *conn },
+                WorldHeapItem::Graph { index, reason } => HeapLogKind::GraphWake { graph: *index, reason: *reason },
             },
         }
     }
 }
 
 struct WorldInner {
-    heap: BinaryHeap<Reverse<HeapEntry>>,
-    heap_log: Vec<HeapLogEntry>,
+    heap: BinaryHeap<Reverse<WorldHeapEntry>>,
     next_sequence: u64,
     current_time_nanos: u64,
     seed: u64,
@@ -168,7 +180,6 @@ impl WorldConnectionProvider {
         Self {
             inner: Mutex::new(WorldInner {
                 heap: BinaryHeap::new(),
-                heap_log: Vec::new(),
                 next_sequence: 0,
                 current_time_nanos: 0,
                 seed,
@@ -192,54 +203,39 @@ impl WorldConnectionProvider {
         self.inner.lock().current_time_nanos
     }
 
-    /// Pop one event at-or-before the horizon. Returns the full HeapEntry (preserving time/seq).
-    pub fn pop_event_at_or_before(&self, horizon_nanos: u64) -> Option<HeapEntry> {
+    /// Pop the next heap item at-or-before the horizon. [`super::WorldLoop`] is the only caller.
+    pub fn pop_at_or_before(&self, horizon_nanos: u64) -> Option<WorldHeapEntry> {
         let mut inner = self.inner.lock();
         let Reverse(first) = inner.heap.peek()?;
         if first.time_nanos > horizon_nanos {
             return None;
         }
-        let Reverse(entry) = inner.heap.pop()?;
-        inner.heap_log.push(HeapLogEntry::from(&entry));
-        Some(entry)
+        inner.heap.pop().map(|Reverse(entry)| entry)
     }
 
-    /// Get the heap log for replay.
-    pub fn heap_log(&self) -> Vec<HeapLogEntry> {
-        self.inner.lock().heap_log.clone()
-    }
-
-    /// Take the heap log, leaving an empty `Vec` behind.
-    pub fn take_heap_log(&self) -> Vec<HeapLogEntry> {
-        std::mem::take(&mut self.inner.lock().heap_log)
-    }
-
-    /// Peek at the next event time without popping.
+    /// Peek at the next heap time without popping.
     pub fn peek_next_event_time(&self) -> Option<u64> {
         self.inner.lock().heap.peek().map(|Reverse(e)| e.time_nanos)
     }
 
-    /// Drain scheduled network events without recording them in the heap log.
-    ///
-    /// [`super::WorldLoop`] merges these onto the unified `(time, sequence)` heap.
-    pub fn take_scheduled_events(&self) -> Vec<HeapEntry> {
-        let mut inner = self.inner.lock();
-        let mut events = Vec::with_capacity(inner.heap.len());
-        while let Some(Reverse(entry)) = inner.heap.pop() {
-            events.push(entry);
-        }
-        events
+    /// Live heap entries (not pop order). [`super::WorldLoop`] filters cancelled wakes.
+    pub fn heap_entries(&self) -> Vec<WorldHeapEntry> {
+        self.inner.lock().heap.iter().map(|Reverse(entry)| entry.clone()).collect()
     }
 
-    /// Allocate the next heap sequence number for a graph wake (or any non-network item).
+    /// Allocate the next heap sequence number.
     ///
-    /// Network events already consume this counter in [`schedule_event_locked`]. Sharing it
-    /// keeps one `(time, sequence)` order across both kinds.
+    /// Shared by network hops ([`schedule_event_locked`]) and graph wakes
+    /// ([`Self::schedule_item`]) so `(time, sequence)` is global.
     pub fn alloc_sequence(&self) -> u64 {
         let mut inner = self.inner.lock();
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        sequence
+        alloc_sequence_locked(&mut inner)
+    }
+
+    /// Enqueue a network hop or graph wake onto the one physical heap.
+    pub fn schedule_item(&self, time_nanos: u64, item: WorldHeapItem) -> u64 {
+        let mut inner = self.inner.lock();
+        schedule_item_locked(&mut inner, time_nanos, item)
     }
 
     /// Manually schedule an event at a specific time (for testing).
@@ -316,10 +312,20 @@ impl WorldConnectionProvider {
     }
 }
 
-fn schedule_event_locked(inner: &mut WorldInner, time_nanos: u64, event: NetworkEvent) {
+fn alloc_sequence_locked(inner: &mut WorldInner) -> u64 {
     let sequence = inner.next_sequence;
     inner.next_sequence += 1;
-    inner.heap.push(Reverse(HeapEntry { time_nanos, sequence, event }));
+    sequence
+}
+
+fn schedule_item_locked(inner: &mut WorldInner, time_nanos: u64, item: WorldHeapItem) -> u64 {
+    let sequence = alloc_sequence_locked(inner);
+    inner.heap.push(Reverse(WorldHeapEntry { time_nanos, sequence, item }));
+    sequence
+}
+
+fn schedule_event_locked(inner: &mut WorldInner, time_nanos: u64, event: NetworkEvent) {
+    schedule_item_locked(inner, time_nanos, WorldHeapItem::Network(event));
 }
 
 fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) {
