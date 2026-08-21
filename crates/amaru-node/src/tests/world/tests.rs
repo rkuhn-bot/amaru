@@ -30,7 +30,7 @@ use amaru_pure_stage::{
     Effect, Instant, Name, StageGraph, StageResponse, TraceMatch, assert_trace_match_filter,
     register_data_deserializer, register_effect_deserializer,
     simulation::{Fifo, SimulationBuilder},
-    tm_clock, tm_effect, tm_input, tm_resume_external, tm_resume_unit, tm_state,
+    tm_clock, tm_effect, tm_external_effect_any, tm_input, tm_resume_external, tm_resume_unit, tm_state,
     trace_buffer::{TraceBuffer, TraceEntry},
 };
 use parking_lot::Mutex;
@@ -1394,17 +1394,10 @@ fn tm_chainsync_roll_forward() -> TraceMatch<'static> {
     )
 }
 
-/// Typed `ValidateHeaderEffect`. Downcasts the effect; no `header()` accessor.
+/// Typed `ValidateHeaderEffect`. Specific wrapper; downcasts via the generic helper.
+/// No `header()` accessor.
 fn tm_validate_header() -> TraceMatch<'static> {
-    TraceMatch::Property(
-        Box::new(|entry| {
-            let TraceEntry::Suspend(Effect::External { effect, .. }) = entry else {
-                return false;
-            };
-            effect.cast_ref::<amaru_consensus::effects::ValidateHeaderEffect>().is_some()
-        }),
-        "ValidateHeaderEffect".to_string(),
-    )
+    tm_external_effect_any::<amaru_consensus::effects::ValidateHeaderEffect>()
 }
 
 /// Typed `ValidateHeaderEffect` on this graph whose Debug names `hash`.
