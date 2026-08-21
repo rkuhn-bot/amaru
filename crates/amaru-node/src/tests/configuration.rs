@@ -90,6 +90,7 @@ impl Debug for NodeTestConfig {
             .field("ledger_dir", &self.ledger_dir)
             .field("chain_dir", &self.chain_dir)
             .field("global_epoch_offset", &self.global_epoch_offset)
+            .field("target_upstream_peers", &self.target_upstream_peers)
             .finish()
     }
 }
@@ -259,8 +260,9 @@ impl NodeTestConfig {
         self
     }
 
-    /// Cap outbound peers. World tests that only need one hop set this to 1 so a real
-    /// ledger's registered relays do not open extra connects.
+    /// Cap outbound peers. World tests set this to 1 for isolation (one intended hop).
+    /// Dest-keyed pairing still completes `Connected` only for the connect that targeted
+    /// that listener; this cap is not what prevents a relay from stealing the handshake.
     pub fn with_target_upstream_peers(mut self, n: usize) -> Self {
         self.target_upstream_peers = Some(n);
         self

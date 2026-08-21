@@ -128,7 +128,7 @@ pub fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 pub fn open_chain_store(chain_dir: &Path) -> anyhow::Result<RocksDBStore> {
-    Ok(RocksDBStore::open(&RocksDbConfig::new(chain_dir.to_path_buf()))?)
+    Ok(RocksDBStore::open_for_readonly(&RocksDbConfig::new(chain_dir.to_path_buf()))?)
 }
 
 /// Hash part of a `<slot>.<hash>` bootstrap index point.
