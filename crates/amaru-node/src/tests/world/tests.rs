@@ -1257,7 +1257,11 @@ fn roll_forward_hash_from_result(
         amaru_protocols::chainsync::InitiatorResult::RollForward(content, _) => {
             header_from_content(content).map(|h| amaru_kernel::IsHeader::hash(&h))
         }
-        _ => None,
+        amaru_protocols::chainsync::InitiatorResult::Initialize
+        | amaru_protocols::chainsync::InitiatorResult::IntersectFound(_, _)
+        | amaru_protocols::chainsync::InitiatorResult::IntersectNotFound(_)
+        | amaru_protocols::chainsync::InitiatorResult::RollBackward(_, _)
+        | amaru_protocols::chainsync::InitiatorResult::Terminated => None,
     }
 }
 
@@ -1279,7 +1283,12 @@ fn entry_chainsync_roll_forward_hash(entry: &TraceEntry) -> Option<amaru_kernel:
     match entry {
         TraceEntry::Suspend(Effect::Send { msg, .. }) => send_data_chainsync_roll_forward_hash(msg.as_ref()),
         TraceEntry::Input { input, .. } => send_data_chainsync_roll_forward_hash(input.as_ref()),
-        _ => None,
+        TraceEntry::Suspend(_)
+        | TraceEntry::Resume { .. }
+        | TraceEntry::Clock(_)
+        | TraceEntry::State { .. }
+        | TraceEntry::Terminated { .. }
+        | TraceEntry::InvalidBytes(..) => None,
     }
 }
 
