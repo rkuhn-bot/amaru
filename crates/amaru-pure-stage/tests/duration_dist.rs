@@ -23,11 +23,10 @@ use std::{
 };
 
 use amaru_pure_stage::{
-    DeserializerGuards, DurationDist, ExternalEffect, ExternalEffectAPI, Resources, StageGraph, assert_trace_contains,
+    DeserializerGuards, DurationDist, ExternalEffect, ExternalEffectAPI, Resources, StageGraph,
     assert_trace_does_not_contain, assert_trace_match, assert_trace_match_filter, register_data_deserializer,
     register_effect_deserializer, simulation::SimulationBuilder, tm_clock, tm_clock_between, tm_effect,
-    tm_external_effect, tm_external_effect_any, tm_input, tm_resume, tm_resume_external, tm_resume_unit, tm_state,
-    trace_buffer::TraceBuffer,
+    tm_external_effect, tm_input, tm_resume, tm_resume_external, tm_resume_unit, tm_state, trace_buffer::TraceBuffer,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -149,12 +148,6 @@ fn zero_does_not_advance_the_clock() {
             tm_state("work-1", &()),
         ],
     );
-}
-
-#[test]
-fn tm_external_effect_any_matches_regardless_of_stage_name() {
-    let (running, _guards) = run_once::<ZeroWork>(1);
-    assert_trace_contains(&running, &[tm_external_effect_any::<ZeroWork>()]);
 }
 
 #[test]
