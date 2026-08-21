@@ -26,8 +26,9 @@ mod world_loop;
 
 pub use nodes::build_world_node;
 pub use world_connection_provider::{
-    GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
-    WorldConnectionProvider, WorldHeapEntry, WorldHeapItem, wire_delay_nanos,
+    GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
+    NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider, WorldHeapEntry, WorldHeapItem,
+    payload_delay_nanos, wire_delay_nanos,
 };
 pub use world_loop::WorldLoop;
 

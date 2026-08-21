@@ -29,14 +29,32 @@ use amaru_pure_stage::BoxFuture;
 use parking_lot::Mutex;
 use tokio_util::bytes::{Bytes, BytesMut};
 
-/// Inclusive one-way wire delay range, in nanoseconds.
+/// Inclusive one-way wire delay range for handshake hops (SYN / Accepted), in nanoseconds.
 pub const WIRE_DELAY_MIN_NANOS: u64 = 1_000_000;
 pub const WIRE_DELAY_MAX_NANOS: u64 = 5_000_000;
 
+/// Honest payload diffusion budget in slots. A message sent in slot `sl` may take this many
+/// slots to reach every honest inbox.
+pub const HONEST_PAYLOAD_DELAY_SLOTS: u64 = 5;
+
+/// Nanosecond cap for [`HONEST_PAYLOAD_DELAY_SLOTS`] on preprod (1s slots).
+pub const HONEST_PAYLOAD_DELAY_MAX_NANOS: u64 = HONEST_PAYLOAD_DELAY_SLOTS * 1_000_000_000;
+
+/// Deterministic delay for sample `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
+pub fn delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
+    assert!(min_nanos <= max_nanos, "delay min ({min_nanos}) exceeds max ({max_nanos})");
+    let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
+    min_nanos + mix % (max_nanos - min_nanos + 1)
+}
+
 /// Deterministic delay for wire hop `index` of `seed`, uniformly in `[1ms, 5ms]`.
 pub fn wire_delay_nanos(seed: u64, index: u64) -> u64 {
-    let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
-    WIRE_DELAY_MIN_NANOS + mix % (WIRE_DELAY_MAX_NANOS - WIRE_DELAY_MIN_NANOS + 1)
+    delay_nanos(seed, index, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS)
+}
+
+/// Deterministic delay for honest payload `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
+pub fn payload_delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
+    delay_nanos(seed, index, min_nanos, max_nanos)
 }
 
 fn splitmix64(mut z: u64) -> u64 {
@@ -155,6 +173,8 @@ struct WorldInner {
     current_time_nanos: u64,
     seed: u64,
     latency_samples: u64,
+    payload_delay_min_nanos: u64,
+    payload_delay_max_nanos: u64,
     listeners: BTreeMap<SocketAddr, Listener>,
     endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
     next_conn_id: ConnectionId,
@@ -177,6 +197,14 @@ struct ConnectionEndpoint {
 
 impl WorldConnectionProvider {
     pub fn new(seed: u64) -> Self {
+        Self::with_payload_delay(seed, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS)
+    }
+
+    /// Build a world whose honest payloads are delayed in `[min_nanos, max_nanos]`.
+    /// Handshake hops stay `[1ms, 5ms]`. Default [`Self::new`] keeps the 1–5ms hop for both
+    /// so existing tests stay in that band.
+    pub fn with_payload_delay(seed: u64, min_nanos: u64, max_nanos: u64) -> Self {
+        assert!(min_nanos <= max_nanos, "payload delay min ({min_nanos}) exceeds max ({max_nanos})");
         Self {
             inner: Mutex::new(WorldInner {
                 heap: BinaryHeap::new(),
@@ -184,11 +212,18 @@ impl WorldConnectionProvider {
                 current_time_nanos: 0,
                 seed,
                 latency_samples: 0,
+                payload_delay_min_nanos: min_nanos,
+                payload_delay_max_nanos: max_nanos,
                 listeners: BTreeMap::new(),
                 endpoints: BTreeMap::new(),
                 next_conn_id: ConnectionId::initial(),
             }),
         }
+    }
+
+    /// Opt in to the 5-slot honest payload budget. Handshake hops stay `[1ms, 5ms]`.
+    pub fn with_honest_payload_delay(seed: u64) -> Self {
+        Self::with_payload_delay(seed, WIRE_DELAY_MIN_NANOS, HONEST_PAYLOAD_DELAY_MAX_NANOS)
     }
 
     /// Advance simulated time to the given instant (in nanoseconds).
@@ -255,6 +290,12 @@ impl WorldConnectionProvider {
     pub fn schedule_wire(&self, event: NetworkEvent) {
         let mut inner = self.inner.lock();
         schedule_wire_locked(&mut inner, event);
+    }
+
+    /// Schedule an honest payload at `now + delay` (`delay` ∈ the configured payload range).
+    pub fn schedule_payload(&self, event: NetworkEvent) {
+        let mut inner = self.inner.lock();
+        schedule_payload_locked(&mut inner, event);
     }
 
     /// Pair a connect that has arrived at `target` if a listener is bound there.
@@ -328,11 +369,21 @@ fn schedule_event_locked(inner: &mut WorldInner, time_nanos: u64, event: Network
     schedule_item_locked(inner, time_nanos, WorldHeapItem::Network(event));
 }
 
-fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) {
-    let delay = wire_delay_nanos(inner.seed, inner.latency_samples);
+fn schedule_delayed_locked(inner: &mut WorldInner, min_nanos: u64, max_nanos: u64, event: NetworkEvent) {
+    let delay = delay_nanos(inner.seed, inner.latency_samples, min_nanos, max_nanos);
     inner.latency_samples += 1;
     let time_nanos = inner.current_time_nanos + delay;
     schedule_event_locked(inner, time_nanos, event);
+}
+
+fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) {
+    schedule_delayed_locked(inner, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS, event);
+}
+
+fn schedule_payload_locked(inner: &mut WorldInner, event: NetworkEvent) {
+    let min_nanos = inner.payload_delay_min_nanos;
+    let max_nanos = inner.payload_delay_max_nanos;
+    schedule_delayed_locked(inner, min_nanos, max_nanos, event);
 }
 
 fn try_complete_recv_locked(
@@ -447,7 +498,7 @@ impl ConnectionProvider for WorldConnectionProvider {
             let peer_id = inner.endpoints[&conn].peer_conn_id;
             let time_nanos = inner.current_time_nanos;
             schedule_event_locked(&mut inner, time_nanos, NetworkEvent::SendAck { conn });
-            schedule_wire_locked(
+            schedule_payload_locked(
                 &mut inner,
                 NetworkEvent::Deliver { conn: peer_id, data: Bytes::copy_from_slice(&data) },
             );

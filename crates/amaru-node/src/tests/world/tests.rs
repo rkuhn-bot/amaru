@@ -15,8 +15,8 @@
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use amaru_kernel::{
-    BlockHeight, Hash, NetworkPoint, NonEmptyBytes, PREPROD_GLOBAL_PARAMETERS, Peer, Slot, any_headers_chain_with_root,
-    utils::tests::run_strategy,
+    BlockHeight, Hash, NetworkPoint, NonEmptyBytes, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer, Slot,
+    any_headers_chain_with_root, utils::tests::run_strategy,
 };
 use amaru_ouroboros::{ConnectionId, ConnectionsResource};
 use amaru_protocols::{
@@ -37,8 +37,9 @@ use parking_lot::Mutex;
 use tokio_util::bytes::Bytes;
 
 use super::{
-    GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
-    WorldConnectionProvider, WorldLoop, build_world_node, wire_delay_nanos,
+    GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
+    NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider, WorldLoop, build_world_node,
+    payload_delay_nanos, wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -817,6 +818,77 @@ async fn test_latency_is_one_to_five_ms() {
         "wire hop time {} not in 1ms..=5ms",
         hop.time_nanos
     );
+}
+
+#[test]
+fn test_honest_payload_cap_is_five_preprod_slots() {
+    let slot = PREPROD_ERA_HISTORY.current_era_summary().params.slot_length;
+    assert_eq!(slot, Duration::from_secs(1), "preprod slot length");
+    assert_eq!(
+        Duration::from_nanos(HONEST_PAYLOAD_DELAY_MAX_NANOS),
+        slot * u32::try_from(HONEST_PAYLOAD_DELAY_SLOTS).expect("slot budget fits u32"),
+    );
+}
+
+#[test]
+fn test_default_payload_delay_matches_wire_hop() {
+    for index in 0..32 {
+        assert_eq!(
+            payload_delay_nanos(SEED, index, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS),
+            wire_delay_nanos(SEED, index),
+            "default payload range is the 1–5ms hop at sample {index}"
+        );
+    }
+}
+
+/// Two honest payloads sent at the same instant sit on the one physical heap at their
+/// sampled delays. Seed `209_514` draws different delays, one within 10µs of the 5-slot
+/// cap. Pop order follows those times — a sorted `assert_heap_log` cannot hide a missing
+/// late payload.
+#[test]
+fn test_honest_payloads_sit_on_heap_at_sampled_delays() {
+    const PAYLOAD_SEED: u64 = 209_514;
+    let min = WIRE_DELAY_MIN_NANOS;
+    let max = HONEST_PAYLOAD_DELAY_MAX_NANOS;
+    let d0 = payload_delay_nanos(PAYLOAD_SEED, 0, min, max);
+    let d1 = payload_delay_nanos(PAYLOAD_SEED, 1, min, max);
+    assert_ne!(d0, d1, "payload samples must differ");
+    assert!(
+        (min..=max).contains(&d0) && (min..=max).contains(&d1),
+        "payload delays {d0} and {d1} must stay in [{min}, {max}]"
+    );
+    assert!(d0.max(d1) >= max.saturating_sub(10_000), "one payload must land near the 5-slot cap, got {d0} and {d1}");
+    assert!(
+        d0.min(d1) > WIRE_DELAY_MAX_NANOS,
+        "the earlier payload must still exceed the 1–5ms hop, got {}",
+        d0.min(d1)
+    );
+
+    let provider = Arc::new(WorldConnectionProvider::with_honest_payload_delay(PAYLOAD_SEED));
+    let (conn0, conn1) = pair_ids();
+    provider.schedule_payload(NetworkEvent::Deliver { conn: conn0, data: Bytes::from_static(b"p0") });
+    provider.schedule_payload(NetworkEvent::Deliver { conn: conn1, data: Bytes::from_static(b"p1") });
+
+    let first = HeapLogEntry { sequence: 0, time_nanos: d0, kind: HeapLogKind::Deliver { conn: conn0, data_len: 2 } };
+    let second = HeapLogEntry { sequence: 1, time_nanos: d1, kind: HeapLogKind::Deliver { conn: conn1, data_len: 2 } };
+    let (early, late) = if d0 < d1 { (first, second) } else { (second, first) };
+
+    let mut world = WorldLoop::new(provider, vec![]);
+    assert_eq!(
+        world.heap_contents(),
+        vec![early, late],
+        "both payloads must already sit on the one heap at their sampled times"
+    );
+    assert_ne!(early.time_nanos, late.time_nanos);
+    assert_eq!(late.time_nanos, d0.max(d1), "the later heap entry is the near-5-slot payload");
+
+    world.run_until_horizon(early.time_nanos);
+    assert_eq!(world.take_heap_log(), vec![early], "earlier payload must pop first, not a sorted log of both");
+    assert_eq!(world.heap_contents(), vec![late], "later payload must still be on the heap at the 5-slot delay");
+
+    world.run_until_horizon(late.time_nanos);
+    assert_eq!(world.take_heap_log(), vec![late]);
+    assert!(world.heap_contents().is_empty(), "both payloads must have been popped");
 }
 
 /// A ready-now graph wake and a `NetworkEvent` at the same nanos are one heap.
