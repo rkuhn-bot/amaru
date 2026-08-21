@@ -15,8 +15,7 @@
 #![expect(clippy::panic, clippy::expect_used)]
 
 use std::{
-    cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     net::SocketAddr,
     num::NonZeroUsize,
@@ -35,59 +34,21 @@ use amaru_pure_stage::{
     simulation::{Blocked, SimulationRunning},
 };
 
-use super::{GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WorldConnectionProvider};
+use super::{GraphWakeReason, HeapLogEntry, NetworkEvent, WorldConnectionProvider};
+pub use super::{WorldHeapEntry, WorldHeapItem};
 
-/// First-class unified heap item: a delayed network event or a graph wake.
+/// World loop: pops the one physical `(time, sequence)` heap.
 ///
-/// Ordered by `(time_nanos, sequence)` so Wait/ready-now and wire hops share one order.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WorldHeapEntry {
-    pub time_nanos: u64,
-    pub sequence: u64,
-    pub item: WorldHeapItem,
-}
-
-/// Payload of a [`WorldHeapEntry`].
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorldHeapItem {
-    Network(NetworkEvent),
-    Graph { index: usize, reason: GraphWakeReason },
-}
-
-impl From<&WorldHeapEntry> for HeapLogEntry {
-    fn from(entry: &WorldHeapEntry) -> Self {
-        HeapLogEntry {
-            sequence: entry.sequence,
-            time_nanos: entry.time_nanos,
-            kind: match &entry.item {
-                WorldHeapItem::Network(event) => match event {
-                    NetworkEvent::Accepted { listener, responder_conn, initiator_addr } => HeapLogKind::Accepted {
-                        listener: *listener,
-                        responder_conn: *responder_conn,
-                        initiator_addr: *initiator_addr,
-                    },
-                    NetworkEvent::ConnectAttempt { target } => HeapLogKind::ConnectAttempt { target: *target },
-                    NetworkEvent::SendAck { conn } => HeapLogKind::SendAck { conn: *conn },
-                    NetworkEvent::Deliver { conn, data } => HeapLogKind::Deliver { conn: *conn, data_len: data.len() },
-                    NetworkEvent::Close { conn } => HeapLogKind::Close { conn: *conn },
-                },
-                WorldHeapItem::Graph { index, reason } => HeapLogKind::GraphWake { graph: *index, reason: *reason },
-            },
-        }
-    }
-}
-
-/// World loop: one `(time, sequence)` heap of network events and graph wakes.
-///
-/// [`SimulationRunning`] bodies live in `graphs` by index so a heap entry can name
-/// them (`WorldHeapItem::Graph`). That Vec is not a scheduler — a graph runs only
-/// when its wake is popped. The provider heap stays network-only and is merged
-/// here (`take_scheduled_events`) with the same sequence counter (`alloc_sequence`).
+/// The heap lives on [`WorldConnectionProvider`]. Network hops enqueue there;
+/// graph wakes call [`WorldConnectionProvider::schedule_item`] onto the same
+/// structure. Shared [`WorldConnectionProvider::alloc_sequence`] keeps one
+/// global `(time, sequence)` order. [`SimulationRunning`] bodies live in
+/// `graphs` by index so a heap entry can name them (`WorldHeapItem::Graph`).
+/// That Vec is not a scheduler — a graph runs only when its wake is popped.
 /// Completes Network UntilResolved effects only via `resume_external_box`.
 pub struct WorldLoop {
     provider: Arc<WorldConnectionProvider>,
     graphs: Vec<SimulationRunning>,
-    heap: BinaryHeap<Reverse<WorldHeapEntry>>,
     heap_log: Vec<HeapLogEntry>,
     /// Sequences of graph wakes superseded by an earlier reschedule.
     cancelled: BTreeSet<u64>,
@@ -118,7 +79,6 @@ impl WorldLoop {
         let mut world = Self {
             provider,
             graphs,
-            heap: BinaryHeap::new(),
             heap_log: Vec::new(),
             cancelled: BTreeSet::new(),
             graph_on_heap,
@@ -127,7 +87,6 @@ impl WorldLoop {
             pending_sends: BTreeMap::new(),
             pending_recvs: BTreeMap::new(),
         };
-        world.ingest_network_events();
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
         }
@@ -140,11 +99,7 @@ impl WorldLoop {
 
     /// Run until no more heap events or graph wakes at-or-before horizon.
     pub async fn run_until_horizon(&mut self, horizon_nanos: u64) {
-        while let Some(next_time) = self.peek_next_event_time() {
-            if next_time > horizon_nanos {
-                break;
-            }
-            let Reverse(entry) = self.heap.pop().expect("peeked");
+        while let Some(entry) = self.provider.pop_at_or_before(horizon_nanos) {
             if self.cancelled.remove(&entry.sequence) {
                 continue;
             }
@@ -160,29 +115,13 @@ impl WorldLoop {
                         self.resume(completion);
                         self.schedule_graph_if_needed(graph_idx);
                     }
-                    self.ingest_network_events();
                 }
                 WorldHeapItem::Graph { index, reason: _ } => {
                     self.graph_on_heap[index] = None;
                     self.wake_and_run_graph(index);
-                    self.ingest_network_events();
                     self.schedule_graph_if_needed(index);
                 }
             }
-        }
-    }
-
-    fn peek_entry(&self) -> Option<&WorldHeapEntry> {
-        self.heap.peek().map(|Reverse(entry)| entry)
-    }
-
-    fn ingest_network_events(&mut self) {
-        for entry in self.provider.take_scheduled_events() {
-            self.heap.push(Reverse(WorldHeapEntry {
-                time_nanos: entry.time_nanos,
-                sequence: entry.sequence,
-                item: WorldHeapItem::Network(entry.event),
-            }));
         }
     }
 
@@ -207,9 +146,8 @@ impl WorldLoop {
             }
             self.cancelled.insert(old_seq);
         }
-        let sequence = self.provider.alloc_sequence();
+        let sequence = self.provider.schedule_item(time_nanos, WorldHeapItem::Graph { index, reason });
         self.graph_on_heap[index] = Some((time_nanos, sequence));
-        self.heap.push(Reverse(WorldHeapEntry { time_nanos, sequence, item: WorldHeapItem::Graph { index, reason } }));
     }
 
     fn wake_and_run_graph(&mut self, index: usize) {
@@ -438,20 +376,20 @@ impl WorldLoop {
         self.peek_next_event_time().is_some_and(|t| t <= horizon_nanos)
     }
 
-    /// Peek next event time on the unified heap.
+    /// Peek next event time on the one physical heap.
     pub fn peek_next_event_time(&self) -> Option<u64> {
-        self.peek_entry().map(|entry| entry.time_nanos)
+        self.provider.peek_next_event_time()
     }
 
-    /// Live unified-heap contents (not pop order), excluding cancelled graph wakes.
+    /// Live heap contents (not pop order), excluding cancelled graph wakes.
     ///
     /// Sorted by `(time, sequence)` so tests can assert a graph wake and a
     /// `NetworkEvent` share one heap before the loop pops either.
     pub fn heap_contents(&self) -> Vec<HeapLogEntry> {
         let mut entries: Vec<_> = self
-            .heap
+            .provider
+            .heap_entries()
             .iter()
-            .map(|Reverse(entry)| entry)
             .filter(|entry| !self.cancelled.contains(&entry.sequence))
             .map(HeapLogEntry::from)
             .collect();

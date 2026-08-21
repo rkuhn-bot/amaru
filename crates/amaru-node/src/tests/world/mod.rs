@@ -15,17 +15,17 @@
 //! World-based connection provider for deterministic simulation testing.
 //!
 //! This module implements EDR-011 discrete-event simulation for network effects.
-//! [`WorldLoop`] owns a unified `(time, sequence)` heap of network events and graph
-//! wakes. The provider heap stays network-only and is merged into that order.
+//! [`WorldConnectionProvider`] owns the one physical `(time, sequence)` heap of
+//! network events and graph wakes. [`WorldLoop`] is the only popper.
 
 mod world_connection_provider;
 mod world_loop;
 
 pub use world_connection_provider::{
-    GraphWakeReason, HeapEntry, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
-    WorldConnectionProvider, wire_delay_nanos,
+    GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
+    WorldConnectionProvider, WorldHeapEntry, WorldHeapItem, wire_delay_nanos,
 };
-pub use world_loop::{WorldHeapEntry, WorldHeapItem, WorldLoop};
+pub use world_loop::WorldLoop;
 
 #[cfg(test)]
 mod tests;
