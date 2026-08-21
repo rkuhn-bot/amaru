@@ -18,9 +18,11 @@
 //! [`WorldConnectionProvider`] owns the one physical `(time, sequence)` heap of
 //! network events and graph wakes. [`WorldLoop`] is the only popper.
 
+mod nodes;
 mod world_connection_provider;
 mod world_loop;
 
+pub use nodes::build_world_node;
 pub use world_connection_provider::{
     GraphWakeReason, HeapLogEntry, HeapLogKind, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
     WorldConnectionProvider, WorldHeapEntry, WorldHeapItem, wire_delay_nanos,
