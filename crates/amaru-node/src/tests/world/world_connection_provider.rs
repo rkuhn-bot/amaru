@@ -1,0 +1,427 @@
+// Copyright 2026 PRAGMA
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#![expect(clippy::expect_used)]
+
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap, VecDeque},
+    io::ErrorKind,
+    net::SocketAddr,
+    num::NonZeroUsize,
+    time::Duration,
+};
+
+use amaru_kernel::{NonEmptyBytes, Peer};
+use amaru_ouroboros::{ConnectionId, ConnectionProvider, ToSocketAddrs};
+use amaru_pure_stage::BoxFuture;
+use parking_lot::Mutex;
+use tokio_util::bytes::{Bytes, BytesMut};
+
+/// Inclusive one-way wire delay range, in nanoseconds.
+pub const WIRE_DELAY_MIN_NANOS: u64 = 1_000_000;
+pub const WIRE_DELAY_MAX_NANOS: u64 = 5_000_000;
+
+/// Deterministic delay for wire hop `index` of `seed`, uniformly in `[1ms, 5ms]`.
+pub fn wire_delay_nanos(seed: u64, index: u64) -> u64 {
+    let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
+    WIRE_DELAY_MIN_NANOS + mix % (WIRE_DELAY_MAX_NANOS - WIRE_DELAY_MIN_NANOS + 1)
+}
+
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// Discrete-event network simulator for deterministic testing.
+///
+/// Provider methods schedule heap events synchronously and return a Future that
+/// [`super::WorldLoop`] completes via `resume_external_box` / `provide_external_result`.
+/// There is no oneshot table and the provider never wakes a peer.
+///
+/// Cloning is the use-site's job (`Arc<WorldConnectionProvider>`).
+pub struct WorldConnectionProvider {
+    inner: Mutex<WorldInner>,
+}
+
+impl Default for WorldConnectionProvider {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+/// Event types scheduled on the heap.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NetworkEvent {
+    /// Completes a parked `accept()` via the world loop.
+    Accepted { listener: SocketAddr, responder_conn: ConnectionId, initiator_addr: SocketAddr },
+    /// SYN arrival for an outbound `connect()`. Listener is checked only when this pops.
+    ConnectAttempt { target: SocketAddr },
+    /// Completes a parked `send()` via the world loop.
+    SendAck { conn: ConnectionId },
+    /// Delivers bytes to `conn`'s inbox and may complete a parked `recv()`.
+    Deliver { conn: ConnectionId, data: Bytes },
+    /// Closes `conn`. The world loop also heap-schedules `Close` for the peer.
+    Close { conn: ConnectionId },
+}
+
+/// Heap entry: (time_nanos, sequence, event)
+/// Ordered by (time, sequence) for deterministic FIFO at same time.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HeapEntry {
+    pub time_nanos: u64,
+    pub sequence: u64,
+    pub event: NetworkEvent,
+}
+
+/// Logged form of a popped heap event. `Copy` so the log never owns heap data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeapLogEntry {
+    pub sequence: u64,
+    pub time_nanos: u64,
+    pub kind: HeapLogKind,
+}
+
+/// Everything from [`NetworkEvent`] except `Deliver`'s payload (kept as `data_len`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapLogKind {
+    Accepted { listener: SocketAddr, responder_conn: ConnectionId, initiator_addr: SocketAddr },
+    ConnectAttempt { target: SocketAddr },
+    SendAck { conn: ConnectionId },
+    Deliver { conn: ConnectionId, data_len: usize },
+    Close { conn: ConnectionId },
+}
+
+impl From<&HeapEntry> for HeapLogEntry {
+    fn from(entry: &HeapEntry) -> Self {
+        HeapLogEntry {
+            sequence: entry.sequence,
+            time_nanos: entry.time_nanos,
+            kind: match &entry.event {
+                NetworkEvent::Accepted { listener, responder_conn, initiator_addr } => HeapLogKind::Accepted {
+                    listener: *listener,
+                    responder_conn: *responder_conn,
+                    initiator_addr: *initiator_addr,
+                },
+                NetworkEvent::ConnectAttempt { target } => HeapLogKind::ConnectAttempt { target: *target },
+                NetworkEvent::SendAck { conn } => HeapLogKind::SendAck { conn: *conn },
+                NetworkEvent::Deliver { conn, data } => HeapLogKind::Deliver { conn: *conn, data_len: data.len() },
+                NetworkEvent::Close { conn } => HeapLogKind::Close { conn: *conn },
+            },
+        }
+    }
+}
+
+struct WorldInner {
+    heap: BinaryHeap<Reverse<HeapEntry>>,
+    heap_log: Vec<HeapLogEntry>,
+    next_sequence: u64,
+    current_time_nanos: u64,
+    seed: u64,
+    latency_samples: u64,
+    listeners: BTreeMap<SocketAddr, Listener>,
+    endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
+    next_conn_id: ConnectionId,
+}
+
+struct Listener {
+    pending_handshakes: VecDeque<PendingHandshake>,
+}
+
+struct PendingHandshake {
+    responder_conn: ConnectionId,
+    initiator_addr: SocketAddr,
+}
+
+struct ConnectionEndpoint {
+    inbox: VecDeque<Bytes>,
+    read_buffer: BytesMut,
+    peer_conn_id: ConnectionId,
+}
+
+impl WorldConnectionProvider {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            inner: Mutex::new(WorldInner {
+                heap: BinaryHeap::new(),
+                heap_log: Vec::new(),
+                next_sequence: 0,
+                current_time_nanos: 0,
+                seed,
+                latency_samples: 0,
+                listeners: BTreeMap::new(),
+                endpoints: BTreeMap::new(),
+                next_conn_id: ConnectionId::initial(),
+            }),
+        }
+    }
+
+    /// Advance simulated time to the given instant (in nanoseconds).
+    pub fn set_time(&self, time_nanos: u64) {
+        let mut inner = self.inner.lock();
+        assert!(time_nanos >= inner.current_time_nanos, "time cannot go backward");
+        inner.current_time_nanos = time_nanos;
+    }
+
+    /// Get current simulated time in nanoseconds.
+    pub fn current_time_nanos(&self) -> u64 {
+        self.inner.lock().current_time_nanos
+    }
+
+    /// Pop one event at-or-before the horizon. Returns the full HeapEntry (preserving time/seq).
+    pub fn pop_event_at_or_before(&self, horizon_nanos: u64) -> Option<HeapEntry> {
+        let mut inner = self.inner.lock();
+        let Reverse(first) = inner.heap.peek()?;
+        if first.time_nanos > horizon_nanos {
+            return None;
+        }
+        let Reverse(entry) = inner.heap.pop()?;
+        inner.heap_log.push(HeapLogEntry::from(&entry));
+        Some(entry)
+    }
+
+    /// Get the heap log for replay.
+    pub fn heap_log(&self) -> Vec<HeapLogEntry> {
+        self.inner.lock().heap_log.clone()
+    }
+
+    /// Take the heap log, leaving an empty `Vec` behind.
+    pub fn take_heap_log(&self) -> Vec<HeapLogEntry> {
+        std::mem::take(&mut self.inner.lock().heap_log)
+    }
+
+    /// Peek at the next event time without popping.
+    pub fn peek_next_event_time(&self) -> Option<u64> {
+        self.inner.lock().heap.peek().map(|Reverse(e)| e.time_nanos)
+    }
+
+    /// Manually schedule an event at a specific time (for testing).
+    pub fn schedule_event_at(&self, time_nanos: u64, event: NetworkEvent) {
+        let mut inner = self.inner.lock();
+        schedule_event_locked(&mut inner, time_nanos, event);
+    }
+
+    /// Schedule an event at current_time + delta_nanos.
+    pub fn schedule_event(&self, delta_nanos: u64, event: NetworkEvent) {
+        let mut inner = self.inner.lock();
+        let time_nanos = inner.current_time_nanos + delta_nanos;
+        schedule_event_locked(&mut inner, time_nanos, event);
+    }
+
+    /// Schedule a one-way wire hop at `now + delay` (`delay` ∈ `[1ms, 5ms]`).
+    pub fn schedule_wire(&self, event: NetworkEvent) {
+        let mut inner = self.inner.lock();
+        schedule_wire_locked(&mut inner, event);
+    }
+
+    /// Pair a connect that has arrived at `target` if a listener is bound there.
+    pub fn pair_if_listening(&self, target: SocketAddr) -> Option<ConnectionId> {
+        let mut inner = self.inner.lock();
+        inner.listeners.contains_key(&target).then(|| pair_connect_locked(&mut inner, target))
+    }
+
+    /// Add data to an endpoint inbox (Deliver).
+    pub fn deliver_to_inbox(&self, conn: ConnectionId, data: Bytes) {
+        let mut inner = self.inner.lock();
+        if let Some(endpoint) = inner.endpoints.get_mut(&conn) {
+            endpoint.inbox.push_back(data);
+        }
+    }
+
+    /// Try to complete recv from buffered inbox data.
+    ///
+    /// Returns `Some` when enough bytes are available, or when the connection is gone
+    /// (`connection reset`). Otherwise leaves unread bytes in the buffer so a later
+    /// Deliver can finish the same recv.
+    pub fn try_complete_recv(
+        &self,
+        conn: ConnectionId,
+        bytes_needed: NonZeroUsize,
+    ) -> Option<std::io::Result<NonEmptyBytes>> {
+        let mut inner = self.inner.lock();
+        try_complete_recv_locked(&mut inner, conn, bytes_needed)
+    }
+
+    /// Pop a queued handshake and return its ids. Both endpoints are already installed at pair time.
+    pub fn take_handshake(&self, listener: SocketAddr) -> Option<(ConnectionId, SocketAddr)> {
+        let mut inner = self.inner.lock();
+        install_handshake_locked(&mut inner, listener)
+    }
+
+    /// Remove a closed endpoint and return the peer id if that side is still live.
+    pub fn close_endpoint(&self, conn: ConnectionId) -> Option<ConnectionId> {
+        let mut inner = self.inner.lock();
+        let endpoint = inner.endpoints.remove(&conn)?;
+        inner.endpoints.contains_key(&endpoint.peer_conn_id).then_some(endpoint.peer_conn_id)
+    }
+
+    pub fn has_listener(&self, addr: SocketAddr) -> bool {
+        self.inner.lock().listeners.contains_key(&addr)
+    }
+
+    /// True when `conn` exists and its peer endpoint is still installed.
+    pub fn can_send(&self, conn: ConnectionId) -> bool {
+        let inner = self.inner.lock();
+        let Some(endpoint) = inner.endpoints.get(&conn) else {
+            return false;
+        };
+        inner.endpoints.contains_key(&endpoint.peer_conn_id)
+    }
+}
+
+fn schedule_event_locked(inner: &mut WorldInner, time_nanos: u64, event: NetworkEvent) {
+    let sequence = inner.next_sequence;
+    inner.next_sequence += 1;
+    inner.heap.push(Reverse(HeapEntry { time_nanos, sequence, event }));
+}
+
+fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) {
+    let delay = wire_delay_nanos(inner.seed, inner.latency_samples);
+    inner.latency_samples += 1;
+    let time_nanos = inner.current_time_nanos + delay;
+    schedule_event_locked(inner, time_nanos, event);
+}
+
+fn try_complete_recv_locked(
+    inner: &mut WorldInner,
+    conn: ConnectionId,
+    bytes_needed: NonZeroUsize,
+) -> Option<std::io::Result<NonEmptyBytes>> {
+    let Some(endpoint) = inner.endpoints.get_mut(&conn) else {
+        return Some(Err(std::io::Error::new(ErrorKind::ConnectionReset, "connection reset")));
+    };
+
+    while let Some(data) = endpoint.inbox.pop_front() {
+        endpoint.read_buffer.extend_from_slice(&data);
+    }
+
+    if endpoint.read_buffer.len() >= bytes_needed.get() {
+        let bytes = endpoint.read_buffer.split_to(bytes_needed.get()).freeze();
+        Some(NonEmptyBytes::try_from(bytes).map_err(|_| std::io::Error::other("empty bytes")))
+    } else {
+        None
+    }
+}
+
+fn install_handshake_locked(inner: &mut WorldInner, listener: SocketAddr) -> Option<(ConnectionId, SocketAddr)> {
+    let handshake = inner.listeners.get_mut(&listener)?.pending_handshakes.pop_front()?;
+    Some((handshake.responder_conn, handshake.initiator_addr))
+}
+
+/// Pair an arrived connect with an existing listener.
+/// Both endpoints (and both `peer_conn_id`s) are installed here so a send after
+/// connect completion can Deliver before accept takes the handshake.
+fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> ConnectionId {
+    let initiator_conn = inner.next_conn_id.get_and_increment();
+    let responder_conn = inner.next_conn_id.get_and_increment();
+
+    inner.endpoints.insert(
+        initiator_conn,
+        ConnectionEndpoint {
+            inbox: VecDeque::new(),
+            read_buffer: BytesMut::with_capacity(65536),
+            peer_conn_id: responder_conn,
+        },
+    );
+    inner.endpoints.insert(
+        responder_conn,
+        ConnectionEndpoint {
+            inbox: VecDeque::new(),
+            read_buffer: BytesMut::with_capacity(65536),
+            peer_conn_id: initiator_conn,
+        },
+    );
+
+    let listener = inner.listeners.get_mut(&target_addr).expect("pair_connect requires a listener");
+    listener.pending_handshakes.push_back(PendingHandshake {
+        responder_conn,
+        initiator_addr: SocketAddr::from(([127, 0, 0, 1], 5000 + initiator_conn.as_u64() as u16)),
+    });
+
+    initiator_conn
+}
+
+impl ConnectionProvider for WorldConnectionProvider {
+    fn listen(&self, addr: SocketAddr) -> BoxFuture<'static, std::io::Result<SocketAddr>> {
+        let mut inner = self.inner.lock();
+        if inner.listeners.contains_key(&addr) {
+            drop(inner);
+            return Box::pin(async move { Err(std::io::Error::new(ErrorKind::AddrInUse, "address already in use")) });
+        }
+        inner.listeners.insert(addr, Listener { pending_handshakes: VecDeque::new() });
+        drop(inner);
+        Box::pin(async move { Ok(addr) })
+    }
+
+    fn accept(&self, listener_addr: SocketAddr) -> BoxFuture<'static, std::io::Result<(Peer, ConnectionId)>> {
+        let mut inner = self.inner.lock();
+        if let Some((responder_conn, initiator_addr)) = install_handshake_locked(&mut inner, listener_addr) {
+            schedule_wire_locked(
+                &mut inner,
+                NetworkEvent::Accepted { listener: listener_addr, responder_conn, initiator_addr },
+            );
+        }
+        drop(inner);
+        Box::pin(std::future::pending())
+    }
+
+    fn connect(&self, addrs: Vec<SocketAddr>, _timeout: Duration) -> BoxFuture<'static, std::io::Result<ConnectionId>> {
+        if let Some(target) = addrs.first().copied() {
+            self.schedule_wire(NetworkEvent::ConnectAttempt { target });
+        }
+        Box::pin(std::future::pending())
+    }
+
+    fn connect_addrs(
+        &self,
+        addr: ToSocketAddrs,
+        timeout: Duration,
+    ) -> BoxFuture<'static, std::io::Result<ConnectionId>> {
+        match addr.to_socket_addrs() {
+            Ok(addrs) => self.connect(addrs, timeout),
+            Err(e) => {
+                let msg = e.to_string();
+                Box::pin(async move { Err(std::io::Error::other(msg)) })
+            }
+        }
+    }
+
+    fn send(&self, conn: ConnectionId, data: NonEmptyBytes) -> BoxFuture<'static, std::io::Result<()>> {
+        let mut inner = self.inner.lock();
+        let peer_live =
+            inner.endpoints.get(&conn).is_some_and(|endpoint| inner.endpoints.contains_key(&endpoint.peer_conn_id));
+        if peer_live {
+            let peer_id = inner.endpoints[&conn].peer_conn_id;
+            let time_nanos = inner.current_time_nanos;
+            schedule_event_locked(&mut inner, time_nanos, NetworkEvent::SendAck { conn });
+            schedule_wire_locked(
+                &mut inner,
+                NetworkEvent::Deliver { conn: peer_id, data: Bytes::copy_from_slice(&data) },
+            );
+        }
+        drop(inner);
+        Box::pin(std::future::pending())
+    }
+
+    fn recv(&self, _conn: ConnectionId, _bytes: NonZeroUsize) -> BoxFuture<'static, std::io::Result<NonEmptyBytes>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn close(&self, conn: ConnectionId) -> BoxFuture<'static, std::io::Result<()>> {
+        self.schedule_event(0, NetworkEvent::Close { conn });
+        Box::pin(async move { Ok(()) })
+    }
+}
