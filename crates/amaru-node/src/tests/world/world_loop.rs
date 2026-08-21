@@ -34,8 +34,7 @@ use amaru_pure_stage::{
     simulation::{Blocked, SimulationRunning},
 };
 
-use super::{GraphWakeReason, HeapLogEntry, NetworkEvent, WorldConnectionProvider};
-pub use super::{WorldHeapEntry, WorldHeapItem};
+use super::{GraphWakeReason, HeapLogEntry, NetworkEvent, WorldConnectionProvider, WorldHeapItem};
 
 /// World loop: pops the one physical `(time, sequence)` heap.
 ///
