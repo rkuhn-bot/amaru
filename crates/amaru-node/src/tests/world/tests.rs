@@ -38,8 +38,9 @@ use tokio_util::bytes::Bytes;
 
 use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
-    LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider,
-    WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos, wire_delay_nanos,
+    LONG_TAIL_PAYLOAD_EVERY, LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
+    WorldConnectionProvider, WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos,
+    wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -1338,13 +1339,21 @@ fn test_world_disseminates_preprod_fragment() {
         served_tip,
         "receiver best tip starts at bootstrap, not the served HEAD"
     );
+    // Header + body payloads. One in LONG_TAIL_PAYLOAD_EVERY can sit at the hop cap.
+    // Horizon is coverage so those sampled Deliveries pop, not a Praos deadline.
+    let hop_coverage = (served_fragment.len() as u64).saturating_mul(2);
+    let long_tail_hops = hop_coverage.div_ceil(LONG_TAIL_PAYLOAD_EVERY);
+    let horizon_nanos =
+        long_tail_hops.saturating_add(1).saturating_mul(HONEST_PAYLOAD_DELAY_MAX_NANOS).saturating_add(2_000_000_000);
     eprintln!(
-        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash}"
+        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash} fragment_len={} horizon_nanos={horizon_nanos}",
+        served_fragment.len()
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
-    // World coverage so sampled long-tail Deliveries can pop. Not a Praos deadline.
-    world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(2_000_000_000));
+    let wall_start = std::time::Instant::now();
+    world.run_until_horizon(horizon_nanos);
+    let wall = wall_start.elapsed();
 
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
@@ -1353,13 +1362,29 @@ fn test_world_disseminates_preprod_fragment() {
     }
 
     let receiver_after = world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("receiver store");
+    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
+    let log = world.heap_log();
+    let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
+    let receiver_have = served_fragment.iter().filter(|h| receiver_after.load_header(&h.hash()).is_some()).count();
+    let roll_forwards = receiver_traces.iter().filter_map(entry_chainsync_roll_forward_hash).count();
+    let validated = receiver_traces.iter().filter(|e| tm_validate_header() == **e).count();
+    let connects = log.iter().filter(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })).count();
+    let accepts = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Accepted { .. })).count();
+    let delivers = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Deliver { .. })).count();
+    eprintln!(
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} vh={validated} connect={connects} accept={accepts} deliver={delivers}",
+        world.graphs()[0].now().sim_elapsed().as_nanos(),
+        world.peek_next_event_time(),
+        primed_after.get_best_chain_tip(),
+        receiver_after.get_best_chain_tip(),
+        served_fragment.len()
+    );
     assert!(
         receiver_after.load_header(&served_tip.hash()).is_some(),
         "receiving node must have the served HEAD in store before tip equality is compared"
     );
 
     let head_hash = served_head.hash();
-    let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
     let receiver_got_roll_forward =
         receiver_traces.iter().any(|entry| entry_chainsync_roll_forward_hash(entry) == Some(head_hash));
     assert!(
@@ -1369,7 +1394,6 @@ fn test_world_disseminates_preprod_fragment() {
     let receiver_validated = receiver_traces.iter().any(|entry| entry_is_validate_header_of(entry, &head_hash));
     assert!(receiver_validated, "B must run production ValidateHeaderEffect on the served HEAD; head={head_hash}");
 
-    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
     let primed_tip = primed_after.get_best_chain_tip();
     let receiver_tip = receiver_after.get_best_chain_tip();
     let primed_header = primed_after.load_header(&primed_tip.hash()).expect("primed tip header");
