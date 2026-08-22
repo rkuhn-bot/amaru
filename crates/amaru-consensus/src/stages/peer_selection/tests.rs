@@ -637,10 +637,7 @@ fn test_outbound_retry_drops_dead_conn_before_reconnect() {
                 move |s: &PeerSelection| {
                     s == &after_reconnect
                         && matches!(s.outbound_peers.get(&p_live), Some(PeerState::Connected(c)) if c.id == id1)
-                        && !s
-                            .outbound_peers
-                            .values()
-                            .any(|st| matches!(st, PeerState::Connected(c) if c.id == id0))
+                        && !s.outbound_peers.values().any(|st| matches!(st, PeerState::Connected(c) if c.id == id0))
                 },
                 "dead conn gone; replacement accepted",
             ),
