@@ -33,7 +33,7 @@ use crate::{
         peer_selection::PeerSelectionMsg,
         test_utils::{start_in_era, te_clock_read, te_input, te_send, te_state, tm_state},
         track_peers::{
-            TrackPeers, TrackPeersMsg,
+            PerPeer, TrackPeers, TrackPeersMsg,
             test_setup::{
                 HEIGHT_RECHECK_INTERVAL, SIM_INITIAL_CLOCK_SECS, build_store, build_store_with_nonces,
                 height_recheck_schedule_id, make_block_header, new_tip, schedule_id_at, setup, setup_base,
@@ -257,6 +257,104 @@ fn test_intersect_found_tracks_peer() {
         Level::WARN,
         Level::ERROR,
     ]);
+}
+
+#[test]
+fn test_reconnect_intersect_then_roll_forward() {
+    let prep = test_prep();
+    let peer = Peer::new("peer1");
+    let mut ids = ConnectionId::initial();
+    let conn0 = ids.get_and_increment();
+    let conn1 = ids.get_and_increment();
+    let intersect_header = &prep.headers[0];
+    let next_header = &prep.headers[1];
+    let stale = &prep.headers[2];
+    let intersect = intersect_header.point();
+    let tip = stale.point();
+
+    let mut state = prep.state.clone();
+    state.insert_peer(peer.clone(), conn0, stale.point(), stale.point());
+
+    let terminated = TrackPeersMsg::FromUpstream(ChainSyncInitiatorMsg {
+        peer: peer.clone(),
+        conn_id: conn0,
+        handler: prep.handler.clone(),
+        msg: chainsync::InitiatorResult::Terminated,
+    });
+    let initialize = TrackPeersMsg::FromUpstream(ChainSyncInitiatorMsg {
+        peer: peer.clone(),
+        conn_id: conn1,
+        handler: prep.handler.clone(),
+        msg: chainsync::InitiatorResult::Initialize,
+    });
+    let intersect_found = TrackPeersMsg::FromUpstream(ChainSyncInitiatorMsg {
+        peer: peer.clone(),
+        conn_id: conn1,
+        handler: prep.handler.clone(),
+        msg: chainsync::InitiatorResult::IntersectFound(intersect, tip),
+    });
+    let roll_forward = TrackPeersMsg::FromUpstream(ChainSyncInitiatorMsg {
+        peer: peer.clone(),
+        conn_id: conn1,
+        handler: prep.handler.clone(),
+        msg: chainsync::InitiatorResult::RollForward(HeaderContent::new(next_header, EraName::Conway), tip),
+    });
+
+    let (running, _guards, mut logs) = setup_base(
+        &prep.rt_handle(),
+        state,
+        [terminated.clone(), initialize.clone(), intersect_found.clone(), roll_forward.clone()],
+        build_store(slice::from_ref(intersect_header)),
+        |running| {
+            running.override_external_effect::<ValidateHeaderEffect>(usize::MAX, |_| {
+                OverrideResult::handled(Ok(Nonces::for_tests()))
+            });
+        },
+    );
+
+    let intersect_current = intersect;
+    let forwarded = next_header.point();
+    assert_trace_contains(
+        &running,
+        &[
+            te_input("tp-1", &terminated).into(),
+            te_clear_peer_availability("tp-1", peer.clone()).into(),
+            te_input("tp-1", &initialize).into(),
+            te_input("tp-1", &intersect_found).into(),
+            te_load_point("tp-1", intersect.hash()).into(),
+            tm_state::<TrackPeers>(
+                "tp-1",
+                move |s| {
+                    !s.upstream.contains_key(&conn0)
+                        && s.upstream
+                            .get(&conn1)
+                            .and_then(PerPeer::established)
+                            .is_some_and(|(current, _)| *current == intersect_current)
+                },
+                "dead conn gone; current is the loaded intersect point",
+            ),
+            te_input("tp-1", &roll_forward).into(),
+            te_send("tp-1", &prep.handler, RequestNext).into(),
+            te_send("tp-1", "downstream", new_tip(next_header.point(), intersect)).into(),
+            tm_state::<TrackPeers>(
+                "tp-1",
+                move |s| {
+                    !s.upstream.contains_key(&conn0)
+                        && s.upstream
+                            .get(&conn1)
+                            .and_then(PerPeer::established)
+                            .is_some_and(|(current, _)| *current == forwarded)
+                },
+                "roll forward accepted from the intersect point",
+            ),
+        ],
+    );
+    assert_trace_does_not_contain(&running, &[tm_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer))]);
+    logs.assert_and_remove(Level::INFO, &["chainsync terminated"])
+        .assert_and_remove(Level::INFO, &["initializing chainsync"])
+        .assert_and_remove(Level::INFO, &["intersect found"])
+        .assert_and_remove(Level::DEBUG, &["roll forward", "new header"])
+        .assert_no_remaining_at([Level::INFO, Level::WARN, Level::ERROR]);
 }
 
 #[test]
