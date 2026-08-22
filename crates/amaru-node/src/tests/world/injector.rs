@@ -35,7 +35,7 @@ use amaru_ouroboros::{
     in_memory_chain_store::InMemoryChainStore,
 };
 use amaru_protocols::{
-    chainsync::ChainSyncInitiatorMsg,
+    chainsync::{ChainSyncInitiatorMsg, InitiatorMessage, InitiatorResult},
     manager::{Manager, ManagerConfig, ManagerMessage},
     metrics_effects::ResourceMeter,
     store_effects::ResourceHeaderStore,
@@ -43,6 +43,7 @@ use amaru_protocols::{
 use amaru_pure_stage::{
     Effects, StageGraph, StageRef,
     simulation::{Fifo, SimulationBuilder, SimulationRunning},
+    trace_buffer::TraceBuffer,
 };
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
@@ -280,7 +281,9 @@ pub fn build_injector(
     graph_index: usize,
 ) -> anyhow::Result<(SimulationRunning, Arc<InjectorShared>)> {
     let serving = Arc::new(InMemoryChainStore::new());
-    let mut stage_graph = SimulationBuilder::default().with_eval_strategy(Fifo);
+    let mut stage_graph = SimulationBuilder::default()
+        .with_eval_strategy(Fifo)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000));
     put_serve_resources(&mut stage_graph, connections, serving.clone());
 
     let manager = stage_graph.stage("manager", amaru_protocols::manager::stage);
@@ -333,7 +336,9 @@ pub fn build_injector_peer(
     tokio_handle: &Handle,
 ) -> anyhow::Result<SimulationRunning> {
     let store = Arc::new(InMemoryChainStore::new());
-    let mut stage_graph = SimulationBuilder::default().with_eval_strategy(Fifo);
+    let mut stage_graph = SimulationBuilder::default()
+        .with_eval_strategy(Fifo)
+        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000));
     put_serve_resources(&mut stage_graph, connections, store);
 
     let manager = stage_graph.stage("manager", amaru_protocols::manager::stage);
@@ -360,7 +365,17 @@ pub fn build_injector_peer(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Scan;
 
-async fn peer_pipeline(_state: (), _msg: ChainSyncInitiatorMsg, _eff: Effects<ChainSyncInitiatorMsg>) {}
+async fn peer_pipeline(_state: (), msg: ChainSyncInitiatorMsg, eff: Effects<ChainSyncInitiatorMsg>) {
+    match msg.msg {
+        InitiatorResult::Initialize | InitiatorResult::Terminated => {}
+        InitiatorResult::IntersectFound(_, _)
+        | InitiatorResult::IntersectNotFound(_)
+        | InitiatorResult::RollForward(_, _)
+        | InitiatorResult::RollBackward(_, _) => {
+            eff.send(&msg.handler, InitiatorMessage::RequestNext).await;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

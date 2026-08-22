@@ -1784,7 +1784,7 @@ async fn test_injector_inventory_reaches_world_loop() {
         assert_eq!(got.height, header.block_height());
         assert!(got.has_body);
     }
-    world.assert_graphs_settled();
+    world.assert_serving_accept(0);
 }
 
 #[tokio::test]
@@ -1800,7 +1800,7 @@ async fn test_injector_empty_store_inventory_is_empty() {
     let mut world = WorldLoop::new(provider, vec![sim]).with_injector(shared);
     world.run_until_horizon(0);
     assert!(world.inventory().is_empty());
-    world.assert_graphs_settled();
+    world.assert_serving_accept(0);
 }
 
 /// Before any reveal a peer must not see later headers. Each `reveal` widens the advertised

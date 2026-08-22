@@ -468,6 +468,22 @@ impl WorldLoop {
         self.assert_graphs_settled();
     }
 
+    /// A serve-only injector stays parked on `accept` (immediate re-PullAccept).
+    /// That is Busy, not Idle — the listen loop is the product.
+    pub fn assert_serving_accept(&mut self, graph_idx: usize) {
+        match self.graphs[graph_idx].run_until_sleeping_or_blocked() {
+            Blocked::Busy { stages, .. } if stages.iter().any(|name| format!("{name}").contains("accept")) => {}
+            other @ (Blocked::Idle
+            | Blocked::Sleeping { .. }
+            | Blocked::Deadlock(_)
+            | Blocked::Breakpoint(..)
+            | Blocked::Busy { .. }
+            | Blocked::Terminated(_)) => {
+                panic!("graph {graph_idx} expected parked accept, got {other:?}")
+            }
+        }
+    }
+
     pub fn assert_graphs_settled(&mut self) {
         for (graph_idx, graph) in self.graphs.iter_mut().enumerate() {
             match graph.run_until_sleeping_or_blocked() {
