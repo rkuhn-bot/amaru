@@ -32,6 +32,7 @@ use amaru_protocols::network_effects::{
 use amaru_pure_stage::{
     Effect, Instant, Name, SendData,
     simulation::{Blocked, SimulationRunning},
+    trace_buffer::TraceEntry,
 };
 
 use super::{GraphWakeReason, HeapLogEntry, NetworkEvent, WorldConnectionProvider, WorldHeapItem};
@@ -60,6 +61,10 @@ pub struct WorldLoop {
     claimed_accepts: BTreeMap<SocketAddr, VecDeque<(usize, Name)>>,
     pending_sends: BTreeMap<ConnectionId, VecDeque<(usize, Name)>>,
     pending_recvs: BTreeMap<ConnectionId, VecDeque<(usize, Name, NonZeroUsize)>>,
+    /// Stages observed via [`Blocked::Terminated`] (and aborted children in that graph's trace).
+    ///
+    /// Keyed by `(graph_idx, Name)` so two `build_node` graphs can share mux/recv names.
+    terminated_stages: BTreeSet<(usize, Name)>,
 }
 
 type Completion = (usize, Name, Box<dyn SendData>);
@@ -88,6 +93,7 @@ impl WorldLoop {
             claimed_accepts: BTreeMap::new(),
             pending_sends: BTreeMap::new(),
             pending_recvs: BTreeMap::new(),
+            terminated_stages: BTreeSet::new(),
         };
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
@@ -187,7 +193,11 @@ impl WorldLoop {
                 Blocked::Deadlock(deadlock) => {
                     panic!("graph {index} deadlock: {deadlock:?}");
                 }
-                Blocked::Idle | Blocked::Sleeping { .. } | Blocked::Busy { .. } | Blocked::Terminated(_) => {
+                Blocked::Terminated(name) => {
+                    self.drop_pending_for_terminated(index, &name);
+                    break;
+                }
+                Blocked::Idle | Blocked::Sleeping { .. } | Blocked::Busy { .. } => {
                     break;
                 }
             }
@@ -370,6 +380,33 @@ impl WorldLoop {
         kick_external(&mut self.graphs[graph_idx]);
     }
 
+    /// Cancel queued network completions for a stage we have already seen terminate.
+    ///
+    /// Aborted children are taken from this graph's trace (`push_terminated`), not a
+    /// world-global name. Heap events may still pop and log. They must not resume a gone stage.
+    fn drop_pending_for_terminated(&mut self, graph_idx: usize, stage: &Name) {
+        self.terminated_stages.insert((graph_idx, stage.clone()));
+        let from_trace = self.graphs[graph_idx].trace_buffer().lock().hydrate_without_timestamps();
+        for entry in from_trace {
+            if let TraceEntry::Terminated { stage, .. } = entry {
+                self.terminated_stages.insert((graph_idx, stage));
+            }
+        }
+        self.drop_matching_pending();
+    }
+
+    fn drop_matching_pending(&mut self) {
+        let gone = &self.terminated_stages;
+        drop_stages_from_pending(&mut self.pending_connects, gone);
+        drop_stages_from_pending(&mut self.pending_accepts, gone);
+        drop_stages_from_pending(&mut self.claimed_accepts, gone);
+        drop_stages_from_pending(&mut self.pending_sends, gone);
+        self.pending_recvs.retain(|_, queue| {
+            queue.retain(|(graph_idx, name, _)| !gone.contains(&(*graph_idx, name.clone())));
+            !queue.is_empty()
+        });
+    }
+
     /// Run until no more events and all graphs idle/terminated.
     pub fn run_to_completion(&mut self) {
         self.run_until_horizon(u64::MAX);
@@ -451,6 +488,16 @@ fn classify_network(effect: &Effect) -> Option<Posted> {
             bytes: recv.bytes,
         })
     }
+}
+
+fn drop_stages_from_pending<K: Ord>(
+    pending: &mut BTreeMap<K, VecDeque<(usize, Name)>>,
+    gone: &BTreeSet<(usize, Name)>,
+) {
+    pending.retain(|_, queue| {
+        queue.retain(|(graph_idx, name)| !gone.contains(&(*graph_idx, name.clone())));
+        !queue.is_empty()
+    });
 }
 
 fn fail_pending_on(

@@ -597,6 +597,22 @@ fn next_best_chain_returns_none_given_point_is_tip() {
 }
 
 #[test]
+fn next_best_chain_does_not_jump_a_gap_to_a_non_child() {
+    with_db(|store| {
+        let h0 = make_header(1, 10, None);
+        let h1 = make_header(2, 20, Some(h0.hash()));
+        let h2 = make_header(3, 30, Some(h1.hash()));
+        store.store_header(&h0).unwrap();
+        store.store_header(&h1).unwrap();
+        store.store_header(&h2).unwrap();
+        store.roll_forward_chain(&h0.point()).unwrap();
+        store.roll_forward_chain(&h2.point()).unwrap();
+
+        assert!(store.next_best_chain(&h0.point()).is_none(), "a later best-chain slot is not the successor of h0");
+    });
+}
+
+#[test]
 fn next_best_chain_header_rolls_forward_from_best_chain_pointer() {
     with_db(|store| {
         let chain = populate_db(store.clone());

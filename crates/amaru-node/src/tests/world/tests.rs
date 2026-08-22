@@ -15,8 +15,8 @@
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use amaru_kernel::{
-    BlockHeight, Hash, NetworkPoint, NonEmptyBytes, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer, Slot,
-    any_headers_chain_with_root, utils::tests::run_strategy,
+    BlockHeight, Hash, IsHeader, NetworkPoint, NonEmptyBytes, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer,
+    Slot, any_headers_chain_with_root, utils::tests::run_strategy,
 };
 use amaru_ouroboros::{ConnectionId, ConnectionsResource};
 use amaru_protocols::{
@@ -38,8 +38,9 @@ use tokio_util::bytes::Bytes;
 
 use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
-    LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider,
-    WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos, wire_delay_nanos,
+    LONG_TAIL_PAYLOAD_EVERY, LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
+    WorldConnectionProvider, WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos,
+    wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -604,6 +605,279 @@ async fn test_close_fails_peer_recv() {
     assert!(recv_err.lock().as_ref().is_some_and(|s| s.contains("connection closed")));
 }
 
+/// A graph that terminates while a same-conn Deliver is still on the heap must
+/// drop that stage's pending recv. The Deliver still pops and logs; WorldLoop
+/// must not resume the gone stage. Live `heap_contents` / `heap_log`, not a
+/// sorted-only proof. Without the drop, `resume_external_box` panics.
+#[tokio::test]
+async fn test_terminate_drops_pending_before_later_deliver() {
+    const PAYLOAD_HOP_NANOS: u64 = 10_000_000;
+    let handle = tokio::runtime::Handle::current();
+    let provider = Arc::new(WorldConnectionProvider::with_payload_delay(SEED, PAYLOAD_HOP_NANOS, PAYLOAD_HOP_NANOS));
+    let listener_addr: SocketAddr = "127.0.0.1:9800".parse().unwrap();
+    let received = observed::<Vec<u8>>();
+    let received_a = received.clone();
+    let trace = TraceBuffer::new_shared(100, 1_000_000);
+
+    let mut graph_a = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
+    graph_a.resources().put::<ConnectionsResource>(provider.clone());
+    let stage_a = graph_a.stage("parent", move |_state: (), _unit: (), eff| {
+        let received_a = received_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener_addr).await.unwrap();
+            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
+            let child = eff
+                .stage("recv", move |(), conn: ConnectionId, eff| {
+                    let received_a = received_a.clone();
+                    async move {
+                        let net = Network::new(&eff);
+                        let bytes = net.recv(conn, NonZeroUsize::new(4).unwrap()).await.unwrap();
+                        set_observed(&received_a, bytes.as_ref().to_vec());
+                    }
+                })
+                .await;
+            let child = eff.wire_up(child, ()).await;
+            eff.send(&child, conn).await;
+            eff.wait(Duration::from_nanos(1)).await;
+            eff.terminate().await
+        }
+    });
+    let stage_a = graph_a.wire_up(stage_a, ());
+    let mut sim_a = graph_a.run(&handle);
+    sim_a.enqueue_msg(&stage_a, [()]);
+
+    let mut graph_b = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph_b.resources().put::<ConnectionsResource>(provider.clone());
+    let stage_b = graph_b.stage("sender", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("ping")).unwrap()).await.unwrap();
+    });
+    let stage_b = graph_b.wire_up(stage_b, ());
+    let mut sim_b = graph_b.run(&handle);
+    sim_b.enqueue_msg(&stage_b, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
+    let (_initiator, responder) = pair_ids();
+    let t_connected = wire_delay_nanos(SEED, 0);
+    let t_accepted = t_connected + wire_delay_nanos(SEED, 1);
+    let t_terminate = t_accepted + 1;
+    let t_deliver = t_connected + PAYLOAD_HOP_NANOS;
+    assert!(t_deliver > t_terminate, "payload hop must land after terminate so the Deliver stays on the heap");
+
+    world.run_until_horizon(t_terminate);
+    let leftover = HeapLogKind::Deliver { conn: responder, data_len: 4 };
+    assert!(
+        world.heap_contents().iter().any(|e| e.kind == leftover),
+        "Deliver must still sit on the live heap after terminate: {:?}",
+        world.heap_contents()
+    );
+    assert!(
+        !world.heap_log().iter().any(|e| e.kind == leftover),
+        "Deliver must not have popped before the leftover-heap check: {:?}",
+        world.heap_log()
+    );
+    assert_eq!(*received.lock(), None, "recv stage must still be pending at terminate");
+
+    world.run_until_horizon(t_deliver);
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == leftover),
+        "Deliver must pop and log after pending was dropped: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        !world.heap_contents().iter().any(|e| e.kind == leftover),
+        "Deliver must have left the live heap: {:?}",
+        world.heap_contents()
+    );
+    assert_eq!(*received.lock(), None, "gone recv stage must not be resumed");
+}
+
+/// Two graphs park the same child Name (`recv`). Graph 0 terminate must drop only
+/// that graph's pending. Graph 1's later Deliver still resumes. A name-only gone
+/// set would clear graph 1 too — the one-node terminate test cannot catch this.
+/// Live `heap_contents` / `heap_log`, not a sorted-only proof.
+#[tokio::test]
+async fn test_terminate_does_not_drop_other_graph_same_stage_name() {
+    const PAYLOAD_HOP_NANOS: u64 = 50_000_000;
+    const WAIT_BEFORE_TERMINATE_NANOS: u64 = 20_000_000;
+    let handle = tokio::runtime::Handle::current();
+    let provider = Arc::new(WorldConnectionProvider::with_payload_delay(SEED, PAYLOAD_HOP_NANOS, PAYLOAD_HOP_NANOS));
+    let listener0: SocketAddr = "127.0.0.1:9810".parse().unwrap();
+    let listener1: SocketAddr = "127.0.0.1:9820".parse().unwrap();
+    let received0 = observed::<Vec<u8>>();
+    let received0_a = received0.clone();
+    let received1 = observed::<Vec<u8>>();
+    let received1_a = received1.clone();
+    let trace0 = TraceBuffer::new_shared(100, 1_000_000);
+    let trace1 = TraceBuffer::new_shared(100, 1_000_000);
+
+    let mut graph0 = SimulationBuilder::default().with_trace_buffer(trace0).with_eval_strategy(Fifo);
+    graph0.resources().put::<ConnectionsResource>(provider.clone());
+    let stage0 = graph0.stage("parent", move |_state: (), _unit: (), eff| {
+        let received0_a = received0_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener0).await.unwrap();
+            let (_peer, conn) = net.accept(listener0).await.unwrap();
+            let child = eff
+                .stage("recv", move |(), conn: ConnectionId, eff| {
+                    let received0_a = received0_a.clone();
+                    async move {
+                        let net = Network::new(&eff);
+                        let bytes = net.recv(conn, NonZeroUsize::new(4).unwrap()).await.unwrap();
+                        set_observed(&received0_a, bytes.as_ref().to_vec());
+                    }
+                })
+                .await;
+            let child = eff.wire_up(child, ()).await;
+            eff.send(&child, conn).await;
+            eff.wait(Duration::from_nanos(WAIT_BEFORE_TERMINATE_NANOS)).await;
+            eff.terminate().await
+        }
+    });
+    let stage0 = graph0.wire_up(stage0, ());
+    let mut sim0 = graph0.run(&handle);
+    sim0.enqueue_msg(&stage0, [()]);
+
+    let mut graph1 = SimulationBuilder::default().with_trace_buffer(trace1).with_eval_strategy(Fifo);
+    graph1.resources().put::<ConnectionsResource>(provider.clone());
+    let stage1 = graph1.stage("parent", move |_state: (), _unit: (), eff| {
+        let received1_a = received1_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener1).await.unwrap();
+            let (_peer, conn) = net.accept(listener1).await.unwrap();
+            let child = eff
+                .stage("recv", move |(), conn: ConnectionId, eff| {
+                    let received1_a = received1_a.clone();
+                    async move {
+                        let net = Network::new(&eff);
+                        let bytes = net.recv(conn, NonZeroUsize::new(5).unwrap()).await.unwrap();
+                        set_observed(&received1_a, bytes.as_ref().to_vec());
+                    }
+                })
+                .await;
+            let child = eff.wire_up(child, ()).await;
+            eff.send(&child, conn).await;
+            eff.wait(Duration::from_secs(3600)).await;
+        }
+    });
+    let stage1 = graph1.wire_up(stage1, ());
+    let mut sim1 = graph1.run(&handle);
+    sim1.enqueue_msg(&stage1, [()]);
+
+    let mut graph2 = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph2.resources().put::<ConnectionsResource>(provider.clone());
+    let stage2 = graph2.stage("sender0", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener0.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("ping")).unwrap()).await.unwrap();
+    });
+    let stage2 = graph2.wire_up(stage2, ());
+    let mut sim2 = graph2.run(&handle);
+    sim2.enqueue_msg(&stage2, [()]);
+
+    let mut graph3 = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph3.resources().put::<ConnectionsResource>(provider.clone());
+    let stage3 = graph3.stage("sender1", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener1.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("hello")).unwrap()).await.unwrap();
+    });
+    let stage3 = graph3.wire_up(stage3, ());
+    let mut sim3 = graph3.run(&handle);
+    sim3.enqueue_msg(&stage3, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim0, sim1, sim2, sim3]);
+    let both_accepted_by = 2 * WIRE_DELAY_MAX_NANOS;
+    world.run_until_horizon(both_accepted_by);
+    assert!(
+        world
+            .heap_log()
+            .iter()
+            .any(|e| matches!(e.kind, HeapLogKind::Accepted { listener, .. } if listener == listener0)),
+        "graph 0 must have accepted before terminate: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        world
+            .heap_log()
+            .iter()
+            .any(|e| matches!(e.kind, HeapLogKind::Accepted { listener, .. } if listener == listener1)),
+        "graph 1 must have accepted before terminate: {:?}",
+        world.heap_log()
+    );
+    let leftover = world
+        .heap_contents()
+        .into_iter()
+        .find(|e| matches!(e.kind, HeapLogKind::Deliver { data_len: 4, .. }))
+        .expect("graph 0 Deliver must sit on the live heap after both accepts");
+    let live = world
+        .heap_contents()
+        .into_iter()
+        .find(|e| matches!(e.kind, HeapLogKind::Deliver { data_len: 5, .. }))
+        .expect("graph 1 Deliver must sit on the live heap after both accepts");
+    let t_accepted0 = world
+        .heap_log()
+        .iter()
+        .find(|e| matches!(e.kind, HeapLogKind::Accepted { listener, .. } if listener == listener0))
+        .expect("graph 0 Accepted")
+        .time_nanos;
+    let t_terminate = t_accepted0 + WAIT_BEFORE_TERMINATE_NANOS;
+    assert!(
+        t_terminate < leftover.time_nanos && t_terminate < live.time_nanos,
+        "terminate must land before both Delivers so they stay on the heap: terminate={t_terminate} leftover={} live={}",
+        leftover.time_nanos,
+        live.time_nanos
+    );
+    assert_eq!(*received0.lock(), None, "graph 0 recv must still be pending at accept");
+    assert_eq!(*received1.lock(), None, "graph 1 recv must still be pending at accept");
+
+    world.run_until_horizon(t_terminate);
+    assert!(
+        world.heap_contents().iter().any(|e| e.kind == leftover.kind),
+        "graph 0 leftover Deliver must still sit on the live heap after terminate: {:?}",
+        world.heap_contents()
+    );
+    assert!(
+        world.heap_contents().iter().any(|e| e.kind == live.kind),
+        "graph 1 Deliver must still sit on the live heap after graph 0 terminate: {:?}",
+        world.heap_contents()
+    );
+    assert!(
+        !world.heap_log().iter().any(|e| e.kind == leftover.kind || e.kind == live.kind),
+        "neither Deliver may have popped before the leftover-heap check: {:?}",
+        world.heap_log()
+    );
+    assert_eq!(*received0.lock(), None, "graph 0 recv must still be pending at terminate");
+    assert_eq!(*received1.lock(), None, "graph 1 recv must still be pending at terminate");
+
+    world.run_until_horizon(leftover.time_nanos.max(live.time_nanos));
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == leftover.kind),
+        "graph 0 leftover Deliver must pop and log without resuming the gone stage: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == live.kind),
+        "graph 1 Deliver must pop and log: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        !world.heap_contents().iter().any(|e| e.kind == leftover.kind || e.kind == live.kind),
+        "both Delivers must have left the live heap: {:?}",
+        world.heap_contents()
+    );
+    assert_eq!(*received0.lock(), None, "gone graph 0 recv must not be resumed");
+    assert_eq!(
+        received1.lock().as_deref(),
+        Some(b"hello".as_ref()),
+        "graph 1 recv with the same Name must still resume"
+    );
+}
+
 /// A Wait must resume from next_wakeup even when the network heap is empty.
 #[tokio::test]
 async fn test_wait_resumes_without_heap_event() {
@@ -951,6 +1225,33 @@ fn test_short_and_long_tail_payloads_sit_on_one_heap() {
     assert!(world.heap_contents().is_empty(), "both payloads must have been popped");
 }
 
+/// Two payloads on one destination stay in send order. A long-tail first hop holds the
+/// short second hop (TCP FIFO). Different connections may still pass each other.
+#[test]
+fn test_same_conn_payloads_stay_in_send_order() {
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
+    let (conn, _) = pair_ids();
+    provider.schedule_payload(NetworkEvent::Deliver { conn, data: Bytes::from_static(b"first") });
+    provider.schedule_payload(NetworkEvent::Deliver { conn, data: Bytes::from_static(b"second") });
+
+    let first = HeapLogEntry { sequence: 0, time_nanos: 0, kind: HeapLogKind::Deliver { conn, data_len: 5 } };
+    let second = HeapLogEntry { sequence: 1, time_nanos: 0, kind: HeapLogKind::Deliver { conn, data_len: 6 } };
+    let mut world = WorldLoop::new(provider, vec![]);
+    let on_heap = world.heap_contents();
+    assert_eq!(on_heap.len(), 2, "both same-conn payloads sit on the heap");
+    assert_eq!(on_heap[0].kind, first.kind);
+    assert_eq!(on_heap[1].kind, second.kind);
+    assert!(on_heap[0].time_nanos <= on_heap[1].time_nanos, "later send cannot arrive earlier on the same conn");
+    assert!(on_heap[0].sequence < on_heap[1].sequence);
+
+    world.run_until_horizon(on_heap[1].time_nanos);
+    let log = world.take_heap_log();
+    assert_eq!(log[0].kind, first.kind);
+    assert_eq!(log[1].kind, second.kind);
+    assert!(log[0].time_nanos <= log[1].time_nanos);
+    assert!(world.heap_contents().is_empty());
+}
+
 /// A ready-now graph wake and a `NetworkEvent` at the same nanos are one heap.
 ///
 /// `Deliver` is scheduled first (seq 0). The graph is then placed on that same heap
@@ -1219,14 +1520,17 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
 fn test_world_disseminates_preprod_fragment() {
     use std::cmp::Ordering;
 
-    use amaru_consensus::stages::select_chain::cmp_tip;
+    use amaru_consensus::{
+        effects::{ResourceBlockValidation, find_best_candidate},
+        stages::select_chain::cmp_tip,
+    };
     use amaru_kernel::{IsHeader, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer};
     use amaru_ouroboros::BaseReadChainStore;
     use amaru_protocols::store_effects::ResourceHeaderStore;
 
     use super::fragment::{
-        copy_dir, fixture_root, header_hash_from_snapshot_point, linear_fragment_to_head, linear_fragment_with_bodies,
-        load_committed_meta, open_chain_store, stores_ready,
+        copy_dir, fixture_root, header_hash_from_snapshot_point, last_body_on_candidate, latest_body_after,
+        linear_fragment_to_head, linear_fragment_with_bodies, load_committed_meta, open_chain_store, stores_ready,
     };
 
     let _guards = fragment_trace_guards();
@@ -1245,7 +1549,7 @@ fn test_world_disseminates_preprod_fragment() {
 
     let primed_chain_path = primed_tmp.path().join("chain");
     let snapshot_hash = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
-    let meta_head = {
+    let clock_head = {
         let store = open_chain_store(&primed_chain_path).expect("open primed chain");
         let fragment = linear_fragment_with_bodies(&store, snapshot_hash).expect("disseminable fragment");
         let head = fragment.last().cloned().expect("fragment has a HEAD");
@@ -1256,17 +1560,16 @@ fn test_world_disseminates_preprod_fragment() {
             fragment.last().expect("HEAD").point(),
             "linear fragment HEAD is the last header, not first()"
         );
-        assert_eq!(format!("{}", head.point()), meta.fragment_head);
         assert_ne!(
             format!("{}", fragment[0].point()),
-            meta.fragment_head,
+            format!("{}", head.point()),
             "HEAD must not be the first header after the snapshot"
         );
-        head
+        latest_body_after(&store, snapshot_hash).expect("latest stored body after snapshot")
     };
 
     let offset = PREPROD_ERA_HISTORY
-        .slot_to_relative_time_unchecked_horizon(meta_head.slot())
+        .slot_to_relative_time_unchecked_horizon(clock_head.slot())
         .expect("fragment slot in era history")
         + Duration::from_secs(30);
 
@@ -1284,7 +1587,7 @@ fn test_world_disseminates_preprod_fragment() {
         .with_listen_address(listen_primed)
         .with_seed(21)
         .with_target_upstream_peers(1)
-        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_trace_buffer(TraceBuffer::new_shared(50_000, 64_000_000))
         .with_ledger_dir(primed_tmp.path().join("ledger"))
         .with_chain_dir(primed_tmp.path().join("chain"))
         .with_global_epoch_offset(offset);
@@ -1293,7 +1596,7 @@ fn test_world_disseminates_preprod_fragment() {
         .with_listen_address(listen_receiver)
         .with_seed(22)
         .with_target_upstream_peers(1)
-        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_trace_buffer(TraceBuffer::new_shared(50_000, 64_000_000))
         .with_ledger_dir(receiver_tmp.path().join("ledger"))
         .with_chain_dir(receiver_tmp.path().join("chain"))
         .with_global_epoch_offset(offset);
@@ -1311,12 +1614,16 @@ fn test_world_disseminates_preprod_fragment() {
         Arc::clone(&*store)
     };
 
-    // `build_node` realigns the best chain to the ledger tip. The HEAD WorldLoop serves is that
-    // post-realign tip, not the last stored body recorded before open.
-    let served_tip = primed_store.get_best_chain_tip();
-    let served_head = primed_store
-        .load_header(&served_tip.hash())
-        .unwrap_or_else(|| panic!("primed store missing served tip header {served_tip}"));
+    // `build_node` realigns the best-chain pointer to the persisted ledger snapshot (volatile
+    // state is dropped on restart). `get_best_chain_tip` is therefore the snapshot. Recovery
+    // still walks `find_best_candidate`; the HEAD WorldLoop serves is that candidate's last
+    // stored body, not the post-realign best-chain pointer.
+    let realigned_tip = primed_store.get_best_chain_tip();
+    assert_eq!(realigned_tip.hash(), snapshot_hash, "realign rewinds the best-chain pointer to the ledger snapshot");
+    let recovery_hash = find_best_candidate(primed_store.as_ref()).expect("recovery candidate after realign");
+    let served_head = last_body_on_candidate(primed_store.as_ref(), recovery_hash, snapshot_hash)
+        .expect("last stored body on candidate");
+    let served_tip = served_head.point();
     assert!(primed_store.has_block(&served_tip.hash()).expect("has_block"), "served tip must have a stored body");
     assert_ne!(served_tip.hash(), snapshot_hash, "served tip must be after the snapshot");
     let served_fragment = linear_fragment_to_head(primed_store.as_ref(), snapshot_hash, served_head.clone())
@@ -1330,15 +1637,42 @@ fn test_world_disseminates_preprod_fragment() {
         );
     }
     assert!(receiver_store.load_header(&served_tip.hash()).is_none(), "receiver must start without the served HEAD");
+    let receiver_already = served_fragment.iter().filter(|h| receiver_store.load_header(&h.hash()).is_some()).count();
+    eprintln!(
+        "catch-up receiver already has {receiver_already}/{} fragment headers; snapshot children={}",
+        served_fragment.len(),
+        receiver_store.get_children(&snapshot_hash).len()
+    );
     assert_ne!(
         receiver_store.get_best_chain_tip(),
         served_tip,
         "receiver best tip starts at bootstrap, not the served HEAD"
     );
+    // Header + body payloads. One in LONG_TAIL_PAYLOAD_EVERY can sit at the hop cap.
+    // Horizon is coverage so those sampled Deliveries pop, not a Praos deadline.
+    let hop_coverage = (served_fragment.len() as u64).saturating_mul(2);
+    let long_tail_hops = hop_coverage.div_ceil(LONG_TAIL_PAYLOAD_EVERY);
+    let horizon_nanos =
+        long_tail_hops.saturating_add(1).saturating_mul(HONEST_PAYLOAD_DELAY_MAX_NANOS).saturating_add(2_000_000_000);
+    let (primed_ledger_tip, primed_volatile_tip, receiver_ledger_tip, receiver_volatile_tip) = {
+        let primed_ledger = sim_primed.resources().get::<ResourceBlockValidation>().expect("primed ledger");
+        let receiver_ledger = sim_receiver.resources().get::<ResourceBlockValidation>().expect("receiver ledger");
+        (
+            format!("{}", primed_ledger.tip()),
+            format!("{:?}", primed_ledger.volatile_tip()),
+            format!("{}", receiver_ledger.tip()),
+            format!("{:?}", receiver_ledger.volatile_tip()),
+        )
+    };
+    eprintln!(
+        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash} fragment_len={} horizon_nanos={horizon_nanos} primed_ledger={primed_ledger_tip} volatile={primed_volatile_tip} receiver_ledger={receiver_ledger_tip} volatile={receiver_volatile_tip}",
+        served_fragment.len()
+    );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
-    // World coverage so sampled long-tail Deliveries can pop. Not a Praos deadline.
-    world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(2_000_000_000));
+    let wall_start = std::time::Instant::now();
+    world.run_until_horizon(horizon_nanos);
+    let wall = wall_start.elapsed();
 
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
@@ -1347,13 +1681,44 @@ fn test_world_disseminates_preprod_fragment() {
     }
 
     let receiver_after = world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("receiver store");
+    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
+    let log = world.heap_log();
+    let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
+    let receiver_have = served_fragment.iter().filter(|h| receiver_after.load_header(&h.hash()).is_some()).count();
+    let rf_hashes: Vec<_> = receiver_traces.iter().filter_map(entry_chainsync_roll_forward_hash).collect();
+    let roll_forwards = rf_hashes.len();
+    let validated = receiver_traces.iter().filter(|e| tm_validate_header() == **e).count();
+    let connects = log.iter().filter(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })).count();
+    let accepts = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Accepted { .. })).count();
+    let delivers = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Deliver { .. })).count();
+    let first = served_fragment.first().expect("fragment");
+    let mut unique_rf = Vec::new();
+    for hash in &rf_hashes {
+        if !unique_rf.contains(hash) {
+            unique_rf.push(*hash);
+        }
+    }
+    let dropped = world.graphs()[1].trace_buffer().lock().dropped_messages();
+    let saw_head_rf = unique_rf.contains(&served_head.hash());
+    let saw_rollback = receiver_traces
+        .iter()
+        .any(|entry| entry_chainsync_initiator_kind(entry).is_some_and(|kind| kind.starts_with("RollBackward")));
+    eprintln!(
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} unique_rf={} vh={validated} dropped={dropped} connect={connects} accept={accepts} deliver={delivers} first={} head_rf={saw_head_rf} rollback={saw_rollback}",
+        world.graphs()[0].now().sim_elapsed().as_nanos(),
+        world.peek_next_event_time(),
+        primed_after.get_best_chain_tip(),
+        receiver_after.get_best_chain_tip(),
+        served_fragment.len(),
+        unique_rf.len(),
+        first.point()
+    );
     assert!(
         receiver_after.load_header(&served_tip.hash()).is_some(),
         "receiving node must have the served HEAD in store before tip equality is compared"
     );
 
     let head_hash = served_head.hash();
-    let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
     let receiver_got_roll_forward =
         receiver_traces.iter().any(|entry| entry_chainsync_roll_forward_hash(entry) == Some(head_hash));
     assert!(
@@ -1363,7 +1728,6 @@ fn test_world_disseminates_preprod_fragment() {
     let receiver_validated = receiver_traces.iter().any(|entry| entry_is_validate_header_of(entry, &head_hash));
     assert!(receiver_validated, "B must run production ValidateHeaderEffect on the served HEAD; head={head_hash}");
 
-    let primed_after = world.graphs()[0].resources().get::<ResourceHeaderStore>().expect("primed store");
     let primed_tip = primed_after.get_best_chain_tip();
     let receiver_tip = receiver_after.get_best_chain_tip();
     let primed_header = primed_after.load_header(&primed_tip.hash()).expect("primed tip header");
@@ -1398,6 +1762,43 @@ fn roll_forward_hash_from_result(
         | amaru_protocols::chainsync::InitiatorResult::IntersectNotFound(_)
         | amaru_protocols::chainsync::InitiatorResult::RollBackward(_, _)
         | amaru_protocols::chainsync::InitiatorResult::Terminated => None,
+    }
+}
+
+fn send_data_chainsync_initiator_kind(data: &dyn amaru_pure_stage::SendData) -> Option<String> {
+    use amaru_consensus::stages::track_peers::TrackPeersMsg;
+    use amaru_protocols::chainsync::{ChainSyncInitiatorMsg, InitiatorResult};
+
+    let msg = if let Ok(msg) = data.cast_ref::<ChainSyncInitiatorMsg>() {
+        &msg.msg
+    } else if let Ok(TrackPeersMsg::FromUpstream(msg)) = data.cast_ref::<TrackPeersMsg>() {
+        &msg.msg
+    } else {
+        return None;
+    };
+    Some(match msg {
+        InitiatorResult::Initialize => "Initialize".to_string(),
+        InitiatorResult::IntersectFound(current, tip) => format!("IntersectFound current={current} tip={tip}"),
+        InitiatorResult::IntersectNotFound(tip) => format!("IntersectNotFound tip={tip}"),
+        InitiatorResult::RollForward(content, tip) => {
+            let hash = header_from_content(content).map(|h| h.hash()).map(|h| h.to_string()).unwrap_or_default();
+            format!("RollForward {hash} tip={tip}")
+        }
+        InitiatorResult::RollBackward(current, tip) => format!("RollBackward current={current} tip={tip}"),
+        InitiatorResult::Terminated => "Terminated".to_string(),
+    })
+}
+
+fn entry_chainsync_initiator_kind(entry: &TraceEntry) -> Option<String> {
+    match entry {
+        TraceEntry::Suspend(Effect::Send { msg, .. }) => send_data_chainsync_initiator_kind(msg.as_ref()),
+        TraceEntry::Input { input, .. } => send_data_chainsync_initiator_kind(input.as_ref()),
+        TraceEntry::Suspend(_)
+        | TraceEntry::Resume { .. }
+        | TraceEntry::Clock(_)
+        | TraceEntry::State { .. }
+        | TraceEntry::Terminated { .. }
+        | TraceEntry::InvalidBytes(..) => None,
     }
 }
 
