@@ -105,7 +105,19 @@ where
         let prefix = [&CHAIN_PREFIX[..], &slot.to_be_bytes()].concat();
         let mut iter = self.db.iterator_opt(IteratorMode::From(&prefix, rocksdb::Direction::Forward), readopts);
 
-        if let Some(Ok((_k, v))) = iter.next() { from_cbor::<NetworkTip>(v.as_ref()).map(Point::from) } else { None }
+        let next = iter
+            .next()
+            .and_then(|kv| kv.ok())
+            .and_then(|(_k, v)| from_cbor::<NetworkTip>(v.as_ref()).map(Point::from))?;
+        // CHAIN_PREFIX is keyed by slot. A gap (realign rewind, partial adopt) can leave a later
+        // slot as the first key. That header is not the successor; ChainSync must not serve it.
+        match point {
+            Point::Origin => Some(next),
+            Point::Specific(_, hash, _) => {
+                let header = self.load_header(&next.hash())?;
+                (header.parent() == Some(*hash)).then_some(next)
+            }
+        }
     }
 
     fn load_block(&self, hash: &HeaderHash) -> Result<Option<RawBlock>, StoreError> {
