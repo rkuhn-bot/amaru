@@ -694,6 +694,190 @@ async fn test_terminate_drops_pending_before_later_deliver() {
     assert_eq!(*received.lock(), None, "gone recv stage must not be resumed");
 }
 
+/// Two graphs park the same child Name (`recv`). Graph 0 terminate must drop only
+/// that graph's pending. Graph 1's later Deliver still resumes. A name-only gone
+/// set would clear graph 1 too — the one-node terminate test cannot catch this.
+/// Live `heap_contents` / `heap_log`, not a sorted-only proof.
+#[tokio::test]
+async fn test_terminate_does_not_drop_other_graph_same_stage_name() {
+    const PAYLOAD_HOP_NANOS: u64 = 50_000_000;
+    const WAIT_BEFORE_TERMINATE_NANOS: u64 = 20_000_000;
+    let handle = tokio::runtime::Handle::current();
+    let provider = Arc::new(WorldConnectionProvider::with_payload_delay(SEED, PAYLOAD_HOP_NANOS, PAYLOAD_HOP_NANOS));
+    let listener0: SocketAddr = "127.0.0.1:9810".parse().unwrap();
+    let listener1: SocketAddr = "127.0.0.1:9820".parse().unwrap();
+    let received0 = observed::<Vec<u8>>();
+    let received0_a = received0.clone();
+    let received1 = observed::<Vec<u8>>();
+    let received1_a = received1.clone();
+    let trace0 = TraceBuffer::new_shared(100, 1_000_000);
+    let trace1 = TraceBuffer::new_shared(100, 1_000_000);
+
+    let mut graph0 = SimulationBuilder::default().with_trace_buffer(trace0).with_eval_strategy(Fifo);
+    graph0.resources().put::<ConnectionsResource>(provider.clone());
+    let stage0 = graph0.stage("parent", move |_state: (), _unit: (), eff| {
+        let received0_a = received0_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener0).await.unwrap();
+            let (_peer, conn) = net.accept(listener0).await.unwrap();
+            let child = eff
+                .stage("recv", move |(), conn: ConnectionId, eff| {
+                    let received0_a = received0_a.clone();
+                    async move {
+                        let net = Network::new(&eff);
+                        let bytes = net.recv(conn, NonZeroUsize::new(4).unwrap()).await.unwrap();
+                        set_observed(&received0_a, bytes.as_ref().to_vec());
+                    }
+                })
+                .await;
+            let child = eff.wire_up(child, ()).await;
+            eff.send(&child, conn).await;
+            eff.wait(Duration::from_nanos(WAIT_BEFORE_TERMINATE_NANOS)).await;
+            eff.terminate().await
+        }
+    });
+    let stage0 = graph0.wire_up(stage0, ());
+    let mut sim0 = graph0.run(&handle);
+    sim0.enqueue_msg(&stage0, [()]);
+
+    let mut graph1 = SimulationBuilder::default().with_trace_buffer(trace1).with_eval_strategy(Fifo);
+    graph1.resources().put::<ConnectionsResource>(provider.clone());
+    let stage1 = graph1.stage("parent", move |_state: (), _unit: (), eff| {
+        let received1_a = received1_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener1).await.unwrap();
+            let (_peer, conn) = net.accept(listener1).await.unwrap();
+            let child = eff
+                .stage("recv", move |(), conn: ConnectionId, eff| {
+                    let received1_a = received1_a.clone();
+                    async move {
+                        let net = Network::new(&eff);
+                        let bytes = net.recv(conn, NonZeroUsize::new(5).unwrap()).await.unwrap();
+                        set_observed(&received1_a, bytes.as_ref().to_vec());
+                    }
+                })
+                .await;
+            let child = eff.wire_up(child, ()).await;
+            eff.send(&child, conn).await;
+            eff.wait(Duration::from_secs(3600)).await;
+        }
+    });
+    let stage1 = graph1.wire_up(stage1, ());
+    let mut sim1 = graph1.run(&handle);
+    sim1.enqueue_msg(&stage1, [()]);
+
+    let mut graph2 = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph2.resources().put::<ConnectionsResource>(provider.clone());
+    let stage2 = graph2.stage("sender0", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener0.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("ping")).unwrap()).await.unwrap();
+    });
+    let stage2 = graph2.wire_up(stage2, ());
+    let mut sim2 = graph2.run(&handle);
+    sim2.enqueue_msg(&stage2, [()]);
+
+    let mut graph3 = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph3.resources().put::<ConnectionsResource>(provider.clone());
+    let stage3 = graph3.stage("sender1", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener1.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("hello")).unwrap()).await.unwrap();
+    });
+    let stage3 = graph3.wire_up(stage3, ());
+    let mut sim3 = graph3.run(&handle);
+    sim3.enqueue_msg(&stage3, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim0, sim1, sim2, sim3]);
+    let both_accepted_by = 2 * WIRE_DELAY_MAX_NANOS;
+    world.run_until_horizon(both_accepted_by);
+    assert!(
+        world
+            .heap_log()
+            .iter()
+            .any(|e| matches!(e.kind, HeapLogKind::Accepted { listener, .. } if listener == listener0)),
+        "graph 0 must have accepted before terminate: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        world
+            .heap_log()
+            .iter()
+            .any(|e| matches!(e.kind, HeapLogKind::Accepted { listener, .. } if listener == listener1)),
+        "graph 1 must have accepted before terminate: {:?}",
+        world.heap_log()
+    );
+    let leftover = world
+        .heap_contents()
+        .into_iter()
+        .find(|e| matches!(e.kind, HeapLogKind::Deliver { data_len: 4, .. }))
+        .expect("graph 0 Deliver must sit on the live heap after both accepts");
+    let live = world
+        .heap_contents()
+        .into_iter()
+        .find(|e| matches!(e.kind, HeapLogKind::Deliver { data_len: 5, .. }))
+        .expect("graph 1 Deliver must sit on the live heap after both accepts");
+    let t_accepted0 = world
+        .heap_log()
+        .iter()
+        .find(|e| matches!(e.kind, HeapLogKind::Accepted { listener, .. } if listener == listener0))
+        .expect("graph 0 Accepted")
+        .time_nanos;
+    let t_terminate = t_accepted0 + WAIT_BEFORE_TERMINATE_NANOS;
+    assert!(
+        t_terminate < leftover.time_nanos && t_terminate < live.time_nanos,
+        "terminate must land before both Delivers so they stay on the heap: terminate={t_terminate} leftover={} live={}",
+        leftover.time_nanos,
+        live.time_nanos
+    );
+    assert_eq!(*received0.lock(), None, "graph 0 recv must still be pending at accept");
+    assert_eq!(*received1.lock(), None, "graph 1 recv must still be pending at accept");
+
+    world.run_until_horizon(t_terminate);
+    assert!(
+        world.heap_contents().iter().any(|e| e.kind == leftover.kind),
+        "graph 0 leftover Deliver must still sit on the live heap after terminate: {:?}",
+        world.heap_contents()
+    );
+    assert!(
+        world.heap_contents().iter().any(|e| e.kind == live.kind),
+        "graph 1 Deliver must still sit on the live heap after graph 0 terminate: {:?}",
+        world.heap_contents()
+    );
+    assert!(
+        !world.heap_log().iter().any(|e| e.kind == leftover.kind || e.kind == live.kind),
+        "neither Deliver may have popped before the leftover-heap check: {:?}",
+        world.heap_log()
+    );
+    assert_eq!(*received0.lock(), None, "graph 0 recv must still be pending at terminate");
+    assert_eq!(*received1.lock(), None, "graph 1 recv must still be pending at terminate");
+
+    world.run_until_horizon(leftover.time_nanos.max(live.time_nanos));
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == leftover.kind),
+        "graph 0 leftover Deliver must pop and log without resuming the gone stage: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == live.kind),
+        "graph 1 Deliver must pop and log: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        !world.heap_contents().iter().any(|e| e.kind == leftover.kind || e.kind == live.kind),
+        "both Delivers must have left the live heap: {:?}",
+        world.heap_contents()
+    );
+    assert_eq!(*received0.lock(), None, "gone graph 0 recv must not be resumed");
+    assert_eq!(
+        received1.lock().as_deref(),
+        Some(b"hello".as_ref()),
+        "graph 1 recv with the same Name must still resume"
+    );
+}
+
 /// A Wait must resume from next_wakeup even when the network heap is empty.
 #[tokio::test]
 async fn test_wait_resumes_without_heap_event() {
