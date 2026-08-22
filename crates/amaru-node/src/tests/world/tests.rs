@@ -1337,6 +1337,12 @@ fn test_world_disseminates_preprod_fragment() {
         );
     }
     assert!(receiver_store.load_header(&served_tip.hash()).is_none(), "receiver must start without the served HEAD");
+    let receiver_already = served_fragment.iter().filter(|h| receiver_store.load_header(&h.hash()).is_some()).count();
+    eprintln!(
+        "catch-up receiver already has {receiver_already}/{} fragment headers; snapshot children={}",
+        served_fragment.len(),
+        receiver_store.get_children(&snapshot_hash).len()
+    );
     assert_ne!(
         receiver_store.get_best_chain_tip(),
         served_tip,
@@ -1402,6 +1408,7 @@ fn test_world_disseminates_preprod_fragment() {
         cursor = next;
     }
     let dropped = world.graphs()[1].trace_buffer().lock().dropped_messages();
+    let initiator_kinds: Vec<_> = receiver_traces.iter().filter_map(entry_chainsync_initiator_kind).collect();
     let rf_detail: Vec<_> = unique_rf
         .iter()
         .map(|hash| {
@@ -1419,7 +1426,7 @@ fn test_world_disseminates_preprod_fragment() {
         })
         .collect();
     eprintln!(
-        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} unique_rf={} vh={validated} dropped={dropped} connect={connects} accept={accepts} deliver={delivers} first={} best_walk={best_walk:?} rf_detail={rf_detail:?}",
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} unique_rf={} vh={validated} dropped={dropped} connect={connects} accept={accepts} deliver={delivers} first={} best_walk={best_walk:?} initiator={initiator_kinds:?} rf_detail={rf_detail:?}",
         world.graphs()[0].now().sim_elapsed().as_nanos(),
         world.peek_next_event_time(),
         primed_after.get_best_chain_tip(),
@@ -1477,6 +1484,43 @@ fn roll_forward_hash_from_result(
         | amaru_protocols::chainsync::InitiatorResult::IntersectNotFound(_)
         | amaru_protocols::chainsync::InitiatorResult::RollBackward(_, _)
         | amaru_protocols::chainsync::InitiatorResult::Terminated => None,
+    }
+}
+
+fn send_data_chainsync_initiator_kind(data: &dyn amaru_pure_stage::SendData) -> Option<String> {
+    use amaru_consensus::stages::track_peers::TrackPeersMsg;
+    use amaru_protocols::chainsync::{ChainSyncInitiatorMsg, InitiatorResult};
+
+    let msg = if let Ok(msg) = data.cast_ref::<ChainSyncInitiatorMsg>() {
+        &msg.msg
+    } else if let Ok(TrackPeersMsg::FromUpstream(msg)) = data.cast_ref::<TrackPeersMsg>() {
+        &msg.msg
+    } else {
+        return None;
+    };
+    Some(match msg {
+        InitiatorResult::Initialize => "Initialize".to_string(),
+        InitiatorResult::IntersectFound(current, tip) => format!("IntersectFound current={current} tip={tip}"),
+        InitiatorResult::IntersectNotFound(tip) => format!("IntersectNotFound tip={tip}"),
+        InitiatorResult::RollForward(content, tip) => {
+            let hash = header_from_content(content).map(|h| h.hash()).map(|h| h.to_string()).unwrap_or_default();
+            format!("RollForward {hash} tip={tip}")
+        }
+        InitiatorResult::RollBackward(current, tip) => format!("RollBackward current={current} tip={tip}"),
+        InitiatorResult::Terminated => "Terminated".to_string(),
+    })
+}
+
+fn entry_chainsync_initiator_kind(entry: &TraceEntry) -> Option<String> {
+    match entry {
+        TraceEntry::Suspend(Effect::Send { msg, .. }) => send_data_chainsync_initiator_kind(msg.as_ref()),
+        TraceEntry::Input { input, .. } => send_data_chainsync_initiator_kind(input.as_ref()),
+        TraceEntry::Suspend(_)
+        | TraceEntry::Resume { .. }
+        | TraceEntry::Clock(_)
+        | TraceEntry::State { .. }
+        | TraceEntry::Terminated { .. }
+        | TraceEntry::InvalidBytes(..) => None,
     }
 }
 
