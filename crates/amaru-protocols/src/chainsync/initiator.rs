@@ -299,13 +299,13 @@ impl ProtocolState<Initiator> for InitiatorState {
 
         Ok(match (self, input) {
             (Intersect, Message::IntersectFound(point, tip)) => (
-                // only for this first time do we sent two requests
-                // this initiates the desired pipelining behaviour
+                // Prime the pipeline: one wire `RequestNext` per in-flight slot.
+                // `CanAwait(n)` counts extras after the current reply, so n = depth - 1.
                 outcome()
                     .send(Message::RequestNext(PIPELINE_DEPTH))
                     .want_next()
                     .result(InitiatorFromNetwork::IntersectFound(point, tip)),
-                CanAwait(1),
+                CanAwait(PIPELINE_DEPTH.saturating_sub(1)),
             ),
             (Intersect, Message::IntersectNotFound(tip)) => {
                 (outcome().result(InitiatorFromNetwork::IntersectNotFound(tip)), Idle)
@@ -365,7 +365,7 @@ pub mod tests {
         spec.init(Idle, find_intersect(), Intersect);
         spec.init(Idle, Message::Done, InitiatorState::Done);
         spec.init(Idle, Message::RequestNext(1), CanAwait(0));
-        spec.resp(Intersect, intersect_found(), Idle);
+        spec.resp(Intersect, intersect_found(), CanAwait(PIPELINE_DEPTH.saturating_sub(1)));
         spec.resp(Intersect, intersect_not_found(), Idle);
         spec.resp(CanAwait(0), AwaitReply, MustReply(0));
         spec.resp(CanAwait(0), roll_forward(), Idle);
@@ -384,5 +384,15 @@ pub mod tests {
             Message::Done => Some(InitiatorAction::Done),
             _ => None,
         });
+    }
+
+    #[test]
+    fn intersect_found_tracks_one_in_flight_per_pipeline_slot() {
+        let (outcome, next) = Intersect
+            .network(Message::IntersectFound(NetworkPoint::Origin, Point::Origin))
+            .expect("IntersectFound is valid in Intersect");
+        assert_eq!(next, CanAwait(PIPELINE_DEPTH.saturating_sub(1)));
+        assert_eq!(outcome.send, Some(Message::RequestNext(PIPELINE_DEPTH)));
+        assert!(outcome.want_next);
     }
 }
