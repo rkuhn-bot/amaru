@@ -1287,7 +1287,7 @@ fn test_world_disseminates_preprod_fragment() {
         .with_listen_address(listen_primed)
         .with_seed(21)
         .with_target_upstream_peers(1)
-        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_trace_buffer(TraceBuffer::new_shared(50_000, 64_000_000))
         .with_ledger_dir(primed_tmp.path().join("ledger"))
         .with_chain_dir(primed_tmp.path().join("chain"))
         .with_global_epoch_offset(offset);
@@ -1296,7 +1296,7 @@ fn test_world_disseminates_preprod_fragment() {
         .with_listen_address(listen_receiver)
         .with_seed(22)
         .with_target_upstream_peers(1)
-        .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000))
+        .with_trace_buffer(TraceBuffer::new_shared(50_000, 64_000_000))
         .with_ledger_dir(receiver_tmp.path().join("ledger"))
         .with_chain_dir(receiver_tmp.path().join("chain"))
         .with_global_epoch_offset(offset);
@@ -1386,7 +1386,23 @@ fn test_world_disseminates_preprod_fragment() {
     let accepts = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Accepted { .. })).count();
     let delivers = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Deliver { .. })).count();
     let first = served_fragment.first().expect("fragment");
-    let rf_detail: Vec<_> = rf_hashes
+    let mut unique_rf = Vec::new();
+    for hash in &rf_hashes {
+        if !unique_rf.contains(hash) {
+            unique_rf.push(*hash);
+        }
+    }
+    let mut best_walk = Vec::new();
+    let mut cursor = realigned_tip;
+    while let Some(next) = primed_after.next_best_chain(&cursor) {
+        best_walk.push(format!("{next}"));
+        if best_walk.len() == 3 {
+            break;
+        }
+        cursor = next;
+    }
+    let dropped = world.graphs()[1].trace_buffer().lock().dropped_messages();
+    let rf_detail: Vec<_> = unique_rf
         .iter()
         .map(|hash| {
             let primed = primed_after.load_header(hash);
@@ -1403,12 +1419,13 @@ fn test_world_disseminates_preprod_fragment() {
         })
         .collect();
     eprintln!(
-        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} vh={validated} connect={connects} accept={accepts} deliver={delivers} first={} rf_detail={rf_detail:?}",
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} unique_rf={} vh={validated} dropped={dropped} connect={connects} accept={accepts} deliver={delivers} first={} best_walk={best_walk:?} rf_detail={rf_detail:?}",
         world.graphs()[0].now().sim_elapsed().as_nanos(),
         world.peek_next_event_time(),
         primed_after.get_best_chain_tip(),
         receiver_after.get_best_chain_tip(),
         served_fragment.len(),
+        unique_rf.len(),
         first.point()
     );
     assert!(
