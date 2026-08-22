@@ -1220,9 +1220,13 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
 fn test_world_disseminates_preprod_fragment() {
     use std::cmp::Ordering;
 
-    use amaru_consensus::{effects::find_best_candidate, stages::select_chain::cmp_tip};
+    use amaru_consensus::{
+        effects::{ResourceBlockValidation, find_best_candidate},
+        stages::select_chain::cmp_tip,
+    };
     use amaru_kernel::{IsHeader, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer};
     use amaru_ouroboros::BaseReadChainStore;
+    use amaru_ouroboros_traits::CanValidateBlocks;
     use amaru_protocols::store_effects::ResourceHeaderStore;
 
     use super::fragment::{
@@ -1345,9 +1349,15 @@ fn test_world_disseminates_preprod_fragment() {
     let long_tail_hops = hop_coverage.div_ceil(LONG_TAIL_PAYLOAD_EVERY);
     let horizon_nanos =
         long_tail_hops.saturating_add(1).saturating_mul(HONEST_PAYLOAD_DELAY_MAX_NANOS).saturating_add(2_000_000_000);
+    let primed_ledger = sim_primed.resources().get::<ResourceBlockValidation>().expect("primed ledger");
+    let receiver_ledger = sim_receiver.resources().get::<ResourceBlockValidation>().expect("receiver ledger");
     eprintln!(
-        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash} fragment_len={} horizon_nanos={horizon_nanos}",
-        served_fragment.len()
+        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash} fragment_len={} horizon_nanos={horizon_nanos} primed_ledger={} volatile={:?} receiver_ledger={} volatile={:?}",
+        served_fragment.len(),
+        primed_ledger.tip(),
+        primed_ledger.volatile_tip(),
+        receiver_ledger.tip(),
+        receiver_ledger.volatile_tip(),
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
@@ -1366,13 +1376,14 @@ fn test_world_disseminates_preprod_fragment() {
     let log = world.heap_log();
     let receiver_traces = world.graphs()[1].trace_buffer().lock().hydrate_without_timestamps();
     let receiver_have = served_fragment.iter().filter(|h| receiver_after.load_header(&h.hash()).is_some()).count();
-    let roll_forwards = receiver_traces.iter().filter_map(entry_chainsync_roll_forward_hash).count();
+    let rf_hashes: Vec<_> = receiver_traces.iter().filter_map(entry_chainsync_roll_forward_hash).collect();
+    let roll_forwards = rf_hashes.len();
     let validated = receiver_traces.iter().filter(|e| tm_validate_header() == **e).count();
     let connects = log.iter().filter(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })).count();
     let accepts = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Accepted { .. })).count();
     let delivers = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Deliver { .. })).count();
     eprintln!(
-        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} vh={validated} connect={connects} accept={accepts} deliver={delivers}",
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} vh={validated} connect={connects} accept={accepts} deliver={delivers} rf_hashes={rf_hashes:?}",
         world.graphs()[0].now().sim_elapsed().as_nanos(),
         world.peek_next_event_time(),
         primed_after.get_best_chain_tip(),
