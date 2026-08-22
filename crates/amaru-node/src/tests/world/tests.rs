@@ -1226,7 +1226,6 @@ fn test_world_disseminates_preprod_fragment() {
     };
     use amaru_kernel::{IsHeader, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer};
     use amaru_ouroboros::BaseReadChainStore;
-    use amaru_ouroboros_traits::CanValidateBlocks;
     use amaru_protocols::store_effects::ResourceHeaderStore;
 
     use super::fragment::{
@@ -1349,15 +1348,19 @@ fn test_world_disseminates_preprod_fragment() {
     let long_tail_hops = hop_coverage.div_ceil(LONG_TAIL_PAYLOAD_EVERY);
     let horizon_nanos =
         long_tail_hops.saturating_add(1).saturating_mul(HONEST_PAYLOAD_DELAY_MAX_NANOS).saturating_add(2_000_000_000);
-    let primed_ledger = sim_primed.resources().get::<ResourceBlockValidation>().expect("primed ledger");
-    let receiver_ledger = sim_receiver.resources().get::<ResourceBlockValidation>().expect("receiver ledger");
+    let (primed_ledger_tip, primed_volatile_tip, receiver_ledger_tip, receiver_volatile_tip) = {
+        let primed_ledger = sim_primed.resources().get::<ResourceBlockValidation>().expect("primed ledger");
+        let receiver_ledger = sim_receiver.resources().get::<ResourceBlockValidation>().expect("receiver ledger");
+        (
+            format!("{}", primed_ledger.tip()),
+            format!("{:?}", primed_ledger.volatile_tip()),
+            format!("{}", receiver_ledger.tip()),
+            format!("{:?}", receiver_ledger.volatile_tip()),
+        )
+    };
     eprintln!(
-        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash} fragment_len={} horizon_nanos={horizon_nanos} primed_ledger={} volatile={:?} receiver_ledger={} volatile={:?}",
-        served_fragment.len(),
-        primed_ledger.tip(),
-        primed_ledger.volatile_tip(),
-        receiver_ledger.tip(),
-        receiver_ledger.volatile_tip(),
+        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash} fragment_len={} horizon_nanos={horizon_nanos} primed_ledger={primed_ledger_tip} volatile={primed_volatile_tip} receiver_ledger={receiver_ledger_tip} volatile={receiver_volatile_tip}",
+        served_fragment.len()
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
