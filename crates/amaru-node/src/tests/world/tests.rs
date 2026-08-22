@@ -1385,13 +1385,31 @@ fn test_world_disseminates_preprod_fragment() {
     let connects = log.iter().filter(|e| matches!(e.kind, HeapLogKind::ConnectAttempt { .. })).count();
     let accepts = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Accepted { .. })).count();
     let delivers = log.iter().filter(|e| matches!(e.kind, HeapLogKind::Deliver { .. })).count();
+    let first = served_fragment.first().expect("fragment");
+    let rf_detail: Vec<_> = rf_hashes
+        .iter()
+        .map(|hash| {
+            let primed = primed_after.load_header(hash);
+            let on_b = receiver_after.load_header(hash).is_some();
+            match primed {
+                Some(header) => format!(
+                    "{hash} primed={} parent={:?} on_b={on_b} in_fragment={}",
+                    header.point(),
+                    header.parent(),
+                    served_fragment.iter().any(|h| h.hash() == *hash)
+                ),
+                None => format!("{hash} primed=missing on_b={on_b}"),
+            }
+        })
+        .collect();
     eprintln!(
-        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} vh={validated} connect={connects} accept={accepts} deliver={delivers} rf_hashes={rf_hashes:?}",
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} vh={validated} connect={connects} accept={accepts} deliver={delivers} first={} rf_detail={rf_detail:?}",
         world.graphs()[0].now().sim_elapsed().as_nanos(),
         world.peek_next_event_time(),
         primed_after.get_best_chain_tip(),
         receiver_after.get_best_chain_tip(),
-        served_fragment.len()
+        served_fragment.len(),
+        first.point()
     );
     assert!(
         receiver_after.load_header(&served_tip.hash()).is_some(),
