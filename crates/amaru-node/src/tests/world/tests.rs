@@ -617,8 +617,9 @@ async fn test_terminate_drops_pending_before_later_deliver() {
     let listener_addr: SocketAddr = "127.0.0.1:9800".parse().unwrap();
     let received = observed::<Vec<u8>>();
     let received_a = received.clone();
+    let trace = TraceBuffer::new_shared(100, 1_000_000);
 
-    let mut graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
+    let mut graph_a = SimulationBuilder::default().with_trace_buffer(trace.clone()).with_eval_strategy(Fifo);
     graph_a.resources().put::<ConnectionsResource>(provider.clone());
     let stage_a = graph_a.stage("parent", move |_state: (), _unit: (), eff| {
         let received_a = received_a.clone();

@@ -32,6 +32,7 @@ use amaru_protocols::network_effects::{
 use amaru_pure_stage::{
     Effect, Instant, Name, SendData,
     simulation::{Blocked, SimulationRunning},
+    trace_buffer::TraceEntry,
 };
 
 use super::{GraphWakeReason, HeapLogEntry, NetworkEvent, WorldConnectionProvider, WorldHeapItem};
@@ -60,8 +61,8 @@ pub struct WorldLoop {
     claimed_accepts: BTreeMap<SocketAddr, VecDeque<(usize, Name)>>,
     pending_sends: BTreeMap<ConnectionId, VecDeque<(usize, Name)>>,
     pending_recvs: BTreeMap<ConnectionId, VecDeque<(usize, Name, NonZeroUsize)>>,
-    /// Graphs that have already returned [`Blocked::Terminated`].
-    terminated_graphs: BTreeSet<usize>,
+    /// Stages observed via [`Blocked::Terminated`] (and aborted children in the trace).
+    terminated_stages: BTreeSet<Name>,
 }
 
 type Completion = (usize, Name, Box<dyn SendData>);
@@ -90,7 +91,7 @@ impl WorldLoop {
             claimed_accepts: BTreeMap::new(),
             pending_sends: BTreeMap::new(),
             pending_recvs: BTreeMap::new(),
-            terminated_graphs: BTreeSet::new(),
+            terminated_stages: BTreeSet::new(),
         };
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
@@ -140,9 +141,6 @@ impl WorldLoop {
     }
 
     fn schedule_graph_if_needed(&mut self, index: usize) {
-        if self.terminated_graphs.contains(&index) {
-            return;
-        }
         let graph = &mut self.graphs[index];
         graph.receive_inputs();
         let now = self.provider.current_time_nanos();
@@ -193,8 +191,8 @@ impl WorldLoop {
                 Blocked::Deadlock(deadlock) => {
                     panic!("graph {index} deadlock: {deadlock:?}");
                 }
-                Blocked::Terminated(_) => {
-                    self.drop_pending_for_graph(index);
+                Blocked::Terminated(name) => {
+                    self.drop_pending_for_terminated(index, &name);
                     break;
                 }
                 Blocked::Idle | Blocked::Sleeping { .. } | Blocked::Busy { .. } => {
@@ -380,17 +378,29 @@ impl WorldLoop {
         kick_external(&mut self.graphs[graph_idx]);
     }
 
-    /// Cancel queued network completions for a graph we have already seen terminate.
+    /// Cancel queued network completions for a stage we have already seen terminate.
     ///
-    /// Heap events for that graph may still pop and log. They must not resume a gone stage.
-    fn drop_pending_for_graph(&mut self, graph_idx: usize) {
-        self.terminated_graphs.insert(graph_idx);
-        drop_graph_from_pending(&mut self.pending_connects, graph_idx);
-        drop_graph_from_pending(&mut self.pending_accepts, graph_idx);
-        drop_graph_from_pending(&mut self.claimed_accepts, graph_idx);
-        drop_graph_from_pending(&mut self.pending_sends, graph_idx);
+    /// Aborted children are taken from the graph trace (`push_terminated`). Heap events may
+    /// still pop and log. They must not resume a gone stage.
+    fn drop_pending_for_terminated(&mut self, graph_idx: usize, stage: &Name) {
+        self.terminated_stages.insert(stage.clone());
+        let from_trace = self.graphs[graph_idx].trace_buffer().lock().hydrate_without_timestamps();
+        for entry in from_trace {
+            if let TraceEntry::Terminated { stage, .. } = entry {
+                self.terminated_stages.insert(stage);
+            }
+        }
+        self.drop_matching_pending();
+    }
+
+    fn drop_matching_pending(&mut self) {
+        let gone = &self.terminated_stages;
+        drop_stages_from_pending(&mut self.pending_connects, gone);
+        drop_stages_from_pending(&mut self.pending_accepts, gone);
+        drop_stages_from_pending(&mut self.claimed_accepts, gone);
+        drop_stages_from_pending(&mut self.pending_sends, gone);
         self.pending_recvs.retain(|_, queue| {
-            queue.retain(|(idx, _, _)| *idx != graph_idx);
+            queue.retain(|(_, name, _)| !gone.contains(name));
             !queue.is_empty()
         });
     }
@@ -478,9 +488,9 @@ fn classify_network(effect: &Effect) -> Option<Posted> {
     }
 }
 
-fn drop_graph_from_pending<K: Ord>(pending: &mut BTreeMap<K, VecDeque<(usize, Name)>>, graph_idx: usize) {
+fn drop_stages_from_pending<K: Ord>(pending: &mut BTreeMap<K, VecDeque<(usize, Name)>>, gone: &BTreeSet<Name>) {
     pending.retain(|_, queue| {
-        queue.retain(|(idx, _)| *idx != graph_idx);
+        queue.retain(|(_, name)| !gone.contains(name));
         !queue.is_empty()
     });
 }
