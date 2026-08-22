@@ -20,10 +20,12 @@
 
 #[cfg(test)]
 mod fragment;
+mod injector;
 mod nodes;
 mod world_connection_provider;
 mod world_loop;
 
+pub use injector::{InjectorShared, InventoryBlock, build_injector, build_injector_peer, scan_inventory};
 pub use nodes::build_world_node;
 pub use world_connection_provider::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,

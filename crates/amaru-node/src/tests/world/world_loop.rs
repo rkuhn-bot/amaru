@@ -24,10 +24,13 @@ use std::{
     time::Duration,
 };
 
-use amaru_kernel::Peer;
+use amaru_kernel::{HeaderHash, Peer};
 use amaru_ouroboros::{ConnectionId, ToSocketAddrs};
-use amaru_protocols::network_effects::{
-    AcceptEffect, AcceptError, ConnectEffect, ConnectError, ReceiveError, RecvEffect, SendEffect, SendError,
+use amaru_protocols::{
+    manager::ManagerMessage,
+    network_effects::{
+        AcceptEffect, AcceptError, ConnectEffect, ConnectError, ReceiveError, RecvEffect, SendEffect, SendError,
+    },
 };
 use amaru_pure_stage::{
     Effect, Instant, Name, SendData,
@@ -35,7 +38,9 @@ use amaru_pure_stage::{
     trace_buffer::TraceEntry,
 };
 
-use super::{GraphWakeReason, HeapLogEntry, NetworkEvent, WorldConnectionProvider, WorldHeapItem};
+use super::{
+    GraphWakeReason, HeapLogEntry, InjectorShared, InventoryBlock, NetworkEvent, WorldConnectionProvider, WorldHeapItem,
+};
 
 /// World loop: pops the one physical `(time, sequence)` heap.
 ///
@@ -65,6 +70,8 @@ pub struct WorldLoop {
     ///
     /// Keyed by `(graph_idx, Name)` so two `build_node` graphs can share mux/recv names.
     terminated_stages: BTreeSet<(usize, Name)>,
+    /// Serve-only injector inventory and reveal cursor. Owned here, not on [`SimulationRunning`].
+    injector: Option<Arc<InjectorShared>>,
 }
 
 type Completion = (usize, Name, Box<dyn SendData>);
@@ -94,6 +101,7 @@ impl WorldLoop {
             pending_sends: BTreeMap::new(),
             pending_recvs: BTreeMap::new(),
             terminated_stages: BTreeSet::new(),
+            injector: None,
         };
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
@@ -108,6 +116,53 @@ impl WorldLoop {
     /// Borrow the node graphs owned by this world.
     pub fn graphs(&self) -> &[SimulationRunning] {
         &self.graphs
+    }
+
+    /// Attach the serve-only injector handle this loop owns.
+    pub fn with_injector(mut self, injector: Arc<InjectorShared>) -> Self {
+        self.injector = Some(injector);
+        self
+    }
+
+    /// Inventory published by the injector graph after it has been stepped.
+    pub fn inventory(&self) -> Vec<InventoryBlock> {
+        self.injector.as_ref().map(|injector| injector.inventory()).unwrap_or_default()
+    }
+
+    /// Revealed prefix tip, or origin when nothing has been revealed.
+    pub fn revealed_tip(&self) -> amaru_kernel::Point {
+        self.injector.as_ref().map(|injector| injector.revealed_tip()).unwrap_or(amaru_kernel::Point::Origin)
+    }
+
+    /// Reveal inventory through `hash` and advertise that tip to the injector manager.
+    pub fn reveal(&mut self, hash: HeaderHash) -> anyhow::Result<Option<InventoryBlock>> {
+        let injector = self.injector.clone().ok_or_else(|| anyhow::anyhow!("world has no injector"))?;
+        let revealed = injector.reveal_through(hash)?;
+        self.advertise_revealed_tip(&injector, revealed.as_ref())?;
+        Ok(revealed)
+    }
+
+    /// Reveal the next inventory block and advertise that tip to the injector manager.
+    pub fn reveal_next(&mut self) -> anyhow::Result<Option<InventoryBlock>> {
+        let injector = self.injector.clone().ok_or_else(|| anyhow::anyhow!("world has no injector"))?;
+        let revealed = injector.reveal_next_block()?;
+        self.advertise_revealed_tip(&injector, revealed.as_ref())?;
+        Ok(revealed)
+    }
+
+    fn advertise_revealed_tip(
+        &mut self,
+        injector: &InjectorShared,
+        revealed: Option<&InventoryBlock>,
+    ) -> anyhow::Result<()> {
+        let Some(block) = revealed else {
+            return Ok(());
+        };
+        let graph_idx = injector.graph_index();
+        let manager = injector.manager();
+        self.graphs[graph_idx].enqueue_msg(&manager, [ManagerMessage::new_tip(block.point)]);
+        self.schedule_graph_if_needed(graph_idx);
+        Ok(())
     }
 
     /// Run until no more heap events or graph wakes at-or-before horizon.
