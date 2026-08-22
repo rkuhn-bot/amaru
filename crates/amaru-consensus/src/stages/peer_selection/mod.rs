@@ -133,7 +133,9 @@ pub const SHARE_REQUEST_AMOUNT: u8 = 20;
 /// - **Disconnected**:
 ///   - `Inbound`: Removes from `inbound_peers` only on exact `ConnectionId` match
 ///     (via `Entry::Occupied` guard).
-///   - `Outbound` + `will_retry == true`: Clears availability claims only.
+///   - `Outbound` + `will_retry == true`: If present as `PeerState::Connected` with
+///     matching id, replaces it with `Connecting` so a reconnect handshake does
+///     not race a stale live entry; then clears availability if nothing remains.
 ///   - `Outbound` + `will_retry == false`: Removes only if present as exactly
 ///     `PeerState::Connected` with matching id; then `regulate_peers`.
 ///     (Share-request timers die with the connection's peer-sharing stage.)
@@ -641,8 +643,22 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
             }
             state.clear_availability_if_gone(&peer, &eff).await;
         }
-        PeerSelectionMsg::Disconnected(peer, _, ConnectionDirection::Outbound, true) => {
-            eff.external(Performance::clear_peer_availability(peer)).await;
+        PeerSelectionMsg::Disconnected(peer, conn_id, ConnectionDirection::Outbound, true) => {
+            if let Entry::Occupied(mut entry) = state.outbound_peers.entry(peer.clone())
+                && let PeerState::Connected(conn) = entry.get()
+                && conn.id == conn_id
+            {
+                let span = debug_span!(
+                    amaru::protocols::peer_selection::peer::DISCONNECTED,
+                    peer = peer.clone(),
+                    conn_id = conn_id.as_u64(),
+                    direction = ConnectionDirection::Outbound,
+                )
+                .entered();
+                entry.insert(PeerState::Connecting);
+                drop(span);
+            }
+            state.clear_availability_if_gone(&peer, &eff).await;
         }
         PeerSelectionMsg::Disconnected(peer, conn_id, ConnectionDirection::Outbound, _) => {
             if let Entry::Occupied(entry) = state.outbound_peers.entry(peer.clone())
