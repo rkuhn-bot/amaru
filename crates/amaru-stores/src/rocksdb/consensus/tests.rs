@@ -21,10 +21,12 @@ use std::{
 };
 
 use amaru_kernel::{
-    BlockHeight, Hash, Header, HeaderHash, IsHeader, NetworkPoint, NonEmptyVec, Nonce, ORIGIN_HASH, Point, PoolId,
-    RawBlock, Slot, any_hash28, any_header, any_header_hash, any_header_with_parent, any_headers_chain, make_header,
-    make_header_with_op_cert_seq,
+    BlockHeight, EraHistory, Hash, Header, HeaderHash, IsHeader, NetworkPoint, NonEmptyVec, Nonce, ORIGIN_HASH, Point,
+    PoolId, RawBlock, Slot, any_hash28, any_header, any_header_hash, any_header_with_parent, any_headers_chain,
+    cardano::network_block::make_encoded_block,
+    make_header, make_header_with_op_cert_seq,
     size::HEADER,
+    to_cbor,
     utils::tests::{random_bytes, run_strategy},
 };
 use amaru_ouroboros_traits::{
@@ -64,11 +66,11 @@ fn rocksdb_chain_store_can_get_header_it_puts() {
 #[test]
 fn rocksdb_chain_store_can_get_block_it_puts() {
     with_db(|db| {
-        let hash: HeaderHash = random_bytes(32).as_slice().into();
-        let block = RawBlock::from(&*vec![1; 64]);
+        let header = make_header(1, 0, None);
+        let block = make_encoded_block(&header, &EraHistory::default());
 
-        db.store_block(&hash, &block).unwrap();
-        let block2 = db.load_block(&hash).unwrap();
+        db.store_block(&header.hash(), &block).unwrap();
+        let block2 = db.load_block(&header.hash()).unwrap();
         assert_eq!(Some(block), block2);
     })
 }
@@ -83,6 +85,32 @@ fn rocksdb_chain_store_can_check_if_block_exists() {
         db.store_block(&hash, &block).unwrap();
         assert!(db.has_block(&hash).unwrap());
     })
+}
+
+#[test]
+fn load_header_rejects_blob_under_wrong_hash() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let store = initialise_test_rw_store(tempdir.path());
+    let stored = make_header(1, 0, None);
+    let requested = make_header(2, 1, None).hash();
+
+    store.db.put([&HEADER_PREFIX[..], &requested[..]].concat(), to_cbor(&stored)).unwrap();
+
+    assert_eq!(store.load_header(&requested), None);
+    assert_eq!(store.load_header_with_validity(&requested), None);
+}
+
+#[test]
+fn load_block_rejects_blob_under_wrong_hash() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let store = initialise_test_rw_store(tempdir.path());
+    let stored = make_header(1, 0, None);
+    let block = make_encoded_block(&stored, &EraHistory::default());
+    let requested = make_header(2, 1, None).hash();
+
+    store.db.put([&BLOCK_PREFIX[..], &requested[..]].concat(), block.as_ref()).unwrap();
+
+    assert!(store.load_block(&requested).is_err());
 }
 
 #[test]
@@ -914,7 +942,7 @@ fn read_snapshot_exposes_direct_read_operations() {
         tail: headers.h1.hash(),
         epoch: Default::default(),
     };
-    let block = RawBlock::from(&*vec![1; 64]);
+    let block = make_encoded_block(&headers.h3, &EraHistory::default());
 
     with_read_db(
         {

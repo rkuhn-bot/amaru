@@ -47,6 +47,7 @@ Other guiding principles:
 
 ### Fixed
 
+- **amaru-stores**: reject chain-store header and block loads whose content does not hash to the requested key. ([#1261](https://github.com/pragma-org/amaru/issues/1261))
 - **amaru-consensus**: resume outbound sync after a mux drop by forgetting the dead connection before the replacement handshake.
 - **amaru-tui**: calculate reported block and transaction throughput using the interval between system-metric samples.
 - **amaru-plutus**: encode `CostModels` as a map from language to cost model (#1219).
