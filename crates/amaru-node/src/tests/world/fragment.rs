@@ -19,10 +19,12 @@
 //! The latest snapshot epoch is that maximum; the fragment target is the epoch after it.
 
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
 };
 
+use amaru_consensus::stages::select_chain::cmp_tip;
 use amaru_kernel::{Epoch, EraHistory, Header, HeaderHash, IsHeader, Slot};
 use amaru_ouroboros::BaseReadChainStore;
 use amaru_stores::rocksdb::{RocksDbConfig, consensus::RocksDBStore};
@@ -219,6 +221,31 @@ pub fn last_body_on_candidate(
     }
 }
 
+/// Latest stored body reachable from `after` by walking children (not `next_best_chain`).
+///
+/// After realign the best-chain pointer is the snapshot, but fragment headers remain as
+/// children. Recovery's `find_best_candidate` walks that same tree. The clock offset must
+/// be taken from this header so served HEADs are not in the future.
+pub fn latest_body_after(store: &dyn BaseReadChainStore, after: HeaderHash) -> anyhow::Result<Header> {
+    let mut best = None;
+    let mut to_visit = store.get_children(&after);
+    let mut seen = BTreeSet::new();
+    while let Some(hash) = to_visit.pop() {
+        if !seen.insert(hash) {
+            continue;
+        }
+        let Some(header) = store.load_header(&hash) else {
+            continue;
+        };
+        if store.has_block(&hash)? && best.as_ref().is_none_or(|current| cmp_tip(Some(&header), Some(current)).is_gt())
+        {
+            best = Some(header);
+        }
+        to_visit.extend(store.get_children(&hash));
+    }
+    best.ok_or_else(|| anyhow::anyhow!("no stored body after snapshot {after}"))
+}
+
 #[cfg(test)]
 mod tests {
     use amaru_kernel::PREPROD_ERA_HISTORY;
@@ -240,6 +267,7 @@ mod tests {
         assert_eq!(discovered.target_epoch.as_u64(), meta.target_epoch);
         assert_eq!(discovered.target_epoch, discovered.latest.epoch + 1);
         assert_eq!(meta.peer, "sleipnir.rkuhn.info:3001");
+        assert!(!meta.fragment_head.is_empty(), "meta.fragment_head records a previous production HEAD");
     }
 
     #[test]

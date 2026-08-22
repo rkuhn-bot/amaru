@@ -1225,8 +1225,8 @@ fn test_world_disseminates_preprod_fragment() {
     use amaru_protocols::store_effects::ResourceHeaderStore;
 
     use super::fragment::{
-        copy_dir, fixture_root, header_hash_from_snapshot_point, last_body_on_candidate, linear_fragment_to_head,
-        linear_fragment_with_bodies, load_committed_meta, open_chain_store, stores_ready,
+        copy_dir, fixture_root, header_hash_from_snapshot_point, last_body_on_candidate, latest_body_after,
+        linear_fragment_to_head, linear_fragment_with_bodies, load_committed_meta, open_chain_store, stores_ready,
     };
 
     let _guards = fragment_trace_guards();
@@ -1245,7 +1245,7 @@ fn test_world_disseminates_preprod_fragment() {
 
     let primed_chain_path = primed_tmp.path().join("chain");
     let snapshot_hash = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
-    let meta_head = {
+    let clock_head = {
         let store = open_chain_store(&primed_chain_path).expect("open primed chain");
         let fragment = linear_fragment_with_bodies(&store, snapshot_hash).expect("disseminable fragment");
         let head = fragment.last().cloned().expect("fragment has a HEAD");
@@ -1261,11 +1261,11 @@ fn test_world_disseminates_preprod_fragment() {
             format!("{}", head.point()),
             "HEAD must not be the first header after the snapshot"
         );
-        head
+        latest_body_after(&store, snapshot_hash).expect("latest stored body after snapshot")
     };
 
     let offset = PREPROD_ERA_HISTORY
-        .slot_to_relative_time_unchecked_horizon(meta_head.slot())
+        .slot_to_relative_time_unchecked_horizon(clock_head.slot())
         .expect("fragment slot in era history")
         + Duration::from_secs(30);
 
@@ -1337,6 +1337,9 @@ fn test_world_disseminates_preprod_fragment() {
         receiver_store.get_best_chain_tip(),
         served_tip,
         "receiver best tip starts at bootstrap, not the served HEAD"
+    );
+    eprintln!(
+        "catch-up served HEAD {served_tip} recovery={recovery_hash} realigned_tip={realigned_tip} snapshot={snapshot_hash}"
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);

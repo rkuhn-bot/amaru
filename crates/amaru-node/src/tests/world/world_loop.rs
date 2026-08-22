@@ -364,10 +364,12 @@ impl WorldLoop {
     }
 
     fn resume(&mut self, (graph_idx, stage_name, result): Completion) {
-        self.graphs[graph_idx]
-            .resume_external_box(&stage_name, result)
-            .unwrap_or_else(|e| panic!("failed to resume stage {stage_name}: {e}"));
-        kick_external(&mut self.graphs[graph_idx]);
+        match self.graphs[graph_idx].resume_external_box(&stage_name, result) {
+            Ok(()) => kick_external(&mut self.graphs[graph_idx]),
+            Err(error) => {
+                tracing::warn!(%stage_name, graph = graph_idx, %error, "skip resume on terminated stage");
+            }
+        }
     }
 
     /// Run until no more events and all graphs idle/terminated.
