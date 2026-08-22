@@ -952,6 +952,33 @@ fn test_short_and_long_tail_payloads_sit_on_one_heap() {
     assert!(world.heap_contents().is_empty(), "both payloads must have been popped");
 }
 
+/// Two payloads on one destination stay in send order. A long-tail first hop holds the
+/// short second hop (TCP FIFO). Different connections may still pass each other.
+#[test]
+fn test_same_conn_payloads_stay_in_send_order() {
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
+    let (conn, _) = pair_ids();
+    provider.schedule_payload(NetworkEvent::Deliver { conn, data: Bytes::from_static(b"first") });
+    provider.schedule_payload(NetworkEvent::Deliver { conn, data: Bytes::from_static(b"second") });
+
+    let first = HeapLogEntry { sequence: 0, time_nanos: 0, kind: HeapLogKind::Deliver { conn, data_len: 5 } };
+    let second = HeapLogEntry { sequence: 1, time_nanos: 0, kind: HeapLogKind::Deliver { conn, data_len: 6 } };
+    let mut world = WorldLoop::new(provider, vec![]);
+    let on_heap = world.heap_contents();
+    assert_eq!(on_heap.len(), 2, "both same-conn payloads sit on the heap");
+    assert_eq!(on_heap[0].kind, first.kind);
+    assert_eq!(on_heap[1].kind, second.kind);
+    assert!(on_heap[0].time_nanos <= on_heap[1].time_nanos, "later send cannot arrive earlier on the same conn");
+    assert!(on_heap[0].sequence < on_heap[1].sequence);
+
+    world.run_until_horizon(on_heap[1].time_nanos);
+    let log = world.take_heap_log();
+    assert_eq!(log[0].kind, first.kind);
+    assert_eq!(log[1].kind, second.kind);
+    assert!(log[0].time_nanos <= log[1].time_nanos);
+    assert!(world.heap_contents().is_empty());
+}
+
 /// A ready-now graph wake and a `NetworkEvent` at the same nanos are one heap.
 ///
 /// `Deliver` is scheduled first (seq 0). The graph is then placed on that same heap
@@ -1398,35 +1425,13 @@ fn test_world_disseminates_preprod_fragment() {
             unique_rf.push(*hash);
         }
     }
-    let mut best_walk = Vec::new();
-    let mut cursor = realigned_tip;
-    while let Some(next) = primed_after.next_best_chain(&cursor) {
-        best_walk.push(format!("{next}"));
-        if best_walk.len() == 3 {
-            break;
-        }
-        cursor = next;
-    }
     let dropped = world.graphs()[1].trace_buffer().lock().dropped_messages();
-    let initiator_kinds: Vec<_> = receiver_traces.iter().filter_map(entry_chainsync_initiator_kind).collect();
-    let rf_detail: Vec<_> = unique_rf
+    let saw_head_rf = unique_rf.contains(&served_head.hash());
+    let saw_rollback = receiver_traces
         .iter()
-        .map(|hash| {
-            let primed = primed_after.load_header(hash);
-            let on_b = receiver_after.load_header(hash).is_some();
-            match primed {
-                Some(header) => format!(
-                    "{hash} primed={} parent={:?} on_b={on_b} in_fragment={}",
-                    header.point(),
-                    header.parent(),
-                    served_fragment.iter().any(|h| h.hash() == *hash)
-                ),
-                None => format!("{hash} primed=missing on_b={on_b}"),
-            }
-        })
-        .collect();
+        .any(|entry| entry_chainsync_initiator_kind(entry).is_some_and(|kind| kind.starts_with("RollBackward")));
     eprintln!(
-        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} unique_rf={} vh={validated} dropped={dropped} connect={connects} accept={accepts} deliver={delivers} first={} best_walk={best_walk:?} initiator={initiator_kinds:?} rf_detail={rf_detail:?}",
+        "catch-up after WorldLoop wall={wall:?} sim={}ns next={:?} primed_tip={} receiver_tip={} have={receiver_have}/{} rf={roll_forwards} unique_rf={} vh={validated} dropped={dropped} connect={connects} accept={accepts} deliver={delivers} first={} head_rf={saw_head_rf} rollback={saw_rollback}",
         world.graphs()[0].now().sim_elapsed().as_nanos(),
         world.peek_next_event_time(),
         primed_after.get_best_chain_tip(),

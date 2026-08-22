@@ -203,6 +203,9 @@ struct WorldInner {
     payload_delay: PayloadDelay,
     listeners: BTreeMap<SocketAddr, Listener>,
     endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
+    /// Last scheduled `Deliver` arrival on each destination. One connection is FIFO:
+    /// hop delay may be long-tail, but a later send cannot pass an earlier one.
+    last_deliver_at: BTreeMap<ConnectionId, u64>,
     next_conn_id: ConnectionId,
 }
 
@@ -252,6 +255,7 @@ impl WorldConnectionProvider {
                 payload_delay,
                 listeners: BTreeMap::new(),
                 endpoints: BTreeMap::new(),
+                last_deliver_at: BTreeMap::new(),
                 next_conn_id: ConnectionId::initial(),
             }),
         }
@@ -367,6 +371,7 @@ impl WorldConnectionProvider {
     pub fn close_endpoint(&self, conn: ConnectionId) -> Option<ConnectionId> {
         let mut inner = self.inner.lock();
         let endpoint = inner.endpoints.remove(&conn)?;
+        inner.last_deliver_at.remove(&conn);
         inner.endpoints.contains_key(&endpoint.peer_conn_id).then_some(endpoint.peer_conn_id)
     }
 
@@ -419,7 +424,19 @@ fn schedule_payload_locked(inner: &mut WorldInner, event: NetworkEvent) {
         PayloadDelay::LongTail => long_tail_payload_delay_nanos(inner.seed, inner.latency_samples),
     };
     inner.latency_samples += 1;
-    let time_nanos = inner.current_time_nanos + delay;
+    let hop = inner.current_time_nanos + delay;
+    // Long-tail is a hop setting, not a license to reorder. One destination inbox is FIFO.
+    let time_nanos = match &event {
+        NetworkEvent::Deliver { conn, .. } => {
+            let arrive = inner.last_deliver_at.get(conn).copied().map_or(hop, |last| hop.max(last));
+            inner.last_deliver_at.insert(*conn, arrive);
+            arrive
+        }
+        NetworkEvent::Accepted { .. }
+        | NetworkEvent::ConnectAttempt { .. }
+        | NetworkEvent::SendAck { .. }
+        | NetworkEvent::Close { .. } => hop,
+    };
     schedule_event_locked(inner, time_nanos, event);
 }
 
