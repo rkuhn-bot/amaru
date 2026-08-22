@@ -605,6 +605,94 @@ async fn test_close_fails_peer_recv() {
     assert!(recv_err.lock().as_ref().is_some_and(|s| s.contains("connection closed")));
 }
 
+/// A graph that terminates while a same-conn Deliver is still on the heap must
+/// drop that stage's pending recv. The Deliver still pops and logs; WorldLoop
+/// must not resume the gone stage. Live `heap_contents` / `heap_log`, not a
+/// sorted-only proof. Without the drop, `resume_external_box` panics.
+#[tokio::test]
+async fn test_terminate_drops_pending_before_later_deliver() {
+    const PAYLOAD_HOP_NANOS: u64 = 10_000_000;
+    let handle = tokio::runtime::Handle::current();
+    let provider = Arc::new(WorldConnectionProvider::with_payload_delay(SEED, PAYLOAD_HOP_NANOS, PAYLOAD_HOP_NANOS));
+    let listener_addr: SocketAddr = "127.0.0.1:9800".parse().unwrap();
+    let received = observed::<Vec<u8>>();
+    let received_a = received.clone();
+
+    let mut graph_a = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph_a.resources().put::<ConnectionsResource>(provider.clone());
+    let stage_a = graph_a.stage("parent", move |_state: (), _unit: (), eff| {
+        let received_a = received_a.clone();
+        async move {
+            let net = Network::new(&eff);
+            net.listen(listener_addr).await.unwrap();
+            let (_peer, conn) = net.accept(listener_addr).await.unwrap();
+            let child = eff
+                .stage("recv", move |(), conn: ConnectionId, eff| {
+                    let received_a = received_a.clone();
+                    async move {
+                        let net = Network::new(&eff);
+                        let bytes = net.recv(conn, NonZeroUsize::new(4).unwrap()).await.unwrap();
+                        set_observed(&received_a, bytes.as_ref().to_vec());
+                    }
+                })
+                .await;
+            let child = eff.wire_up(child, ()).await;
+            eff.send(&child, conn).await;
+            eff.wait(Duration::from_nanos(1)).await;
+            eff.terminate().await
+        }
+    });
+    let stage_a = graph_a.wire_up(stage_a, ());
+    let mut sim_a = graph_a.run(&handle);
+    sim_a.enqueue_msg(&stage_a, [()]);
+
+    let mut graph_b = SimulationBuilder::default().with_eval_strategy(Fifo);
+    graph_b.resources().put::<ConnectionsResource>(provider.clone());
+    let stage_b = graph_b.stage("sender", move |_state: (), _unit: (), eff| async move {
+        let net = Network::new(&eff);
+        let conn = net.connect(listener_addr.into(), Duration::from_secs(1)).await.unwrap();
+        net.send(conn, NonEmptyBytes::try_from(Bytes::from("ping")).unwrap()).await.unwrap();
+    });
+    let stage_b = graph_b.wire_up(stage_b, ());
+    let mut sim_b = graph_b.run(&handle);
+    sim_b.enqueue_msg(&stage_b, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
+    let (_initiator, responder) = pair_ids();
+    let t_connected = wire_delay_nanos(SEED, 0);
+    let t_accepted = t_connected + wire_delay_nanos(SEED, 1);
+    let t_terminate = t_accepted + 1;
+    let t_deliver = t_connected + PAYLOAD_HOP_NANOS;
+    assert!(t_deliver > t_terminate, "payload hop must land after terminate so the Deliver stays on the heap");
+
+    world.run_until_horizon(t_terminate);
+    let leftover = HeapLogKind::Deliver { conn: responder, data_len: 4 };
+    assert!(
+        world.heap_contents().iter().any(|e| e.kind == leftover),
+        "Deliver must still sit on the live heap after terminate: {:?}",
+        world.heap_contents()
+    );
+    assert!(
+        !world.heap_log().iter().any(|e| e.kind == leftover),
+        "Deliver must not have popped before the leftover-heap check: {:?}",
+        world.heap_log()
+    );
+    assert_eq!(*received.lock(), None, "recv stage must still be pending at terminate");
+
+    world.run_until_horizon(t_deliver);
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == leftover),
+        "Deliver must pop and log after pending was dropped: {:?}",
+        world.heap_log()
+    );
+    assert!(
+        !world.heap_contents().iter().any(|e| e.kind == leftover),
+        "Deliver must have left the live heap: {:?}",
+        world.heap_contents()
+    );
+    assert_eq!(*received.lock(), None, "gone recv stage must not be resumed");
+}
+
 /// A Wait must resume from next_wakeup even when the network heap is empty.
 #[tokio::test]
 async fn test_wait_resumes_without_heap_event() {

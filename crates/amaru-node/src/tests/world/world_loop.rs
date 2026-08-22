@@ -60,6 +60,8 @@ pub struct WorldLoop {
     claimed_accepts: BTreeMap<SocketAddr, VecDeque<(usize, Name)>>,
     pending_sends: BTreeMap<ConnectionId, VecDeque<(usize, Name)>>,
     pending_recvs: BTreeMap<ConnectionId, VecDeque<(usize, Name, NonZeroUsize)>>,
+    /// Graphs that have already returned [`Blocked::Terminated`].
+    terminated_graphs: BTreeSet<usize>,
 }
 
 type Completion = (usize, Name, Box<dyn SendData>);
@@ -88,6 +90,7 @@ impl WorldLoop {
             claimed_accepts: BTreeMap::new(),
             pending_sends: BTreeMap::new(),
             pending_recvs: BTreeMap::new(),
+            terminated_graphs: BTreeSet::new(),
         };
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
@@ -137,6 +140,9 @@ impl WorldLoop {
     }
 
     fn schedule_graph_if_needed(&mut self, index: usize) {
+        if self.terminated_graphs.contains(&index) {
+            return;
+        }
         let graph = &mut self.graphs[index];
         graph.receive_inputs();
         let now = self.provider.current_time_nanos();
@@ -187,7 +193,11 @@ impl WorldLoop {
                 Blocked::Deadlock(deadlock) => {
                     panic!("graph {index} deadlock: {deadlock:?}");
                 }
-                Blocked::Idle | Blocked::Sleeping { .. } | Blocked::Busy { .. } | Blocked::Terminated(_) => {
+                Blocked::Terminated(_) => {
+                    self.drop_pending_for_graph(index);
+                    break;
+                }
+                Blocked::Idle | Blocked::Sleeping { .. } | Blocked::Busy { .. } => {
                     break;
                 }
             }
@@ -364,12 +374,25 @@ impl WorldLoop {
     }
 
     fn resume(&mut self, (graph_idx, stage_name, result): Completion) {
-        match self.graphs[graph_idx].resume_external_box(&stage_name, result) {
-            Ok(()) => kick_external(&mut self.graphs[graph_idx]),
-            Err(error) => {
-                tracing::warn!(%stage_name, graph = graph_idx, %error, "skip resume on terminated stage");
-            }
-        }
+        self.graphs[graph_idx]
+            .resume_external_box(&stage_name, result)
+            .unwrap_or_else(|e| panic!("failed to resume stage {stage_name}: {e}"));
+        kick_external(&mut self.graphs[graph_idx]);
+    }
+
+    /// Cancel queued network completions for a graph we have already seen terminate.
+    ///
+    /// Heap events for that graph may still pop and log. They must not resume a gone stage.
+    fn drop_pending_for_graph(&mut self, graph_idx: usize) {
+        self.terminated_graphs.insert(graph_idx);
+        drop_graph_from_pending(&mut self.pending_connects, graph_idx);
+        drop_graph_from_pending(&mut self.pending_accepts, graph_idx);
+        drop_graph_from_pending(&mut self.claimed_accepts, graph_idx);
+        drop_graph_from_pending(&mut self.pending_sends, graph_idx);
+        self.pending_recvs.retain(|_, queue| {
+            queue.retain(|(idx, _, _)| *idx != graph_idx);
+            !queue.is_empty()
+        });
     }
 
     /// Run until no more events and all graphs idle/terminated.
@@ -453,6 +476,13 @@ fn classify_network(effect: &Effect) -> Option<Posted> {
             bytes: recv.bytes,
         })
     }
+}
+
+fn drop_graph_from_pending<K: Ord>(pending: &mut BTreeMap<K, VecDeque<(usize, Name)>>, graph_idx: usize) {
+    pending.retain(|_, queue| {
+        queue.retain(|(idx, _)| *idx != graph_idx);
+        !queue.is_empty()
+    });
 }
 
 fn fail_pending_on(

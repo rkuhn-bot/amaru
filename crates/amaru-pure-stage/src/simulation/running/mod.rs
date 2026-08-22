@@ -1258,14 +1258,13 @@ impl SimulationRunning {
 
     /// Resume an [`Effect::External`].
     ///
-    /// Returns an error if the stage is gone (including after termination) or is not
-    /// waiting for an external effect.
+    /// # Panics
+    ///
+    /// Panics if the stage name does not exist (which may also happen due to termination).
     pub fn resume_external_box(&mut self, at_stage: impl AsRef<Name>, result: Box<dyn SendData>) -> anyhow::Result<()> {
         let at_stage = at_stage.as_ref().clone();
         {
-            let Some(data) = self.stages.get_mut(&at_stage) else {
-                anyhow::bail!("stage `{at_stage}` was already terminated");
-            };
+            let data = self.stages.get_mut(&at_stage).assert_stage("which cannot receive external effects");
             if !matches!(data.waiting, Some(StageEffect::External(_))) {
                 anyhow::bail!("stage `{at_stage}` was not waiting for an external effect, but {:?}", data.waiting);
             }
