@@ -27,10 +27,10 @@ use amaru_protocols::{
     store_effects::ResourceParameters,
 };
 use amaru_pure_stage::{
-    Effect, Instant, Name, StageGraph, StageResponse, assert_trace_match_filter, register_data_deserializer,
-    register_effect_deserializer,
+    Effect, Instant, Name, StageGraph, StageResponse, TraceMatch, assert_trace_match_filter,
+    register_data_deserializer, register_effect_deserializer,
     simulation::{Fifo, SimulationBuilder},
-    tm_clock, tm_effect, tm_input, tm_resume_external, tm_resume_unit, tm_state,
+    tm_clock, tm_effect, tm_external_effect_any, tm_input, tm_resume_external, tm_resume_unit, tm_state,
     trace_buffer::{TraceBuffer, TraceEntry},
 };
 use parking_lot::Mutex;
@@ -38,8 +38,8 @@ use tokio_util::bytes::Bytes;
 
 use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
-    NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider, WorldLoop, build_world_node,
-    payload_delay_nanos, wire_delay_nanos,
+    LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider,
+    WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos, wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -630,6 +630,48 @@ async fn test_wait_resumes_without_heap_event() {
     assert_eq!(*done.lock(), Some(true));
 }
 
+/// A Wait on a graph with a non-zero global epoch offset must still resume.
+/// Instant comparison is `sim_elapsed + offset`. Waking with a zero-offset
+/// max_time misses that Wait and reschedules the Sleeping wake forever, so a
+/// later Deliver never pops.
+#[tokio::test]
+async fn test_sleeping_wake_uses_graph_epoch_offset() {
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let done = observed::<bool>();
+    let done_a = done.clone();
+    let epoch_offset = Duration::from_secs(70_419_600);
+    let wait_at = 100_000_000;
+    let deliver_at = 200_000_000;
+    let hop_conn = ConnectionId::initial();
+    provider.schedule_event_at(deliver_at, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
+
+    let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo).with_global_epoch_offset(epoch_offset);
+    graph.resources().put::<ConnectionsResource>(provider.clone());
+    let stage = graph.stage("waiter", move |_state: (), _unit: (), eff| {
+        let done_a = done_a.clone();
+        async move {
+            eff.wait(Duration::from_nanos(wait_at)).await;
+            set_observed(&done_a, true);
+        }
+    });
+    let stage = graph.wire_up(stage, ());
+    let mut sim = graph.run(&handle);
+    sim.enqueue_msg(&stage, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim]);
+    world.run_until_horizon(wait_at.saturating_sub(1));
+    assert_eq!(*done.lock(), None, "Wait must not complete before its wakeup");
+    assert_eq!(world.peek_next_event_time(), Some(wait_at));
+
+    world.run_until_horizon(deliver_at);
+    assert_eq!(*done.lock(), Some(true), "Sleeping wait must resume using the graph epoch offset");
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }),
+        "later Deliver must pop after the offset Wait wakes"
+    );
+}
+
 #[tokio::test]
 async fn test_listen_same_port_errors() {
     let handle = tokio::runtime::Handle::current();
@@ -841,30 +883,48 @@ fn test_default_payload_delay_matches_wire_hop() {
     }
 }
 
-/// Two honest payloads sent at the same instant sit on the one physical heap at their
-/// sampled delays. Seed `209_514` draws different delays, one within 10µs of the 5-slot
-/// cap. Pop order follows those times — a sorted `assert_heap_log` cannot hide a missing
-/// late payload.
+/// Seeded long-tail samples stay in the 1–5ms hop for the majority, with at least one
+/// sample orders of magnitude later. A uniform draw over `[1ms, 5s]` fails this.
 #[test]
-fn test_honest_payloads_sit_on_heap_at_sampled_delays() {
-    const PAYLOAD_SEED: u64 = 209_514;
-    let min = WIRE_DELAY_MIN_NANOS;
-    let max = HONEST_PAYLOAD_DELAY_MAX_NANOS;
-    let d0 = payload_delay_nanos(PAYLOAD_SEED, 0, min, max);
-    let d1 = payload_delay_nanos(PAYLOAD_SEED, 1, min, max);
-    assert_ne!(d0, d1, "payload samples must differ");
+fn test_long_tail_payload_delay_is_not_uniform_over_five_slots() {
+    const N: u64 = 256;
+    let samples: Vec<u64> = (0..N).map(|index| long_tail_payload_delay_nanos(SEED, index)).collect();
+    let short = samples.iter().filter(|d| (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(d)).count();
+    let long =
+        samples.iter().filter(|d| (LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS).contains(d)).count();
     assert!(
-        (min..=max).contains(&d0) && (min..=max).contains(&d1),
-        "payload delays {d0} and {d1} must stay in [{min}, {max}]"
+        short * 2 > samples.len(),
+        "most samples must stay in the 1–5ms hop, not a uniform [1ms, 5s] draw; short={short}/{}",
+        samples.len()
     );
-    assert!(d0.max(d1) >= max.saturating_sub(10_000), "one payload must land near the 5-slot cap, got {d0} and {d1}");
+    assert!(long >= 1, "at least one sample must land in the long-tail bucket (>= 1s), got none");
     assert!(
-        d0.min(d1) > WIRE_DELAY_MAX_NANOS,
-        "the earlier payload must still exceed the 1–5ms hop, got {}",
-        d0.min(d1)
+        samples.iter().all(|d| {
+            (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(d)
+                || (LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS).contains(d)
+        }),
+        "every sample must be a short hop or a long-tail hop within the per-send cap: {samples:?}"
+    );
+    let again: Vec<u64> = (0..N).map(|index| long_tail_payload_delay_nanos(SEED, index)).collect();
+    assert_eq!(samples, again, "long-tail samples must be deterministic for a seed");
+}
+
+/// Two honest payloads sent at the same instant — one short hop, one long-tail — sit on
+/// the one physical heap at those times. Seed `7` draws that pair. Pop the short first;
+/// the long one stays on the heap. A sorted `assert_heap_log` cannot hide a missing late payload.
+#[test]
+fn test_short_and_long_tail_payloads_sit_on_one_heap() {
+    const PAYLOAD_SEED: u64 = 7;
+    let d0 = long_tail_payload_delay_nanos(PAYLOAD_SEED, 0);
+    let d1 = long_tail_payload_delay_nanos(PAYLOAD_SEED, 1);
+    let short_band = WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS;
+    let long_band = LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS;
+    assert!(
+        (short_band.contains(&d0) && long_band.contains(&d1)) || (long_band.contains(&d0) && short_band.contains(&d1)),
+        "seed {PAYLOAD_SEED} must draw one short hop and one long-tail payload, got {d0} and {d1}"
     );
 
-    let provider = Arc::new(WorldConnectionProvider::with_honest_payload_delay(PAYLOAD_SEED));
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(PAYLOAD_SEED));
     let (conn0, conn1) = pair_ids();
     provider.schedule_payload(NetworkEvent::Deliver { conn: conn0, data: Bytes::from_static(b"p0") });
     provider.schedule_payload(NetworkEvent::Deliver { conn: conn1, data: Bytes::from_static(b"p1") });
@@ -879,12 +939,12 @@ fn test_honest_payloads_sit_on_heap_at_sampled_delays() {
         vec![early, late],
         "both payloads must already sit on the one heap at their sampled times"
     );
-    assert_ne!(early.time_nanos, late.time_nanos);
-    assert_eq!(late.time_nanos, d0.max(d1), "the later heap entry is the near-5-slot payload");
+    assert!(short_band.contains(&early.time_nanos), "the earlier heap entry must be the short hop");
+    assert!(long_band.contains(&late.time_nanos), "the later heap entry must be the long-tail payload");
 
     world.run_until_horizon(early.time_nanos);
-    assert_eq!(world.take_heap_log(), vec![early], "earlier payload must pop first, not a sorted log of both");
-    assert_eq!(world.heap_contents(), vec![late], "later payload must still be on the heap at the 5-slot delay");
+    assert_eq!(world.take_heap_log(), vec![early], "short payload must pop first, not a sorted log of both");
+    assert_eq!(world.heap_contents(), vec![late], "long-tail payload must still be on the heap");
 
     world.run_until_horizon(late.time_nanos);
     assert_eq!(world.take_heap_log(), vec![late]);
@@ -1068,18 +1128,21 @@ async fn test_sleeping_graph_does_not_run_before_earlier_deliver() {
 /// the listen-side accept interval (100ms Wait) to be woken; that is left to a later PR
 /// so keepalive Waits stay un-woken.
 ///
-/// Proves they boot, connect, and put at least one header on the wire. Does not claim
-/// tip equality and does not load a preprod fragment. `k` stays at the production value.
-/// Horizon covers 1–5ms wire hops but stays under the 100ms accept interval.
+/// Proves they boot, connect, and put at least one header on the wire (typed
+/// chainsync `RollForward` or `ValidateHeaderEffect`). Does not claim tip equality
+/// and does not load a preprod fragment. `k` stays at the production value.
+/// Long-tail payload delay is a world setting, not a theorem. Horizon only runs
+/// far enough for sampled Deliveries to pop; it is not a Praos deadline.
 ///
 /// Not `#[tokio::test]`: production graphs issue DurationDist::Zero effects whose `run()`
 /// may be Pending on the first poll, and SimulationRunning then `Handle::block_on`s them.
 /// That panics inside an existing Tokio context. WorldLoop is therefore synchronous.
 #[test]
 fn test_world_owns_production_nodes_boot_connect_exchange() {
+    let _guards = fragment_trace_guards();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let handle = runtime.handle().clone();
-    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
 
     let conway_start_slot = Slot::from(68_774_400);
     let root_point = NetworkPoint::Specific(conway_start_slot, Hash::new([0u8; 32]));
@@ -1106,8 +1169,8 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
     let sim_b = build_world_node(&node_b, connections, &handle).expect("node B");
 
     let mut world = WorldLoop::new(provider, vec![sim_a, sim_b]);
-    // Wire hops are 1–5ms; stay under the 100ms listen-side accept Wait.
-    world.run_until_horizon(50_000_000);
+    // World coverage so a sampled long-tail Deliver can pop. Not a Praos deadline.
+    world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(WIRE_DELAY_MAX_NANOS));
 
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
@@ -1124,15 +1187,15 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::SendAck { .. })), "nodes must send: {log:?}");
     assert!(log.iter().any(|e| matches!(e.kind, HeapLogKind::Deliver { .. })), "nodes must deliver: {log:?}");
 
-    let exchanged = world.graphs().iter().any(|graph| {
-        graph.trace_buffer().lock().hydrate_without_timestamps().iter().any(trace_mentions_header_or_block)
+    let header_on_wire = world.graphs().iter().any(|graph| {
+        graph
+            .trace_buffer()
+            .lock()
+            .hydrate_without_timestamps()
+            .iter()
+            .any(|entry| tm_chainsync_roll_forward() == *entry || tm_validate_header() == *entry)
     });
-    assert!(exchanged, "expected at least one header or block on the wire under WorldLoop; heap={log:?}");
-}
-
-fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
-    let text = format!("{entry:?}");
-    text.contains("RollForward") || text.contains("ValidateHeader") || text.contains("HeaderContent")
+    assert!(header_on_wire, "expected a typed chainsync RollForward or ValidateHeaderEffect; heap={log:?}");
 }
 
 /// A real preprod fragment, produced by `run_until` after bootstrap, is disseminated over
@@ -1140,10 +1203,11 @@ fn trace_mentions_header_or_block(entry: &TraceEntry) -> bool {
 /// synthetic `any_headers_chain`). Node B starts from bootstrap only and must receive the
 /// fragment HEAD on the mux.
 ///
-/// Tip equality is asserted only after B has the fragment HEAD in store and a typed chainsync
-/// `RollForward` of that hash, plus a typed `ValidateHeaderEffect` on B. Comparison is production
-/// `cmp_tip` after production `CanValidateHeaders`, with production `k` (2160). This is not CP(k),
-/// not Genesis Condition B, and not paper *s*.
+/// B's `cmp_tip` equals the fragment HEAD after production `CanValidateHeaders`, once those
+/// headers have arrived. Long-tail payload delay is a world setting, not a theorem. Horizon
+/// only runs the world far enough for sampled Deliveries to pop; it is not a Praos deadline
+/// and not a paper time bound. This is not P-diff, not Δ=5, not inbox-by-sl+6, not P-join,
+/// and not 2Δ. `k` stays at the production value (2160).
 ///
 /// `target_upstream_peers=1` is isolation (one intended hop). Dest-keyed pairing already completes
 /// `Connected` only for the connect that targeted that listener.
@@ -1208,7 +1272,7 @@ fn test_world_disseminates_preprod_fragment() {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let handle = runtime.handle().clone();
-    let provider = Arc::new(WorldConnectionProvider::new(SEED));
+    let provider = Arc::new(WorldConnectionProvider::with_long_tail_payload_delay(SEED));
 
     let listen_primed = "127.0.0.1:9321";
     let listen_receiver = "127.0.0.1:9320";
@@ -1273,8 +1337,8 @@ fn test_world_disseminates_preprod_fragment() {
     );
 
     let mut world = WorldLoop::new(provider, vec![sim_primed, sim_receiver]);
-    // Connect is a 1–5ms hop; horizon 0 never delivers. Cover many chainsync RollForward hops.
-    world.run_until_horizon(2_000_000_000);
+    // World coverage so sampled long-tail Deliveries can pop. Not a Praos deadline.
+    world.run_until_horizon(HONEST_PAYLOAD_DELAY_MAX_NANOS.saturating_add(2_000_000_000));
 
     for graph in world.graphs() {
         let params = graph.resources().get::<ResourceParameters>().expect("production GlobalParameters");
@@ -1364,11 +1428,24 @@ fn entry_chainsync_roll_forward_hash(entry: &TraceEntry) -> Option<amaru_kernel:
     }
 }
 
+/// Typed chainsync `RollForward` on Send or Input. Specific matcher, next to the test.
+fn tm_chainsync_roll_forward() -> TraceMatch<'static> {
+    TraceMatch::Property(
+        Box::new(|entry| entry_chainsync_roll_forward_hash(entry).is_some()),
+        "chainsync RollForward".to_string(),
+    )
+}
+
+/// Typed `ValidateHeaderEffect`. Specific wrapper; downcasts via the generic helper.
+/// No `header()` accessor.
+fn tm_validate_header() -> TraceMatch<'static> {
+    tm_external_effect_any::<amaru_consensus::effects::ValidateHeaderEffect>()
+}
+
 /// Typed `ValidateHeaderEffect` on this graph whose Debug names `hash`.
 ///
-/// `ValidateHeaderEffect` does not expose the header; there is no shared `tm_*` matcher for
-/// "this header" either. Do not treat a substring OR on `RollForward`/`ValidateHeader`/`HeaderContent`
-/// as this proof.
+/// `ValidateHeaderEffect` does not expose the header. Do not treat a substring OR on
+/// `RollForward`/`ValidateHeader`/`HeaderContent` as this proof.
 fn entry_is_validate_header_of(entry: &TraceEntry, hash: &amaru_kernel::HeaderHash) -> bool {
     let TraceEntry::Suspend(Effect::External { effect, .. }) = entry else {
         return false;
@@ -1376,5 +1453,5 @@ fn entry_is_validate_header_of(entry: &TraceEntry, hash: &amaru_kernel::HeaderHa
     let Some(typed) = effect.cast_ref::<amaru_consensus::effects::ValidateHeaderEffect>() else {
         return false;
     };
-    format!("{typed:?}").contains(&hash.to_string())
+    tm_validate_header() == *entry && format!("{typed:?}").contains(&hash.to_string())
 }

@@ -163,9 +163,13 @@ impl WorldLoop {
 
     fn wake_and_run_graph(&mut self, index: usize) {
         let time_nanos = self.provider.current_time_nanos();
-        let instant = Instant::at_offset(Duration::from_nanos(time_nanos), Duration::ZERO);
         let graph = &mut self.graphs[index];
-        let clock_behind = instant_nanos(graph.now()) < time_nanos;
+        // Instant Ord uses duration_since_global_epoch. A zero-offset max_time
+        // misses waits scheduled with the graph's epoch offset and reschedules
+        // the same Sleeping wake forever.
+        let graph_now = graph.now();
+        let instant = graph_now - graph_now.sim_elapsed() + Duration::from_nanos(time_nanos);
+        let clock_behind = instant_nanos(graph_now) < time_nanos;
         let wakeup_due = graph.next_wakeup().is_some_and(|t| instant_nanos(t) <= time_nanos);
         if clock_behind || wakeup_due {
             graph.skip_to_next_wakeup(Some(instant));

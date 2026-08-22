@@ -272,6 +272,34 @@ pub fn tm_external_effect_match<'a, T: ExternalEffect>(
     )
 }
 
+/// Matches `Suspend(External)` whose effect downcasts to `T`, on any stage.
+///
+/// Use [`tm_external_effect`] when the stage name is known. This is the generic
+/// form when only the effect type matters.
+pub fn tm_external_effect_any<T: ExternalEffect>() -> TraceMatch<'static> {
+    tm_external_effect_any_match::<T>(|_| true)
+}
+
+/// Matches `Suspend(External)` whose effect casts to `T` **and** `predicate` holds,
+/// regardless of `at_stage`.
+pub fn tm_external_effect_any_match<'a, T: ExternalEffect>(
+    predicate: impl Fn(&T) -> bool + Send + 'a,
+) -> TraceMatch<'a> {
+    let description = format!("ExternalEffect<{}>(any stage)", std::any::type_name::<T>());
+    TraceMatch::Property(
+        Box::new(move |entry| {
+            let TraceEntry::Suspend(Effect::External { effect, .. }) = entry else {
+                return false;
+            };
+            let Some(typed) = effect.cast_ref::<T>() else {
+                return false;
+            };
+            predicate(typed)
+        }),
+        description,
+    )
+}
+
 /// Matches any [`TraceEntry::Resume`].
 pub fn tm_resume() -> TraceMatch<'static> {
     TraceMatch::Property(Box::new(|entry| matches!(entry, TraceEntry::Resume { .. })), "Resume".to_string())

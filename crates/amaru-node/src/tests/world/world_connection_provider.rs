@@ -33,12 +33,19 @@ use tokio_util::bytes::{Bytes, BytesMut};
 pub const WIRE_DELAY_MIN_NANOS: u64 = 1_000_000;
 pub const WIRE_DELAY_MAX_NANOS: u64 = 5_000_000;
 
-/// Honest payload diffusion budget in slots. A message sent in slot `sl` may take this many
-/// slots to reach every honest inbox.
+/// Per-send `Deliver` delay cap in slots on preprod (1s slots). An upper bound on one
+/// honest payload hop. Not Praos Δ and not a claim that every honest inbox is reached.
 pub const HONEST_PAYLOAD_DELAY_SLOTS: u64 = 5;
 
-/// Nanosecond cap for [`HONEST_PAYLOAD_DELAY_SLOTS`] on preprod (1s slots).
+/// Nanosecond cap for one [`HONEST_PAYLOAD_DELAY_SLOTS`] payload hop on preprod.
 pub const HONEST_PAYLOAD_DELAY_MAX_NANOS: u64 = HONEST_PAYLOAD_DELAY_SLOTS * 1_000_000_000;
+
+/// Inclusive lower bound of the long-tail payload bucket (1s). Two orders of magnitude
+/// above the 5ms hop.
+pub const LONG_TAIL_PAYLOAD_MIN_NANOS: u64 = 1_000_000_000;
+
+/// One in this many seeded samples is drawn from the long-tail bucket.
+pub const LONG_TAIL_PAYLOAD_EVERY: u64 = 10;
 
 /// Deterministic delay for sample `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
 pub fn delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
@@ -55,6 +62,20 @@ pub fn wire_delay_nanos(seed: u64, index: u64) -> u64 {
 /// Deterministic delay for honest payload `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
 pub fn payload_delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
     delay_nanos(seed, index, min_nanos, max_nanos)
+}
+
+/// Long-tail payload delay: most samples stay in the 1–5ms hop; a seeded minority is
+/// drawn from `[LONG_TAIL_PAYLOAD_MIN_NANOS, HONEST_PAYLOAD_DELAY_MAX_NANOS]`.
+///
+/// Uses the same `splitmix64` stream as [`delay_nanos`]. Not uniform over `[1ms, 5s]`.
+pub fn long_tail_payload_delay_nanos(seed: u64, index: u64) -> u64 {
+    let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
+    let (min_nanos, max_nanos) = if (mix >> 32).is_multiple_of(LONG_TAIL_PAYLOAD_EVERY) {
+        (LONG_TAIL_PAYLOAD_MIN_NANOS, HONEST_PAYLOAD_DELAY_MAX_NANOS)
+    } else {
+        (WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS)
+    };
+    min_nanos + mix % (max_nanos - min_nanos + 1)
 }
 
 fn splitmix64(mut z: u64) -> u64 {
@@ -167,14 +188,19 @@ impl From<&WorldHeapEntry> for HeapLogEntry {
     }
 }
 
+/// How `Deliver` delays are drawn. Handshake hops stay `[1ms, 5ms]` either way.
+enum PayloadDelay {
+    Uniform { min_nanos: u64, max_nanos: u64 },
+    LongTail,
+}
+
 struct WorldInner {
     heap: BinaryHeap<Reverse<WorldHeapEntry>>,
     next_sequence: u64,
     current_time_nanos: u64,
     seed: u64,
     latency_samples: u64,
-    payload_delay_min_nanos: u64,
-    payload_delay_max_nanos: u64,
+    payload_delay: PayloadDelay,
     listeners: BTreeMap<SocketAddr, Listener>,
     endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
     next_conn_id: ConnectionId,
@@ -200,11 +226,22 @@ impl WorldConnectionProvider {
         Self::with_payload_delay(seed, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS)
     }
 
-    /// Build a world whose honest payloads are delayed in `[min_nanos, max_nanos]`.
+    /// Build a world whose honest payloads are delayed uniformly in `[min_nanos, max_nanos]`.
     /// Handshake hops stay `[1ms, 5ms]`. Default [`Self::new`] keeps the 1–5ms hop for both
     /// so existing tests stay in that band.
     pub fn with_payload_delay(seed: u64, min_nanos: u64, max_nanos: u64) -> Self {
         assert!(min_nanos <= max_nanos, "payload delay min ({min_nanos}) exceeds max ({max_nanos})");
+        Self::with_delay(seed, PayloadDelay::Uniform { min_nanos, max_nanos })
+    }
+
+    /// Opt in to a long-tail honest payload delay. Most `Deliver`s stay in the 1–5ms hop;
+    /// a seeded minority is much later, capped at [`HONEST_PAYLOAD_DELAY_MAX_NANOS`].
+    /// Handshake hops stay `[1ms, 5ms]`.
+    pub fn with_long_tail_payload_delay(seed: u64) -> Self {
+        Self::with_delay(seed, PayloadDelay::LongTail)
+    }
+
+    fn with_delay(seed: u64, payload_delay: PayloadDelay) -> Self {
         Self {
             inner: Mutex::new(WorldInner {
                 heap: BinaryHeap::new(),
@@ -212,18 +249,12 @@ impl WorldConnectionProvider {
                 current_time_nanos: 0,
                 seed,
                 latency_samples: 0,
-                payload_delay_min_nanos: min_nanos,
-                payload_delay_max_nanos: max_nanos,
+                payload_delay,
                 listeners: BTreeMap::new(),
                 endpoints: BTreeMap::new(),
                 next_conn_id: ConnectionId::initial(),
             }),
         }
-    }
-
-    /// Opt in to the 5-slot honest payload budget. Handshake hops stay `[1ms, 5ms]`.
-    pub fn with_honest_payload_delay(seed: u64) -> Self {
-        Self::with_payload_delay(seed, WIRE_DELAY_MIN_NANOS, HONEST_PAYLOAD_DELAY_MAX_NANOS)
     }
 
     /// Advance simulated time to the given instant (in nanoseconds).
@@ -292,7 +323,7 @@ impl WorldConnectionProvider {
         schedule_wire_locked(&mut inner, event);
     }
 
-    /// Schedule an honest payload at `now + delay` (`delay` ∈ the configured payload range).
+    /// Schedule an honest payload at `now + delay` (configured payload distribution).
     pub fn schedule_payload(&self, event: NetworkEvent) {
         let mut inner = self.inner.lock();
         schedule_payload_locked(&mut inner, event);
@@ -381,9 +412,15 @@ fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) {
 }
 
 fn schedule_payload_locked(inner: &mut WorldInner, event: NetworkEvent) {
-    let min_nanos = inner.payload_delay_min_nanos;
-    let max_nanos = inner.payload_delay_max_nanos;
-    schedule_delayed_locked(inner, min_nanos, max_nanos, event);
+    let delay = match inner.payload_delay {
+        PayloadDelay::Uniform { min_nanos, max_nanos } => {
+            delay_nanos(inner.seed, inner.latency_samples, min_nanos, max_nanos)
+        }
+        PayloadDelay::LongTail => long_tail_payload_delay_nanos(inner.seed, inner.latency_samples),
+    };
+    inner.latency_samples += 1;
+    let time_nanos = inner.current_time_nanos + delay;
+    schedule_event_locked(inner, time_nanos, event);
 }
 
 fn try_complete_recv_locked(
