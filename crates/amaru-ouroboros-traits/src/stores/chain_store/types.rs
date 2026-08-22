@@ -14,7 +14,7 @@
 
 use std::{collections::VecDeque, fmt::Display};
 
-use amaru_kernel::{Header, HeaderHash, NonEmptyVec, Point};
+use amaru_kernel::{Header, HeaderHash, IsHeader, NonEmptyVec, Point, RawBlock};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +66,24 @@ Pass `--migrate-chain-db` (or set `AMARU_MIGRATE_CHAIN_DB=true`) when starting t
                 )
             }
         }
+    }
+}
+
+/// Return `header` only when it is the content addressed by `hash`.
+pub fn header_addressed_by(header: Header, hash: &HeaderHash) -> Option<Header> {
+    (header.hash() == *hash).then_some(header)
+}
+
+/// Return `block` only when its header is the content addressed by `hash`.
+pub fn block_addressed_by(block: RawBlock, hash: &HeaderHash) -> Result<RawBlock, StoreError> {
+    let actual = block
+        .decode_header()
+        .map_err(|error| StoreError::ReadError { error: format!("failed to decode block header for {hash}: {error}") })?
+        .hash();
+    if actual == *hash {
+        Ok(block)
+    } else {
+        Err(StoreError::ReadError { error: format!("block header hash {actual} does not match requested {hash}") })
     }
 }
 
