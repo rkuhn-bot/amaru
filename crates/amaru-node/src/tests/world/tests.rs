@@ -15,8 +15,8 @@
 use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use amaru_kernel::{
-    BlockHeight, Hash, NetworkPoint, NonEmptyBytes, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer, Slot,
-    any_headers_chain_with_root, utils::tests::run_strategy,
+    BlockHeight, Hash, IsHeader, NetworkPoint, NonEmptyBytes, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer,
+    Slot, any_headers_chain_with_root, utils::tests::run_strategy,
 };
 use amaru_ouroboros::{ConnectionId, ConnectionsResource};
 use amaru_protocols::{
