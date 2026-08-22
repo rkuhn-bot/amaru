@@ -16,9 +16,11 @@ use std::{net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use amaru_kernel::{
     BlockHeight, Hash, IsHeader, NetworkPoint, NonEmptyBytes, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer,
-    Slot, any_headers_chain_with_root, utils::tests::run_strategy,
+    Slot, any_headers_chain_with_root, cardano::network_block::make_encoded_block, utils::tests::run_strategy,
 };
-use amaru_ouroboros::{ConnectionId, ConnectionsResource};
+use amaru_ouroboros::{
+    BaseReadChainStore, ConnectionId, ConnectionsResource, WriteChainStore, in_memory_chain_store::InMemoryChainStore,
+};
 use amaru_protocols::{
     network_effects::{
         AcceptEffect, AcceptError, ConnectEffect, ConnectError, ListenEffect, ListenError, Network, NetworkOps,
@@ -39,8 +41,8 @@ use tokio_util::bytes::Bytes;
 use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
     LONG_TAIL_PAYLOAD_EVERY, LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
-    WorldConnectionProvider, WorldLoop, build_world_node, long_tail_payload_delay_nanos, payload_delay_nanos,
-    wire_delay_nanos,
+    WorldConnectionProvider, WorldLoop, build_injector, build_injector_peer, build_world_node,
+    long_tail_payload_delay_nanos, payload_delay_nanos, wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -1744,6 +1746,117 @@ fn test_world_disseminates_preprod_fragment() {
     );
     assert_eq!(receiver_tip, served_tip);
     assert_eq!(primed_tip, served_tip);
+}
+
+fn injector_linear_store(n: usize) -> (Arc<InMemoryChainStore>, Vec<amaru_kernel::Header>) {
+    let conway_start_slot = Slot::from(68_774_400);
+    let root_point = NetworkPoint::Specific(conway_start_slot, Hash::new([0u8; 32]));
+    let headers = run_strategy(any_headers_chain_with_root(n, root_point.with_height(BlockHeight::from(0))));
+    let store = Arc::new(InMemoryChainStore::new());
+    store.set_anchor_point(&headers[0].point()).unwrap();
+    for header in &headers {
+        store.store_header(header).unwrap();
+        store.store_block(&header.hash(), &make_encoded_block(header, &PREPROD_ERA_HISTORY)).unwrap();
+        store.roll_forward_chain(&header.point()).unwrap();
+    }
+    (store, headers)
+}
+
+#[tokio::test]
+async fn test_injector_inventory_reaches_world_loop() {
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let (store, headers) = injector_linear_store(3);
+    let listen: SocketAddr = "127.0.0.1:9400".parse().unwrap();
+    let source: Arc<dyn BaseReadChainStore> = store;
+    let connections: ConnectionsResource = provider.clone();
+    let (sim, shared) = build_injector(source, connections, listen, &handle, 0).expect("injector");
+
+    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(shared);
+    assert!(world.inventory().is_empty(), "inventory is published by the injector graph, not at construction");
+    world.run_until_horizon(0);
+    let inventory = world.inventory();
+    assert_eq!(inventory.len(), 3);
+    for (got, header) in inventory.iter().zip(headers.iter()) {
+        assert_eq!(got.hash, header.hash());
+        assert_eq!(got.point, header.point());
+        assert_eq!(got.slot, header.slot());
+        assert_eq!(got.height, header.block_height());
+        assert!(got.has_body);
+    }
+    world.assert_serving_accept(0);
+}
+
+#[tokio::test]
+async fn test_injector_empty_store_inventory_is_empty() {
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let store = Arc::new(InMemoryChainStore::new());
+    let listen: SocketAddr = "127.0.0.1:9401".parse().unwrap();
+    let source: Arc<dyn BaseReadChainStore> = store;
+    let connections: ConnectionsResource = provider.clone();
+    let (sim, shared) = build_injector(source, connections, listen, &handle, 0).expect("injector");
+
+    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(shared);
+    world.run_until_horizon(0);
+    assert!(world.inventory().is_empty());
+    world.assert_serving_accept(0);
+}
+
+/// Before any reveal a peer must not see later headers. Each `reveal` widens the advertised
+/// prefix; ChainSync may RollForward only that prefix.
+#[tokio::test]
+async fn test_injector_reveal_gates_chainsync() {
+    let _guards = fragment_trace_guards();
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let (store, headers) = injector_linear_store(2);
+    let listen: SocketAddr = "127.0.0.1:9402".parse().unwrap();
+    let source: Arc<dyn BaseReadChainStore> = store;
+    let connections: ConnectionsResource = provider.clone();
+    let (injector, shared) = build_injector(source, connections.clone(), listen, &handle, 0).expect("injector");
+    let peer = build_injector_peer(connections, listen, &handle).expect("injector peer");
+
+    let mut world = WorldLoop::new(provider, vec![injector, peer]).with_injector(shared);
+    // Handshake hops are 1–5ms; a few mux frames finish well before 200ms.
+    world.run_until_horizon(200_000_000);
+    assert_eq!(world.inventory().len(), 2);
+    assert!(!peer_saw_roll_forward(&world, 1, &headers[0].hash()), "no header is visible before WorldLoop reveal");
+    assert!(!peer_saw_roll_forward(&world, 1, &headers[1].hash()));
+
+    world.reveal(headers[0].hash()).expect("reveal header 1");
+    world.run_until_horizon(400_000_000);
+    assert!(
+        peer_trace(&world, 1).iter().any(|entry| tm_chainsync_roll_forward_of(headers[0].hash()) == *entry),
+        "ChainSync may RollForward the first revealed header"
+    );
+    assert!(
+        peer_trace(&world, 1).iter().all(|entry| tm_chainsync_roll_forward_of(headers[1].hash()) != *entry),
+        "header 2 stays hidden after reveal 1"
+    );
+
+    world.reveal(headers[1].hash()).expect("reveal header 2");
+    world.run_until_horizon(600_000_000);
+    assert!(
+        peer_trace(&world, 1).iter().any(|entry| tm_chainsync_roll_forward_of(headers[1].hash()) == *entry),
+        "ChainSync may RollForward the second revealed header"
+    );
+}
+
+fn peer_trace(world: &WorldLoop, graph: usize) -> Vec<TraceEntry> {
+    world.graphs()[graph].trace_buffer().lock().hydrate_without_timestamps()
+}
+
+fn peer_saw_roll_forward(world: &WorldLoop, graph: usize, hash: &amaru_kernel::HeaderHash) -> bool {
+    peer_trace(world, graph).iter().any(|entry| entry_chainsync_roll_forward_hash(entry) == Some(*hash))
+}
+
+/// Typed `RollForward` of this header hash. Generic helper → this specific matcher.
+fn tm_chainsync_roll_forward_of(hash: amaru_kernel::HeaderHash) -> TraceMatch<'static> {
+    TraceMatch::Property(
+        Box::new(move |entry| entry_chainsync_roll_forward_hash(entry) == Some(hash)),
+        format!("chainsync RollForward {hash}"),
+    )
 }
 
 fn header_from_content(content: &amaru_protocols::chainsync::HeaderContent) -> Option<amaru_kernel::Header> {
