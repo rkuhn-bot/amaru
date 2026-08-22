@@ -630,6 +630,48 @@ async fn test_wait_resumes_without_heap_event() {
     assert_eq!(*done.lock(), Some(true));
 }
 
+/// A Wait on a graph with a non-zero global epoch offset must still resume.
+/// Instant comparison is `sim_elapsed + offset`. Waking with a zero-offset
+/// max_time misses that Wait and reschedules the Sleeping wake forever, so a
+/// later Deliver never pops.
+#[tokio::test]
+async fn test_sleeping_wake_uses_graph_epoch_offset() {
+    let handle = tokio::runtime::Handle::current();
+    let provider = provider();
+    let done = observed::<bool>();
+    let done_a = done.clone();
+    let epoch_offset = Duration::from_secs(70_419_600);
+    let wait_at = 100_000_000;
+    let deliver_at = 200_000_000;
+    let hop_conn = ConnectionId::initial();
+    provider.schedule_event_at(deliver_at, NetworkEvent::Deliver { conn: hop_conn, data: Bytes::from_static(b"x") });
+
+    let mut graph = SimulationBuilder::default().with_eval_strategy(Fifo).with_global_epoch_offset(epoch_offset);
+    graph.resources().put::<ConnectionsResource>(provider.clone());
+    let stage = graph.stage("waiter", move |_state: (), _unit: (), eff| {
+        let done_a = done_a.clone();
+        async move {
+            eff.wait(Duration::from_nanos(wait_at)).await;
+            set_observed(&done_a, true);
+        }
+    });
+    let stage = graph.wire_up(stage, ());
+    let mut sim = graph.run(&handle);
+    sim.enqueue_msg(&stage, [()]);
+
+    let mut world = WorldLoop::new(provider, vec![sim]);
+    world.run_until_horizon(wait_at.saturating_sub(1));
+    assert_eq!(*done.lock(), None, "Wait must not complete before its wakeup");
+    assert_eq!(world.peek_next_event_time(), Some(wait_at));
+
+    world.run_until_horizon(deliver_at);
+    assert_eq!(*done.lock(), Some(true), "Sleeping wait must resume using the graph epoch offset");
+    assert!(
+        world.heap_log().iter().any(|e| e.kind == HeapLogKind::Deliver { conn: hop_conn, data_len: 1 }),
+        "later Deliver must pop after the offset Wait wakes"
+    );
+}
+
 #[tokio::test]
 async fn test_listen_same_port_errors() {
     let handle = tokio::runtime::Handle::current();
