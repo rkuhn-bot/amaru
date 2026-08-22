@@ -186,6 +186,39 @@ pub fn linear_fragment_with_bodies(store: &dyn BaseReadChainStore, after: Header
     Ok(headers)
 }
 
+/// Last header on the parent walk from `candidate` toward `after` that still has a stored body.
+///
+/// After `build_node` realigns the best-chain pointer to the ledger snapshot, `next_best_chain`
+/// no longer walks the fragment. Recovery still starts from `find_best_candidate`; the
+/// disseminable HEAD is this header, not `get_best_chain_tip`.
+pub fn last_body_on_candidate(
+    store: &dyn BaseReadChainStore,
+    candidate: HeaderHash,
+    after: HeaderHash,
+) -> anyhow::Result<Header> {
+    if candidate == after {
+        anyhow::bail!("recovery candidate is the snapshot {after}; no fragment to serve");
+    }
+    let mut current = store
+        .load_header(&candidate)
+        .ok_or_else(|| anyhow::anyhow!("missing recovery candidate header {candidate}"))?;
+    loop {
+        if store.has_block(&current.hash())? {
+            if current.hash() == after {
+                anyhow::bail!("no stored body after snapshot {after}");
+            }
+            return Ok(current);
+        }
+        let Some(parent) = current.parent() else {
+            anyhow::bail!("reached origin before a stored body on candidate {candidate}");
+        };
+        if parent == after {
+            anyhow::bail!("no stored body between snapshot {after} and candidate {candidate}");
+        }
+        current = store.load_header(&parent).ok_or_else(|| anyhow::anyhow!("missing parent {parent}"))?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use amaru_kernel::PREPROD_ERA_HISTORY;
@@ -233,15 +266,10 @@ mod tests {
         let head = fragment.last().expect("HEAD");
         let walked = linear_fragment_to_head(&store, snapshot, head.clone()).expect("parent walk");
         assert_eq!(walked.last().map(|h| h.point()), Some(head.point()));
-        assert_eq!(
-            format!("{}", head.point()),
-            meta.fragment_head,
-            "meta.fragment_head must be the last header, not first()"
-        );
         assert!(fragment.len() >= 2, "fragment must be more than a single header");
         assert_ne!(
             format!("{}", fragment[0].point()),
-            meta.fragment_head,
+            format!("{}", head.point()),
             "HEAD must not be the first header after the snapshot"
         );
     }

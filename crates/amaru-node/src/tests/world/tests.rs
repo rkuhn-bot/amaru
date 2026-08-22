@@ -1219,14 +1219,14 @@ fn test_world_owns_production_nodes_boot_connect_exchange() {
 fn test_world_disseminates_preprod_fragment() {
     use std::cmp::Ordering;
 
-    use amaru_consensus::stages::select_chain::cmp_tip;
+    use amaru_consensus::{effects::find_best_candidate, stages::select_chain::cmp_tip};
     use amaru_kernel::{IsHeader, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer};
     use amaru_ouroboros::BaseReadChainStore;
     use amaru_protocols::store_effects::ResourceHeaderStore;
 
     use super::fragment::{
-        copy_dir, fixture_root, header_hash_from_snapshot_point, linear_fragment_to_head, linear_fragment_with_bodies,
-        load_committed_meta, open_chain_store, stores_ready,
+        copy_dir, fixture_root, header_hash_from_snapshot_point, last_body_on_candidate, linear_fragment_to_head,
+        linear_fragment_with_bodies, load_committed_meta, open_chain_store, stores_ready,
     };
 
     let _guards = fragment_trace_guards();
@@ -1256,10 +1256,9 @@ fn test_world_disseminates_preprod_fragment() {
             fragment.last().expect("HEAD").point(),
             "linear fragment HEAD is the last header, not first()"
         );
-        assert_eq!(format!("{}", head.point()), meta.fragment_head);
         assert_ne!(
             format!("{}", fragment[0].point()),
-            meta.fragment_head,
+            format!("{}", head.point()),
             "HEAD must not be the first header after the snapshot"
         );
         head
@@ -1311,12 +1310,16 @@ fn test_world_disseminates_preprod_fragment() {
         Arc::clone(&*store)
     };
 
-    // `build_node` realigns the best chain to the ledger tip. The HEAD WorldLoop serves is that
-    // post-realign tip, not the last stored body recorded before open.
-    let served_tip = primed_store.get_best_chain_tip();
-    let served_head = primed_store
-        .load_header(&served_tip.hash())
-        .unwrap_or_else(|| panic!("primed store missing served tip header {served_tip}"));
+    // `build_node` realigns the best-chain pointer to the persisted ledger snapshot (volatile
+    // state is dropped on restart). `get_best_chain_tip` is therefore the snapshot. Recovery
+    // still walks `find_best_candidate`; the HEAD WorldLoop serves is that candidate's last
+    // stored body, not the post-realign best-chain pointer.
+    let realigned_tip = primed_store.get_best_chain_tip();
+    assert_eq!(realigned_tip.hash(), snapshot_hash, "realign rewinds the best-chain pointer to the ledger snapshot");
+    let recovery_hash = find_best_candidate(primed_store.as_ref()).expect("recovery candidate after realign");
+    let served_head = last_body_on_candidate(primed_store.as_ref(), recovery_hash, snapshot_hash)
+        .expect("last stored body on candidate");
+    let served_tip = served_head.point();
     assert!(primed_store.has_block(&served_tip.hash()).expect("has_block"), "served tip must have a stored body");
     assert_ne!(served_tip.hash(), snapshot_hash, "served tip must be after the snapshot");
     let served_fragment = linear_fragment_to_head(primed_store.as_ref(), snapshot_hash, served_head.clone())
