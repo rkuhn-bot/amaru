@@ -632,11 +632,11 @@ fn test_outbound_retry_drops_dead_conn_before_reconnect() {
             te_input("ps-1", &connected).into(),
             te_clock_suspend("ps-1").into(),
             te_record_advertisability("ps-1", p.clone(), false, sim_t0()).into(),
-            te_state("ps-1", &after_reconnect).into(),
             tm_state(
                 "ps-1",
                 move |s: &PeerSelection| {
-                    matches!(s.outbound_peers.get(&p_live), Some(PeerState::Connected(c)) if c.id == id1)
+                    s == &after_reconnect
+                        && matches!(s.outbound_peers.get(&p_live), Some(PeerState::Connected(c)) if c.id == id1)
                         && !s
                             .outbound_peers
                             .values()
