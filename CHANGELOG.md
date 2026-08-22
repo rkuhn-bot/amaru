@@ -47,7 +47,7 @@ Other guiding principles:
 
 ### Fixed
 
-- **amaru-consensus**: resume outbound sync after a mux drop by forgetting the dead connection before the replacement handshake, and by setting the peer tip to the loaded intersection on `IntersectFound`.
+- **amaru-consensus**: resume outbound sync after a mux drop by forgetting the dead connection before the replacement handshake.
 - **amaru-tui**: calculate reported block and transaction throughput using the interval between system-metric samples.
 - **amaru-plutus**: encode `CostModels` as a map from language to cost model (#1219).
 - **amaru-ledger**: compute the size of a value using the same encoding as the Haskell node.
