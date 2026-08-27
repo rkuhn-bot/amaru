@@ -38,7 +38,8 @@ use crate::tests::configuration::NodeTestConfig;
 /// primed RocksDB, not an injector. Production validation; simulated wire only.
 ///
 /// Primed startup keeps the persisted best chain. Catch-up nodes realign to the
-/// bootstrap snapshot. Peer mix is static+shared (no ledger/snapshot relays).
+/// bootstrap snapshot and use up to three upstreams (static chain + shared).
+/// Populate `run_until` uses embedded big-ledger peers (up to 10).
 /// The test installs [`crate::Telemetry`] so WorldLoop has a tracing subscriber
 /// even when `primed/` already exists.
 ///
@@ -70,7 +71,6 @@ fn test_world_disseminates_preprod_fragment() {
     let root = fixture_root();
     ensure_fragment_stores(&root).expect("produce preprod fragment stores");
     let meta = load_committed_meta(&root).expect("meta.json");
-    assert_eq!(meta.peer, "sleipnir.rkuhn.info:3001");
 
     let primed_tmp = tempfile::tempdir().expect("primed temp");
     copy_dir(&root.join("primed/chain"), &primed_tmp.path().join("chain")).expect("copy primed chain");

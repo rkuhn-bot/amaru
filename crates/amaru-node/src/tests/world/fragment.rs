@@ -46,6 +46,8 @@ use crate::{MaxExtraLedgerSnapshots, NodeBuilder};
 /// Public CDN base used by `amaru-bootstrap` (`DEFAULT_PUBLIC_URL`) for anonymous index fetch.
 pub const SNAPSHOT_PUBLIC_URL: &str = "https://pub-b844360df4774bb092a2bb2043b888e5.r2.dev";
 
+const RUN_UNTIL_UPSTREAM_PEERS: usize = 10;
+
 /// `<slot>.<hash>` point as published in `<network>/index.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotPoint {
@@ -69,7 +71,6 @@ pub struct FragmentMeta {
     pub latest_snapshot_point: String,
     pub latest_snapshot_epoch: u64,
     pub target_epoch: u64,
-    pub peer: String,
     /// Last header after the snapshot that has a stored body. Display form of [`Point`].
     pub fragment_head: String,
 }
@@ -139,7 +140,7 @@ fn primed_ready(root: &Path) -> bool {
 /// than the following epoch.
 ///
 /// Same steps as the fixture README: public-CDN bootstrap, copy, then live
-/// `run_until` of `meta.target_epoch` from `meta.peer`. Coverage is checked
+/// `run_until` of `meta.target_epoch` from embedded big-ledger peers. Coverage is checked
 /// under the populate lock so a concurrent rebuild cannot make the other test
 /// open a half-written store.
 pub fn ensure_fragment_stores(root: &Path) -> anyhow::Result<()> {
@@ -228,8 +229,8 @@ async fn populate_fragment_stores(root: &Path, meta: &FragmentMeta) -> anyhow::R
         tracing::info!(
             target = "world_fragment",
             epoch = meta.target_epoch,
-            peer = %meta.peer,
-            "run_until target epoch"
+            target_upstream_peers = RUN_UNTIL_UPSTREAM_PEERS,
+            "run_until target epoch from embedded big-ledger peers"
         );
         run_until_target_epoch(&primed, meta, Arc::new(Meter::default())).await?;
     } else {
@@ -261,12 +262,12 @@ async fn run_until_target_epoch(primed: &Path, meta: &FragmentMeta, meter: Arc<M
     let running = NodeBuilder::new(NetworkName::Preprod)?
         .ledger_dir(primed.join("ledger"))
         .chain_dir(primed.join("chain"))
-        .target_upstream_peers(1)
+        .no_default_peer()
+        .target_upstream_peers(RUN_UNTIL_UPSTREAM_PEERS)
         .listen_ephemeral_localhost()
         .migrate_chain_db(true)
         .max_extra_ledger_snapshots(MaxExtraLedgerSnapshots::All)
         .meter(meter)
-        .peers([meta.peer.clone()])
         .observers(LedgerObservers::new().on_adopted_block(move |block| {
             if block.epoch.as_u64() >= target_epoch && !done_flag.swap(true, Ordering::SeqCst) {
                 tracing::info!(
@@ -418,7 +419,6 @@ mod tests {
         assert_eq!(discovered.latest.epoch.as_u64(), meta.latest_snapshot_epoch);
         assert_eq!(discovered.target_epoch.as_u64(), meta.target_epoch);
         assert_eq!(discovered.target_epoch, discovered.latest.epoch + 2);
-        assert_eq!(meta.peer, "sleipnir.rkuhn.info:3001");
         assert!(!meta.fragment_head.is_empty(), "meta.fragment_head records a previous production HEAD");
     }
 

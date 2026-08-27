@@ -7,8 +7,8 @@ must appear on every honest node after `WorldLoop`.
 The RocksDB stores are too large to commit. This directory keeps the discovery
 inputs (`index.json`, `meta.json`). Missing `bootstrap/` and `primed/` are
 produced by the recorded-data tests themselves (CDN bootstrap, then live
-`run_until` of `meta.json`'s `target_epoch` from `meta.json`'s `peer`). Progress
-prints to stderr.
+`run_until` of `meta.json`'s `target_epoch` from embedded big-ledger peers).
+Progress prints to stderr.
 
 ## Discover the target epoch (do not guess)
 
