@@ -80,6 +80,14 @@ impl Telemetry {
         if with_otlp { Self::install_otlp(with_json) } else { Self::install_local(with_json) }
     }
 
+    fn accept_already_set(result: Result<(), impl std::fmt::Display>, what: &str) -> anyhow::Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(_) if tracing::dispatcher::has_been_set() => Ok(()),
+            Err(e) => Err(anyhow!("{what}: {e}")),
+        }
+    }
+
     fn install_local(with_json: bool) -> anyhow::Result<Self> {
         init_fmt_subscriber(with_json)?;
         Ok(Self { meter: Arc::new(Meter::default()), system_metrics: None, teardown: None })
@@ -133,24 +141,20 @@ impl Telemetry {
                 .with_span_list(false)
                 .with_writer(std::io::stdout)
                 .with_filter(fmt_filter);
-            tracing_subscriber::registry()
-                .with(otel_layer)
-                .with(log_bridge)
-                .with(fmt)
-                .try_init()
-                .context("init OTLP+JSON tracing subscriber")?;
+            Self::accept_already_set(
+                tracing_subscriber::registry().with(otel_layer).with(log_bridge).with(fmt).try_init(),
+                "init OTLP+JSON tracing subscriber",
+            )?;
         } else {
             let fmt = tracing_subscriber::fmt::layer()
                 .with_writer(std::io::stderr)
                 .with_ansi(false)
                 .compact()
                 .with_filter(fmt_filter);
-            tracing_subscriber::registry()
-                .with(otel_layer)
-                .with(log_bridge)
-                .with(fmt)
-                .try_init()
-                .context("init OTLP+fmt tracing subscriber")?;
+            Self::accept_already_set(
+                tracing_subscriber::registry().with(otel_layer).with(log_bridge).with(fmt).try_init(),
+                "init OTLP+fmt tracing subscriber",
+            )?;
         }
 
         let meter = Arc::new(Meter::from(meter_provider.meter(METRICS_METER_NAME)));
@@ -201,21 +205,25 @@ impl Drop for Telemetry {
 fn init_fmt_subscriber(with_json: bool) -> anyhow::Result<()> {
     let filter = rust_log_filter();
     if with_json {
-        tracing_subscriber::fmt()
-            .json()
-            .with_span_list(false)
-            .with_writer(std::io::stdout)
-            .with_env_filter(filter)
-            .try_init()
-            .map_err(|e| anyhow!("init JSON tracing subscriber: {e}"))?;
+        Telemetry::accept_already_set(
+            tracing_subscriber::fmt()
+                .json()
+                .with_span_list(false)
+                .with_writer(std::io::stdout)
+                .with_env_filter(filter)
+                .try_init(),
+            "init JSON tracing subscriber",
+        )?;
     } else {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .compact()
-            .with_env_filter(filter)
-            .try_init()
-            .map_err(|e| anyhow!("init fmt tracing subscriber: {e}"))?;
+        Telemetry::accept_already_set(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_ansi(false)
+                .compact()
+                .with_env_filter(filter)
+                .try_init(),
+            "init fmt tracing subscriber",
+        )?;
     }
     Ok(())
 }

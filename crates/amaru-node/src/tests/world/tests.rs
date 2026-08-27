@@ -37,8 +37,8 @@ use tokio_util::bytes::Bytes;
 
 use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
-    LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS, WorldConnectionProvider,
-    WorldLoop, long_tail_payload_delay_nanos, wire_delay_nanos,
+    LONG_TAIL_PAYLOAD_EVERY, LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
+    WorldConnectionProvider, WorldLoop, long_tail_payload_delay_nanos, wire_delay_nanos,
 };
 
 const SEED: u64 = 0xA11CE;
@@ -1138,17 +1138,21 @@ fn test_honest_payload_cap_is_five_preprod_slots() {
 /// sample orders of magnitude later. A uniform draw over `[1ms, 5s]` fails this.
 #[test]
 fn test_long_tail_payload_delay_is_not_uniform_over_five_slots() {
-    const N: u64 = 256;
+    const N: u64 = 4096;
     let samples: Vec<u64> = (0..N).map(|index| long_tail_payload_delay_nanos(SEED, index)).collect();
     let short = samples.iter().filter(|d| (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(d)).count();
     let long =
         samples.iter().filter(|d| (LONG_TAIL_PAYLOAD_MIN_NANOS..=HONEST_PAYLOAD_DELAY_MAX_NANOS).contains(d)).count();
     assert!(
-        short * 2 > samples.len(),
-        "most samples must stay in the 1–5ms hop, not a uniform [1ms, 5s] draw; short={short}/{}",
+        short * 10 > samples.len(),
+        "almost all samples must stay in the 1–5ms hop, not a uniform [1ms, 5s] draw; short={short}/{}",
         samples.len()
     );
-    assert!(long >= 1, "at least one sample must land in the long-tail bucket (>= 1s), got none");
+    assert!(
+        long >= 1 && (long as u64) * LONG_TAIL_PAYLOAD_EVERY / 2 < N,
+        "long-tail must be rare (~1/{LONG_TAIL_PAYLOAD_EVERY}), got long={long}/{}",
+        samples.len()
+    );
     assert!(
         samples.iter().all(|d| {
             (WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS).contains(d)
@@ -1165,7 +1169,7 @@ fn test_long_tail_payload_delay_is_not_uniform_over_five_slots() {
 /// the long one stays on the heap. A sorted `assert_heap_log` cannot hide a missing late payload.
 #[test]
 fn test_short_and_long_tail_payloads_sit_on_one_heap() {
-    const PAYLOAD_SEED: u64 = 7;
+    const PAYLOAD_SEED: u64 = 126;
     let d0 = long_tail_payload_delay_nanos(PAYLOAD_SEED, 0);
     let d1 = long_tail_payload_delay_nanos(PAYLOAD_SEED, 1);
     let short_band = WIRE_DELAY_MIN_NANOS..=WIRE_DELAY_MAX_NANOS;

@@ -45,7 +45,8 @@ pub const HONEST_PAYLOAD_DELAY_MAX_NANOS: u64 = HONEST_PAYLOAD_DELAY_SLOTS * 1_0
 pub const LONG_TAIL_PAYLOAD_MIN_NANOS: u64 = 1_000_000_000;
 
 /// One in this many seeded samples is drawn from the long-tail bucket.
-pub const LONG_TAIL_PAYLOAD_EVERY: u64 = 10;
+/// Rare enough that FIFO does not stall an epoch-sized catch-up on every handful of blocks.
+pub const LONG_TAIL_PAYLOAD_EVERY: u64 = 1000;
 
 /// Deterministic delay for sample `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
 fn delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {

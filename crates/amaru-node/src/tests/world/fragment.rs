@@ -41,7 +41,7 @@ use amaru_ouroboros::BaseReadChainStore;
 use amaru_stores::rocksdb::{RocksDbConfig, consensus::RocksDBStore};
 use serde::Deserialize;
 
-use crate::{MaxExtraLedgerSnapshots, NodeBuilder, Telemetry};
+use crate::{MaxExtraLedgerSnapshots, NodeBuilder};
 
 /// Public CDN base used by `amaru-bootstrap` (`DEFAULT_PUBLIC_URL`) for anonymous index fetch.
 pub const SNAPSHOT_PUBLIC_URL: &str = "https://pub-b844360df4774bb092a2bb2043b888e5.r2.dev";
@@ -139,10 +139,9 @@ fn primed_ready(root: &Path) -> bool {
 /// than the following epoch.
 ///
 /// Same steps as the fixture README: public-CDN bootstrap, copy, then live
-/// `run_until` of `meta.target_epoch` from `meta.peer`. Observability is
-/// [`Telemetry::install`] (stderr fmt, plus OTLP when `AMARU_WITH_OPEN_TELEMETRY` is set).
-/// Coverage is checked under the populate lock so a concurrent rebuild cannot
-/// make the other test open a half-written store.
+/// `run_until` of `meta.target_epoch` from `meta.peer`. Coverage is checked
+/// under the populate lock so a concurrent rebuild cannot make the other test
+/// open a half-written store.
 pub fn ensure_fragment_stores(root: &Path) -> anyhow::Result<()> {
     let _lock = acquire_populate_lock(root)?;
     if fragment_stores_usable(root)? {
@@ -182,7 +181,6 @@ fn acquire_populate_lock(root: &Path) -> anyhow::Result<File> {
 }
 
 async fn populate_fragment_stores(root: &Path, meta: &FragmentMeta) -> anyhow::Result<()> {
-    let telemetry = Telemetry::install().await?;
     tracing::info!(
         target = "world_fragment",
         path = %root.display(),
@@ -233,12 +231,11 @@ async fn populate_fragment_stores(root: &Path, meta: &FragmentMeta) -> anyhow::R
             peer = %meta.peer,
             "run_until target epoch"
         );
-        run_until_target_epoch(&primed, meta, Arc::clone(&telemetry.meter)).await?;
+        run_until_target_epoch(&primed, meta, Arc::new(Meter::default())).await?;
     } else {
         tracing::info!(target = "world_fragment", "primed/ already populated; skipping run_until");
     }
 
-    telemetry.shutdown().await?;
     if !stores_ready(root) {
         anyhow::bail!("fragment stores still missing after populate under {}", root.display());
     }

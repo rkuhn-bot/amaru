@@ -730,7 +730,7 @@ impl SimulationRunning {
 
         for (name, predicate) in &self.breakpoints {
             if (predicate)(&effect) {
-                tracing::info!("breakpoint `{}` hit: {:?}", name, effect);
+                tracing::debug!("breakpoint `{}` hit: {:?}", name, effect);
                 return Some(Blocked::Breakpoint(name.clone(), effect));
             }
         }
