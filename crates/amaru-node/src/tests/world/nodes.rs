@@ -36,6 +36,8 @@ use crate::{build_node, tests::configuration::NodeTestConfig};
 /// - set `k` to `chain_length` (production `k` from the network parameters is kept)
 /// - stub `ValidateHeaderEffect`
 /// - add the test-only actions stage
+///
+/// Chain-store realign follows [`NodeTestConfig::keep_persisted_best_chain`] (off by default).
 pub fn build_world_node(
     node_config: &NodeTestConfig,
     connections: ConnectionsResource,

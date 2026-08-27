@@ -44,7 +44,6 @@ use chain_sync_client::ChainSyncClient;
 use crate::{
     aws::{AnonymousS3Client, S3Config},
     cardano_node::tvar::import_snapshot_from_tvar,
-    default_snapshots_dir,
 };
 
 /// S3-backed snapshot descriptor used during bootstrap.
@@ -112,12 +111,10 @@ fn snapshot_hash(snapshot: &Snapshot) -> Result<HeaderHash, Box<dyn Error>> {
 }
 
 /// List S3 objects under `<network>/`, derive epoch from slot via era history, return `Vec<Snapshot>`.
-async fn bootstrap_snapshots(
+async fn list_published_snapshots(
     network: NetworkName,
     s3: &AnonymousS3Client,
-) -> Result<(PathBuf, Vec<Snapshot>), Box<dyn Error>> {
-    let snapshots_dir: PathBuf = default_snapshots_dir(network).into();
-
+) -> Result<Vec<Snapshot>, Box<dyn Error>> {
     let era_history = network
         .as_era_history()
         .ok_or_else(|| format!("no era history available for network {network}; S3 bootstrap is only supported for mainnet, preprod, and preview"))?;
@@ -131,7 +128,7 @@ async fn bootstrap_snapshots(
         snapshots.push(Snapshot { epoch, point: s3_snap.point, key: s3_snap.key });
     }
 
-    Ok((snapshots_dir, snapshots))
+    Ok(snapshots)
 }
 
 /// Parse the slot number from a `<slot>.<hash>` point string.
@@ -409,11 +406,12 @@ pub async fn bootstrap(
     global_parameters: &GlobalParameters,
     ledger_dir: PathBuf,
     chain_dir: PathBuf,
+    snapshots_dir: PathBuf,
     target_epoch: Option<Epoch>,
     s3_config: S3Config,
 ) -> Result<(), Box<dyn Error>> {
     let s3 = AnonymousS3Client::new(s3_config);
-    let (snapshots_dir, snapshots) = bootstrap_snapshots(network, &s3).await?;
+    let snapshots = list_published_snapshots(network, &s3).await?;
     let [first_snapshot, second_snapshot, third_snapshot] = select_bootstrap_snapshots(&snapshots, target_epoch)?;
 
     download_snapshots(&[first_snapshot, second_snapshot, third_snapshot], &snapshots_dir, &s3).await?;

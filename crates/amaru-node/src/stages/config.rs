@@ -82,6 +82,11 @@ pub struct Config {
     /// Metrics sink. When `None`, [`build_and_run_node`](crate::build_and_run_node) uses
     /// [`Meter::default`] (no OpenTelemetry export, no local observer).
     pub meter: Option<Arc<Meter>>,
+
+    /// When true (production default), rewind the chain store's best-chain pointer to the
+    /// persisted ledger tip on startup. World tests set this false so a primed store keeps
+    /// serving its already-validated best chain.
+    pub realign_chain_store: bool,
 }
 
 impl Config {
@@ -150,6 +155,7 @@ impl Default for Config {
             tx_submission_responder_params: ResponderParams::default(),
             observers: amaru_ledger::LedgerObservers::default(),
             meter: None,
+            realign_chain_store: true,
         }
     }
 }

@@ -145,6 +145,19 @@ impl WorldLoop {
     /// `Handle::block_on` `DurationDist::Zero` effects, which cannot run inside an
     /// existing Tokio context.
     pub fn run_until_horizon(&mut self, horizon_nanos: u64) {
+        self.run_until_horizon_with(horizon_nanos, Duration::MAX, |_| {});
+    }
+
+    /// Like [`Self::run_until_horizon`], calling `progress` at start, then every
+    /// `progress_every` of wall time, then once more when the horizon is reached.
+    pub fn run_until_horizon_with(
+        &mut self,
+        horizon_nanos: u64,
+        progress_every: Duration,
+        mut progress: impl FnMut(&Self),
+    ) {
+        let mut last_progress = std::time::Instant::now();
+        progress(self);
         while let Some(entry) = self.provider.pop_at_or_before(horizon_nanos) {
             if self.cancelled.remove(&entry.sequence) {
                 continue;
@@ -168,7 +181,14 @@ impl WorldLoop {
                     self.schedule_graph_if_needed(index);
                 }
             }
+
+            let now = std::time::Instant::now();
+            if now.saturating_duration_since(last_progress) >= progress_every {
+                progress(self);
+                last_progress = now;
+            }
         }
+        progress(self);
     }
 
     fn schedule_graph_if_needed(&mut self, index: usize) {
@@ -235,7 +255,9 @@ impl WorldLoop {
 
     fn on_external(&mut self, graph_idx: usize, effect: Effect) {
         let posted = classify_network(&effect);
-        self.graphs[graph_idx].handle_effect(effect);
+        if let Some(Blocked::Terminated(name)) = self.graphs[graph_idx].handle_effect(effect) {
+            self.drop_pending_for_terminated(graph_idx, &name);
+        }
         kick_external(&mut self.graphs[graph_idx]);
         if let Some(posted) = posted {
             self.track_or_complete(graph_idx, posted);
@@ -401,6 +423,16 @@ impl WorldLoop {
     }
 
     fn resume(&mut self, (graph_idx, stage_name, result): Completion) {
+        if self.terminated_stages.contains(&(graph_idx, stage_name.clone())) {
+            return;
+        }
+        // Supervised children terminate with a tombstone to the parent, not
+        // `Blocked::Terminated`. A later hop must not resume a removed stage.
+        if !self.graphs[graph_idx].contains_stage(&stage_name) {
+            self.terminated_stages.insert((graph_idx, stage_name));
+            self.drop_matching_pending();
+            return;
+        }
         self.graphs[graph_idx]
             .resume_external_box(&stage_name, result)
             .unwrap_or_else(|e| panic!("failed to resume stage {stage_name}: {e}"));
@@ -473,6 +505,11 @@ impl WorldLoop {
     /// Get the event log (network events and graph wakes, in pop order).
     pub fn heap_log(&self) -> Vec<HeapLogEntry> {
         self.heap_log.clone()
+    }
+
+    /// Number of heap events popped so far (network hops and graph wakes).
+    pub fn heap_len(&self) -> usize {
+        self.heap_log.len()
     }
 
     /// Take the event log, leaving it empty.

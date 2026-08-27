@@ -14,21 +14,34 @@
 
 //! Discover the `run_until` target epoch from Amaru's published bootstrap index.
 //!
+//! Fixture helpers for recorded-chain world tests (`real_data`; EDR-011
+//! "World tests: generated vs recorded chains").
+//!
 //! Bootstrap lists `<network>/index.json` (see `amaru-bootstrap::AnonymousS3Client::list_snapshots`)
 //! and maps each `<slot>.<hash>` point through [`EraHistory::slot_to_epoch_unchecked_horizon`].
-//! The latest snapshot epoch is that maximum; the fragment target is the epoch after it.
+//! The latest snapshot epoch is that maximum. `run_until` stops at the first block of
+//! `latest + 2` so the fragment is the following full epoch.
 
 use std::{
-    collections::BTreeSet,
-    fs, io,
+    fs::{self, File, TryLockError},
+    io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
-use amaru_consensus::stages::select_chain::cmp_tip;
-use amaru_kernel::{Epoch, EraHistory, Header, HeaderHash, IsHeader, Slot};
+use amaru_bootstrap::{S3Config, bootstrap, default_snapshots_dir};
+use amaru_kernel::{Epoch, EraHistory, Header, HeaderHash, IsHeader, NetworkName, Slot};
+use amaru_ledger::LedgerObservers;
+use amaru_metrics::Meter;
 use amaru_ouroboros::BaseReadChainStore;
 use amaru_stores::rocksdb::{RocksDbConfig, consensus::RocksDBStore};
 use serde::Deserialize;
+
+use crate::{MaxExtraLedgerSnapshots, NodeBuilder, Telemetry};
 
 /// Public CDN base used by `amaru-bootstrap` (`DEFAULT_PUBLIC_URL`) for anonymous index fetch.
 pub const SNAPSHOT_PUBLIC_URL: &str = "https://pub-b844360df4774bb092a2bb2043b888e5.r2.dev";
@@ -70,8 +83,9 @@ pub fn parse_slot_from_point(point: &str) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("invalid snapshot point format: {point}"))
 }
 
-/// Map published index points to epochs. Latest snapshot state is the maximum epoch;
-/// `run_until` must target the epoch after that.
+/// Map published index points to epochs. Latest snapshot sits at the end of its epoch;
+/// `run_until` stops at the first block of `latest + 2` so the fragment is the whole
+/// next epoch (~`epoch_size` slots), not the few blocks until that epoch begins.
 pub fn bootstrap_index_from_points(points: &[String], era_history: &EraHistory) -> anyhow::Result<BootstrapIndex> {
     let mut snapshots = Vec::with_capacity(points.len());
     for point in points {
@@ -83,11 +97,19 @@ pub fn bootstrap_index_from_points(points: &[String], era_history: &EraHistory) 
         .into_iter()
         .max_by_key(|s| s.epoch)
         .ok_or_else(|| anyhow::anyhow!("bootstrap index listed no snapshots"))?;
-    Ok(BootstrapIndex { target_epoch: latest.epoch + 1, latest })
+    Ok(BootstrapIndex { target_epoch: latest.epoch + 2, latest })
 }
 
 pub fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/world-preprod-fragment")
+}
+
+/// `snapshots/<network>/` at the workspace root (`./snapshots`), not the crate CWD.
+///
+/// `cargo test -p amaru-node` runs with cwd `crates/amaru-node`, so a relative
+/// [`default_snapshots_dir`] would download a second copy of the archives.
+fn workspace_snapshots_dir(network: NetworkName) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(default_snapshots_dir(network))
 }
 
 pub fn load_committed_index(root: &Path) -> anyhow::Result<Vec<String>> {
@@ -101,10 +123,201 @@ pub fn load_committed_meta(root: &Path) -> anyhow::Result<FragmentMeta> {
 }
 
 pub fn stores_ready(root: &Path) -> bool {
-    dir_is_populated(&root.join("bootstrap/chain"))
-        && dir_is_populated(&root.join("bootstrap/ledger"))
-        && dir_is_populated(&root.join("primed/chain"))
-        && dir_is_populated(&root.join("primed/ledger"))
+    bootstrap_ready(root) && primed_ready(root)
+}
+
+fn bootstrap_ready(root: &Path) -> bool {
+    dir_is_populated(&root.join("bootstrap/chain")) && dir_is_populated(&root.join("bootstrap/ledger"))
+}
+
+fn primed_ready(root: &Path) -> bool {
+    dir_is_populated(&root.join("primed/chain")) && dir_is_populated(&root.join("primed/ledger"))
+}
+
+/// Produce `bootstrap/` and `primed/` under `root` when they are missing, or
+/// rebuild `primed/` when it only covers the tail after the snapshot rather
+/// than the following epoch.
+///
+/// Same steps as the fixture README: public-CDN bootstrap, copy, then live
+/// `run_until` of `meta.target_epoch` from `meta.peer`. Observability is
+/// [`Telemetry::install`] (stderr fmt, plus OTLP when `AMARU_WITH_OPEN_TELEMETRY` is set).
+/// Coverage is checked under the populate lock so a concurrent rebuild cannot
+/// make the other test open a half-written store.
+pub fn ensure_fragment_stores(root: &Path) -> anyhow::Result<()> {
+    let _lock = acquire_populate_lock(root)?;
+    if fragment_stores_usable(root)? {
+        return Ok(());
+    }
+    let meta = load_committed_meta(root)?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("world-fragment-populate").build()?;
+    rt.block_on(populate_fragment_stores(root, &meta))
+}
+
+fn fragment_stores_usable(root: &Path) -> anyhow::Result<bool> {
+    if !stores_ready(root) {
+        return Ok(false);
+    }
+    let meta = load_committed_meta(root)?;
+    primed_covers_next_epoch(root, &meta)
+}
+
+/// Exclusive lock on `root/.populate.lock` so parallel `--ignored` tests share one populate.
+///
+/// [`File::lock`] is advisory whole-file locking: `flock(LOCK_EX)` on Unix, `LockFileEx` on
+/// Windows. The OS drops it when this handle is closed (including process crash). The file
+/// is left in place; presence is not the lock.
+fn acquire_populate_lock(root: &Path) -> anyhow::Result<File> {
+    fs::create_dir_all(root)?;
+    let path = root.join(".populate.lock");
+    let file = File::create(&path)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            eprintln!("waiting for another test to finish producing fragment stores ({})", path.display());
+            file.lock()?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(file)
+}
+
+async fn populate_fragment_stores(root: &Path, meta: &FragmentMeta) -> anyhow::Result<()> {
+    let telemetry = Telemetry::install().await?;
+    tracing::info!(
+        target = "world_fragment",
+        path = %root.display(),
+        target_epoch = meta.target_epoch,
+        "producing bootstrap + primed stores"
+    );
+
+    if !bootstrap_ready(root) {
+        tracing::info!(target = "world_fragment", "bootstrap latest published preprod snapshot into bootstrap/");
+        let chain = root.join("bootstrap/chain");
+        let ledger = root.join("bootstrap/ledger");
+        remove_if_exists(&chain)?;
+        remove_if_exists(&ledger)?;
+        fs::create_dir_all(&chain)?;
+        fs::create_dir_all(&ledger)?;
+        let network = NetworkName::Preprod;
+        let global =
+            network.as_global_parameters().cloned().ok_or_else(|| anyhow::anyhow!("preprod global parameters"))?;
+        let snapshots_dir = workspace_snapshots_dir(network);
+        tracing::info!(
+            target = "world_fragment",
+            snapshots_dir = %snapshots_dir.display(),
+            "reusing workspace snapshot cache"
+        );
+        bootstrap(network, &global, ledger, chain, snapshots_dir, None, S3Config::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("bootstrap: {e}"))?;
+    } else {
+        tracing::info!(target = "world_fragment", "bootstrap/ already populated; skipping snapshot download");
+    }
+
+    if primed_ready(root) && !primed_covers_next_epoch(root, meta)? {
+        tracing::info!(
+            target = "world_fragment",
+            "primed fragment is only a tail of an epoch; removing it to sync a full epoch"
+        );
+        remove_if_exists(&root.join("primed"))?;
+    }
+
+    if !primed_ready(root) {
+        tracing::info!(target = "world_fragment", "copy bootstrap → primed");
+        let primed = root.join("primed");
+        remove_if_exists(&primed)?;
+        copy_dir(&root.join("bootstrap"), &primed)?;
+        tracing::info!(
+            target = "world_fragment",
+            epoch = meta.target_epoch,
+            peer = %meta.peer,
+            "run_until target epoch"
+        );
+        run_until_target_epoch(&primed, meta, Arc::clone(&telemetry.meter)).await?;
+    } else {
+        tracing::info!(target = "world_fragment", "primed/ already populated; skipping run_until");
+    }
+
+    telemetry.shutdown().await?;
+    if !stores_ready(root) {
+        anyhow::bail!("fragment stores still missing after populate under {}", root.display());
+    }
+    if !primed_covers_next_epoch(root, meta)? {
+        anyhow::bail!("primed fragment is still shorter than one epoch after populate under {}", root.display());
+    }
+    tracing::info!(target = "world_fragment", "stores ready");
+    Ok(())
+}
+
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn run_until_target_epoch(primed: &Path, meta: &FragmentMeta, meter: Arc<Meter>) -> anyhow::Result<()> {
+    let target_epoch = meta.target_epoch;
+    let done = Arc::new(AtomicBool::new(false));
+    let done_flag = Arc::clone(&done);
+    let running = NodeBuilder::new(NetworkName::Preprod)?
+        .ledger_dir(primed.join("ledger"))
+        .chain_dir(primed.join("chain"))
+        .target_upstream_peers(1)
+        .listen_ephemeral_localhost()
+        .migrate_chain_db(true)
+        .max_extra_ledger_snapshots(MaxExtraLedgerSnapshots::All)
+        .meter(meter)
+        .peers([meta.peer.clone()])
+        .observers(LedgerObservers::new().on_adopted_block(move |block| {
+            if block.epoch.as_u64() >= target_epoch && !done_flag.swap(true, Ordering::SeqCst) {
+                tracing::info!(
+                    target = "run_until",
+                    epoch = %block.epoch,
+                    point = %block.point,
+                    "target epoch reached"
+                );
+            }
+        }))
+        .build_and_run(&tokio::runtime::Handle::current())?;
+
+    loop {
+        if done.load(Ordering::SeqCst) {
+            running.request_abort();
+            break;
+        }
+        tokio::select! {
+            _ = running.termination() => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+    }
+    running.termination().await;
+    if !done.load(Ordering::SeqCst) {
+        anyhow::bail!("node terminated before target epoch {target_epoch}");
+    }
+    Ok(())
+}
+
+/// True when the primed chain spans most of an epoch after the snapshot (not a ~epoch-boundary tail).
+fn primed_covers_next_epoch(root: &Path, meta: &FragmentMeta) -> anyhow::Result<bool> {
+    let store = open_chain_store(&root.join("primed/chain"))?;
+    let snapshot = header_hash_from_snapshot_point(&meta.latest_snapshot_point)?;
+    let Ok(fragment) = linear_fragment_with_bodies(&store, snapshot) else {
+        return Ok(false);
+    };
+    let Some(head) = fragment.last() else {
+        return Ok(false);
+    };
+    let snapshot_slot = parse_slot_from_point(&meta.latest_snapshot_point)?;
+    Ok(covers_following_epoch(head.slot().as_u64(), snapshot_slot))
+}
+
+/// Conway/Shelley+ preprod epoch length in slots.
+pub(super) const PREPROD_EPOCH_SLOTS: u64 = 432_000;
+
+pub(super) fn covers_following_epoch(head_slot: u64, snapshot_slot: u64) -> bool {
+    head_slot.saturating_sub(snapshot_slot) >= PREPROD_EPOCH_SLOTS * 8 / 10
 }
 
 fn dir_is_populated(path: &Path) -> bool {
@@ -188,64 +401,6 @@ pub fn linear_fragment_with_bodies(store: &dyn BaseReadChainStore, after: Header
     Ok(headers)
 }
 
-/// Last header on the parent walk from `candidate` toward `after` that still has a stored body.
-///
-/// After `build_node` realigns the best-chain pointer to the ledger snapshot, `next_best_chain`
-/// no longer walks the fragment. Recovery still starts from `find_best_candidate`; the
-/// disseminable HEAD is this header, not `get_best_chain_tip`.
-pub fn last_body_on_candidate(
-    store: &dyn BaseReadChainStore,
-    candidate: HeaderHash,
-    after: HeaderHash,
-) -> anyhow::Result<Header> {
-    if candidate == after {
-        anyhow::bail!("recovery candidate is the snapshot {after}; no fragment to serve");
-    }
-    let mut current = store
-        .load_header(&candidate)
-        .ok_or_else(|| anyhow::anyhow!("missing recovery candidate header {candidate}"))?;
-    loop {
-        if store.has_block(&current.hash())? {
-            if current.hash() == after {
-                anyhow::bail!("no stored body after snapshot {after}");
-            }
-            return Ok(current);
-        }
-        let Some(parent) = current.parent() else {
-            anyhow::bail!("reached origin before a stored body on candidate {candidate}");
-        };
-        if parent == after {
-            anyhow::bail!("no stored body between snapshot {after} and candidate {candidate}");
-        }
-        current = store.load_header(&parent).ok_or_else(|| anyhow::anyhow!("missing parent {parent}"))?;
-    }
-}
-
-/// Latest stored body reachable from `after` by walking children (not `next_best_chain`).
-///
-/// After realign the best-chain pointer is the snapshot, but fragment headers remain as
-/// children. Recovery's `find_best_candidate` walks that same tree. The clock offset must
-/// be taken from this header so served HEADs are not in the future.
-pub fn latest_body_after(store: &dyn BaseReadChainStore, after: HeaderHash) -> anyhow::Result<Header> {
-    let mut best = None;
-    let mut to_visit = store.get_children(&after);
-    let mut seen = BTreeSet::new();
-    while let Some(hash) = to_visit.pop() {
-        if !seen.insert(hash) {
-            continue;
-        }
-        let Some(header) = store.load_header(&hash) else {
-            continue;
-        };
-        if store.has_block(&hash)? && best.as_ref().is_none_or(|current| cmp_tip(Some(&header), Some(current)).is_gt())
-        {
-            best = Some(header);
-        }
-        to_visit.extend(store.get_children(&hash));
-    }
-    best.ok_or_else(|| anyhow::anyhow!("no stored body after snapshot {after}"))
-}
-
 #[cfg(test)]
 mod tests {
     use amaru_kernel::PREPROD_ERA_HISTORY;
@@ -265,9 +420,23 @@ mod tests {
         assert_eq!(discovered.latest.point, meta.latest_snapshot_point);
         assert_eq!(discovered.latest.epoch.as_u64(), meta.latest_snapshot_epoch);
         assert_eq!(discovered.target_epoch.as_u64(), meta.target_epoch);
-        assert_eq!(discovered.target_epoch, discovered.latest.epoch + 1);
+        assert_eq!(discovered.target_epoch, discovered.latest.epoch + 2);
         assert_eq!(meta.peer, "sleipnir.rkuhn.info:3001");
         assert!(!meta.fragment_head.is_empty(), "meta.fragment_head records a previous production HEAD");
+    }
+
+    #[test]
+    fn test_workspace_snapshots_dir_is_repo_cache() {
+        let dir = workspace_snapshots_dir(NetworkName::Preprod);
+        assert!(dir.ends_with(Path::new("snapshots").join("preprod")));
+        assert_ne!(dir, PathBuf::from(default_snapshots_dir(NetworkName::Preprod)));
+    }
+
+    #[test]
+    fn test_covers_following_epoch_rejects_boundary_tail() {
+        // meta.json's previous fragment_head is 174 slots after the snapshot.
+        assert!(!covers_following_epoch(130_982_572, 130_982_398));
+        assert!(covers_following_epoch(130_982_398 + PREPROD_EPOCH_SLOTS * 8 / 10, 130_982_398));
     }
 
     #[test]
@@ -281,10 +450,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires preprod fragment stores; see tests/fixtures/world-preprod-fragment/README.md"]
+    #[ignore = "first run downloads a preprod snapshot and syncs one epoch from the network"]
     fn test_primed_store_fragment_head_is_last_header_with_body() {
         let root = fixture_root();
-        assert!(stores_ready(&root), "stores missing under {}", root.display());
+        ensure_fragment_stores(&root).expect("produce preprod fragment stores");
         let meta = load_committed_meta(&root).expect("meta.json");
         let tmp = tempfile::tempdir().expect("copy primed chain");
         copy_dir(&root.join("primed/chain"), &tmp.path().join("chain")).expect("copy primed chain");
@@ -292,6 +461,13 @@ mod tests {
         let snapshot = header_hash_from_snapshot_point(&meta.latest_snapshot_point).expect("snapshot hash");
         let fragment = linear_fragment_with_bodies(&store, snapshot).expect("fragment with bodies");
         let head = fragment.last().expect("HEAD");
+        let snapshot_slot = parse_slot_from_point(&meta.latest_snapshot_point).expect("snapshot slot");
+        assert!(
+            covers_following_epoch(head.slot().as_u64(), snapshot_slot),
+            "fragment should cover most of an epoch; got {} headers ending at {}",
+            fragment.len(),
+            head.point()
+        );
         let walked = linear_fragment_to_head(&store, snapshot, head.clone()).expect("parent walk");
         assert_eq!(walked.last().map(|h| h.point()), Some(head.point()));
         assert!(fragment.len() >= 2, "fragment must be more than a single header");

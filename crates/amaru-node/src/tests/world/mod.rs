@@ -17,11 +17,20 @@
 //! This module implements EDR-011 discrete-event simulation for network effects.
 //! [`WorldConnectionProvider`] owns the one physical `(time, sequence)` heap of
 //! network events and graph wakes. [`WorldLoop`] is the only popper.
+//!
+//! Chain-data tests are split by kind (EDR-011 "World tests: generated vs recorded
+//! chains"): `generated` for synthetic trees, `real_data` for live-network fragments.
 
 #[cfg(test)]
 mod fragment;
+#[cfg(test)]
+mod generated;
 mod injector;
 mod nodes;
+#[cfg(test)]
+mod real_data;
+#[cfg(test)]
+mod support;
 mod world_connection_provider;
 mod world_loop;
 

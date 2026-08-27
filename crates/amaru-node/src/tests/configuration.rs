@@ -75,6 +75,10 @@ pub struct NodeTestConfig {
     pub global_epoch_offset: Option<Duration>,
     /// When set, overrides [`Config::target_upstream_peers`] (production default is 3).
     pub target_upstream_peers: Option<usize>,
+    /// When true, `build_node` does not rewind the chain store to the ledger tip.
+    pub keep_persisted_best_chain: bool,
+    /// When set, overrides [`Config::peer_mix`] (production default includes shared/snapshot/ledger).
+    pub peer_mix: Option<String>,
 }
 
 impl Debug for NodeTestConfig {
@@ -91,6 +95,8 @@ impl Debug for NodeTestConfig {
             .field("chain_dir", &self.chain_dir)
             .field("global_epoch_offset", &self.global_epoch_offset)
             .field("target_upstream_peers", &self.target_upstream_peers)
+            .field("keep_persisted_best_chain", &self.keep_persisted_best_chain)
+            .field("peer_mix", &self.peer_mix)
             .finish()
     }
 }
@@ -121,6 +127,8 @@ impl Default for NodeTestConfig {
             chain_dir: None,
             global_epoch_offset: None,
             target_upstream_peers: None,
+            keep_persisted_best_chain: false,
+            peer_mix: None,
         }
     }
 }
@@ -268,6 +276,18 @@ impl NodeTestConfig {
         self
     }
 
+    /// Leave the chain store's best-chain pointer as persisted (no startup realign).
+    pub fn with_keep_persisted_best_chain(mut self) -> Self {
+        self.keep_persisted_best_chain = true;
+        self
+    }
+
+    /// Restrict outbound candidate sources (e.g. `static~1` for a one-hop world test).
+    pub fn with_peer_mix(mut self, mix: impl Into<String>) -> Self {
+        self.peer_mix = Some(mix.into());
+        self
+    }
+
     /// Given a list of block headers:
     ///
     /// - Store them in the chain store.
@@ -313,6 +333,10 @@ impl NodeTestConfig {
         config.listen_address = self.listen_address.clone();
         if let Some(n) = self.target_upstream_peers {
             config.target_upstream_peers = n;
+        }
+        config.realign_chain_store = !self.keep_persisted_best_chain;
+        if let Some(mix) = &self.peer_mix {
+            config.peer_mix = mix.parse().map_err(|e| anyhow::anyhow!("invalid peer-mix `{mix}`: {e}"))?;
         }
 
         if let Some(ledger_dir) = &self.ledger_dir {

@@ -145,11 +145,12 @@ pub fn build_node(
     let block_validator = Arc::new(make_block_validator(&config.ledger_config, state, chain_store.clone())?);
     let max_epoch = pool_summaries.max_epoch();
 
-    // Make the chain store, either from the network resources if already set
-    // or from the configuration.
-    // This also makes sure that the chain store tip and anchors are exactly aligned to the
-    // ledger tip.
-    initialize_chain_store(chain_store.clone(), ledger_tip)?;
+    // Production restarts drop the volatile ledger, so the chain store can be ahead of the
+    // persisted ledger tip. Realign makes the best-chain pointer match. World tests keep the
+    // persisted best chain so already-validated blocks stay on the advertised tip.
+    if config.realign_chain_store {
+        initialize_chain_store(chain_store.clone(), ledger_tip)?;
+    }
     let ledger_tip = chain_store.load_point(&ledger_tip.hash()).ok_or(anyhow!("ledger tip header not found"))?;
 
     // The best hash for blocks that were possibly downloaded and validated before a restart,
