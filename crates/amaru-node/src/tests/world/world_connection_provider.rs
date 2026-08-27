@@ -48,7 +48,7 @@ pub const LONG_TAIL_PAYLOAD_MIN_NANOS: u64 = 1_000_000_000;
 pub const LONG_TAIL_PAYLOAD_EVERY: u64 = 10;
 
 /// Deterministic delay for sample `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
-pub fn delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
+fn delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
     assert!(min_nanos <= max_nanos, "delay min ({min_nanos}) exceeds max ({max_nanos})");
     let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
     min_nanos + mix % (max_nanos - min_nanos + 1)
@@ -59,15 +59,10 @@ pub fn wire_delay_nanos(seed: u64, index: u64) -> u64 {
     delay_nanos(seed, index, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS)
 }
 
-/// Deterministic delay for honest payload `index` of `seed`, uniformly in `[min_nanos, max_nanos]`.
-pub fn payload_delay_nanos(seed: u64, index: u64, min_nanos: u64, max_nanos: u64) -> u64 {
-    delay_nanos(seed, index, min_nanos, max_nanos)
-}
-
 /// Long-tail payload delay: most samples stay in the 1–5ms hop; a seeded minority is
 /// drawn from `[LONG_TAIL_PAYLOAD_MIN_NANOS, HONEST_PAYLOAD_DELAY_MAX_NANOS]`.
 ///
-/// Uses the same `splitmix64` stream as [`delay_nanos`]. Not uniform over `[1ms, 5s]`.
+/// Uses the same `splitmix64` stream as the wire hop. Not uniform over `[1ms, 5s]`.
 pub fn long_tail_payload_delay_nanos(seed: u64, index: u64) -> u64 {
     let mix = splitmix64(seed.wrapping_add(index.wrapping_mul(0x9E3779B97F4A7C15)));
     let (min_nanos, max_nanos) = if (mix >> 32).is_multiple_of(LONG_TAIL_PAYLOAD_EVERY) {
@@ -123,7 +118,7 @@ pub enum NetworkEvent {
 ///
 /// Ordered by `(time_nanos, sequence)` so Wait/ready-now and wire hops share one order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WorldHeapEntry {
+pub(super) struct WorldHeapEntry {
     pub time_nanos: u64,
     pub sequence: u64,
     pub item: WorldHeapItem,
@@ -131,7 +126,7 @@ pub struct WorldHeapEntry {
 
 /// Payload of a [`WorldHeapEntry`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum WorldHeapItem {
+pub(super) enum WorldHeapItem {
     Network(NetworkEvent),
     Graph { index: usize, reason: GraphWakeReason },
 }
@@ -262,19 +257,19 @@ impl WorldConnectionProvider {
     }
 
     /// Advance simulated time to the given instant (in nanoseconds).
-    pub fn set_time(&self, time_nanos: u64) {
+    pub(super) fn set_time(&self, time_nanos: u64) {
         let mut inner = self.inner.lock();
         assert!(time_nanos >= inner.current_time_nanos, "time cannot go backward");
         inner.current_time_nanos = time_nanos;
     }
 
     /// Get current simulated time in nanoseconds.
-    pub fn current_time_nanos(&self) -> u64 {
+    pub(super) fn current_time_nanos(&self) -> u64 {
         self.inner.lock().current_time_nanos
     }
 
     /// Pop the next heap item at-or-before the horizon. [`super::WorldLoop`] is the only caller.
-    pub fn pop_at_or_before(&self, horizon_nanos: u64) -> Option<WorldHeapEntry> {
+    pub(super) fn pop_at_or_before(&self, horizon_nanos: u64) -> Option<WorldHeapEntry> {
         let mut inner = self.inner.lock();
         let Reverse(first) = inner.heap.peek()?;
         if first.time_nanos > horizon_nanos {
@@ -284,26 +279,17 @@ impl WorldConnectionProvider {
     }
 
     /// Peek at the next heap time without popping.
-    pub fn peek_next_event_time(&self) -> Option<u64> {
+    pub(super) fn peek_next_event_time(&self) -> Option<u64> {
         self.inner.lock().heap.peek().map(|Reverse(e)| e.time_nanos)
     }
 
     /// Live heap entries (not pop order). [`super::WorldLoop`] filters cancelled wakes.
-    pub fn heap_entries(&self) -> Vec<WorldHeapEntry> {
+    pub(super) fn heap_entries(&self) -> Vec<WorldHeapEntry> {
         self.inner.lock().heap.iter().map(|Reverse(entry)| entry.clone()).collect()
     }
 
-    /// Allocate the next heap sequence number.
-    ///
-    /// Shared by network hops ([`schedule_event_locked`]) and graph wakes
-    /// ([`Self::schedule_item`]) so `(time, sequence)` is global.
-    pub fn alloc_sequence(&self) -> u64 {
-        let mut inner = self.inner.lock();
-        alloc_sequence_locked(&mut inner)
-    }
-
     /// Enqueue a network hop or graph wake onto the one physical heap.
-    pub fn schedule_item(&self, time_nanos: u64, item: WorldHeapItem) -> u64 {
+    pub(super) fn schedule_item(&self, time_nanos: u64, item: WorldHeapItem) -> u64 {
         let mut inner = self.inner.lock();
         schedule_item_locked(&mut inner, time_nanos, item)
     }
@@ -322,7 +308,7 @@ impl WorldConnectionProvider {
     }
 
     /// Schedule a one-way wire hop at `now + delay` (`delay` ∈ `[1ms, 5ms]`).
-    pub fn schedule_wire(&self, event: NetworkEvent) {
+    pub(super) fn schedule_wire(&self, event: NetworkEvent) {
         let mut inner = self.inner.lock();
         schedule_wire_locked(&mut inner, event);
     }
@@ -334,13 +320,13 @@ impl WorldConnectionProvider {
     }
 
     /// Pair a connect that has arrived at `target` if a listener is bound there.
-    pub fn pair_if_listening(&self, target: SocketAddr) -> Option<ConnectionId> {
+    pub(super) fn pair_if_listening(&self, target: SocketAddr) -> Option<ConnectionId> {
         let mut inner = self.inner.lock();
         inner.listeners.contains_key(&target).then(|| pair_connect_locked(&mut inner, target))
     }
 
     /// Add data to an endpoint inbox (Deliver).
-    pub fn deliver_to_inbox(&self, conn: ConnectionId, data: Bytes) {
+    pub(super) fn deliver_to_inbox(&self, conn: ConnectionId, data: Bytes) {
         let mut inner = self.inner.lock();
         if let Some(endpoint) = inner.endpoints.get_mut(&conn) {
             endpoint.inbox.push_back(data);
@@ -352,7 +338,7 @@ impl WorldConnectionProvider {
     /// Returns `Some` when enough bytes are available, or when the connection is gone
     /// (`connection reset`). Otherwise leaves unread bytes in the buffer so a later
     /// Deliver can finish the same recv.
-    pub fn try_complete_recv(
+    pub(super) fn try_complete_recv(
         &self,
         conn: ConnectionId,
         bytes_needed: NonZeroUsize,
@@ -362,25 +348,21 @@ impl WorldConnectionProvider {
     }
 
     /// Pop a queued handshake and return its ids. Both endpoints are already installed at pair time.
-    pub fn take_handshake(&self, listener: SocketAddr) -> Option<(ConnectionId, SocketAddr)> {
+    pub(super) fn take_handshake(&self, listener: SocketAddr) -> Option<(ConnectionId, SocketAddr)> {
         let mut inner = self.inner.lock();
         install_handshake_locked(&mut inner, listener)
     }
 
     /// Remove a closed endpoint and return the peer id if that side is still live.
-    pub fn close_endpoint(&self, conn: ConnectionId) -> Option<ConnectionId> {
+    pub(super) fn close_endpoint(&self, conn: ConnectionId) -> Option<ConnectionId> {
         let mut inner = self.inner.lock();
         let endpoint = inner.endpoints.remove(&conn)?;
         inner.last_deliver_at.remove(&conn);
         inner.endpoints.contains_key(&endpoint.peer_conn_id).then_some(endpoint.peer_conn_id)
     }
 
-    pub fn has_listener(&self, addr: SocketAddr) -> bool {
-        self.inner.lock().listeners.contains_key(&addr)
-    }
-
     /// True when `conn` exists and its peer endpoint is still installed.
-    pub fn can_send(&self, conn: ConnectionId) -> bool {
+    pub(super) fn can_send(&self, conn: ConnectionId) -> bool {
         let inner = self.inner.lock();
         let Some(endpoint) = inner.endpoints.get(&conn) else {
             return false;

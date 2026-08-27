@@ -18,16 +18,14 @@
 //! ChainSync responder, BlockFetch responder), serves headers and blocks from a store
 //! prefix, and does not run consensus or forge.
 //!
-//! The injector scans what is in the DB and publishes that inventory to a shared handle
-//! owned by [`super::WorldLoop`]. WorldLoop holds the reveal cursor and decides when each
-//! block becomes visible. The injector does not pick the advertised tip on its own.
+//! The injector scans the source store at construction. WorldLoop holds the reveal
+//! cursor and decides when each block becomes visible. The injector does not pick
+//! the advertised tip on its own.
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use amaru_consensus::stages::select_chain::cmp_tip;
-use amaru_kernel::{
-    BlockHeight, Header, HeaderHash, IsHeader, NetworkMagic, PREPROD_ERA_HISTORY, Peer, Point, Slot, Transaction,
-};
+use amaru_kernel::{Header, HeaderHash, IsHeader, NetworkMagic, PREPROD_ERA_HISTORY, Peer, Point, Transaction};
 use amaru_mempool::InMemoryMempool;
 use amaru_metrics::Meter;
 use amaru_ouroboros::{
@@ -48,41 +46,18 @@ use amaru_pure_stage::{
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
 
-/// One header the injector found in the source store, in chain order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InventoryBlock {
-    pub point: Point,
-    pub hash: HeaderHash,
-    pub slot: Slot,
-    pub height: BlockHeight,
-    pub has_body: bool,
-}
-
-impl InventoryBlock {
-    fn from_header(header: &Header, has_body: bool) -> Self {
-        Self {
-            point: header.point(),
-            hash: header.hash(),
-            slot: header.slot(),
-            height: header.block_height(),
-            has_body,
-        }
-    }
-}
-
 /// Shared injector handle owned by [`super::WorldLoop`].
 ///
-/// The injector graph writes the scanned inventory here. WorldLoop reads it after the
-/// first step and drives reveal. Do not hang this off [`SimulationRunning`].
+/// Inventory is scanned at construction. WorldLoop holds the reveal cursor and decides
+/// when each block becomes visible. Do not hang this off [`SimulationRunning`].
 pub struct InjectorShared {
     inner: Mutex<InjectorInner>,
 }
 
 struct InjectorInner {
-    inventory: Vec<InventoryBlock>,
+    inventory: Vec<Point>,
     revealed: usize,
     manager: StageRef<ManagerMessage>,
-    graph_index: usize,
     source: Arc<dyn BaseReadChainStore>,
     serving: Arc<InMemoryChainStore>,
 }
@@ -90,92 +65,47 @@ struct InjectorInner {
 impl InjectorShared {
     fn new(
         manager: StageRef<ManagerMessage>,
-        graph_index: usize,
         source: Arc<dyn BaseReadChainStore>,
         serving: Arc<InMemoryChainStore>,
+        inventory: Vec<Point>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            inner: Mutex::new(InjectorInner {
-                inventory: Vec::new(),
-                revealed: 0,
-                manager,
-                graph_index,
-                source,
-                serving,
-            }),
-        })
+        Arc::new(Self { inner: Mutex::new(InjectorInner { inventory, revealed: 0, manager, source, serving }) })
     }
 
-    fn publish_inventory(&self, inventory: Vec<InventoryBlock>) {
-        self.inner.lock().inventory = inventory;
-    }
-
-    pub fn inventory(&self) -> Vec<InventoryBlock> {
-        self.inner.lock().inventory.clone()
-    }
-
-    pub fn revealed_tip(&self) -> Point {
-        let inner = self.inner.lock();
-        inner.revealed.checked_sub(1).and_then(|i| inner.inventory.get(i)).map(|b| b.point).unwrap_or(Point::Origin)
+    pub(super) fn inventory_len(&self) -> usize {
+        self.inner.lock().inventory.len()
     }
 
     pub(super) fn manager(&self) -> StageRef<ManagerMessage> {
         self.inner.lock().manager.clone()
     }
 
-    pub(super) fn graph_index(&self) -> usize {
-        self.inner.lock().graph_index
-    }
-
-    fn copy_prefix_through(&self, through: usize) -> anyhow::Result<Option<InventoryBlock>> {
+    /// Copy the source prefix through `hash` into the serving store and return that tip.
+    pub(super) fn reveal_through(&self, hash: HeaderHash) -> anyhow::Result<Point> {
         let mut inner = self.inner.lock();
-        if inner.inventory.is_empty() || through >= inner.inventory.len() {
-            anyhow::bail!("reveal index {through} is outside inventory of {}", inner.inventory.len());
-        }
-        while inner.revealed <= through {
-            let block = inner.inventory[inner.revealed].clone();
-            copy_revealed_block(inner.source.as_ref(), inner.serving.as_ref(), &block)?;
-            inner.revealed += 1;
-        }
-        Ok(inner.inventory.get(through).cloned())
-    }
-
-    fn next_unrevealed_index(&self) -> Option<usize> {
-        let inner = self.inner.lock();
-        (inner.revealed < inner.inventory.len()).then_some(inner.revealed)
-    }
-
-    fn index_of(&self, hash: HeaderHash) -> anyhow::Result<usize> {
-        self.inner
-            .lock()
+        let through = inner
             .inventory
             .iter()
-            .position(|b| b.hash == hash)
-            .ok_or_else(|| anyhow::anyhow!("hash {hash} is not in the injector inventory"))
-    }
-
-    pub(super) fn reveal_through(&self, hash: HeaderHash) -> anyhow::Result<Option<InventoryBlock>> {
-        let through = self.index_of(hash)?;
-        self.copy_prefix_through(through)
-    }
-
-    pub(super) fn reveal_next_block(&self) -> anyhow::Result<Option<InventoryBlock>> {
-        let Some(through) = self.next_unrevealed_index() else {
-            return Ok(None);
-        };
-        self.copy_prefix_through(through)
+            .position(|point| point.hash() == hash)
+            .ok_or_else(|| anyhow::anyhow!("hash {hash} is not in the injector inventory"))?;
+        while inner.revealed <= through {
+            copy_revealed_block(inner.source.as_ref(), inner.serving.as_ref(), inner.inventory[inner.revealed])?;
+            inner.revealed += 1;
+        }
+        Ok(inner.inventory[through])
     }
 }
 
 fn copy_revealed_block(
     source: &dyn BaseReadChainStore,
     serving: &InMemoryChainStore,
-    block: &InventoryBlock,
+    point: Point,
 ) -> anyhow::Result<()> {
-    let header = source.load_header(&block.hash).ok_or_else(|| anyhow::anyhow!("missing header {}", block.hash))?;
+    let hash = point.hash();
+    let header = source.load_header(&hash).ok_or_else(|| anyhow::anyhow!("missing header {hash}"))?;
     serving.store_header(&header)?;
-    if let Some(body) = source.load_block(&block.hash)? {
-        serving.store_block(&block.hash, &body)?;
+    if let Some(body) = source.load_block(&hash)? {
+        serving.store_block(&hash, &body)?;
     }
     if serving.get_anchor_point() == Point::Origin {
         serving.set_anchor_point(&header.point())?;
@@ -189,28 +119,21 @@ fn copy_revealed_block(
 /// Uses `next_best_chain` when that still names the fragment (InMemory / live tip).
 /// After `realign_chain_store_to` the best-chain pointer is the snapshot, so this falls
 /// back to walking children after that snapshot — the same tree recovery uses.
-pub fn scan_inventory(store: &dyn BaseReadChainStore) -> Vec<InventoryBlock> {
+fn scan_inventory(store: &dyn BaseReadChainStore) -> Vec<Point> {
     let tip = store.get_best_chain_tip();
     let realigned =
         tip != Point::Origin && store.next_best_chain(&tip).is_none() && !store.get_children(&tip.hash()).is_empty();
-    if realigned {
-        let linear = walk_next_best(store, tip);
-        if !linear.is_empty() {
-            return linear;
-        }
-        return children_fragment(store, tip.hash());
-    }
-    walk_next_best(store, Point::Origin)
+    if realigned { children_fragment(store, tip.hash()) } else { walk_next_best(store, Point::Origin) }
 }
 
-fn walk_next_best(store: &dyn BaseReadChainStore, mut cursor: Point) -> Vec<InventoryBlock> {
+fn walk_next_best(store: &dyn BaseReadChainStore, mut cursor: Point) -> Vec<Point> {
     let mut out = Vec::new();
     while let Some(next) = store.next_best_chain(&cursor) {
         let Some(header) = store.load_header(&next.hash()) else {
             break;
         };
         let has_body = store.has_block(&header.hash()).unwrap_or(false);
-        out.push(InventoryBlock::from_header(&header, has_body));
+        out.push(header.point());
         if !has_body {
             break;
         }
@@ -219,7 +142,7 @@ fn walk_next_best(store: &dyn BaseReadChainStore, mut cursor: Point) -> Vec<Inve
     out
 }
 
-fn children_fragment(store: &dyn BaseReadChainStore, after: HeaderHash) -> Vec<InventoryBlock> {
+fn children_fragment(store: &dyn BaseReadChainStore, after: HeaderHash) -> Vec<Point> {
     let mut best = None;
     let mut to_visit = store.get_children(&after);
     let mut seen = BTreeSet::new();
@@ -240,47 +163,35 @@ fn children_fragment(store: &dyn BaseReadChainStore, after: HeaderHash) -> Vec<I
     let Some(head) = best else {
         return Vec::new();
     };
-    let mut headers = vec![head.clone()];
-    let mut current = head;
+    let mut headers = vec![head];
     loop {
-        let Some(parent) = current.parent() else {
+        let Some(parent) = headers.last().and_then(Header::parent) else {
             return Vec::new();
         };
         if parent == after {
             headers.reverse();
-            return inventory_from_headers(store, headers);
+            return headers.into_iter().map(|header| header.point()).collect();
         }
         let Some(header) = store.load_header(&parent) else {
             return Vec::new();
         };
-        headers.push(header.clone());
-        current = header;
+        headers.push(header);
     }
-}
-
-fn inventory_from_headers(store: &dyn BaseReadChainStore, headers: Vec<Header>) -> Vec<InventoryBlock> {
-    headers
-        .into_iter()
-        .map(|header| {
-            let has_body = store.has_block(&header.hash()).unwrap_or(false);
-            InventoryBlock::from_header(&header, has_body)
-        })
-        .collect()
 }
 
 /// Build the serve-only injector graph.
 ///
 /// Listens and accepts (`accept_interval = 0` so extra inbounds are not gated on the 100ms
 /// Wait). Serves ChainSync/BlockFetch from an InMemory copy of the revealed prefix. The
-/// source store is scanned as-is; after realign that source still advertises the snapshot.
+/// source store is scanned at construction; after realign that source still advertises the snapshot.
 pub fn build_injector(
     source: Arc<dyn BaseReadChainStore>,
     connections: ConnectionsResource,
     listen: SocketAddr,
     tokio_handle: &Handle,
-    graph_index: usize,
 ) -> anyhow::Result<(SimulationRunning, Arc<InjectorShared>)> {
     let serving = Arc::new(InMemoryChainStore::new());
+    let inventory = scan_inventory(source.as_ref());
     let mut stage_graph = SimulationBuilder::default()
         .with_eval_strategy(Fifo)
         .with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000));
@@ -299,21 +210,11 @@ pub fn build_injector(
         ),
     );
     let manager_ref = manager.without_state();
-    let shared = InjectorShared::new(manager_ref.clone(), graph_index, source.clone(), serving);
-    let scan_shared = shared.clone();
-    let scan = stage_graph.stage("scan", move |_state: (), _msg: Scan, _eff| {
-        let scan_shared = scan_shared.clone();
-        let source = source.clone();
-        async move {
-            scan_shared.publish_inventory(scan_inventory(source.as_ref()));
-        }
-    });
-    let scan = stage_graph.wire_up(scan, ());
+    let shared = InjectorShared::new(manager_ref.clone(), source, serving, inventory);
 
     stage_graph
         .preload(&manager_ref, [ManagerMessage::Listen(listen)])
         .map_err(|_| anyhow::anyhow!("failed to preload injector Listen"))?;
-    stage_graph.preload(&scan, [Scan]).map_err(|_| anyhow::anyhow!("failed to preload injector Scan"))?;
 
     Ok((stage_graph.run(tokio_handle), shared))
 }
@@ -362,9 +263,6 @@ pub fn build_injector_peer(
     Ok(stage_graph.run(tokio_handle))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct Scan;
-
 async fn peer_pipeline(_state: (), msg: ChainSyncInitiatorMsg, eff: Effects<ChainSyncInitiatorMsg>) {
     match msg.msg {
         InitiatorResult::Initialize | InitiatorResult::Terminated => {}
@@ -397,14 +295,7 @@ mod tests {
     fn test_scan_inventory_lists_linear_fragment_in_chain_order() {
         let (store, headers) = primed_linear_store(3);
         let inventory = scan_inventory(&store);
-        assert_eq!(inventory.len(), 3);
-        for (got, header) in inventory.iter().zip(headers.iter()) {
-            assert_eq!(got.hash, header.hash());
-            assert_eq!(got.point, header.point());
-            assert_eq!(got.slot, header.slot());
-            assert_eq!(got.height, header.block_height());
-            assert!(got.has_body);
-        }
+        assert_eq!(inventory, headers.iter().map(Header::point).collect::<Vec<_>>());
     }
 
     fn primed_linear_store(n: usize) -> (InMemoryChainStore, Vec<Header>) {

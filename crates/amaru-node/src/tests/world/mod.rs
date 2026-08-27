@@ -25,13 +25,12 @@ mod nodes;
 mod world_connection_provider;
 mod world_loop;
 
-pub use injector::{InjectorShared, InventoryBlock, build_injector, build_injector_peer, scan_inventory};
+pub use injector::{InjectorShared, build_injector, build_injector_peer};
 pub use nodes::build_world_node;
 pub use world_connection_provider::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
     LONG_TAIL_PAYLOAD_EVERY, LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
-    WorldConnectionProvider, WorldHeapEntry, WorldHeapItem, long_tail_payload_delay_nanos, payload_delay_nanos,
-    wire_delay_nanos,
+    WorldConnectionProvider, long_tail_payload_delay_nanos, wire_delay_nanos,
 };
 pub use world_loop::WorldLoop;
 

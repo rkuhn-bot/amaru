@@ -42,7 +42,7 @@ use super::{
     GraphWakeReason, HONEST_PAYLOAD_DELAY_MAX_NANOS, HONEST_PAYLOAD_DELAY_SLOTS, HeapLogEntry, HeapLogKind,
     LONG_TAIL_PAYLOAD_EVERY, LONG_TAIL_PAYLOAD_MIN_NANOS, NetworkEvent, WIRE_DELAY_MAX_NANOS, WIRE_DELAY_MIN_NANOS,
     WorldConnectionProvider, WorldLoop, build_injector, build_injector_peer, build_world_node,
-    long_tail_payload_delay_nanos, payload_delay_nanos, wire_delay_nanos,
+    long_tail_payload_delay_nanos, wire_delay_nanos,
 };
 use crate::tests::configuration::NodeTestConfig;
 
@@ -1148,17 +1148,6 @@ fn test_honest_payload_cap_is_five_preprod_slots() {
     );
 }
 
-#[test]
-fn test_default_payload_delay_matches_wire_hop() {
-    for index in 0..32 {
-        assert_eq!(
-            payload_delay_nanos(SEED, index, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS),
-            wire_delay_nanos(SEED, index),
-            "default payload range is the 1–5ms hop at sample {index}"
-        );
-    }
-}
-
 /// Seeded long-tail samples stay in the 1–5ms hop for the majority, with at least one
 /// sample orders of magnitude later. A uniform draw over `[1ms, 5s]` fails this.
 #[test]
@@ -1766,24 +1755,15 @@ fn injector_linear_store(n: usize) -> (Arc<InMemoryChainStore>, Vec<amaru_kernel
 async fn test_injector_inventory_reaches_world_loop() {
     let handle = tokio::runtime::Handle::current();
     let provider = provider();
-    let (store, headers) = injector_linear_store(3);
+    let (store, _) = injector_linear_store(3);
     let listen: SocketAddr = "127.0.0.1:9400".parse().unwrap();
     let source: Arc<dyn BaseReadChainStore> = store;
     let connections: ConnectionsResource = provider.clone();
-    let (sim, shared) = build_injector(source, connections, listen, &handle, 0).expect("injector");
+    let (sim, shared) = build_injector(source, connections, listen, &handle).expect("injector");
 
-    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(shared);
-    assert!(world.inventory().is_empty(), "inventory is published by the injector graph, not at construction");
+    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(0, shared);
+    assert_eq!(world.inventory_len(), 3, "inventory is scanned at injector construction");
     world.run_until_horizon(0);
-    let inventory = world.inventory();
-    assert_eq!(inventory.len(), 3);
-    for (got, header) in inventory.iter().zip(headers.iter()) {
-        assert_eq!(got.hash, header.hash());
-        assert_eq!(got.point, header.point());
-        assert_eq!(got.slot, header.slot());
-        assert_eq!(got.height, header.block_height());
-        assert!(got.has_body);
-    }
     world.assert_serving_accept(0);
 }
 
@@ -1795,11 +1775,11 @@ async fn test_injector_empty_store_inventory_is_empty() {
     let listen: SocketAddr = "127.0.0.1:9401".parse().unwrap();
     let source: Arc<dyn BaseReadChainStore> = store;
     let connections: ConnectionsResource = provider.clone();
-    let (sim, shared) = build_injector(source, connections, listen, &handle, 0).expect("injector");
+    let (sim, shared) = build_injector(source, connections, listen, &handle).expect("injector");
 
-    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(shared);
+    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(0, shared);
+    assert_eq!(world.inventory_len(), 0);
     world.run_until_horizon(0);
-    assert!(world.inventory().is_empty());
     world.assert_serving_accept(0);
 }
 
@@ -1814,13 +1794,13 @@ async fn test_injector_reveal_gates_chainsync() {
     let listen: SocketAddr = "127.0.0.1:9402".parse().unwrap();
     let source: Arc<dyn BaseReadChainStore> = store;
     let connections: ConnectionsResource = provider.clone();
-    let (injector, shared) = build_injector(source, connections.clone(), listen, &handle, 0).expect("injector");
+    let (injector, shared) = build_injector(source, connections.clone(), listen, &handle).expect("injector");
     let peer = build_injector_peer(connections, listen, &handle).expect("injector peer");
 
-    let mut world = WorldLoop::new(provider, vec![injector, peer]).with_injector(shared);
+    let mut world = WorldLoop::new(provider, vec![injector, peer]).with_injector(0, shared);
     // Handshake hops are 1–5ms; a few mux frames finish well before 200ms.
     world.run_until_horizon(200_000_000);
-    assert_eq!(world.inventory().len(), 2);
+    assert_eq!(world.inventory_len(), 2);
     assert!(!peer_saw_roll_forward(&world, 1, &headers[0].hash()), "no header is visible before WorldLoop reveal");
     assert!(!peer_saw_roll_forward(&world, 1, &headers[1].hash()));
 

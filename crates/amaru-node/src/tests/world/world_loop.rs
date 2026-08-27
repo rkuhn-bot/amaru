@@ -39,15 +39,15 @@ use amaru_pure_stage::{
 };
 
 use super::{
-    GraphWakeReason, HeapLogEntry, InjectorShared, InventoryBlock, NetworkEvent, WorldConnectionProvider, WorldHeapItem,
+    GraphWakeReason, HeapLogEntry, InjectorShared, NetworkEvent, WorldConnectionProvider,
+    world_connection_provider::WorldHeapItem,
 };
 
 /// World loop: pops the one physical `(time, sequence)` heap.
 ///
 /// The heap lives on [`WorldConnectionProvider`]. Network hops enqueue there;
 /// graph wakes call [`WorldConnectionProvider::schedule_item`] onto the same
-/// structure. Shared [`WorldConnectionProvider::alloc_sequence`] keeps one
-/// global `(time, sequence)` order. [`SimulationRunning`] bodies live in
+/// structure so `(time, sequence)` is global. [`SimulationRunning`] bodies live in
 /// `graphs` by index so a heap entry can name them (`WorldHeapItem::Graph`).
 /// That Vec is not a scheduler — a graph runs only when its wake is popped.
 /// Completes Network UntilResolved effects only via `resume_external_box`.
@@ -70,8 +70,8 @@ pub struct WorldLoop {
     ///
     /// Keyed by `(graph_idx, Name)` so two `build_node` graphs can share mux/recv names.
     terminated_stages: BTreeSet<(usize, Name)>,
-    /// Serve-only injector inventory and reveal cursor. Owned here, not on [`SimulationRunning`].
-    injector: Option<Arc<InjectorShared>>,
+    /// Serve-only injector and the graph index it occupies. Owned here, not on [`SimulationRunning`].
+    injector: Option<(usize, Arc<InjectorShared>)>,
 }
 
 type Completion = (usize, Name, Box<dyn SendData>);
@@ -118,49 +118,23 @@ impl WorldLoop {
         &self.graphs
     }
 
-    /// Attach the serve-only injector handle this loop owns.
-    pub fn with_injector(mut self, injector: Arc<InjectorShared>) -> Self {
-        self.injector = Some(injector);
+    /// Attach the serve-only injector handle this loop owns, at `graph_index` in `graphs`.
+    pub fn with_injector(mut self, graph_index: usize, injector: Arc<InjectorShared>) -> Self {
+        self.injector = Some((graph_index, injector));
         self
     }
 
-    /// Inventory published by the injector graph after it has been stepped.
-    pub fn inventory(&self) -> Vec<InventoryBlock> {
-        self.injector.as_ref().map(|injector| injector.inventory()).unwrap_or_default()
-    }
-
-    /// Revealed prefix tip, or origin when nothing has been revealed.
-    pub fn revealed_tip(&self) -> amaru_kernel::Point {
-        self.injector.as_ref().map(|injector| injector.revealed_tip()).unwrap_or(amaru_kernel::Point::Origin)
+    /// Number of inventory blocks the injector scanned at construction.
+    pub fn inventory_len(&self) -> usize {
+        self.injector.as_ref().map(|(_, injector)| injector.inventory_len()).unwrap_or(0)
     }
 
     /// Reveal inventory through `hash` and advertise that tip to the injector manager.
-    pub fn reveal(&mut self, hash: HeaderHash) -> anyhow::Result<Option<InventoryBlock>> {
-        let injector = self.injector.clone().ok_or_else(|| anyhow::anyhow!("world has no injector"))?;
-        let revealed = injector.reveal_through(hash)?;
-        self.advertise_revealed_tip(&injector, revealed.as_ref())?;
-        Ok(revealed)
-    }
-
-    /// Reveal the next inventory block and advertise that tip to the injector manager.
-    pub fn reveal_next(&mut self) -> anyhow::Result<Option<InventoryBlock>> {
-        let injector = self.injector.clone().ok_or_else(|| anyhow::anyhow!("world has no injector"))?;
-        let revealed = injector.reveal_next_block()?;
-        self.advertise_revealed_tip(&injector, revealed.as_ref())?;
-        Ok(revealed)
-    }
-
-    fn advertise_revealed_tip(
-        &mut self,
-        injector: &InjectorShared,
-        revealed: Option<&InventoryBlock>,
-    ) -> anyhow::Result<()> {
-        let Some(block) = revealed else {
-            return Ok(());
-        };
-        let graph_idx = injector.graph_index();
+    pub fn reveal(&mut self, hash: HeaderHash) -> anyhow::Result<()> {
+        let (graph_idx, injector) = self.injector.clone().ok_or_else(|| anyhow::anyhow!("world has no injector"))?;
+        let point = injector.reveal_through(hash)?;
         let manager = injector.manager();
-        self.graphs[graph_idx].enqueue_msg(&manager, [ManagerMessage::new_tip(block.point)]);
+        self.graphs[graph_idx].enqueue_msg(&manager, [ManagerMessage::new_tip(point)]);
         self.schedule_graph_if_needed(graph_idx);
         Ok(())
     }
@@ -353,16 +327,14 @@ impl WorldLoop {
                         if self.pending_accepts.get(target).is_some_and(|q| q.is_empty()) {
                             self.pending_accepts.remove(target);
                         }
-                        if let Some((responder_conn, initiator_addr)) = self.provider.take_handshake(*target) {
-                            self.claimed_accepts.entry(*target).or_default().push_back(waiting);
-                            self.provider.schedule_wire(NetworkEvent::Accepted {
-                                listener: *target,
-                                responder_conn,
-                                initiator_addr,
-                            });
-                        } else {
-                            self.pending_accepts.entry(*target).or_default().push_front(waiting);
-                        }
+                        let (responder_conn, initiator_addr) =
+                            self.provider.take_handshake(*target).expect("pair_connect queues a handshake");
+                        self.claimed_accepts.entry(*target).or_default().push_back(waiting);
+                        self.provider.schedule_wire(NetworkEvent::Accepted {
+                            listener: *target,
+                            responder_conn,
+                            initiator_addr,
+                        });
                     }
                     vec![(
                         graph_idx,
@@ -484,7 +456,7 @@ impl WorldLoop {
         }
     }
 
-    pub fn assert_graphs_settled(&mut self) {
+    fn assert_graphs_settled(&mut self) {
         for (graph_idx, graph) in self.graphs.iter_mut().enumerate() {
             match graph.run_until_sleeping_or_blocked() {
                 Blocked::Idle | Blocked::Terminated(_) => {}
@@ -506,11 +478,6 @@ impl WorldLoop {
     /// Take the event log, leaving it empty.
     pub fn take_heap_log(&mut self) -> Vec<HeapLogEntry> {
         std::mem::take(&mut self.heap_log)
-    }
-
-    /// Check if any events remain on the unified heap before horizon.
-    pub fn has_events_before(&self, horizon_nanos: u64) -> bool {
-        self.peek_next_event_time().is_some_and(|t| t <= horizon_nanos)
     }
 
     /// Peek next event time on the one physical heap.
