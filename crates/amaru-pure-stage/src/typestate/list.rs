@@ -246,7 +246,7 @@ where
 impl<E, Body, SeqTail, RestPar, I> TakeHead<E, Skip<I>, SeqTail, RestPar> for Repeat<Body>
 where
     Body: RepeatBody,
-    If<{ core::direct_const_arg!(TYPES_EQ::<Body::Head, E>) }>: IsFalse,
+    If<{ core::gca!(TYPES_EQ::<Body::Head, E>) }>: IsFalse,
     SeqTail: Uncons + ConsIfPresent<RestPar>,
     SeqTail::Out: SelectTup<E, I>,
 {
@@ -258,7 +258,7 @@ where
 impl<E, Body, RestPar, I> TakeHead<E, There<I>, (), RestPar> for Repeat<Body>
 where
     Body: RepeatBody,
-    If<{ core::direct_const_arg!(TYPES_EQ::<Body::Head, E>) }>: IsFalse,
+    If<{ core::gca!(TYPES_EQ::<Body::Head, E>) }>: IsFalse,
     RestPar: SelectTup<E, I>,
     <RestPar as SelectTup<E, I>>::Rest: Prefix<(Repeat<Body>,)>,
 {
@@ -269,7 +269,7 @@ where
 impl<E, Eff, SeqTail, RestPar, I> TakeHead<E, There<I>, SeqTail, RestPar> for Eff
 where
     Eff: NotRepeat,
-    If<{ core::direct_const_arg!(TYPES_EQ::<Eff, E>) }>: IsFalse,
+    If<{ core::gca!(TYPES_EQ::<Eff, E>) }>: IsFalse,
     SeqTail: Prefix<Eff>,
     RestPar: SelectTup<E, I>,
     <RestPar as SelectTup<E, I>>::Rest: Prefix<SeqTail::Out>,

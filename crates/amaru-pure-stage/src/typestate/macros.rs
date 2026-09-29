@@ -824,8 +824,8 @@ macro_rules! typestate_tuple {
 /// Requires the following nightly features on the crate using it:
 /// ```ignore
 /// ![feature(
-///     min_generic_const_args,
-///     generic_const_args,
+///     gca_min_const_items,
+///     gca_const_items,
 ///     generic_const_items,
 ///     const_type_name,
 ///     unsized_const_params,
@@ -851,7 +851,7 @@ macro_rules! reveal_remainder {
         const REVEAL<Rem: $crate::typestate::ConstDesc>: usize = $crate::typestate::remainder_ctfe_panic::<Rem>();
         fn reveal<M, Rem: $crate::typestate::ConstDesc>(s: &$crate::typestate::Session<M, Rem>)
         where
-            [(); ::core::direct_const_arg!(REVEAL::<Rem>)]:,
+            [(); ::core::gca!(REVEAL::<Rem>)]:,
         {
             let _ = s;
         }

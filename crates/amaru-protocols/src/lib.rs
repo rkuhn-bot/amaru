@@ -15,8 +15,8 @@
 #![feature(
     type_alias_impl_trait,
     // features below are only needed when using `amaru_pure_stage::reveal_remainder!` to debug typestate
-    generic_const_args,
-    min_generic_const_args,
+    gca_const_items,
+    gca_min_const_items,
     generic_const_items,
     const_type_name,
     unsized_const_params,

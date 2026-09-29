@@ -14,8 +14,8 @@
 
 #![feature(
     generic_const_items,
-    generic_const_args,
-    min_generic_const_args,
+    gca_const_items,
+    gca_min_const_items,
     const_type_name,
     unsized_const_params,
     adt_const_params

@@ -271,7 +271,7 @@ impl<M, Rem: super::ConstDesc> Session<M, Rem> {
     /// [`reveal_remainder`](crate::reveal_remainder) so the span is the call.
     pub fn reveal(&self)
     where
-        [(); core::direct_const_arg!(super::describe::REVEAL::<Rem>)]:,
+        [(); core::gca!(super::describe::REVEAL::<Rem>)]:,
     {
         let _ = self;
     }
