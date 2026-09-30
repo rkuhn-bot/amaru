@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{collections::BTreeSet, fmt, num::NonZeroU8, sync::Arc};
 
 use amaru_kernel::{EraHistory, NetworkMagic, Peer, Point};
 use amaru_observability::{Instrument, TraceContext, debug_span, error, info};
@@ -20,18 +20,25 @@ use amaru_ouroboros::{ConnectionId, MempoolMsg, TxOrigin};
 use amaru_pure_stage::{DeserializerGuards, Effects, StageRef, Void, register_data_deserializer};
 
 use crate::{
-    blockfetch::{self, BlockFetchMessage, Blocks, register_blockfetch_initiator, register_blockfetch_responder},
+    blockfetch::{
+        self, BlockFetchMessage, Blocks, blockfetch_pipeline_max_buffer, register_blockfetch_initiator,
+        register_blockfetch_responder,
+    },
     chainsync::{
-        self, ChainSyncInitiatorMsg, InitiatorResult, register_chainsync_initiator, register_chainsync_responder,
+        self, ChainSyncInitiatorMsg, InitiatorResult, PIPELINE_DEPTH, register_chainsync_initiator,
+        register_chainsync_responder,
     },
     handshake,
     keepalive::{self, register_keepalive},
     manager::{ManagerConfig, ManagerMessage},
     mux::{self, MuxMessage},
-    peer_sharing::{PeerSharingMessage, ShareResult, register_peer_sharing_initiator, register_peer_sharing_responder},
+    peer_sharing::{
+        MAX_MESSAGE_BYTES, PeerSharingMessage, ShareResult, register_peer_sharing_initiator,
+        register_peer_sharing_responder,
+    },
     protocol::{
-        Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
-        PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, Role,
+        Erased, Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
+        PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, ProtocolId, Role,
     },
     protocol_messages::{
         handshake::HandshakeResult, version_data::VersionData, version_number::VersionNumber,
@@ -353,7 +360,8 @@ async fn do_initialize(
     let peer = *peer;
     let muxer = eff.stage("mux", mux::stage).await;
     let muxer = eff.supervise(muxer, ConnectionMessage::ChildDied(ChildId::Mux));
-    let muxer = eff.wire_up(muxer, mux::State::new(*conn_id, &[(PROTO_HANDSHAKE.erase(), 5760)], *role, peer)).await;
+    let early = early_mini_protocol_buffers(config.blockfetch_pipeline_n);
+    let muxer = eff.wire_up(muxer, mux::State::new(*conn_id, &early, *role, peer)).await;
 
     let handshake_result = eff.me_ref().contramap(ConnectionMessage::Handshake);
 
@@ -398,6 +406,30 @@ async fn do_initialize(
         .await;
 
     State::Handshake { muxer, handshake }
+}
+
+/// Protocol ids whose first segments may share a burst with the handshake accept.
+///
+/// The mux reader pulls the next segment as soon as the handshake segment has been
+/// dispatched, which is before `do_handshake` has `Register`ed these handlers.
+/// `Muxer::buffer` holds those bytes (same limits as the later `Register`) until the
+/// handler asks for them. Without this, that burst is `unknown protocol` and the
+/// bearer is torn down. Both directions are listed because a duplex peer sends as
+/// initiator (wire id `N`, delivered on `N | 0x8000`) as well as responder.
+fn early_mini_protocol_buffers(blockfetch_n: NonZeroU8) -> Vec<(ProtocolId<Erased>, usize)> {
+    let mut buffers = vec![(PROTO_HANDSHAKE.erase(), 5760)];
+    let both = [
+        (PROTO_N2N_CHAIN_SYNC, 5760 * usize::from(PIPELINE_DEPTH), 5760usize),
+        (PROTO_N2N_BLOCK_FETCH, blockfetch_pipeline_max_buffer(blockfetch_n), 2_500_000),
+        (PROTO_N2N_TX_SUB, 2_500_000, 2_500_000),
+        (PROTO_N2N_KEEP_ALIVE, 65535, 65535),
+        (PROTO_N2N_PEER_SHARE, MAX_MESSAGE_BYTES, MAX_MESSAGE_BYTES),
+    ];
+    for (id, initiator_limit, responder_limit) in both {
+        buffers.push((id.erase(), initiator_limit));
+        buffers.push((id.responder().erase(), responder_limit));
+    }
+    buffers
 }
 
 async fn do_handshake(
