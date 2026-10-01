@@ -21,11 +21,16 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 
 mod check;
+mod limits;
 mod miniprotocol;
 mod pipeline;
 mod want_next;
 
 pub use check::ProtoSpec;
+pub use limits::{
+    BLOCK_FETCH_INGRESS, CHAIN_SYNC_INGRESS, HANDSHAKE_INGRESS, KEEP_ALIVE_INGRESS, PEER_SHARING_INGRESS,
+    TX_SUBMISSION_INGRESS, ingress_limit,
+};
 pub use miniprotocol::{
     Inputs, Internal, Miniprotocol, Outcome, ProtocolState, Pull, StageState, Timeout, from_wire, miniprotocol, outcome,
 };
@@ -197,6 +202,11 @@ pub const PROTO_N2N_PEER_SHARE: ProtocolId<Initiator> = ProtocolId::<Initiator>(
 pub const PROTO_TEST: ProtocolId<Initiator> = ProtocolId::<Initiator>(257, PhantomData);
 
 impl<R: RoleT> ProtocolId<R> {
+    /// Mini-protocol number with the responder bit (`0x8000`) cleared.
+    pub const fn mini_protocol_num(self) -> u16 {
+        self.0 & !RESPONDER
+    }
+
     pub const fn is_initiator(self) -> bool {
         self.0 & RESPONDER == 0
     }

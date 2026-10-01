@@ -50,6 +50,7 @@ Other guiding principles:
 
 ### Fixed
 
+- **amaru-protocols**: chainsync no longer closes the connection when a peer pipelines headers. The ingress buffer for that protocol was 5760 bytes (the handshake and peer-sharing limit) instead of 462000 bytes. Block-fetch, tx-submission, and keep-alive now use the same ingress limits as cardano-node.
 - **amaru-protocols**: a new connection no longer drops when the peer's first chainsync (and other mini-protocol) segments arrive in the same burst as the handshake accept. Those segments are held until the handlers are registered, instead of being rejected as an unknown protocol.
 - **amaru-consensus**: a node whose ledger and chain store are both still at origin no longer stops block fetch during startup recovery. Recovery still stops when the ledger is at origin but the chain store already has a candidate.
 - **amaru**: starting with many upstream peers no longer panics when connection attempts fail together, or when many name lookups fail or many peers are demoted at the same time. ([#1428](https://github.com/pragma-org/amaru/issues/1428))
