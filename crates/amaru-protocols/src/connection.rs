@@ -31,7 +31,7 @@ use crate::{
     peer_sharing::{PeerSharingMessage, ShareResult, register_peer_sharing_initiator, register_peer_sharing_responder},
     protocol::{
         Erased, Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
-        PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, ProtocolId, Role, ingress_limit,
+        PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, ProtocolId, Role, ingress_deadline, ingress_limit,
     },
     protocol_messages::{
         handshake::HandshakeResult, version_data::VersionData, version_number::VersionNumber,
@@ -462,7 +462,7 @@ async fn do_initialize(
     // when it advertises full duplex. Those are the protocols the mux may hold before `Register`.
     let initiator_only = false;
     let advertisable = true;
-    let muxer = eff.stage("mux", mux::stage).await;
+    let muxer = eff.stage("mux", mux::stage).await.with_mailbox_size(mux::MUX_MAILBOX_SIZE);
     let muxer = eff.supervise(muxer, ConnectionMessage::ChildDied(ChildId::Mux));
     let early = early_mini_protocol_buffers(advertisable);
     let muxer = eff.wire_up(muxer, mux::State::new(*conn_id, &early, *role, peer)).await;
@@ -506,7 +506,13 @@ async fn do_initialize(
     };
     eff.send(
         &muxer,
-        MuxMessage::Register { protocol, frame: mux::Frame::OneCborItem, handler, max_buffer: ingress_limit(protocol) },
+        MuxMessage::Register {
+            protocol,
+            frame: mux::Frame::OneCborItem,
+            handler,
+            max_buffer: ingress_limit(protocol),
+            ingress_deadline: ingress_deadline(protocol),
+        },
     )
     .await;
 
@@ -984,6 +990,27 @@ mod tests {
         // Verify state remains the same
         let state = running.get_state(&connection_stage).unwrap();
         assert_eq!(state.state, connection_state);
+    }
+
+    #[test]
+    fn mux_is_created_with_the_burst_mailbox() {
+        let _guards = trace_guards();
+        let mut network = SimulationBuilder::default();
+        let connection = network.stage("connection", stage);
+        let connection = network.wire_up(connection, test_connection(State::Initial));
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.breakpoint(
+            "mux-wire",
+            |eff| matches!(eff, Effect::WireStage { name, .. } if name.as_str().starts_with("mux")),
+        );
+        running.enqueue_msg(&connection, [ConnectionMessage::Initialize]);
+        running.run(Run::default()).assert_breakpoint("mux-wire");
+        let hit = running.breakpoint_effect();
+        let Effect::WireStage { mailbox_size, .. } = hit.effect() else {
+            panic!("expected the mux to be wired");
+        };
+        assert_eq!(*mailbox_size, mux::MUX_MAILBOX_SIZE);
     }
 
     // HELPERS
