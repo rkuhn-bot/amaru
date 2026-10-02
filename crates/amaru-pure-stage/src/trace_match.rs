@@ -187,6 +187,65 @@ pub fn tm_try_send<'a>(from: &'a str, to: &'a str, msg: impl SendData, outcome: 
     )
 }
 
+/// Creates a `TraceMatch` for a `TrySend` whose payload is of type `T` and whose admission
+/// result is `outcome`.
+///
+/// Use this when the payload cannot be built for [`tm_try_send`] (it contains a [`crate::StageRef`],
+/// or it was injected by [`crate::StageRef::contramap`] before it was traced).
+pub fn tm_try_send_type<'a, T: SendData>(from: &'a str, to: &'a str, outcome: TrySend) -> TraceMatch<'a> {
+    let description = format!(
+        "TrySend(from: {:?}, to: {:?}, outcome: {:?}, msg of type {})",
+        from,
+        to,
+        outcome,
+        std::any::type_name::<T>()
+    );
+    TraceMatch::Property(
+        Box::new(move |src| {
+            let Some(Effect::TrySend { from: f, to: t, msg, outcome: got }) = src.suspend() else {
+                return false;
+            };
+            f.as_str() == from
+                && t.as_str().contains(to)
+                && *got == outcome
+                && msg.as_ref().type_id() == std::any::TypeId::of::<T>()
+        }),
+        description,
+    )
+}
+
+/// Creates a `TraceMatch` for a `TrySend` whose payload is of type `T`, whose admission result
+/// is `outcome`, and whose payload satisfies `predicate`.
+pub fn tm_try_send_match<'a, T: SendData>(
+    from: &'a str,
+    to: &'a str,
+    outcome: TrySend,
+    predicate: impl Fn(&T) -> bool + Send + 'a,
+) -> TraceMatch<'a> {
+    let description = format!(
+        "TrySend(from: {:?}, to: {:?}, outcome: {:?}, msg matching {})",
+        from,
+        to,
+        outcome,
+        std::any::type_name::<T>()
+    );
+    TraceMatch::Property(
+        Box::new(move |src| {
+            let Some(Effect::TrySend { from: f, to: t, msg, outcome: got }) = src.suspend() else {
+                return false;
+            };
+            if f.as_str() != from || !t.as_str().contains(to) || *got != outcome {
+                return false;
+            }
+            let Ok(typed) = msg.as_ref().cast_ref::<T>() else {
+                return false;
+            };
+            predicate(typed)
+        }),
+        description,
+    )
+}
+
 /// Creates a `TraceMatch` for a `Call` effect.
 pub fn tm_call<'a>(from: &'a str, to: &'a str, duration: Duration) -> TraceMatch<'a> {
     let description = format!("Call(from: {:?}, to: {:?}, duration: {:?})", from, to, duration);
@@ -555,5 +614,27 @@ pub fn assert_trace_does_not_contain(running: &SimulationRunning, forbidden: &[T
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trace_buffer::TraceEntry;
+
+    #[test]
+    fn try_send_type_and_match_check_outcome_and_payload() {
+        let full = TraceEntry::suspend(Effect::try_send("mgr", "conn-a", Box::new(7u8), TrySend::Full));
+        assert_eq!(tm_try_send_type::<u8>("mgr", "conn-a", TrySend::Full), full);
+        assert_eq!(tm_try_send_match("mgr", "conn-a", TrySend::Full, |n: &u8| *n == 7), full);
+        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-a", TrySend::Queued), full);
+        assert_ne!(tm_try_send_type::<u16>("mgr", "conn-a", TrySend::Full), full);
+        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-b", TrySend::Full), full);
+        assert_ne!(tm_try_send_match("mgr", "conn-a", TrySend::Full, |n: &u8| *n == 8), full);
+        assert_ne!(tm_try_send_match("other", "conn-a", TrySend::Full, |_: &u8| true), full);
+
+        let send = TraceEntry::suspend(Effect::send("mgr", "conn-a", Box::new(7u8)));
+        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-a", TrySend::Full), send);
+        assert_ne!(tm_try_send_match("mgr", "conn-a", TrySend::Queued, |_: &u8| true), send);
     }
 }

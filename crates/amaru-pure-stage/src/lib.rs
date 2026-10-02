@@ -70,7 +70,7 @@ pub use trace_match::{
     assert_trace_match, assert_trace_match_filter, tm_add_stage, tm_call, tm_clock, tm_clock_between, tm_effect,
     tm_external_effect, tm_external_effect_any, tm_external_effect_any_match, tm_external_effect_match, tm_input,
     tm_resume, tm_resume_external, tm_resume_external_match, tm_resume_unit, tm_send, tm_state, tm_terminate,
-    tm_terminated, tm_try_send, tm_wire_stage,
+    tm_terminated, tm_try_send, tm_try_send_match, tm_try_send_type, tm_wire_stage,
 };
 pub use types::{
     BLACKHOLE_NAME, BoxFuture, DEFAULT_MAILBOX_SIZE, Name, OrTerminateWith, PRIORITY_MAILBOX_SIZE, SendData,
