@@ -36,7 +36,7 @@ use super::*;
 use crate::stages::{
     block_source::BlockSourceMsg,
     select_chain::SelectChainMsg,
-    test_utils::{Logs, run_simulation},
+    test_utils::{Logs, SimulationRunMode, run_simulation_with},
 };
 
 pub fn test_peer() -> Peer {
@@ -186,14 +186,44 @@ pub fn setup_preload(
     setup_with_overrides(prep, messages, |_| {})
 }
 
+/// Like [`setup_preload`], but stops at the first scheduled wakeup without advancing time.
+pub fn setup_until_sleeping(
+    prep: &TestPrep,
+    messages: impl IntoIterator<Item = FetchBlocksMsg>,
+) -> (SimulationRunning, DeserializerGuards, Logs) {
+    setup_with_overrides_mode(prep, messages, |_| {}, SimulationRunMode::UntilSleeping)
+}
+
 pub fn setup_with_overrides(
     prep: &TestPrep,
     messages: impl IntoIterator<Item = FetchBlocksMsg>,
     overrides: impl FnOnce(&mut SimulationRunning),
 ) -> (SimulationRunning, DeserializerGuards, Logs) {
+    setup_with_overrides_mode(prep, messages, overrides, SimulationRunMode::UntilBlocked)
+}
+
+/// Like [`setup_with_overrides`], but stops at the first scheduled wakeup without advancing time.
+pub fn setup_with_overrides_until_sleeping(
+    prep: &TestPrep,
+    messages: impl IntoIterator<Item = FetchBlocksMsg>,
+    overrides: impl FnOnce(&mut SimulationRunning),
+) -> (SimulationRunning, DeserializerGuards, Logs) {
+    setup_with_overrides_mode(prep, messages, overrides, SimulationRunMode::UntilSleeping)
+}
+
+pub fn fetch_stage() -> StageRef<FetchBlocksMsg> {
+    StageRef::named_for_tests("fb-1")
+}
+
+fn setup_with_overrides_mode(
+    prep: &TestPrep,
+    messages: impl IntoIterator<Item = FetchBlocksMsg>,
+    overrides: impl FnOnce(&mut SimulationRunning),
+    mode: SimulationRunMode,
+) -> (SimulationRunning, DeserializerGuards, Logs) {
     let guards = register_guards();
 
-    run_simulation(
+    run_simulation_with(
         prep.rt.handle(),
         guards,
         |mut network| {
@@ -209,6 +239,7 @@ pub fn setup_with_overrides(
             ));
         },
         overrides,
+        mode,
     )
 }
 

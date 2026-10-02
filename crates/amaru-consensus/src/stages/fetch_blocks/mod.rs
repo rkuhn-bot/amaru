@@ -82,7 +82,9 @@ const FETCH_WIDEN_DELAYS: [Duration; 3] =
 ///   an accepted block, clear missing/timeout, signal `FetchNextFrom(boundary)` upstream to retry.
 /// - `Widen(req_id)`: While any block in this batch is still missing, ask the performance
 ///   resource for covering peers not yet contacted and send those to the manager for the
-///   remaining range. A broadcast that has not reported `PeersAsked` yet is left alone. The
+///   remaining range. An open broadcast is left alone for the whole attempt: `PeersAsked`
+///   names only connections that admitted the request, so a full or not-yet-confirmed peer
+///   is not in `asked` and must not be selected again. The
 ///   next delay is armed from `fetch_started_at`. A prefix of the batch does not cancel it:
 ///   the wakeup is dropped only once the batch is fully satisfied.
 /// - `PeersAsked(req_id, peers)`: Union peers whose handler admitted the request into the timeout
@@ -90,6 +92,7 @@ const FETCH_WIDEN_DELAYS: [Duration; 3] =
 ///   peer is stamped with the instant this attempt chose to ask them: `fetch_started_at` for the
 ///   initial set (one confirmation per connection shares that instant), and the widen clock for
 ///   a peer added by a later wakeup. The stamp does not depend on `fetch_peers` being empty.
+///   A confirmation does not end an open broadcast.
 /// - `NoBlocks(req_id, peer)`: Mark the peer settled, `record_fetch_failure` once, and drop them
 ///   from the timeout set.
 /// - `NoPeersAvailable(req_id)`: If matches current, log INFO that fetch is paused; leave the
@@ -174,7 +177,10 @@ pub struct FetchBlocks {
     widen_index: u8,
     /// The single widen wakeup still waiting to fire. Cancelled when the batch is fully satisfied.
     widen: Option<ScheduleId>,
-    /// The initial request asked every initiating connection, and `PeersAsked` has not named them yet.
+    /// The initial request asked every initiating connection.
+    ///
+    /// Widen does not add peers while this is set, including after a partial `PeersAsked`.
+    /// Cleared when the attempt ends or when the manager reports that nobody could be contacted.
     awaiting_broadcast: bool,
 }
 
@@ -510,8 +516,11 @@ impl FetchBlocks {
         }
         self.widen_index = self.widen_index.saturating_add(1);
         self.arm_next_widen(eff).await;
-        // A broadcast has not named its peers yet. Asking now would hit the same connections twice.
-        if self.awaiting_broadcast && self.fetch_peers.is_empty() {
+        // A broadcast already offered this request to every initiating connection. Confirmed
+        // peers land in `asked`; a full mailbox never confirms, and a slow one has not confirmed
+        // yet. Selecting now would ask those peers again. Targeted fetch does not have this hole:
+        // it inserts `asked` before the send.
+        if self.awaiting_broadcast {
             return;
         }
         let already = self.asked.union(&self.fetch_peers).count();
@@ -672,7 +681,8 @@ impl FetchBlocks {
             self.fetch_peers.insert(*peer);
             self.asked.insert(*peer);
         }
-        self.awaiting_broadcast = false;
+        // Leave `awaiting_broadcast` set. This list is only the connections that admitted the
+        // request, not every peer the broadcast attempted.
         if fresh.is_empty() {
             return;
         }
@@ -726,8 +736,10 @@ impl FetchBlocks {
         self.fetch_peers.clear();
         self.fetch_settled.clear();
         self.fetch_contributors.clear();
-        // Nobody was contacted. A later widen may ask peers that announce after this pause.
+        // Nobody was contacted. Drop both the names and their stamps so a later widen, or a
+        // late confirmation, does not treat this pause as an earlier choice.
         self.asked.clear();
+        self.asked_at.clear();
         self.awaiting_broadcast = false;
     }
 
