@@ -32,6 +32,7 @@ use std::{
 
 use amaru_consensus::{
     effects::{GenerateRandomSeed, ValidateBlockEffect, ValidateHeaderEffect},
+    performance::{FetchPeerSet, SelectPeersForFetchEffect},
     stages::select_chain::cmp_tip,
 };
 use amaru_kernel::{
@@ -865,25 +866,55 @@ struct AdversarialOutcome {
     heights: Vec<u64>,
     mailbox_size: usize,
     mailbox_len: usize,
+    /// Highest manager mailbox length seen at a best-chain tip, and again at the horizon.
+    mailbox_high: usize,
     requested_peers: Vec<String>,
     fault_at: Option<u64>,
     adopted_at: Option<u64>,
+    finished_at: u64,
     bad_peer: SocketAddr,
     honest_peers: Vec<SocketAddr>,
     adopted: bool,
     log: Vec<HeapLogEntry>,
 }
 
-/// N injectors serve one generated fragment. The node dials all of them with the production
-/// mailbox of 10. `fault` hits the lowest-address injector once the handshake window has passed.
+struct AdversarialSetup<'a> {
+    label: &'a str,
+    fault: AdversarialFault,
+    /// Node bulk mailbox. Injectors stay at the production default.
+    mailbox: usize,
+    fragment: usize,
+    fault_at: u64,
+    horizon: u64,
+    seed: Option<u64>,
+    /// Every fetch batch asks every connection. Later waves keep hitting the stalled peer.
+    broadcast: bool,
+}
+
+/// N injectors serve one generated fragment. The node dials all of them.
+/// `fault` hits the lowest-address injector at `setup.fault_at`.
 fn run_adversarial(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
-    let run = SyncRun::new(&format!("adversarial {label}"));
+    run_adversarial_with(AdversarialSetup {
+        label,
+        fault,
+        mailbox: ADMISSION_MAILBOX,
+        fragment: ADVERSARIAL_FRAGMENT,
+        fault_at: ADVERSARIAL_FAULT_AT_NANOS,
+        horizon: ADVERSARIAL_HORIZON_NANOS,
+        seed: None,
+        broadcast: false,
+    })
+}
+
+fn run_adversarial_with(setup: AdversarialSetup<'_>) -> AdversarialOutcome {
+    let AdversarialSetup { label, fault, mailbox, fragment, fault_at, horizon, seed, broadcast } = setup;
+    let run = SyncRun::new_seeded(&format!("adversarial {label}"), seed);
     let base = 9900u16;
     let injector_addrs: Vec<SocketAddr> = (0..ADVERSARIAL_PEERS).map(|i| loopback(base + i as u16)).collect();
     let bad_peer = injector_addrs[0];
     let honest_peers = injector_addrs[1..].to_vec();
     let node_addr = node_listen(base, 0);
-    let (store, headers) = injector_linear_store(ADVERSARIAL_FRAGMENT, run.seed);
+    let (store, headers) = injector_linear_store(fragment, run.seed);
     let head = headers.last().expect("fragment head").clone();
 
     let mut graphs = Vec::new();
@@ -907,18 +938,24 @@ fn run_adversarial(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
     }
     let peers: Vec<Peer> = injector_addrs.iter().copied().map(peer_at).collect();
     let node = with_ancestor(
-        generated_node(run.seed, 0, node_addr).with_upstream_peers(peers).with_mailbox_size(ADMISSION_MAILBOX),
+        generated_node(run.seed, 0, node_addr).with_upstream_peers(peers).with_mailbox_size(mailbox),
         &headers[0],
     );
     let node_idx = graphs.len();
-    graphs.push(run.spawn_catch_up(0, node));
+    let mut node_sim = run.spawn_catch_up(0, node);
+    if broadcast {
+        // Cold-start shape on every batch: the manager offers the range to each connection,
+        // including one that has stopped reading.
+        node_sim.override_external_effect::<SelectPeersForFetchEffect>(usize::MAX, |_| {
+            OverrideResult::handled(FetchPeerSet { peers: Vec::new(), weak: true })
+        });
+    }
+    graphs.push(node_sim);
 
     match fault {
         AdversarialFault::None => {}
-        AdversarialFault::StalledReader => run.provider.schedule_stalled_reader(bad_peer, ADVERSARIAL_FAULT_AT_NANOS),
-        AdversarialFault::SilentResponder => {
-            run.provider.schedule_silent_responder(bad_peer, ADVERSARIAL_FAULT_AT_NANOS)
-        }
+        AdversarialFault::StalledReader => run.provider.schedule_stalled_reader(bad_peer, fault_at),
+        AdversarialFault::SilentResponder => run.provider.schedule_silent_responder(bad_peer, fault_at),
     }
 
     let requested_peers = Arc::new(Mutex::new(Vec::new()));
@@ -929,11 +966,16 @@ fn run_adversarial(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
     // Do not read the chain store from this callback: the tip write that woke us may
     // still hold it, and a re-entrant lock deadlocks the world loop.
     let mut last_tip_at = None;
-    world.run_until_horizon_on_best_chain_tip(ADVERSARIAL_HORIZON_NANOS, |world| {
+    let mut mailbox_high = 0usize;
+    world.run_until_horizon_on_best_chain_tip(horizon, |world| {
         last_tip_at = Some(world.now_nanos());
+        let (len, _) = manager_mailbox(world, node_idx);
+        mailbox_high = mailbox_high.max(len);
     });
 
     let (mailbox_len, mailbox_size) = manager_mailbox(&world, node_idx);
+    mailbox_high = mailbox_high.max(mailbox_len);
+    let finished_at = world.now_nanos();
     let adopted = adopted_head(&world, node_idx, &head);
     let adopted_at = adopted.then_some(last_tip_at).flatten();
     let ancestor_height = headers[0].block_height().as_u64();
@@ -958,7 +1000,7 @@ fn run_adversarial(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
     });
     let requested_peers = std::mem::take(&mut *requested_peers.lock().expect("requested peers"));
     eprintln!(
-        "adversarial {label} seed={:#x} adopted={adopted} adopted_at={adopted_at:?} heights={heights:?} mailbox={mailbox_len}/{mailbox_size} requested={} fault_at={fault_at:?} last_peers={:?}",
+        "adversarial {label} seed={:#x} adopted={adopted} adopted_at={adopted_at:?} finished_at={finished_at} heights={heights:?} mailbox={mailbox_len}/{mailbox_size} high={mailbox_high} requested={} fault_at={fault_at:?} last_peers={:?}",
         run.seed,
         requested_peers.len(),
         requested_peers.last(),
@@ -969,7 +1011,9 @@ fn run_adversarial(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
         heights,
         mailbox_size,
         mailbox_len,
+        mailbox_high,
         requested_peers,
+        finished_at,
         fault_at,
         adopted_at,
         bad_peer,
@@ -1071,6 +1115,70 @@ fn assert_fetch_survives_one_bad_peer(outcome: &AdversarialOutcome, label: &str)
     );
 }
 
+/// Bulk mailbox for the stalled-reader replay. An honest broadcast of this fragment
+/// still fits; a peer that stops reading fills it when every later batch is offered there.
+const STALL_MAILBOX: usize = 4;
+/// Several block-fetch batches (`MAX_MISSING_BLOCKS_PER_BATCH` is 25).
+const STALL_FRAGMENT: usize = 150;
+/// After connects (about 3–8ms) and before this fragment's bodies are adopted (~150ms).
+const STALL_FAULT_AT_NANOS: u64 = 10_000_000;
+/// Honest adoption of [`STALL_FRAGMENT`] is about 150ms. The bound sits above that.
+const STALL_ADOPTION_BOUND_NANOS: u64 = 500_000_000;
+/// Long enough to record a late adoption. The 60s block-fetch agency timeout stays beyond it.
+const STALL_HORIZON_NANOS: u64 = 2_000_000_000;
+
+fn stall_replay(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
+    run_adversarial_with(AdversarialSetup {
+        label,
+        fault,
+        mailbox: STALL_MAILBOX,
+        fragment: STALL_FRAGMENT,
+        fault_at: STALL_FAULT_AT_NANOS,
+        horizon: STALL_HORIZON_NANOS,
+        seed: None,
+        broadcast: true,
+    })
+}
+
+fn assert_head_before_bound(outcome: &AdversarialOutcome, label: &str) {
+    assert_eq!(outcome.mailbox_size, STALL_MAILBOX, "{label} mailbox");
+    assert!(
+        outcome.adopted,
+        "{label} must adopt the head from the other peers; seed={:#x} heights={:?} mailbox={}/{} high={} finished_at={}",
+        outcome.seed,
+        outcome.heights,
+        outcome.mailbox_len,
+        outcome.mailbox_size,
+        outcome.mailbox_high,
+        outcome.finished_at
+    );
+    assert!(
+        outcome.adopted_at.is_some_and(|at| at < STALL_ADOPTION_BOUND_NANOS),
+        "{label} must adopt before {}ms; seed={:#x} adopted_at={:?} finished_at={} high={}/{}",
+        STALL_ADOPTION_BOUND_NANOS / 1_000_000,
+        outcome.seed,
+        outcome.adopted_at,
+        outcome.finished_at,
+        outcome.mailbox_high,
+        outcome.mailbox_size
+    );
+    assert!(
+        outcome.mailbox_high < outcome.mailbox_size,
+        "{label} manager mailbox must stay below capacity; seed={:#x} high={}/{}",
+        outcome.seed,
+        outcome.mailbox_high,
+        outcome.mailbox_size
+    );
+    assert!(outcome.heights.len() >= 2, "{label} chain advanced {:?}", outcome.heights);
+    assert!(!outcome.requested_peers.is_empty(), "{label} must emit block.requested; seed={:#x}", outcome.seed);
+    let last = outcome.requested_peers.last().expect("block.requested");
+    assert!(
+        outcome.honest_peers.iter().any(|honest| last.contains(&honest.to_string())),
+        "{label} must fetch from an honest peer; seed={:#x} last={last}",
+        outcome.seed
+    );
+}
+
 /// Three peers, production mailbox, no fault. The small mailbox still syncs the fragment.
 #[test]
 fn test_world_small_mailbox_honest_peers_sync() {
@@ -1084,12 +1192,20 @@ fn test_world_small_mailbox_honest_peers_sync() {
     assert!(!outcome.requested_peers.is_empty(), "block.requested; seed={:#x}", outcome.seed);
 }
 
-/// One peer stops reading. The other peers still deliver the fragment, the manager mailbox
-/// stays below capacity, and chain selection keeps moving.
+/// Every batch is offered to every peer, one of whom stops reading after the handshake.
+/// The head is adopted from the others before [`STALL_ADOPTION_BOUND_NANOS`], and the
+/// manager mailbox stays below [`STALL_MAILBOX`].
 #[test]
 fn test_world_stalled_reader_fetch_continues() {
-    let outcome = run_adversarial("stalled-reader", AdversarialFault::StalledReader);
-    assert_fetch_survives_one_bad_peer(&outcome, "stalled reader");
+    let outcome = stall_replay("stalled-reader", AdversarialFault::StalledReader);
+    assert_head_before_bound(&outcome, "stalled reader");
+    assert!(
+        outcome.fault_at.is_some_and(|at| outcome.adopted_at.is_some_and(|adopted| adopted > at)),
+        "adoption must follow the stall; seed={:#x} adopted_at={:?} fault_at={:?}",
+        outcome.seed,
+        outcome.adopted_at,
+        outcome.fault_at
+    );
     assert!(
         outcome
             .log
@@ -1098,6 +1214,14 @@ fn test_world_stalled_reader_fetch_continues() {
         "stalled-reader hop; seed={:#x}",
         outcome.seed
     );
+}
+
+/// Same broadcast and mailbox as the stalled-reader replay, with every peer still reading.
+#[test]
+fn test_world_broadcast_honest_peers_sync() {
+    let outcome = stall_replay("broadcast-honest", AdversarialFault::None);
+    assert!(outcome.fault_at.is_none(), "no fault was scheduled");
+    assert_head_before_bound(&outcome, "broadcast honest");
 }
 
 /// One peer accepts writes and then stops delivering. The others still complete the fetch.
