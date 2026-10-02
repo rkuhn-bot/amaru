@@ -1896,6 +1896,126 @@ fn caller_gone_while_call_is_queued(runtime: Runtime) {
     }
 }
 
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ParkCaller {
+    out: StageRef<Report>,
+    callee: Option<StageRef<Mail>>,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ParkParent {
+    out: StageRef<Report>,
+    caller: StageRef<Kick>,
+    callee: Option<StageRef<Mail>>,
+}
+
+/// Callee mailbox holds one message. Occupy is in flight, one filler is queued, and the call
+/// is only parked. The callee then terminates. The request never entered the mailbox.
+fn install_parked_call_loses_callee(
+    graph: &mut impl StageGraph,
+) -> (StageRef<ParentMsg>, StageRef<Kick>, Sender<ParentMsg>, Sender<Kick>, Receiver<Report>) {
+    let caller = graph.stage("caller", async |mut st: ParkCaller, msg: Kick, eff| match msg {
+        Kick::Bind(callee) => {
+            st.callee = Some(callee);
+            st
+        }
+        Kick::Go => {
+            let callee = st.callee.clone().expect("callee bound");
+            let result = eff.call_with_admission(&callee, CALL_TIMEOUT, Mail::Ping).await;
+            eff.send(&st.out, Report::Call(call_code(result))).await;
+            st
+        }
+    });
+    let caller_ref = caller.sender();
+    let (out, rx) = graph.output("out", 8);
+    graph.wire_up(caller, ParkCaller { out: out.clone(), callee: None });
+
+    let parent = graph.stage("parent", async |mut st: ParkParent, msg: ParentMsg, eff| match msg {
+        ParentMsg::Boot => {
+            let callee = eff
+                .stage("callee", async |out: StageRef<Report>, msg: Mail, eff| {
+                    match msg {
+                        Mail::Occupy => {
+                            eff.send(&out, Report::Holding).await;
+                            eff.wait(SLOT_WAIT).await;
+                            return eff.terminate().await;
+                        }
+                        Mail::Filler(n) => eff.send(&out, Report::Saw(n)).await,
+                        Mail::Ping(_) => eff.send(&out, Report::Saw(9)).await,
+                    }
+                    out
+                })
+                .await
+                .with_mailbox_size(1);
+            let callee = eff.supervise(callee, ParentMsg::Gone);
+            let callee = eff.wire_up(callee, st.out.clone()).await;
+            eff.send(&st.caller, Kick::Bind(callee.clone())).await;
+            st.callee = Some(callee);
+            st
+        }
+        ParentMsg::Occupy => {
+            let callee = st.callee.clone().expect("booted");
+            eff.send(&callee, Mail::Occupy).await;
+            st
+        }
+        ParentMsg::Fill(n) => {
+            let callee = st.callee.clone().expect("booted");
+            eff.send(&callee, Mail::Filler(n)).await;
+            st
+        }
+        ParentMsg::Gone => st,
+    });
+    let parent_ref = parent.sender();
+    graph.wire_up(parent, ParkParent { out, caller: caller_ref.clone(), callee: None });
+    (parent_ref.clone(), caller_ref.clone(), graph.input(&parent_ref), graph.input(&caller_ref), rx)
+}
+
+fn callee_gone_while_call_is_only_parked(runtime: Runtime) {
+    let _guards = register();
+    let assert_not_admitted = |msgs: &[Report]| {
+        assert!(msgs.contains(&Report::Call(0)), "parked call must be NotAdmitted: {msgs:?}");
+        assert!(!msgs.contains(&Report::Saw(9)), "parked call must not be delivered: {msgs:?}");
+        assert!(!msgs.contains(&Report::Call(1)), "parked call must not be TimedOut: {msgs:?}");
+    };
+    match runtime {
+        Runtime::Simulation => {
+            let mut network = SimulationBuilder::default();
+            let (parent, caller, _to_parent, _to_caller, mut rx) = install_parked_call_loses_callee(&mut network);
+            let mut sim = network.run(test_runtime().handle());
+            sim.enqueue_msg(&parent, [ParentMsg::Boot]);
+            sim.run(Run::skip_wakeups()).assert_idle();
+            sim.enqueue_msg(&parent, [ParentMsg::Occupy]);
+            sim.run(Run::default()).assert_sleeping();
+            assert_eq!(rx.try_next(), Some(Report::Holding));
+            sim.enqueue_msg(&parent, [ParentMsg::Fill(1)]);
+            sim.run(Run::default()).assert_sleeping();
+            sim.enqueue_msg(&caller, [Kick::Go]);
+            sim.run(Run::skip_wakeups()).assert_idle();
+            assert_not_admitted(&drain_report(&mut rx));
+        }
+        Runtime::Tokio => {
+            let rt = paused_runtime();
+            let mut network = TokioBuilder::default();
+            let (_parent, _caller, to_parent, to_caller, mut rx) = install_parked_call_loses_callee(&mut network);
+            let running = network.run(rt.handle().clone());
+            rt.block_on(async move {
+                to_parent.send(ParentMsg::Boot).await.unwrap();
+                settle().await;
+                to_parent.send(ParentMsg::Occupy).await.unwrap();
+                settle().await;
+                assert_eq!(rx.try_next(), Some(Report::Holding));
+                to_parent.send(ParentMsg::Fill(1)).await.unwrap();
+                settle().await;
+                to_caller.send(Kick::Go).await.unwrap();
+                tokio::time::sleep(CALL_TIMEOUT).await;
+                settle().await;
+                assert_not_admitted(&drain_report(&mut rx));
+            });
+            running.abort();
+        }
+    }
+}
+
 #[test]
 fn try_send_full_blackhole_and_gone_simulation() {
     try_send_full_blackhole_and_gone(Runtime::Simulation);
@@ -2014,4 +2134,14 @@ fn caller_gone_while_call_is_queued_simulation() {
 #[test]
 fn caller_gone_while_call_is_queued_tokio() {
     caller_gone_while_call_is_queued(Runtime::Tokio);
+}
+
+#[test]
+fn callee_gone_while_call_is_only_parked_simulation() {
+    callee_gone_while_call_is_only_parked(Runtime::Simulation);
+}
+
+#[test]
+fn callee_gone_while_call_is_only_parked_tokio() {
+    callee_gone_while_call_is_only_parked(Runtime::Tokio);
 }

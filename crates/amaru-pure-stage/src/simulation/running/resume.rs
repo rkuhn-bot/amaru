@@ -225,43 +225,38 @@ pub fn resume_call_send_internal(
     };
     let id = *id;
 
-    let (real_to, missing) = match super::deliver_message(&mut sim.stages, to.clone(), msg) {
+    // Record admission now. A later wakeup cannot rediscover it: `terminate_stage` may
+    // already have dropped the callee, and with it the parked row.
+    let admitted = match super::deliver_message(&mut sim.stages, to.clone(), msg) {
         DeliverMessageResult::Delivered(data_to) => {
             // `to` may not be suspended on receive, so failure to resume is okay
             let name = data_to.name.clone();
             resume_receive_internal(sim, &name)?;
-            (Some(name), false)
+            true
         }
         DeliverMessageResult::Full(data_to, send_data) => {
             data_to.senders.push_back((from.clone(), send_data));
-            (Some(data_to.name.clone()), false)
+            false
         }
         DeliverMessageResult::NotFound => {
             tracing::warn!(stage = %to, "message send to terminated stage dropped");
-            (None, true)
+            false
         }
     };
 
-    let ret = real_to.is_some();
-
     sim.schedule_wakeup(id, move |sim| {
-        // Drop a request that is still only queued. This runs even when the caller is
-        // already gone, so a later drain of the callee cannot admit it.
-        let still_queued = real_to.as_ref().is_some_and(|real_to| {
-            let Some(data_to) = sim.stages.get_mut(real_to) else {
-                return false;
-            };
-            let before = data_to.senders.len();
+        // Not admitted: drop the parked row if the callee is still there. This runs even
+        // when the caller is already gone, so a later drain cannot deliver the request.
+        if !admitted && let Some(data_to) = sim.stages.get_mut(&to) {
             data_to.senders.retain(|(name, _)| name != &from);
-            before != data_to.senders.len()
-        });
+        }
         let Some(data_from) = sim.stages.get_mut(&from) else {
             tracing::warn!(name = %from, "stage was terminated, skipping call effect delivery");
             return;
         };
-        // Still queued or nowhere to queue: `NotAdmitted` (never delivered).
-        // Otherwise the request was admitted and the deadline passed: `TimedOut` (stays queued).
-        let response = if still_queued || missing { CallNotAdmitted::boxed() } else { CallTimeout::boxed() };
+        // `admitted` is from schedule time. The callee dying later does not turn a parked
+        // request into `TimedOut`, and it does not pull an admitted request back out.
+        let response = if admitted { CallTimeout::boxed() } else { CallNotAdmitted::boxed() };
         resume_call_internal(
             data_from,
             &mut |name, response| {
@@ -273,7 +268,7 @@ pub fn resume_call_send_internal(
         .ok();
     });
 
-    Ok(ret)
+    Ok(true)
 }
 
 pub fn resume_call_internal(

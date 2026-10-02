@@ -1871,3 +1871,71 @@ fn deliver_priority(sim: &mut SimulationRunning, at_stage: Name, msg: Box<dyn Se
     // Stage may already be waiting on Receive; wake it so the priority message is not stuck.
     let _ = resume_receive_internal(sim, &name);
 }
+
+#[cfg(test)]
+mod admission_cleanup {
+    use std::time::Duration;
+
+    use super::SimulationRunning;
+    use crate::{
+        StageGraph, StageRef,
+        simulation::{Run, SimulationBuilder},
+        trace_buffer::TerminationReason,
+    };
+
+    /// Mailbox size 1, one filler queued, caller blocked in `call`.
+    fn parked_call() -> (tokio::runtime::Runtime, SimulationRunning, crate::Name, crate::Name) {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let mut network = SimulationBuilder::default();
+        let callee = network
+            .stage("callee", async |out: StageRef<u8>, msg: u8, eff| {
+                if msg == 0 {
+                    eff.send(&out, 1u8).await;
+                    eff.wait(Duration::from_secs(10)).await;
+                } else {
+                    eff.send(&out, msg).await;
+                }
+                out
+            })
+            .with_mailbox_size(1);
+        let callee_ref = callee.sender();
+        let caller = network.stage("caller", async |callee: StageRef<u8>, _: u8, eff| {
+            let _ = eff.call(&callee, Duration::from_secs(30), |_: StageRef<u8>| 9u8).await;
+            callee
+        });
+        let caller_ref = caller.sender();
+        let (out, mut rx) = network.output("out", 4);
+        network.wire_up(callee, out);
+        network.wire_up(caller, callee_ref.clone());
+        let mut sim = network.run(rt.handle());
+        sim.enqueue_msg(&callee_ref, [0u8]);
+        sim.run(Run::default()).assert_sleeping();
+        assert_eq!(rx.try_next(), Some(1));
+        sim.enqueue_msg(&callee_ref, [1u8]);
+        sim.enqueue_msg(&caller_ref, [0u8]);
+        sim.run(Run::default()).assert_sleeping();
+        let callee_name = callee_ref.name().clone();
+        let caller_name = caller_ref.name().clone();
+        assert_eq!(sim.stages.get(&callee_name).expect("callee").senders.len(), 1, "call is parked");
+        (rt, sim, callee_name, caller_name)
+    }
+
+    #[test]
+    fn terminate_drops_the_callers_parked_call() {
+        let (_rt, mut sim, callee, caller) = parked_call();
+        sim.terminate_stage(caller, TerminationReason::Voluntary);
+        let senders = &sim.stages.get(&callee).expect("callee").senders;
+        assert!(senders.is_empty(), "outbound retain must drop the parked call: {senders:?}");
+    }
+
+    #[test]
+    fn admit_drops_a_parked_sender_that_is_gone() {
+        let (_rt, mut sim, callee, caller) = parked_call();
+        let mailbox = sim.stages.get(&callee).expect("callee").mailbox.len();
+        sim.stages.remove(&caller);
+        sim.admit_parked_sender(&callee, false);
+        let data = sim.stages.get(&callee).expect("callee");
+        assert!(data.senders.is_empty(), "a gone sender is not put back on the queue");
+        assert_eq!(data.mailbox.len(), mailbox, "a gone sender is not admitted");
+    }
+}
