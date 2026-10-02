@@ -259,6 +259,13 @@ pub fn te_clock(instant: Instant) -> TraceEntry {
     TraceEntry::Clock(instant)
 }
 
+pub fn te_record_peers_asked(at_stage: &str, hashes: Vec<HeaderHash>, peers: Vec<Peer>, at: Instant) -> TraceEntry {
+    TraceEntry::suspend(Effect::external(
+        at_stage,
+        Box::new(crate::performance::Performance::record_peers_asked(hashes, peers, at)),
+    ))
+}
+
 pub fn te_record_blocks_requested(at_stage: &str, hashes: Vec<HeaderHash>, requested_at: Instant) -> TraceEntry {
     TraceEntry::suspend(Effect::external(
         at_stage,

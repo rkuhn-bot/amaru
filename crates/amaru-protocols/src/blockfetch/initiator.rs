@@ -100,9 +100,15 @@ amaru_pure_stage::impl_label!(Close);
 pub enum Blocks {
     /// Peer responded that it has no blocks in the requested range.
     NoBlocks(u64, Peer),
-    /// Manager found no initiating connections for this request id.
+    /// No initiating connection existed to attempt this request.
+    ///
+    /// Every candidate connection refusing the message is not this outcome: nobody was asked,
+    /// and the fetch timeout retries.
     NoPeersAvailable(u64),
-    /// Peers to which the manager dispatched this fetch request (for performance scoring).
+    /// Peers whose block-fetch handler admitted this request.
+    ///
+    /// The connection sends one peer, itself, when that handler's mailbox accepts the range.
+    /// A handler that does not accept it is absent, and is not scored for this request.
     PeersAsked(u64, Vec<Peer>),
     Block(u64, Peer, NetworkBlock),
     Done(u64),

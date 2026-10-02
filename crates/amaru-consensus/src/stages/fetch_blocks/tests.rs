@@ -30,8 +30,8 @@ use crate::{
         fetch_blocks::test_setup::{
             TestPrep, make_block_header, setup, setup_with_overrides, te_ancestors_between, te_cancel_schedule,
             te_clock, te_find_missing_blocks, te_has_block, te_load_header, te_record_block_delivery,
-            te_record_blocks_requested, te_record_fetch_failure, te_schedule, te_select_peers_for_fetch,
-            te_store_block, test_peer, test_prep,
+            te_record_blocks_requested, te_record_fetch_failure, te_record_peers_asked, te_schedule,
+            te_select_peers_for_fetch, te_store_block, test_peer, test_prep,
         },
         test_utils::{
             assert_trace, start_in_era, te_clock_read, te_input, te_send, te_state, te_terminate, te_terminated,
@@ -252,6 +252,7 @@ fn test_recover_stored_blocks_fetches_the_whole_gap_after_the_replayed_prefix() 
         te_has_block("fb-1", prep.headers.h2.hash()),
         te_clock_read("fb-1"),
         te_select_peers_for_fetch("fb-1", vec![prep.headers.h2.hash(), h3.hash()], 5, requested_at),
+        te_schedule("fb-1", FetchBlocksMsg::Timeout(1), timers.timeout),
         te_send(
             "fb-1",
             "manager",
@@ -264,7 +265,6 @@ fn test_recover_stored_blocks_fetches_the_whole_gap_after_the_replayed_prefix() 
             },
         ),
         te_record_blocks_requested("fb-1", vec![prep.headers.h2.hash(), h3.hash()], requested_at),
-        te_schedule("fb-1", FetchBlocksMsg::Timeout(1), timers.timeout),
     ];
     push_widen_arm(&mut trace, &timers);
     trace.push(te_state("fb-1", &expected));
@@ -325,6 +325,7 @@ fn test_new_tip_blocks_to_fetch() {
         te_find_missing_blocks("fb-1", tip.hash(), 25),
         te_clock_read("fb-1"),
         te_select_peers_for_fetch("fb-1", vec![prep.headers.h1.hash(), prep.headers.h2.hash()], 5, requested_at),
+        te_schedule("fb-1", FetchBlocksMsg::Timeout(1), timers.timeout),
         te_send(
             "fb-1",
             "manager",
@@ -337,7 +338,6 @@ fn test_new_tip_blocks_to_fetch() {
             },
         ),
         te_record_blocks_requested("fb-1", vec![prep.headers.h1.hash(), prep.headers.h2.hash()], requested_at),
-        te_schedule("fb-1", FetchBlocksMsg::Timeout(1), timers.timeout),
     ];
     push_widen_arm(&mut trace, &timers);
     trace.push(te_state("fb-1", &state_with_timeout));
@@ -690,6 +690,7 @@ fn test_strong_selection_passes_peers_to_manager() {
             te_clock_read("fb-1").into(),
             te_select_peers_for_fetch("fb-1", vec![prep.headers.h1.hash(), prep.headers.h2.hash()], 5, requested_at)
                 .into(),
+            te_schedule("fb-1", FetchBlocksMsg::Timeout(1), request_timers().timeout).into(),
             te_send(
                 "fb-1",
                 "manager",
@@ -861,7 +862,16 @@ fn test_later_peers_asked_keeps_the_first_wave() {
         state.asked = BTreeSet::from([alice, bob]);
         state
     };
-    assert_trace_contains(&running, &[te_state("fb-1", &expected).into()]);
+    let started = prep.state.fetch_started_at.expect("attempt start");
+    let hash_owned = prep.headers.h1.hash();
+    assert_trace_contains(
+        &running,
+        &[
+            te_record_peers_asked("fb-1", vec![hash_owned], vec![alice], started).into(),
+            te_record_peers_asked("fb-1", vec![hash_owned], vec![bob], started).into(),
+            te_state("fb-1", &expected).into(),
+        ],
+    );
     let hash = format!(r#"header_hash="{}""#, prep.headers.h1.hash());
     logs.assert_and_remove(Level::DEBUG, &["block.requested", &hash, r#"peers="127.0.0.1:3001""#])
         .assert_and_remove(Level::DEBUG, &["block.requested", &hash, r#"peers="127.0.0.1:3002""#])

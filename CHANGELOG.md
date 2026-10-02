@@ -44,6 +44,7 @@ Other guiding principles:
 ### Fixed
 
 - **amaru**: a block fetch that cannot hand its request to a peer now hits that request's timeout and continues, instead of waiting forever and leaving the node stuck. ([#1453][])
+- **amaru**: one peer that is not reading no longer stops block fetch from asking the other peers. `block.requested` lists only peers whose block-fetch handler accepted the request. The 5s fetch timeout is armed before the request is handed to the connection manager.
 
 ## v10.11.20261001 _[unreleased; planned for 2026-10-01]_
 
