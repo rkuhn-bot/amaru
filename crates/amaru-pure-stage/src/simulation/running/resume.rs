@@ -259,6 +259,8 @@ pub fn resume_call_send_internal(
             tracing::warn!(name = %from, "stage was terminated, skipping call effect delivery");
             return;
         };
+        // Still queued or nowhere to queue: `NotAdmitted` (never delivered).
+        // Otherwise the request was admitted and the deadline passed: `TimedOut` (stays queued).
         let response = if still_queued || missing { CallNotAdmitted::boxed() } else { CallTimeout::boxed() };
         resume_call_internal(
             data_from,

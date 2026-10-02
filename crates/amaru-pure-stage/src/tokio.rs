@@ -645,12 +645,14 @@ async fn await_call(
         Some(tx) => match tokio::time::timeout_at(deadline, tx.send(msg)).await {
             Ok(Ok(())) => match reply_until(deadline, rx).await {
                 Some(msg) => msg,
+                // Admitted, then the deadline passed: `CallAdmission::TimedOut`. The request stays queued.
                 None => CallTimeout::boxed(),
             },
             Ok(Err(_)) => {
                 tokio::time::sleep_until(deadline).await;
                 CallNotAdmitted::boxed()
             }
+            // Deadline fired before admission: `CallAdmission::NotAdmitted`. The request is never delivered.
             Err(_) => CallNotAdmitted::boxed(),
         },
         None => {

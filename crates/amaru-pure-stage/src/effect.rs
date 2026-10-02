@@ -172,14 +172,15 @@ impl ScheduleIds {
 pub(crate) struct CallTimeout;
 
 impl CallTimeout {
-    /// The value a caller observes when the deadline elapses after the request was admitted
-    /// and no reply arrived. The request stays in the callee mailbox.
+    /// The value a caller observes as [`CallAdmission::TimedOut`]: the request was admitted,
+    /// then the deadline passed. The request stays queued. A late reply is ignored.
     pub(crate) fn boxed() -> Box<dyn SendData> {
         Box::new(Self)
     }
 }
 
-/// The request never entered the callee mailbox. It will not be delivered later.
+/// The value a caller observes as [`CallAdmission::NotAdmitted`]: the deadline fired before
+/// admission. The request is never delivered.
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CallNotAdmitted;
 
@@ -205,25 +206,24 @@ pub enum TrySend {
 
 /// Result of [`Effects::call_with_admission`].
 ///
-/// [`Effects::call`] maps both [`NotAdmitted`](Self::NotAdmitted) and [`Admitted`](Self::Admitted)
+/// [`Effects::call`] maps both [`NotAdmitted`](Self::NotAdmitted) and [`TimedOut`](Self::TimedOut)
 /// to `None`.
 #[derive(Debug, PartialEq)]
 pub enum CallAdmission<T> {
     /// A reply arrived before the deadline.
     Reply(T),
-    /// The deadline fired before the request entered the callee mailbox.
-    /// The request was cancelled and will not be delivered later.
+    /// The deadline fired before admission. The request is never delivered.
     NotAdmitted,
-    /// The deadline fired after the request was admitted.
-    /// The request stays in the callee mailbox; a later reply is ignored.
-    Admitted,
+    /// The request was admitted, then the deadline passed. The request stays queued.
+    /// A late reply is ignored.
+    TimedOut,
 }
 
 pub(crate) fn call_admission<Resp: SendData + DeserializeOwned>(resp: Box<dyn SendData>) -> CallAdmission<Resp> {
     if resp.typetag_name() == type_name::<CallNotAdmitted>() {
         CallAdmission::NotAdmitted
     } else if resp.typetag_name() == type_name::<CallTimeout>() {
-        CallAdmission::Admitted
+        CallAdmission::TimedOut
     } else {
         CallAdmission::Reply(resp.cast_deserialize::<Resp>().expect("internal message type error"))
     }
@@ -316,15 +316,11 @@ impl<M> Effects<M> {
     /// the callee mailbox and, once the request is admitted, waiting for the reply. It does
     /// not start only after the request is queued.
     ///
-    /// * If the deadline fires before admission, the request is cancelled. It must not enter
-    ///   the callee mailbox afterwards, including when a slot later frees or the caller has
-    ///   already terminated. [`call`](Self::call) reports `None`.
-    ///   [`call_with_admission`](Self::call_with_admission) reports [`CallAdmission::NotAdmitted`].
-    /// * If the deadline fires after admission, the request stays where it is. Dropping the
-    ///   reply channel does not pull it back out. A reply that arrives after the deadline is
-    ///   ignored. [`call`](Self::call) reports `None`.
-    ///   [`call_with_admission`](Self::call_with_admission) reports [`CallAdmission::Admitted`],
-    ///   which is neither “reply” nor “not sent”.
+    /// * [`CallAdmission::NotAdmitted`] — the deadline fired before admission. The request
+    ///   is never delivered, including when a slot later frees or the caller has already
+    ///   terminated. [`call`](Self::call) reports `None`.
+    /// * [`CallAdmission::TimedOut`] — the request was admitted, then the deadline passed.
+    ///   The request stays queued. A late reply is ignored. [`call`](Self::call) reports `None`.
     /// * If the target is already gone, or is a blackhole, the caller still waits out the
     ///   deadline and then observes the not-admitted outcome. Nothing is delivered.
     ///
@@ -344,16 +340,16 @@ impl<M> Effects<M> {
         Box::pin(async move {
             match result.await {
                 CallAdmission::Reply(resp) => Some(resp),
-                CallAdmission::NotAdmitted | CallAdmission::Admitted => None,
+                CallAdmission::NotAdmitted | CallAdmission::TimedOut => None,
             }
         })
     }
 
-    /// [`call`](Self::call), plus the distinction between a deadline that cancelled admission
-    /// and a deadline that fired after the request was already in the callee mailbox.
+    /// [`call`](Self::call), plus [`CallAdmission::NotAdmitted`] versus [`CallAdmission::TimedOut`].
     ///
-    /// The deadline rules are the same as [`call`](Self::call). Protocols that must not treat
-    /// an admitted request as unsent use this instead of collapsing both timeouts to `None`.
+    /// `NotAdmitted` means the deadline fired before admission: the request is never delivered.
+    /// `TimedOut` means the request was admitted, then the deadline passed: it stays queued and
+    /// a late reply is ignored. [`call`](Self::call) collapses both to `None`.
     #[expect(clippy::panic)]
     #[track_caller]
     pub fn call_with_admission<Req: SendData, Resp: SendData + DeserializeOwned>(

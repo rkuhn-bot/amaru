@@ -70,7 +70,7 @@ enum Report {
     Holding,
     Saw(u8),
     Try(u8, TrySend),
-    /// `0` not admitted, `1` admitted, `2` reply.
+    /// `0` [`CallAdmission::NotAdmitted`], `1` [`CallAdmission::TimedOut`], `2` reply.
     Call(u8),
     Sent,
     Got(u8),
@@ -1576,7 +1576,7 @@ fn blocking_send_parks_until_the_mailbox_drains(runtime: Runtime) {
 fn call_code(result: CallAdmission<u32>) -> u8 {
     match result {
         CallAdmission::NotAdmitted => 0,
-        CallAdmission::Admitted => 1,
+        CallAdmission::TimedOut => 1,
         CallAdmission::Reply(_) => 2,
     }
 }
@@ -1662,7 +1662,7 @@ fn call_cancelled_before_admission(runtime: Runtime) {
     }
 }
 
-fn call_admitted_is_not_retracted(runtime: Runtime) {
+fn call_timed_out_is_not_retracted(runtime: Runtime) {
     let _guards = register();
     match runtime {
         Runtime::Simulation => {
@@ -1672,10 +1672,10 @@ fn call_admitted_is_not_retracted(runtime: Runtime) {
             let started = sim.now();
             sim.enqueue_msg(&caller, [0]);
             sim.run(Run::until(started + CALL_TIMEOUT));
-            assert_eq!(drain_report(&mut rx), vec![Report::Call(1)], "deadline after admission");
+            assert_eq!(drain_report(&mut rx), vec![Report::Call(1)], "timed out after admission");
             sim.run(Run::until(started + HOLD));
             let rest = drain_report(&mut rx);
-            assert!(rest.contains(&Report::Saw(9)), "admitted request stays: {rest:?}");
+            assert!(rest.contains(&Report::Saw(9)), "timed-out request stays queued: {rest:?}");
             assert!(!rest.iter().any(|msg| matches!(msg, Report::Call(_))), "{rest:?}");
         }
         Runtime::Tokio => {
@@ -1987,13 +1987,13 @@ fn call_cancelled_before_admission_tokio() {
 }
 
 #[test]
-fn call_admitted_is_not_retracted_simulation() {
-    call_admitted_is_not_retracted(Runtime::Simulation);
+fn call_timed_out_is_not_retracted_simulation() {
+    call_timed_out_is_not_retracted(Runtime::Simulation);
 }
 
 #[test]
-fn call_admitted_is_not_retracted_tokio() {
-    call_admitted_is_not_retracted(Runtime::Tokio);
+fn call_timed_out_is_not_retracted_tokio() {
+    call_timed_out_is_not_retracted(Runtime::Tokio);
 }
 
 #[test]
