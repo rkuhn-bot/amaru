@@ -44,10 +44,10 @@ use tokio::{
 use tracing::trace_span;
 
 use crate::{
-    BoxFuture, Effects, Instant, Name, PRIORITY_MAILBOX_SIZE, ScheduleId, ScheduleIds, SendData, Sender, StageBuildRef,
-    StageGraph, StageRef,
+    BoxFuture, DEFAULT_MAILBOX_SIZE, Effects, Instant, Name, PRIORITY_MAILBOX_SIZE, ScheduleId, ScheduleIds, SendData,
+    Sender, StageBuildRef, StageGraph, StageRef, TrySend,
     drop_guard::DropGuard,
-    effect::{CallExtra, CallTimeout, CanSupervise, StageEffect, StageResponse, TransitionFactory},
+    effect::{CallExtra, CallNotAdmitted, CallTimeout, CanSupervise, StageEffect, StageResponse, TransitionFactory},
     effect_box::EffectBox,
     resources::Resources,
     sender::StageRefExtra,
@@ -95,7 +95,7 @@ impl TokioInner {
             global_epoch_offset: Duration::ZERO,
             resources: Resources::default(),
             schedule_ids: ScheduleIds::default(),
-            mailbox_size: 10,
+            mailbox_size: DEFAULT_MAILBOX_SIZE,
             priority_mailbox_size: PRIORITY_MAILBOX_SIZE,
             stage_counter: Mutex::new(0usize),
             trace_buffer: TraceBuffer::new_shared(0, 0),
@@ -141,6 +141,27 @@ impl Clock for TokioClock {
     fn advance_to(&self, _instant: Instant) {}
 }
 
+struct PendingStage {
+    mailbox_size: crate::stage_ref::MailboxSize,
+    /// Capacity the current channel was opened with. Compared against [`Self::mailbox_size`]
+    /// so a later override can rebuild the channel. Zero is stored as zero; the channel
+    /// itself is opened by [`open_mailbox`].
+    opened: usize,
+    tx: mpsc::Sender<Box<dyn SendData>>,
+    rx: mpsc::Receiver<Box<dyn SendData>>,
+    transition: TransitionFactory,
+}
+
+/// Open a bulk mailbox.
+///
+/// `tokio::sync::mpsc::channel(0)` panics (the buffer must be at least 1). Capacity zero is
+/// still a rendezvous: the channel has one slot, and the stage task holds that slot whenever
+/// it is not waiting to receive. A message is admitted only while the stage is idle, the
+/// slot is empty, and no blocking sender is already waiting on it.
+fn open_mailbox(size: usize) -> (mpsc::Sender<Box<dyn SendData>>, mpsc::Receiver<Box<dyn SendData>>) {
+    mpsc::channel(if size == 0 { 1 } else { size })
+}
+
 /// A [`StageGraph`] implementation that dispatches each stage as a task on the Tokio global pool.
 ///
 /// *This is currently only a minimal sketch that will likely not fit the intended design.
@@ -149,6 +170,7 @@ impl Clock for TokioClock {
 pub struct TokioBuilder {
     tasks: Vec<Box<dyn FnOnce(Arc<TokioInner>) -> BoxFuture<'static, ()>>>,
     inner: TokioInner,
+    pending: BTreeMap<Name, PendingStage>,
     termination: watch::Receiver<bool>,
     termination_tx: watch::Sender<bool>,
 }
@@ -156,7 +178,13 @@ pub struct TokioBuilder {
 impl Default for TokioBuilder {
     fn default() -> Self {
         let (termination_tx, termination_rx) = watch::channel(false);
-        Self { tasks: Default::default(), inner: TokioInner::new(), termination_tx, termination: termination_rx }
+        Self {
+            tasks: Default::default(),
+            inner: TokioInner::new(),
+            pending: BTreeMap::new(),
+            termination_tx,
+            termination: termination_rx,
+        }
     }
 }
 
@@ -167,6 +195,7 @@ impl TokioBuilder {
             inner,
             termination,
             termination_tx: _, // only statically spawned stages can terminate the network
+            pending: _,
         } = self;
         let inner = Arc::new(inner);
         let handles = tasks.into_iter().map(|t| rt.spawn(t(inner.clone()))).collect::<Vec<_>>();
@@ -200,11 +229,13 @@ impl TokioBuilder {
         self
     }
 
-    /// Bulk mailbox capacity for each stage.
+    /// Default bulk mailbox capacity for stages that do not call
+    /// [`StageBuildRef::with_mailbox_size`](crate::StageBuildRef::with_mailbox_size).
     ///
     /// This is the number of messages that may wait in the mailbox. The message currently
-    /// being processed does not count. Defaults to 10, matching
+    /// being processed does not count. Defaults to [`DEFAULT_MAILBOX_SIZE`], matching
     /// [`SimulationBuilder::with_mailbox_size`](crate::simulation::SimulationBuilder::with_mailbox_size).
+    /// Zero is a rendezvous: see [`open_mailbox`].
     pub fn with_mailbox_size(mut self, size: usize) -> Self {
         self.inner.mailbox_size = size;
         self
@@ -218,9 +249,37 @@ impl TokioBuilder {
         self.inner.priority_mailbox_size = size;
         self
     }
-}
 
-type RefAux = (Receiver<Box<dyn SendData>>, TransitionFactory);
+    /// Apply a [`StageBuildRef::with_mailbox_size`] override before the channel is used.
+    fn reconcile(&mut self, name: &Name) {
+        let Some(pending) = self.pending.get_mut(name) else {
+            return;
+        };
+        let size = pending.mailbox_size.get();
+        if pending.opened == size {
+            return;
+        }
+        let (tx, rx) = open_mailbox(size);
+        let mut queued = Vec::new();
+        while let Ok(msg) = pending.rx.try_recv() {
+            queued.push(msg);
+        }
+        // Capacity zero still accepts one message while the stage is idle (the initial state).
+        let limit = if size == 0 { 1 } else { size };
+        #[expect(clippy::panic)]
+        if queued.len() > limit {
+            panic!("stage `{name}` was preloaded with {} messages but its mailbox size is {size}", queued.len());
+        }
+        for msg in queued {
+            #[expect(clippy::expect_used)]
+            tx.try_send(msg).expect("channel has room for the preloaded messages");
+        }
+        pending.tx = tx.clone();
+        pending.rx = rx;
+        pending.opened = size;
+        self.inner.senders.lock().insert(name.clone(), tx);
+    }
+}
 
 impl StageGraph for TokioBuilder {
     #[expect(clippy::expect_used)]
@@ -235,8 +294,10 @@ impl StageGraph for TokioBuilder {
     {
         // THIS MUST MATCH THE SIMULATION BUILDER
         let name = stage_name(&mut self.inner.stage_counter.lock(), name.as_ref());
-        let (tx, rx) = mpsc::channel(self.inner.mailbox_size);
-        self.inner.senders.lock().insert(name.clone(), tx);
+        let mailbox_size = crate::stage_ref::MailboxSize::new(self.inner.mailbox_size);
+        let opened = mailbox_size.get();
+        let (tx, rx) = open_mailbox(opened);
+        self.inner.senders.lock().insert(name.clone(), tx.clone());
 
         let me = StageRef::new(name.clone());
         let clock = self.inner.clock.clone();
@@ -244,8 +305,18 @@ impl StageGraph for TokioBuilder {
         let resources = self.inner.resources.clone();
         let schedule_ids = self.inner.schedule_ids.clone();
         let trace_buffer = self.inner.trace_buffer.clone();
+        let child_mailbox = self.inner.mailbox_size;
         let ff = Box::new(move |effect| {
-            let eff = Effects::new(me, effect, clock, global_epoch_offset, resources, schedule_ids, trace_buffer);
+            let eff = Effects::new(
+                me,
+                effect,
+                clock,
+                global_epoch_offset,
+                resources,
+                schedule_ids,
+                trace_buffer,
+                child_mailbox,
+            );
             Box::new(move |state: Box<dyn SendData>, msg: Box<dyn SendData>| {
                 let state = state.cast::<St>().expect("internal state type error");
                 let msg = msg.cast::<Msg>().expect("internal message type error");
@@ -254,9 +325,10 @@ impl StageGraph for TokioBuilder {
                     as BoxFuture<'static, Box<dyn SendData>>
             }) as Transition
         });
-        let network: RefAux = (rx, ff);
+        self.pending
+            .insert(name.clone(), PendingStage { mailbox_size: mailbox_size.clone(), opened, tx, rx, transition: ff });
 
-        StageBuildRef { name, network: Box::new(network), _ph: PhantomData }
+        StageBuildRef { name, network: Box::new(()), mailbox_size, _ph: PhantomData }
     }
 
     #[expect(clippy::expect_used)]
@@ -265,13 +337,16 @@ impl StageGraph for TokioBuilder {
         stage: StageBuildRef<Msg, St, Box<dyn Any + Send>>,
         state: St,
     ) -> StageStateRef<Msg, St> {
-        let StageBuildRef { name, network, _ph } = stage;
-        let (rx, ff) = *network.downcast::<RefAux>().expect("internal network type error");
+        let StageBuildRef { name, .. } = stage;
+        self.reconcile(&name);
+        let PendingStage { rx, tx, mailbox_size, transition: ff, .. } =
+            self.pending.remove(&name).expect("stage was already wired or was not created here");
+        let mailbox_size = mailbox_size.get();
         let stage_name = name.clone();
         let state = Box::new(state);
         let termination_tx = self.termination_tx.clone();
         self.tasks.push(Box::new(move |inner| {
-            let stage = run_stage_boxed(state, rx, ff, stage_name.clone(), inner.clone());
+            let stage = run_stage_boxed(state, rx, tx, mailbox_size, ff, stage_name.clone(), inner.clone());
             Box::pin(async move {
                 let _termination = DropGuard::new(termination_tx, |tx| {
                     tx.send_replace(true);
@@ -291,6 +366,7 @@ impl StageGraph for TokioBuilder {
         messages: impl IntoIterator<Item = Msg>,
     ) -> Result<(), Box<dyn SendData>> {
         let stage = stage.as_ref();
+        self.reconcile(stage.name());
         let senders = self.inner.senders.lock();
         for msg in messages {
             let (_name, leftover, payload) = stage.materialize_send(msg);
@@ -310,7 +386,9 @@ impl StageGraph for TokioBuilder {
     }
 
     fn input<Msg: SendData>(&mut self, stage: impl AsRef<StageRef<Msg>>) -> Sender<Msg> {
-        mk_sender(stage.as_ref(), &self.inner)
+        let stage = stage.as_ref();
+        self.reconcile(stage.name());
+        mk_sender(stage, &self.inner)
     }
 
     fn resources(&self) -> &Resources {
@@ -331,6 +409,8 @@ enum PriorityMessage {
 fn run_stage_boxed(
     mut state: Box<dyn SendData>,
     mut rx: Receiver<Box<dyn SendData + 'static>>,
+    tx: mpsc::Sender<Box<dyn SendData>>,
+    mailbox_size: usize,
     transition: TransitionFactory,
     stage_name: Name,
     inner: Arc<TokioInner>,
@@ -359,6 +439,11 @@ fn run_stage_boxed(
         });
 
         let mut msgs = Vec::new();
+        // Capacity zero: hold the only slot while this stage is not parked in `recv`, so a
+        // second message cannot sit in the buffer. Dropped just before waiting, reclaimed
+        // before the next transition. A blocking sender already queued on the semaphore is
+        // given the slot instead (`try_reserve_owned` fails); `try_send` cannot take it.
+        let mut idle_hold: Option<mpsc::OwnedPermit<Box<dyn SendData>>> = None;
 
         inner.trace_buffer.lock().push_state(&stage_name, &state);
 
@@ -366,6 +451,9 @@ fn run_stage_boxed(
             // Messages queued while the previous transition was awaiting an effect are already
             // ingress. Taking them before `select` keeps a due schedule ahead of newer bulk mail.
             if msgs.is_empty() {
+                if mailbox_size == 0 {
+                    idle_hold.take();
+                }
                 let poll_timers = !timers.is_empty();
                 // if multiple timers have fired since the last poll, we need them all so that we can deliver them in order
                 let mut timer_chunks = (&mut timers).ready_chunks(1000);
@@ -380,6 +468,9 @@ fn run_stage_boxed(
                         tracing::error!(%stage_name, "stage sender dropped");
                         break;
                     }
+                }
+                if mailbox_size == 0 {
+                    idle_hold = tx.clone().try_reserve_owned().ok();
                 }
             }
 
@@ -547,20 +638,27 @@ async fn await_call(
     duration: Duration,
 ) -> StageResponse {
     let deadline = tokio::time::Instant::now() + duration;
-    let reply = match tx {
+    // `timeout_at` on `send` drops the send future when the deadline fires, so a request
+    // that has not been admitted is never delivered later. A send that already completed
+    // stays in the mailbox; the deadline does not pull it back out.
+    let response = match tx {
         Some(tx) => match tokio::time::timeout_at(deadline, tx.send(msg)).await {
-            Ok(Ok(())) => reply_until(deadline, rx).await,
-            Ok(Err(_)) | Err(_) => {
+            Ok(Ok(())) => match reply_until(deadline, rx).await {
+                Some(msg) => msg,
+                None => CallTimeout::boxed(),
+            },
+            Ok(Err(_)) => {
                 tokio::time::sleep_until(deadline).await;
-                None
+                CallNotAdmitted::boxed()
             }
+            Err(_) => CallNotAdmitted::boxed(),
         },
         None => {
             tokio::time::sleep_until(deadline).await;
-            None
+            CallNotAdmitted::boxed()
         }
     };
-    CallTimeout::response(reply)
+    StageResponse::CallResponse(response)
 }
 
 async fn reply_until(
@@ -637,6 +735,46 @@ async fn interpreter(
                 poll_with_ingress(tx.send(msg), timers, cancel_senders, timeouts, msgs).await.ok();
                 StageResponse::Unit
             }
+            StageEffect::TrySend(target, msg) => {
+                // `None` is a blackhole (dropped, reported as queued). `Some` is a real mailbox.
+                enum Slot {
+                    Blackhole,
+                    Missing,
+                    Reserved(mpsc::OwnedPermit<Box<dyn SendData>>),
+                    Full,
+                    Closed,
+                }
+                let slot = if target.is_empty() {
+                    tracing::warn!(stage = %name, "try_send to blackhole stage dropped");
+                    Slot::Blackhole
+                } else {
+                    match inner.senders.lock().get(&target).cloned() {
+                        None => Slot::Missing,
+                        Some(tx) => match tx.try_reserve_owned() {
+                            Ok(permit) => Slot::Reserved(permit),
+                            Err(mpsc::error::TrySendError::Full(_)) => Slot::Full,
+                            Err(mpsc::error::TrySendError::Closed(_)) => Slot::Closed,
+                        },
+                    }
+                };
+                let outcome = match &slot {
+                    Slot::Blackhole | Slot::Reserved(_) => TrySend::Queued,
+                    Slot::Full => TrySend::Full,
+                    Slot::Missing | Slot::Closed => TrySend::Gone,
+                };
+                // Serialize a copy while `msg` is still owned, then move it into the mailbox.
+                let effect = crate::Effect::TrySend { from: name.clone(), to: target, msg, outcome };
+                tb().push_suspend(&effect);
+                #[expect(clippy::panic, clippy::wildcard_enum_match_arm)]
+                let msg = match effect {
+                    crate::Effect::TrySend { msg, .. } => msg,
+                    other => panic!("try_send trace was built as {other:?}"),
+                };
+                if let Slot::Reserved(permit) = slot {
+                    permit.send(msg);
+                }
+                StageResponse::TrySend(outcome)
+            }
             StageEffect::Call(target, duration, msg) => {
                 #[expect(clippy::panic)]
                 let CallExtra::CallFn(NoDebug(msg)) = msg else {
@@ -708,11 +846,19 @@ async fn interpreter(
                 let name = stage_name(&mut inner.stage_counter.lock(), name.as_str());
                 StageResponse::AddStageResponse(name)
             }
-            StageEffect::WireStage(name, transition, initial_state, tombstone) => {
+            StageEffect::WireStage(name, transition, initial_state, tombstone, mailbox_size) => {
                 tracing::debug!("stage `{name}` wired");
-                let (tx, rx) = mpsc::channel(inner.mailbox_size);
-                inner.senders.lock().insert(name.clone(), tx);
-                let stage = run_stage_boxed(initial_state, rx, transition.into_inner(), name.clone(), inner.clone());
+                let (tx, rx) = open_mailbox(mailbox_size);
+                inner.senders.lock().insert(name.clone(), tx.clone());
+                let stage = run_stage_boxed(
+                    initial_state,
+                    rx,
+                    tx,
+                    mailbox_size,
+                    transition.into_inner(),
+                    name.clone(),
+                    inner.clone(),
+                );
                 let (done_tx, done_rx) = oneshot::channel();
                 let handle = tokio::spawn(async move {
                     stage.await;

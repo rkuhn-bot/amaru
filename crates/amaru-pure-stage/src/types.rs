@@ -43,6 +43,14 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// programming error and must fail loudly).
 pub const PRIORITY_MAILBOX_SIZE: usize = 10;
 
+/// Default bulk mailbox capacity for a stage that does not set its own.
+///
+/// Both interpreters use this when [`StageBuildRef::with_mailbox_size`](crate::StageBuildRef::with_mailbox_size)
+/// is not called. [`SimulationBuilder::with_mailbox_size`](crate::simulation::SimulationBuilder::with_mailbox_size)
+/// and [`TokioBuilder::with_mailbox_size`](crate::tokio::TokioBuilder::with_mailbox_size) change the default
+/// for stages created by that builder, including stages those stages later wire up.
+pub const DEFAULT_MAILBOX_SIZE: usize = 10;
+
 /// Type constraint for messages, which must be self-contained and have a `Debug` instance.
 ///
 /// It is not possible to require an implementation of `PartialEq<Box<dyn Message>>`, but it

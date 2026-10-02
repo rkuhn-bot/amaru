@@ -86,7 +86,7 @@ impl Replay {
                     let name = actual.at_stage();
                     let expected = self.pending_suspend.remove(name);
                     ensure!(
-                        expected.as_ref() == Some(&actual),
+                        expected.as_ref().is_some_and(|expected| suspend_matches(expected, &actual)),
                         "idx {}: stage {} suspended with effect {:?},\nbut expected {:?}",
                         idx,
                         name,
@@ -98,8 +98,8 @@ impl Replay {
                         Effect::AddStage { at_stage, name } => {
                             self.handle_add_stage(at_stage, name, idx)?;
                         }
-                        Effect::WireStage { at_stage, name, initial_state, tombstone, .. } => {
-                            self.handle_wire_stage(at_stage, name, initial_state, tombstone, idx)?;
+                        Effect::WireStage { at_stage, name, initial_state, tombstone, mailbox_size } => {
+                            self.handle_wire_stage(at_stage, name, initial_state, tombstone, mailbox_size, idx)?;
                         }
                         _ => {}
                     }
@@ -214,10 +214,11 @@ impl Replay {
         name: Name,
         initial_state: Box<dyn SendData>,
         tombstone: Box<dyn SendData>,
+        mailbox_size: usize,
         idx: usize,
     ) -> anyhow::Result<()> {
         match self.get_waiting_effect(&at_stage, "wire stage", idx)? {
-            StageEffect::WireStage(expected_name, transition, _, _) => {
+            StageEffect::WireStage(expected_name, transition, _, _, _) => {
                 check_stage_name(name.clone(), expected_name, "wire stage", idx)?;
                 let initial_state = deserialize_send_data_value(initial_state)?;
                 let tombstone = deserialize_send_data_value(tombstone)?;
@@ -236,6 +237,7 @@ impl Replay {
                     StageData {
                         name: name.clone(),
                         mailbox: VecDeque::new(),
+                        mailbox_size,
                         priority: VecDeque::new(),
                         tombstones: VecDeque::new(),
                         state: StageState::Idle(initial_state),
@@ -334,10 +336,25 @@ fn materialize_stage_response(response: StageResponse) -> anyhow::Result<StageRe
     }
 }
 
+/// `poll_stage` records [`TrySend::Queued`] as a placeholder. The traced effect carries the
+/// real admission result, which is what the stage already observed on resume.
+fn suspend_matches(expected: &Effect, actual: &Effect) -> bool {
+    match (expected, actual) {
+        (
+            Effect::TrySend { from, to, msg, .. },
+            Effect::TrySend { from: other_from, to: other_to, msg: other_msg, .. },
+        ) => from == other_from && to == other_to && msg == other_msg,
+        _ => expected == actual,
+    }
+}
+
 /// Recover the actual dyn SendData values in an effect.
 fn deserialize_effect(effect: Effect) -> anyhow::Result<Effect> {
     match effect {
         Effect::Send { from, to, msg } => Ok(Effect::Send { from, to, msg: deserialize_send_data_value(msg)? }),
+        Effect::TrySend { from, to, msg, outcome } => {
+            Ok(Effect::TrySend { from, to, msg: deserialize_send_data_value(msg)?, outcome })
+        }
         Effect::Call { from, to, duration, msg } => {
             Ok(Effect::Call { from, to, duration, msg: deserialize_send_data_value(msg)? })
         }
@@ -347,11 +364,12 @@ fn deserialize_effect(effect: Effect) -> anyhow::Result<Effect> {
         Effect::SetTimeout { at_stage, slot, delay, msg } => {
             Ok(Effect::SetTimeout { at_stage, slot, delay, msg: deserialize_send_data_value(msg)? })
         }
-        Effect::WireStage { at_stage, name, initial_state, tombstone } => Ok(Effect::WireStage {
+        Effect::WireStage { at_stage, name, initial_state, tombstone, mailbox_size } => Ok(Effect::WireStage {
             at_stage,
             name,
             initial_state: deserialize_send_data_value(initial_state)?,
             tombstone: deserialize_send_data_value(tombstone)?,
+            mailbox_size,
         }),
         other => Ok(other),
     }

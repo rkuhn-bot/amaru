@@ -14,12 +14,36 @@
 
 use std::{any::Any, fmt, marker::PhantomData, ops::Deref, sync::Arc};
 
+use parking_lot::Mutex;
+
 use crate::{BLACKHOLE_NAME, Name, SendData};
+
+/// Bulk mailbox capacity shared by a [`StageBuildRef`] and the builder that will wire it.
+///
+/// [`StageBuildRef::with_mailbox_size`] updates the value in place, so a preload that runs
+/// before [`StageGraph::wire_up`](crate::StageGraph::wire_up) observes the override.
+#[derive(Clone)]
+pub(crate) struct MailboxSize(Arc<Mutex<usize>>);
+
+impl MailboxSize {
+    pub(crate) fn new(size: usize) -> Self {
+        Self(Arc::new(Mutex::new(size)))
+    }
+
+    pub(crate) fn get(&self) -> usize {
+        *self.0.lock()
+    }
+
+    pub(crate) fn set(&self, size: usize) {
+        *self.0.lock() = size;
+    }
+}
 
 /// A handle to a stage during the building phase of a [`StageGraph`](crate::StageGraph).
 pub struct StageBuildRef<Msg, St, RefAux> {
     pub name: Name,
     pub(crate) network: RefAux,
+    pub(crate) mailbox_size: MailboxSize,
     pub(crate) _ph: PhantomData<(Msg, St)>,
 }
 
@@ -27,6 +51,21 @@ impl<Msg, State, RefAux> StageBuildRef<Msg, State, RefAux> {
     /// Derive the handle that can later be used for sending messages to this stage.
     pub fn sender(&self) -> StageRef<Msg> {
         StageRef { name: self.name.clone(), extra: None, _ph: PhantomData }
+    }
+
+    /// Set this stage's bulk mailbox capacity.
+    ///
+    /// Stages that do not call this keep the builder default ([`crate::DEFAULT_MAILBOX_SIZE`],
+    /// or the value passed to the builder's `with_mailbox_size`). The override applies to this
+    /// stage only. A stage created later with [`Effects::stage`](crate::Effects::stage) starts
+    /// from the same builder default and may override its own capacity the same way.
+    ///
+    /// Capacity is the number of messages that may wait in the mailbox. The message a stage is
+    /// currently processing does not count. Zero is a rendezvous: a message is admitted only
+    /// when the destination is already waiting to receive and no parked sender stands ahead.
+    pub fn with_mailbox_size(self, size: usize) -> Self {
+        self.mailbox_size.set(size);
+        self
     }
 }
 
