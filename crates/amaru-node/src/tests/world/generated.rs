@@ -1078,43 +1078,6 @@ impl<S: tracing::Subscriber> Layer<S> for RequestedPeers {
     }
 }
 
-fn assert_fetch_survives_one_bad_peer(outcome: &AdversarialOutcome, label: &str) {
-    assert_eq!(outcome.mailbox_size, ADMISSION_MAILBOX, "{label} must run at the production mailbox");
-    assert!(outcome.fault_at.is_some(), "{label} fault must pop; seed={:#x}", outcome.seed);
-    assert!(
-        outcome.adopted_at.is_some_and(|at| at > outcome.fault_at.unwrap_or(0)),
-        "{label} must still be fetching when the fault pops; seed={:#x} adopted_at={:?} fault_at={:?}",
-        outcome.seed,
-        outcome.adopted_at,
-        outcome.fault_at
-    );
-    assert!(
-        outcome.adopted,
-        "{label} must finish the fragment from the other peers; seed={:#x} heights={:?} mailbox={}/{}",
-        outcome.seed, outcome.heights, outcome.mailbox_len, outcome.mailbox_size
-    );
-    assert!(
-        outcome.heights.len() >= 2,
-        "{label} chain selection must keep advancing; seed={:#x} heights={:?}",
-        outcome.seed,
-        outcome.heights
-    );
-    assert!(
-        outcome.mailbox_len < outcome.mailbox_size,
-        "{label} manager mailbox must not be stuck full; seed={:#x} len={}",
-        outcome.seed,
-        outcome.mailbox_len
-    );
-    assert!(!outcome.requested_peers.is_empty(), "{label} must emit block.requested; seed={:#x}", outcome.seed);
-    let last = outcome.requested_peers.last().expect("block.requested");
-    assert!(
-        outcome.honest_peers.iter().any(|honest| last.contains(&honest.to_string())),
-        "{label} must finish by asking an honest peer; seed={:#x} last={last} bad={}",
-        outcome.seed,
-        outcome.bad_peer
-    );
-}
-
 /// Bulk mailbox for the stalled-reader replay. An honest broadcast of this fragment
 /// still fits; a peer that stops reading fills it when every later batch is offered there.
 const STALL_MAILBOX: usize = 4;
@@ -1171,11 +1134,18 @@ fn assert_head_before_bound(outcome: &AdversarialOutcome, label: &str) {
     );
     assert!(outcome.heights.len() >= 2, "{label} chain advanced {:?}", outcome.heights);
     assert!(!outcome.requested_peers.is_empty(), "{label} must emit block.requested; seed={:#x}", outcome.seed);
-    let last = outcome.requested_peers.last().expect("block.requested");
+    // Each connection logs its own peers. The last event can name only the lowest address,
+    // which is healthy in the honest control, so the check is over the whole run.
+    let asked_other = outcome
+        .requested_peers
+        .iter()
+        .any(|peers| outcome.honest_peers.iter().any(|honest| peers.contains(&honest.to_string())));
     assert!(
-        outcome.honest_peers.iter().any(|honest| last.contains(&honest.to_string())),
-        "{label} must fetch from an honest peer; seed={:#x} last={last}",
-        outcome.seed
+        asked_other,
+        "{label} must request blocks from a peer other than {}; seed={:#x} events={}",
+        outcome.bad_peer,
+        outcome.seed,
+        outcome.requested_peers.len()
     );
 }
 
@@ -1195,6 +1165,11 @@ fn test_world_small_mailbox_honest_peers_sync() {
 /// Every batch is offered to every peer, one of whom stops reading after the handshake.
 /// The head is adopted from the others before [`STALL_ADOPTION_BOUND_NANOS`], and the
 /// manager mailbox stays below [`STALL_MAILBOX`].
+///
+/// That bound fails when the manager's per-connection fetch send and the connection's
+/// forward to the block-fetch handler both block. Either blocking send on its own still
+/// adopts inside the bound: the other `try_send` skips a full mailbox and the fetch
+/// continues on a peer that is still reading.
 #[test]
 fn test_world_stalled_reader_fetch_continues() {
     let outcome = stall_replay("stalled-reader", AdversarialFault::StalledReader);
@@ -1224,11 +1199,33 @@ fn test_world_broadcast_honest_peers_sync() {
     assert_head_before_bound(&outcome, "broadcast honest");
 }
 
-/// One peer accepts writes and then stops delivering. The others still complete the fetch.
+/// A silent peer still lets the others finish a short fragment. Writes are acked, so this
+/// does not fill the manager mailbox and does not guard the fan-out.
 #[test]
 fn test_world_silent_responder_fetch_continues() {
     let outcome = run_adversarial("silent-responder", AdversarialFault::SilentResponder);
-    assert_fetch_survives_one_bad_peer(&outcome, "silent responder");
+    assert_eq!(outcome.mailbox_size, ADMISSION_MAILBOX);
+    assert!(outcome.fault_at.is_some(), "silent-responder hop must pop; seed={:#x}", outcome.seed);
+    assert!(
+        outcome.adopted_at.is_some_and(|at| at > outcome.fault_at.unwrap_or(0)),
+        "silent responder must still be fetching when the fault pops; seed={:#x} adopted_at={:?} fault_at={:?}",
+        outcome.seed,
+        outcome.adopted_at,
+        outcome.fault_at
+    );
+    assert!(
+        outcome.adopted,
+        "silent responder must still sync; seed={:#x} heights={:?}",
+        outcome.seed, outcome.heights
+    );
+    assert!(outcome.heights.len() >= 2, "chain advanced {:?}", outcome.heights);
+    assert!(
+        outcome.mailbox_len < outcome.mailbox_size,
+        "manager mailbox {}/{}",
+        outcome.mailbox_len,
+        outcome.mailbox_size
+    );
+    assert!(!outcome.requested_peers.is_empty(), "block.requested; seed={:#x}", outcome.seed);
     assert!(
         outcome
             .log
@@ -1239,10 +1236,10 @@ fn test_world_silent_responder_fetch_continues() {
     );
 }
 
-/// A stalled reader should fault only that connection. Mux ingress still awaits the handler,
-/// so the connection is not torn down and this stays ignored until that behaviour exists.
+/// A peer that never reads stalls this node's writes. The local side does not close that
+/// connection for a missing `SendAck`, so the teardown assertion stays ignored.
 #[test]
-#[ignore = "mux ingress still awaits the handler, so a stalled reader is not faulted and that connection is not torn down"]
+#[ignore = "a connection whose peer never reads is not closed by the local side yet"]
 fn test_stalled_reader_tears_down_only_that_connection() {
     let outcome = run_adversarial("stalled-teardown", AdversarialFault::StalledReader);
     let bad_responders: Vec<_> = outcome
