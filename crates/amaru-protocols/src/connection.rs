@@ -138,6 +138,13 @@ struct Established {
     /// stored one. `Queued` or `Gone` drops it; `Full` keeps it for the transition after that.
     #[serde(default)]
     pending_tip: Option<(Point, TraceContext)>,
+    /// One `PeerSharingMessage::Start` the peer-sharing child did not accept.
+    ///
+    /// Flushed with `try_send` at the start of the next transition. A newer Start replaces the
+    /// stored one. `Queued` or `Gone` drops it; `Full` keeps it. Cleared when that child is
+    /// stopped or dies.
+    #[serde(default)]
+    pending_share: Option<PeerSharingMessage>,
 }
 
 /// Identity of a supervised child stage of a connection.
@@ -224,6 +231,7 @@ pub async fn stage(
 
     async move {
         let state = flush_pending_tip(state, &eff).await;
+        let state = flush_pending_share(state, &eff).await;
         let state = match (state, msg) {
             (state, ConnectionMessage::Disconnect) => {
                 return teardown(state, &params, &eff).await;
@@ -244,7 +252,7 @@ pub async fn stage(
                     conn_id = conn_id.as_u64(),
                     child = child.to_string()
                 );
-                return teardown(state, &params, &eff).await;
+                return teardown(clear_pending_share(state, child), &params, &eff).await;
             }
             (State::Established(s), ConnectionMessage::StopTimeout) => {
                 if s.stopping.is_empty() {
@@ -272,14 +280,19 @@ pub async fn stage(
                 State::Established(s)
             }
             (
-                State::Established(s),
+                State::Established(mut s),
                 ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to },
             ) => {
                 if !s.stopping.contains(&ChildId::PeerSharing)
-                    && let Some(ps) = &s.peer_sharing_initiator
+                    && let Some(ps) = s.peer_sharing_initiator.clone()
                 {
-                    let _ =
-                        eff.try_send(ps, PeerSharingMessage::Start { amount, initial_delay, interval, reply_to }).await;
+                    let start = PeerSharingMessage::Start { amount, initial_delay, interval, reply_to };
+                    match eff.try_send(&ps, start.clone()).await {
+                        TrySend::Full => s.pending_share = Some(start),
+                        TrySend::Queued | TrySend::Gone => s.pending_share = None,
+                    }
+                } else {
+                    s.pending_share = None;
                 }
                 State::Established(s)
             }
@@ -356,6 +369,40 @@ async fn flush_pending_tip(state: State, eff: &Effects<ConnectionMessage>) -> St
         TrySend::Queued | TrySend::Gone => established.pending_tip = None,
         TrySend::Full => {}
     }
+    State::Established(established)
+}
+
+/// Offer a stored peer-sharing `Start` before this transition handles its message.
+///
+/// `Queued` and `Gone` drop the stored start. `Full` keeps it for the following transition.
+/// A missing initiator drops it: there is no child left to retry.
+async fn flush_pending_share(state: State, eff: &Effects<ConnectionMessage>) -> State {
+    let State::Established(mut established) = state else {
+        return state;
+    };
+    let Some(start) = established.pending_share.clone() else {
+        return State::Established(established);
+    };
+    let Some(initiator) = established.peer_sharing_initiator.clone() else {
+        established.pending_share = None;
+        return State::Established(established);
+    };
+    match eff.try_send(&initiator, start).await {
+        TrySend::Queued | TrySend::Gone => established.pending_share = None,
+        TrySend::Full => {}
+    }
+    State::Established(established)
+}
+
+/// A dead peer-sharing child will not accept the stored `Start`.
+fn clear_pending_share(state: State, child: ChildId) -> State {
+    if child != ChildId::PeerSharing {
+        return state;
+    }
+    let State::Established(mut established) = state else {
+        return state;
+    };
+    established.pending_share = None;
     State::Established(established)
 }
 
@@ -528,6 +575,7 @@ async fn do_handshake(
         peer_sharing_responder: None,
         stopping: BTreeSet::new(),
         pending_tip: None,
+        pending_share: None,
     };
 
     if run_responders {
@@ -631,6 +679,7 @@ async fn begin_stop(mut s: Established, params: &Params, eff: &Effects<Connectio
         }
         if let Some(ps) = &s.peer_sharing_initiator {
             s.stopping.insert(ChildId::PeerSharing);
+            s.pending_share = None;
             let _ = eff.try_send(ps, PeerSharingMessage::Close).await;
         }
     }
@@ -701,6 +750,7 @@ async fn on_expected_stop(
         }
         ChildId::PeerSharing => {
             s.peer_sharing_initiator = None;
+            s.pending_share = None;
             mux::install_done_trap(
                 &s.muxer,
                 PROTO_N2N_PEER_SHARE.erase(),
@@ -823,7 +873,9 @@ mod tests {
         simulation::{Run, SimulationBuilder, SimulationRunning},
         stage_ref::StageStateRef,
         trace_buffer::{TraceBuffer, TraceEntry},
-        trace_match::{assert_trace_match_filter, tm_resume, tm_send, tm_state_match, tm_try_send_match},
+        trace_match::{
+            assert_trace_contains, assert_trace_match_filter, tm_resume, tm_send, tm_state_match, tm_try_send_match,
+        },
     };
     use tokio::runtime::Runtime;
 
@@ -979,7 +1031,23 @@ mod tests {
             peer_sharing_responder: None,
             stopping: BTreeSet::new(),
             pending_tip: None,
+            pending_share: None,
         }))
+    }
+
+    fn established_sharing(
+        peer_sharing: Option<StageRef<PeerSharingMessage>>,
+        pending: Option<PeerSharingMessage>,
+        stopping: BTreeSet<ChildId>,
+    ) -> Connection {
+        let mut connection = established(None, None);
+        let State::Established(established) = &mut connection.state else {
+            unreachable!("established() builds Established");
+        };
+        established.peer_sharing_initiator = peer_sharing;
+        established.pending_share = pending;
+        established.stopping = stopping;
+        connection
     }
 
     fn connection_input<'a>(
@@ -1007,6 +1075,7 @@ mod tests {
         let mut guards = crate::deserializers::register_deserializers();
         guards.push(register_data_deserializer::<Inputs<BlockFetchMessage>>().boxed());
         guards.push(register_data_deserializer::<Inputs<chainsync::ResponderMessage>>().boxed());
+        guards.push(register_data_deserializer::<Inputs<PeerSharingMessage>>().boxed());
         guards
     }
 
@@ -1049,6 +1118,43 @@ mod tests {
             running.enqueue_msg(stage, [msg()]);
         }
         assert_eq!(running.mailbox_len(stage), DEFAULT_MAILBOX_SIZE);
+    }
+
+    fn pending_share_of(connection: &Connection) -> Option<PeerSharingMessage> {
+        let State::Established(established) = &connection.state else {
+            panic!("connection left Established");
+        };
+        established.pending_share.clone()
+    }
+
+    fn share_start(amount: u8) -> PeerSharingMessage {
+        PeerSharingMessage::Start {
+            amount,
+            initial_delay: Duration::from_secs(1),
+            interval: Duration::from_secs(60),
+            reply_to: StageRef::blackhole(),
+        }
+    }
+
+    fn share_request(amount: u8) -> ConnectionMessage {
+        ConnectionMessage::RequestSharePeers {
+            amount,
+            initial_delay: Duration::from_secs(1),
+            interval: Duration::from_secs(60),
+            reply_to: StageRef::blackhole(),
+        }
+    }
+
+    fn is_local_start(amount: u8) -> impl Fn(&Inputs<PeerSharingMessage>) -> bool {
+        move |msg| matches!(msg, Inputs::Local(PeerSharingMessage::Start { amount: got, .. }) if *got == amount)
+    }
+
+    fn is_start(amount: u8) -> impl Fn(&PeerSharingMessage) -> bool {
+        move |msg| matches!(msg, PeerSharingMessage::Start { amount: got, .. } if *got == amount)
+    }
+
+    async fn hold_share(_state: (), _msg: Inputs<PeerSharingMessage>, eff: Effects<Inputs<PeerSharingMessage>>) {
+        eff.wait(Duration::from_secs(3600)).await;
     }
 
     fn pending_point(connection: &Connection) -> Option<Point> {
@@ -1252,6 +1358,196 @@ mod tests {
                 tm_state_match(name.as_str(), move |state: &Connection| pending_point(state) == Some(point)),
             ],
             &[tm_resume(), drop_other_stages(name.as_str())],
+        );
+    }
+
+    fn fill_share(
+        running: &mut SimulationRunning,
+        stage: &StageStateRef<Inputs<PeerSharingMessage>, ()>,
+    ) -> amaru_pure_stage::Instant {
+        running.enqueue_msg(stage, [Inputs::Local(PeerSharingMessage::Tick)]);
+        let parked = running.run(Run::default()).assert_sleeping();
+        for _ in 0..DEFAULT_MAILBOX_SIZE {
+            running.enqueue_msg(stage, [Inputs::Local(PeerSharingMessage::Tick)]);
+        }
+        assert_eq!(running.mailbox_len(stage), DEFAULT_MAILBOX_SIZE);
+        parked
+    }
+
+    /// A full peer-sharing child keeps the one Start. A second Start replaces it. The next
+    /// transition flushes that latest Start once.
+    #[test]
+    fn nonblocking_share_keeps_latest_start_and_flushes_once() {
+        let _guards = trace_guards();
+        let mut network = traced();
+        let sharing = network.stage("sharing", hold_share);
+        let sharing_sender = sharing.sender();
+        let sharing = network.wire_up(sharing, ());
+        let connection = network.stage("connection", stage);
+        let connection = network.wire_up(
+            connection,
+            established_sharing(
+                Some(sharing_sender.contramap(Inputs::<PeerSharingMessage>::Local)),
+                None,
+                BTreeSet::new(),
+            ),
+        );
+
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::default()).assert_idle();
+        let parked = fill_share(&mut running, &sharing);
+        running.trace_buffer().lock().clear();
+
+        let name = connection.name().clone();
+        running.enqueue_msg(&connection, [share_request(1)]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(pending_share_of(running.get_state(&connection).unwrap()), Some(share_start(1)));
+        assert_eq!(running.mailbox_len(&sharing), DEFAULT_MAILBOX_SIZE);
+        assert_trace_match_filter(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| {
+                    matches!(sent, ConnectionMessage::RequestSharePeers { amount: 1, .. })
+                }),
+                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(1)),
+                tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state) == Some(share_start(1))),
+            ],
+            &[tm_resume(), drop_other_stages(name.as_str())],
+        );
+
+        running.enqueue_msg(&connection, [share_request(2)]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(pending_share_of(running.get_state(&connection).unwrap()), Some(share_start(2)));
+        assert_eq!(
+            running.mailbox_len(&sharing),
+            DEFAULT_MAILBOX_SIZE,
+            "a second Start must not be queued beside the first"
+        );
+        assert_trace_match_filter(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| {
+                    matches!(sent, ConnectionMessage::RequestSharePeers { amount: 2, .. })
+                }),
+                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(1)),
+                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(2)),
+                tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state) == Some(share_start(2))),
+            ],
+            &[tm_resume(), drop_other_stages(name.as_str())],
+        );
+
+        running.run(Run::until(parked)).assert_sleeping();
+        assert_eq!(running.mailbox_len(&sharing), DEFAULT_MAILBOX_SIZE - 1);
+        running.trace_buffer().lock().clear();
+
+        running.enqueue_msg(&connection, [ConnectionMessage::StopTimeout]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(pending_share_of(running.get_state(&connection).unwrap()), None);
+        assert_eq!(running.mailbox_len(&sharing), DEFAULT_MAILBOX_SIZE);
+        assert_trace_match_filter(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| matches!(sent, ConnectionMessage::StopTimeout)),
+                tm_try_send_match(name.as_str(), "sharing", TrySend::Queued, is_local_start(2)),
+                tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
+            ],
+            &[tm_resume(), drop_other_stages(name.as_str())],
+        );
+    }
+
+    #[test]
+    fn nonblocking_share_gone_clears_pending_start() {
+        let _guards = trace_guards();
+        let mut network = traced();
+        let connection = network.stage("connection", stage);
+        let gone = StageRef::<PeerSharingMessage>::named_for_tests("missing-share");
+        let connection =
+            network.wire_up(connection, established_sharing(Some(gone), Some(share_start(1)), BTreeSet::new()));
+
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
+
+        let name = connection.name().clone();
+        running.enqueue_msg(&connection, [ConnectionMessage::StopTimeout]);
+        running.run(Run::default()).assert_idle();
+        assert_eq!(pending_share_of(running.get_state(&connection).unwrap()), None);
+        assert_trace_match_filter(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| matches!(sent, ConnectionMessage::StopTimeout)),
+                tm_try_send_match(name.as_str(), "missing-share", TrySend::Gone, is_start(1)),
+                tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
+            ],
+            &[tm_resume(), drop_other_stages(name.as_str())],
+        );
+
+        running.enqueue_msg(&connection, [share_request(2)]);
+        running.run(Run::default()).assert_idle();
+        assert_eq!(pending_share_of(running.get_state(&connection).unwrap()), None);
+        assert_trace_match_filter(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| {
+                    matches!(sent, ConnectionMessage::RequestSharePeers { amount: 2, .. })
+                }),
+                tm_try_send_match(name.as_str(), "missing-share", TrySend::Gone, is_start(2)),
+                tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
+            ],
+            &[tm_resume(), drop_other_stages(name.as_str())],
+        );
+    }
+
+    #[test]
+    fn nonblocking_share_child_died_clears_pending_start() {
+        let _guards = trace_guards();
+        let mut network = traced();
+        let sharing = network.stage("sharing", hold_share);
+        let sharing_sender = sharing.sender();
+        let sharing = network.wire_up(sharing, ());
+        let connection = network.stage("connection", stage);
+        let mut initial = established_sharing(
+            Some(sharing_sender.contramap(Inputs::<PeerSharingMessage>::Local)),
+            Some(share_start(1)),
+            BTreeSet::from([ChildId::PeerSharing]),
+        );
+        let State::Established(established) = &mut initial.state else {
+            unreachable!("established_sharing builds Established");
+        };
+        // Desired use None so the expected stop does not start a replacement child.
+        established.desired_use = LocalUse::None;
+        established.actual_use = LocalUse::None;
+        let connection = network.wire_up(connection, initial);
+
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::default()).assert_idle();
+        fill_share(&mut running, &sharing);
+        running.trace_buffer().lock().clear();
+
+        let name = connection.name().clone();
+        running.enqueue_msg(&connection, [ConnectionMessage::ChildDied(ChildId::PeerSharing)]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&connection).expect("expected child death finishes the transition");
+        let State::Established(established) = &state.state else {
+            panic!("connection left Established");
+        };
+        assert_eq!(established.pending_share, None);
+        assert!(established.peer_sharing_initiator.is_none());
+        assert!(established.stopping.is_empty());
+        assert_eq!(running.mailbox_len(&sharing), DEFAULT_MAILBOX_SIZE);
+        assert_trace_contains(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| {
+                    matches!(sent, ConnectionMessage::ChildDied(ChildId::PeerSharing))
+                }),
+                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(1)),
+                tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
+            ],
         );
     }
 
