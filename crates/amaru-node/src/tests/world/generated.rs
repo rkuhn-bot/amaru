@@ -21,7 +21,14 @@
 //!
 //! Every run prints `seed=0x…`. Replay with `AMARU_TEST_SEED=<that value>`.
 
-use std::{cmp::Ordering, env::var, net::SocketAddr, num::NonZeroU8, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering,
+    env::var,
+    net::SocketAddr,
+    num::NonZeroU8,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use amaru_consensus::{
     effects::{GenerateRandomSeed, ValidateBlockEffect, ValidateHeaderEffect},
@@ -36,16 +43,23 @@ use amaru_metrics::LedgerMetrics;
 use amaru_ouroboros::{
     BaseReadChainStore, ConnectionsResource, Nonces, WriteChainStore, in_memory_chain_store::InMemoryChainStore,
 };
-use amaru_protocols::store_effects::{ResourceHeaderStore, ResourceParameters};
+use amaru_protocols::{
+    manager::ManagerMessage,
+    store_effects::{ResourceHeaderStore, ResourceParameters},
+};
 use amaru_pure_stage::{
+    StageRef,
     simulation::{SimulationRunning, running::OverrideResult},
     trace_buffer::TraceBuffer,
 };
 use tokio::runtime::{Handle, Runtime};
+use tracing::field::Visit;
+use tracing_subscriber::{Layer, layer::SubscriberExt, registry};
 
 use super::{
     HONEST_PAYLOAD_DELAY_MAX_NANOS, HeapLogEntry, HeapLogKind, InjectorShared, WIRE_DELAY_MAX_NANOS,
-    WorldConnectionProvider, WorldLoop, build_injector, build_injector_peer, build_world_node,
+    WorldConnectionProvider, WorldLoop, build_injector, build_injector_peer, build_injector_with_mailbox,
+    build_world_node,
     support::{
         derive_seed, draw_test_seed, fragment_trace_guards, peer_saw_roll_forward, peer_trace, seed_bytes, test_seeds,
         tm_chainsync_roll_forward, tm_chainsync_roll_forward_of, tm_validate_header,
@@ -679,6 +693,8 @@ fn p_join_wire_summary(log: &[HeapLogEntry]) -> PJoinWireSummary {
             | HeapLogKind::SendAck { .. }
             | HeapLogKind::Close { .. }
             | HeapLogKind::PeerDisconnect
+            | HeapLogKind::StalledReader { .. }
+            | HeapLogKind::SilentResponder { .. }
             | HeapLogKind::Reveal { .. }
             | HeapLogKind::GraphWake { .. } => {}
         }
@@ -785,5 +801,390 @@ async fn test_injector_reveal_gates_chainsync() {
     assert!(
         peer_trace(&world, 1).iter().any(|entry| tm_chainsync_roll_forward_of(headers[1].hash()) == *entry),
         "ChainSync may RollForward the second revealed header"
+    );
+}
+
+/// Production bulk mailbox. Existing world tests keep 10000; admission tests use this.
+const ADMISSION_MAILBOX: usize = 10;
+
+/// Reveals wait while the injector mailbox is at capacity. The loop reads
+/// [`SimulationRunning::mailbox_size`], so a mailbox of 10 must hold the next reveal back.
+#[tokio::test]
+async fn test_reveal_pacing_stops_at_mailbox_capacity() {
+    assert_eq!(ADMISSION_MAILBOX, amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
+    let seed = draw_test_seed();
+    eprintln!("world reveal_pacing seed={seed:#x}");
+    let handle = Handle::current();
+    let (store, headers) = injector_linear_store(4, seed);
+    let provider = provider(seed);
+    let (mut sim, shared) =
+        build_injector_with_mailbox(store, provider.clone(), loopback(9410), seed, ADMISSION_MAILBOX, &handle)
+            .expect("injector");
+    assert_eq!(sim.mailbox_size(), ADMISSION_MAILBOX);
+    let manager = shared.manager();
+    let point = shared.reveal_through(headers[0].hash()).expect("header is in the inventory");
+    while sim.mailbox_len(&manager) < sim.mailbox_size() {
+        sim.enqueue_msg(&manager, [ManagerMessage::new_tip(point)]);
+    }
+    assert_eq!(sim.mailbox_len(&manager), ADMISSION_MAILBOX);
+
+    // WorldLoop::new admits one queued message via receive_inputs. The stage is then
+    // runnable, so a further enqueue stays in the mailbox and fills that slot again.
+    let mut world = WorldLoop::new(provider, vec![sim]).with_injector(0, shared);
+    assert_eq!(world.graph(0).mailbox_len(&manager), ADMISSION_MAILBOX - 1);
+    world.reveal(headers[1].hash()).expect("refill the admitted slot");
+    assert_eq!(world.graph(0).mailbox_len(&manager), ADMISSION_MAILBOX);
+    world.schedule_reveals(headers.iter().map(IsHeader::hash));
+    assert!(
+        world.heap_contents().iter().all(|entry| !matches!(entry.kind, HeapLogKind::Reveal { .. })),
+        "a full mailbox of {ADMISSION_MAILBOX} must not take another reveal: {:?}",
+        world.heap_contents()
+    );
+}
+
+const ADVERSARIAL_PEERS: usize = 3;
+/// Longer than one block-fetch batch (`MAX_MISSING_BLOCKS_PER_BATCH` is 25) so a stuck
+/// fan-out leaves a later range unfetched.
+const ADVERSARIAL_FRAGMENT: usize = 32;
+/// Same bound as the block-fetch world tests. The 60s block-fetch agency timeout
+/// forces a recv the world loop itself has to complete, so the horizon stays under it.
+const ADVERSARIAL_HORIZON_NANOS: u64 = BLOCKFETCH_HORIZON_NANOS;
+/// After the handshake (connects land around 3–8ms) and while this fragment's
+/// bodies are still outstanding (adoption of the 32-block head is ~50ms).
+const ADVERSARIAL_FAULT_AT_NANOS: u64 = 15_000_000;
+
+#[derive(Clone, Copy)]
+enum AdversarialFault {
+    None,
+    StalledReader,
+    SilentResponder,
+}
+
+struct AdversarialOutcome {
+    seed: u64,
+    heights: Vec<u64>,
+    mailbox_size: usize,
+    mailbox_len: usize,
+    requested_peers: Vec<String>,
+    fault_at: Option<u64>,
+    adopted_at: Option<u64>,
+    bad_peer: SocketAddr,
+    honest_peers: Vec<SocketAddr>,
+    adopted: bool,
+    log: Vec<HeapLogEntry>,
+}
+
+/// N injectors serve one generated fragment. The node dials all of them with the production
+/// mailbox of 10. `fault` hits the lowest-address injector once the handshake window has passed.
+fn run_adversarial(label: &str, fault: AdversarialFault) -> AdversarialOutcome {
+    let run = SyncRun::new(&format!("adversarial {label}"));
+    let base = 9900u16;
+    let injector_addrs: Vec<SocketAddr> = (0..ADVERSARIAL_PEERS).map(|i| loopback(base + i as u16)).collect();
+    let bad_peer = injector_addrs[0];
+    let honest_peers = injector_addrs[1..].to_vec();
+    let node_addr = node_listen(base, 0);
+    let (store, headers) = injector_linear_store(ADVERSARIAL_FRAGMENT, run.seed);
+    let head = headers.last().expect("fragment head").clone();
+
+    let mut graphs = Vec::new();
+    let mut shared0 = None;
+    for (index, addr) in injector_addrs.iter().copied().enumerate() {
+        let source: Arc<dyn BaseReadChainStore> = store.clone();
+        let (mut sim, shared) = build_injector(
+            source,
+            run.connections(),
+            addr,
+            derive_seed(run.seed, TAG_INJECTOR + index as u64),
+            &run.handle,
+        )
+        .expect("injector");
+        let point = shared.reveal_through(head.hash()).expect("head is in the inventory");
+        sim.enqueue_msg(shared.manager(), [ManagerMessage::new_tip(point)]);
+        if index == 0 {
+            shared0 = Some(shared);
+        }
+        graphs.push(sim);
+    }
+    let peers: Vec<Peer> = injector_addrs.iter().copied().map(peer_at).collect();
+    let node = with_ancestor(
+        generated_node(run.seed, 0, node_addr).with_upstream_peers(peers).with_mailbox_size(ADMISSION_MAILBOX),
+        &headers[0],
+    );
+    let node_idx = graphs.len();
+    graphs.push(run.spawn_catch_up(0, node));
+
+    match fault {
+        AdversarialFault::None => {}
+        AdversarialFault::StalledReader => run.provider.schedule_stalled_reader(bad_peer, ADVERSARIAL_FAULT_AT_NANOS),
+        AdversarialFault::SilentResponder => {
+            run.provider.schedule_silent_responder(bad_peer, ADVERSARIAL_FAULT_AT_NANOS)
+        }
+    }
+
+    let requested_peers = Arc::new(Mutex::new(Vec::new()));
+    let (dispatch, _layer_peers) = block_requested_dispatch(requested_peers.clone());
+    let mut world = WorldLoop::new(run.provider.clone(), graphs).with_injector(0, shared0.expect("injector 0"));
+    world.set_subscriber(node_idx, dispatch);
+
+    // Do not read the chain store from this callback: the tip write that woke us may
+    // still hold it, and a re-entrant lock deadlocks the world loop.
+    let mut last_tip_at = None;
+    world.run_until_horizon_on_best_chain_tip(ADVERSARIAL_HORIZON_NANOS, |world| {
+        last_tip_at = Some(world.now_nanos());
+    });
+
+    let (mailbox_len, mailbox_size) = manager_mailbox(&world, node_idx);
+    let adopted = adopted_head(&world, node_idx, &head);
+    let adopted_at = adopted.then_some(last_tip_at).flatten();
+    let ancestor_height = headers[0].block_height().as_u64();
+    let mut heights = vec![ancestor_height];
+    if let Some(height) = chain_tip_height(&world, node_idx)
+        && height != ancestor_height
+    {
+        heights.push(height);
+    }
+    let log = world.heap_log();
+    let fault_at = log.iter().find_map(|entry| match entry.kind {
+        HeapLogKind::StalledReader { .. } | HeapLogKind::SilentResponder { .. } => Some(entry.time_nanos),
+        HeapLogKind::Accepted { .. }
+        | HeapLogKind::ConnectAttempt { .. }
+        | HeapLogKind::ConnectTimeout { .. }
+        | HeapLogKind::SendAck { .. }
+        | HeapLogKind::Deliver { .. }
+        | HeapLogKind::Close { .. }
+        | HeapLogKind::PeerDisconnect
+        | HeapLogKind::Reveal { .. }
+        | HeapLogKind::GraphWake { .. } => None,
+    });
+    let requested_peers = std::mem::take(&mut *requested_peers.lock().expect("requested peers"));
+    eprintln!(
+        "adversarial {label} seed={:#x} adopted={adopted} adopted_at={adopted_at:?} heights={heights:?} mailbox={mailbox_len}/{mailbox_size} requested={} fault_at={fault_at:?} last_peers={:?}",
+        run.seed,
+        requested_peers.len(),
+        requested_peers.last(),
+    );
+    world.stop();
+    AdversarialOutcome {
+        seed: run.seed,
+        heights,
+        mailbox_size,
+        mailbox_len,
+        requested_peers,
+        fault_at,
+        adopted_at,
+        bad_peer,
+        honest_peers,
+        adopted,
+        log,
+    }
+}
+
+fn chain_tip_height(world: &WorldLoop, graph: usize) -> Option<u64> {
+    let store = world.graph(graph).resources().get::<ResourceHeaderStore>().expect("node chain store");
+    let tip = store.get_best_chain_tip();
+    store.load_header(&tip.hash()).map(|header| header.block_height().as_u64())
+}
+
+fn adopted_head(world: &WorldLoop, graph: usize, head: &Header) -> bool {
+    let store = world.graph(graph).resources().get::<ResourceHeaderStore>().expect("node chain store");
+    store.get_best_chain_tip() == head.point()
+}
+
+fn manager_mailbox(world: &WorldLoop, graph: usize) -> (usize, usize) {
+    let manager = StageRef::<ManagerMessage>::named_for_tests("manager-1");
+    let running = world.graph(graph);
+    assert!(running.contains_stage(manager.name()), "node graph is missing manager-1");
+    (running.mailbox_len(&manager), running.mailbox_size())
+}
+
+fn block_requested_dispatch(peers: Arc<Mutex<Vec<String>>>) -> (tracing::Dispatch, Arc<Mutex<Vec<String>>>) {
+    let layer = RequestedPeers(peers.clone());
+    let dispatch = tracing::Dispatch::new(registry().with(layer));
+    (dispatch, peers)
+}
+
+struct RequestedPeers(Arc<Mutex<Vec<String>>>);
+
+struct PeerField<'a>(&'a mut Option<String>);
+
+impl Visit for PeerField<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "peers" && self.0.is_none() {
+            *self.0 = Some(format!("{value:?}"));
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "peers" {
+            *self.0 = Some(value.to_string());
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for RequestedPeers {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().name() != "block.requested" {
+            return;
+        }
+        let mut peers = None;
+        event.record(&mut PeerField(&mut peers));
+        if let Some(peers) = peers {
+            self.0.lock().expect("requested peers").push(peers);
+        }
+    }
+}
+
+fn assert_fetch_survives_one_bad_peer(outcome: &AdversarialOutcome, label: &str) {
+    assert_eq!(outcome.mailbox_size, ADMISSION_MAILBOX, "{label} must run at the production mailbox");
+    assert!(outcome.fault_at.is_some(), "{label} fault must pop; seed={:#x}", outcome.seed);
+    assert!(
+        outcome.adopted_at.is_some_and(|at| at > outcome.fault_at.unwrap_or(0)),
+        "{label} must still be fetching when the fault pops; seed={:#x} adopted_at={:?} fault_at={:?}",
+        outcome.seed,
+        outcome.adopted_at,
+        outcome.fault_at
+    );
+    assert!(
+        outcome.adopted,
+        "{label} must finish the fragment from the other peers; seed={:#x} heights={:?} mailbox={}/{}",
+        outcome.seed, outcome.heights, outcome.mailbox_len, outcome.mailbox_size
+    );
+    assert!(
+        outcome.heights.len() >= 2,
+        "{label} chain selection must keep advancing; seed={:#x} heights={:?}",
+        outcome.seed,
+        outcome.heights
+    );
+    assert!(
+        outcome.mailbox_len < outcome.mailbox_size,
+        "{label} manager mailbox must not be stuck full; seed={:#x} len={}",
+        outcome.seed,
+        outcome.mailbox_len
+    );
+    assert!(!outcome.requested_peers.is_empty(), "{label} must emit block.requested; seed={:#x}", outcome.seed);
+    let last = outcome.requested_peers.last().expect("block.requested");
+    assert!(
+        outcome.honest_peers.iter().any(|honest| last.contains(&honest.to_string())),
+        "{label} must finish by asking an honest peer; seed={:#x} last={last} bad={}",
+        outcome.seed,
+        outcome.bad_peer
+    );
+}
+
+/// Three peers, production mailbox, no fault. The small mailbox still syncs the fragment.
+#[test]
+fn test_world_small_mailbox_honest_peers_sync() {
+    let outcome = run_adversarial("honest", AdversarialFault::None);
+    assert_eq!(outcome.mailbox_size, ADMISSION_MAILBOX);
+    assert!(outcome.fault_at.is_none(), "no fault was scheduled");
+    assert!(outcome.adopted, "honest peers must sync at mailbox 10; seed={:#x}", outcome.seed);
+    assert!(outcome.adopted_at.is_some(), "honest adoption time; seed={:#x}", outcome.seed);
+    assert!(outcome.heights.len() >= 2, "chain advanced {:?}", outcome.heights);
+    assert!(outcome.mailbox_len < outcome.mailbox_size, "manager mailbox {}", outcome.mailbox_len);
+    assert!(!outcome.requested_peers.is_empty(), "block.requested; seed={:#x}", outcome.seed);
+}
+
+/// One peer stops reading. The other peers still deliver the fragment, the manager mailbox
+/// stays below capacity, and chain selection keeps moving.
+#[test]
+fn test_world_stalled_reader_fetch_continues() {
+    let outcome = run_adversarial("stalled-reader", AdversarialFault::StalledReader);
+    assert_fetch_survives_one_bad_peer(&outcome, "stalled reader");
+    assert!(
+        outcome
+            .log
+            .iter()
+            .any(|entry| matches!(entry.kind, HeapLogKind::StalledReader { peer } if peer == outcome.bad_peer)),
+        "stalled-reader hop; seed={:#x}",
+        outcome.seed
+    );
+}
+
+/// One peer accepts writes and then stops delivering. The others still complete the fetch.
+#[test]
+fn test_world_silent_responder_fetch_continues() {
+    let outcome = run_adversarial("silent-responder", AdversarialFault::SilentResponder);
+    assert_fetch_survives_one_bad_peer(&outcome, "silent responder");
+    assert!(
+        outcome
+            .log
+            .iter()
+            .any(|entry| matches!(entry.kind, HeapLogKind::SilentResponder { peer } if peer == outcome.bad_peer)),
+        "silent-responder hop; seed={:#x}",
+        outcome.seed
+    );
+}
+
+/// A stalled reader should fault only that connection. Mux ingress still awaits the handler,
+/// so the connection is not torn down and this stays ignored until that behaviour exists.
+#[test]
+#[ignore = "mux ingress still awaits the handler, so a stalled reader is not faulted and that connection is not torn down"]
+fn test_stalled_reader_tears_down_only_that_connection() {
+    let outcome = run_adversarial("stalled-teardown", AdversarialFault::StalledReader);
+    let bad_responders: Vec<_> = outcome
+        .log
+        .iter()
+        .filter_map(|entry| match entry.kind {
+            HeapLogKind::Accepted { listener, responder_conn, .. } if listener == outcome.bad_peer => {
+                Some(responder_conn)
+            }
+            HeapLogKind::Accepted { .. }
+            | HeapLogKind::ConnectAttempt { .. }
+            | HeapLogKind::ConnectTimeout { .. }
+            | HeapLogKind::SendAck { .. }
+            | HeapLogKind::Deliver { .. }
+            | HeapLogKind::Close { .. }
+            | HeapLogKind::PeerDisconnect
+            | HeapLogKind::StalledReader { .. }
+            | HeapLogKind::SilentResponder { .. }
+            | HeapLogKind::Reveal { .. }
+            | HeapLogKind::GraphWake { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!bad_responders.is_empty(), "the stalled injector must have accepted; seed={:#x}", outcome.seed);
+    assert!(
+        outcome
+            .log
+            .iter()
+            .any(|entry| matches!(entry.kind, HeapLogKind::Close { conn } if bad_responders.contains(&conn))),
+        "the stalled connection must be torn down; seed={:#x}",
+        outcome.seed
+    );
+    let honest_responders: Vec<_> = outcome
+        .log
+        .iter()
+        .filter_map(|entry| match entry.kind {
+            HeapLogKind::Accepted { listener, responder_conn, .. } if outcome.honest_peers.contains(&listener) => {
+                Some(responder_conn)
+            }
+            HeapLogKind::Accepted { .. }
+            | HeapLogKind::ConnectAttempt { .. }
+            | HeapLogKind::ConnectTimeout { .. }
+            | HeapLogKind::SendAck { .. }
+            | HeapLogKind::Deliver { .. }
+            | HeapLogKind::Close { .. }
+            | HeapLogKind::PeerDisconnect
+            | HeapLogKind::StalledReader { .. }
+            | HeapLogKind::SilentResponder { .. }
+            | HeapLogKind::Reveal { .. }
+            | HeapLogKind::GraphWake { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        outcome.log.iter().all(|entry| match entry.kind {
+            HeapLogKind::Close { conn } => !honest_responders.contains(&conn),
+            HeapLogKind::Accepted { .. }
+            | HeapLogKind::ConnectAttempt { .. }
+            | HeapLogKind::ConnectTimeout { .. }
+            | HeapLogKind::SendAck { .. }
+            | HeapLogKind::Deliver { .. }
+            | HeapLogKind::PeerDisconnect
+            | HeapLogKind::StalledReader { .. }
+            | HeapLogKind::SilentResponder { .. }
+            | HeapLogKind::Reveal { .. }
+            | HeapLogKind::GraphWake { .. } => true,
+        }),
+        "honest peers must stay up; seed={:#x}",
+        outcome.seed
     );
 }
