@@ -23,7 +23,8 @@ use std::time::Duration;
 use amaru_pure_stage::DeserializerGuards;
 pub(crate) use initiator::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
 pub use initiator::{
-    BLOCKFETCH_PIPELINE_N, BlockFetchMessage, Blocks, blockfetch_pipeline_max_buffer, register_blockfetch_initiator,
+    BLOCKFETCH_PIPELINE_N, BlockFetchMessage, Blocks, blockfetch_handler_mailbox, blockfetch_pipeline_max_buffer,
+    register_blockfetch_initiator,
 };
 pub use messages::{BatchDone, Block, ClientDone, Message, NoBlocks, RequestRange, StartBatch};
 pub use responder::register_blockfetch_responder;

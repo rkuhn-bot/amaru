@@ -53,6 +53,16 @@ pub fn blockfetch_pipeline_max_buffer(n: NonZeroU8) -> usize {
     usize::from(n.get()).saturating_mul(MAX_FETCHED_BLOCKS).saturating_mul(BLOCKFETCH_MAX_BLOCK_WIRE_BYTES)
 }
 
+/// Bulk mailbox of the block-fetch handler for pipeline depth `n`.
+///
+/// One local request and one network message per slot, plus `Registered`,
+/// `Close`, and the one stashed newer range. The default bulk mailbox is 10,
+/// and `n = 2` stays inside it.
+pub fn blockfetch_handler_mailbox(n: NonZeroU8) -> usize {
+    const BULK_MAILBOX: usize = 10;
+    BULK_MAILBOX.max(2 * usize::from(n.get()) + 4)
+}
+
 fn pipeline_slots(n: NonZeroU8) -> NonZeroUsize {
     match NonZeroUsize::new(usize::from(n.get())) {
         Some(n) => n,
@@ -210,7 +220,7 @@ impl FromMailbox<Mail> for BatchDone {
 
 pub fn register_deserializers() -> DeserializerGuards {
     vec![
-        amaru_pure_stage::register_data_deserializer::<Pipelined<Instance>>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<Pipelined<Instance, BlockFetchMessage>>().boxed(),
         amaru_pure_stage::register_data_deserializer::<Instance>().boxed(),
         amaru_pure_stage::register_data_deserializer::<BlockFetchMessage>().boxed(),
         amaru_pure_stage::register_data_deserializer::<Blocks>().boxed(),
@@ -240,7 +250,7 @@ struct Instance {
 }
 
 type Mail = Inputs<BlockFetchMessage>;
-type Handler = Pipelined<Instance>;
+type Handler = Pipelined<Instance, BlockFetchMessage>;
 
 impl OccupancyOf for Instance {
     fn occupancy(&self) -> Occupancy {
@@ -464,7 +474,7 @@ async fn invalid(peer: Peer, state: &str, input: impl std::fmt::Debug, eff: Effe
     eff.terminate().await
 }
 
-impl Pipelined<Instance> {
+impl Pipelined<Instance, BlockFetchMessage> {
     fn for_peer(n: NonZeroU8, muxer: StageRef<MuxMessage>, peer: Peer) -> Self {
         let mux = MuxClient::new(muxer, PROTO_N2N_BLOCK_FETCH.erase());
         Pipelined::new(pipeline_slots(n), |_| Instance::new(mux.clone(), peer))
@@ -476,7 +486,7 @@ async fn lock_step(state: Instance, msg: Mail, eff: Effects<Mail>) -> Instance {
 }
 
 async fn handler(state: Handler, msg: Mail, eff: Effects<Mail>) -> Handler {
-    pipelined(state, msg, eff, instance).await
+    pipelined(state, msg, eff, instance, |msg| matches!(msg, BlockFetchMessage::Close)).await
 }
 
 pub async fn register_blockfetch_initiator<M: amaru_pure_stage::SendData>(
@@ -486,13 +496,14 @@ pub async fn register_blockfetch_initiator<M: amaru_pure_stage::SendData>(
     eff: &Effects<M>,
     tombstone: M,
 ) -> StageRef<BlockFetchMessage> {
+    let mailbox = blockfetch_handler_mailbox(n);
     let blockfetch = if n.get() == 1 {
         let mux = MuxClient::new(muxer.clone(), PROTO_N2N_BLOCK_FETCH.erase());
-        let blockfetch = eff.stage("blockfetch", lock_step).await;
+        let blockfetch = eff.stage("blockfetch", lock_step).await.with_mailbox_size(mailbox);
         let blockfetch = eff.supervise(blockfetch, tombstone);
         eff.wire_up(blockfetch, Instance::new(mux, peer)).await
     } else {
-        let blockfetch = eff.stage("blockfetch", handler).await;
+        let blockfetch = eff.stage("blockfetch", handler).await.with_mailbox_size(mailbox);
         let blockfetch = eff.supervise(blockfetch, tombstone);
         eff.wire_up(blockfetch, Handler::for_peer(n, muxer.clone(), peer)).await
     };
@@ -554,6 +565,10 @@ mod tests {
             | MuxMessage::EgressRetry => {}
         }
         log
+    }
+
+    fn no_blocks_reply() -> Inputs<BlockFetchMessage> {
+        Inputs::Network(HandlerMessage::FromNetwork(NonEmptyBytes::encode(&Message::from(NoBlocks))))
     }
 
     fn test_runtime() -> &'static tokio::runtime::Handle {
@@ -731,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn extra_fetch_while_full_terminates() {
+    fn third_fetch_while_full_is_sent_when_a_slot_idles() {
         let mut network = SimulationBuilder::default();
         let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
             inbox.push(msg);
@@ -740,40 +755,195 @@ mod tests {
         let mux = network.stage("mux", mux_step);
         let mux_ref = mux.sender();
         let out = network.wire_up(out, Vec::new());
-        let _mux = network.wire_up(mux, MuxLog::default());
+        let mux = network.wire_up(mux, MuxLog::default());
         let handler_b = network.stage("bf", handler);
         let handler =
             network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
         let cr = (*out).clone();
+        let range = |id, cr| BlockFetchMessage::RequestRange { from: Point::Origin, through: Point::Origin, id, cr };
         network
             .preload(
                 &handler,
                 [
                     Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
-                    Inputs::Local(BlockFetchMessage::RequestRange {
-                        from: Point::Origin,
-                        through: Point::Origin,
-                        id: 1,
-                        cr: cr.clone(),
-                    }),
-                    Inputs::Local(BlockFetchMessage::RequestRange {
-                        from: Point::Origin,
-                        through: Point::Origin,
-                        id: 2,
-                        cr: cr.clone(),
-                    }),
-                    Inputs::Local(BlockFetchMessage::RequestRange {
-                        from: Point::Origin,
-                        through: Point::Origin,
-                        id: 3,
-                        cr,
-                    }),
+                    Inputs::Local(range(1, cr.clone())),
+                    Inputs::Local(range(2, cr.clone())),
+                    Inputs::Local(range(3, cr)),
                 ],
             )
             .unwrap();
         let mut running = network.run(test_runtime());
-        let blocked = running.run(Run::skip_wakeups());
-        assert!(matches!(blocked, amaru_pure_stage::simulation::Blocked::Terminated(_)));
+        let blocked = running.run(Run::default());
+        assert!(
+            matches!(blocked, amaru_pure_stage::simulation::Blocked::Sleeping { .. }),
+            "a third range must not drop the handler: {blocked:?}"
+        );
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "RequestRange"]);
+        assert_eq!(running.get_state(&out).cloned().unwrap(), vec![Blocks::NoBlocks(1, Peer::for_test(3001))]);
+    }
+
+    /// Two ranges occupy both slots. A third is held until a slot returns to `Idle`.
+    /// The three `NoBlocks` replies must come back as ids 1, 2, 3. Applying the held
+    /// range inside the finishing slot, before the receive cursor moves, would hand
+    /// the second range's reply to the new id.
+    #[test]
+    fn stashed_fetch_keeps_wire_order() {
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, MuxLog::default());
+        let handler_b = network.stage("bf", handler);
+        let handler =
+            network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
+        let cr = (*out).clone();
+        let range = |id, cr| BlockFetchMessage::RequestRange { from: Point::Origin, through: Point::Origin, id, cr };
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(range(1, cr.clone())),
+                    Inputs::Local(range(2, cr.clone())),
+                    Inputs::Local(range(3, cr)),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        running.run(Run::default()).assert_sleeping();
+
+        let log = running.get_state(&mux).cloned().unwrap();
+        assert_eq!(log.sends, vec!["RequestRange", "RequestRange"]);
+        assert_eq!(log.wants, 1);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "RequestRange"]);
+        assert_eq!(running.get_state(&out).cloned().unwrap(), vec![Blocks::NoBlocks(1, Peer::for_test(3001))]);
+        assert_eq!(running.get_state(&mux).unwrap().wants, 2);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, Peer::for_test(3001)), Blocks::NoBlocks(2, Peer::for_test(3001))]
+        );
+        assert_eq!(running.get_state(&mux).unwrap().wants, 3);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::skip_wakeups()).assert_idle();
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![
+                Blocks::NoBlocks(1, Peer::for_test(3001)),
+                Blocks::NoBlocks(2, Peer::for_test(3001)),
+                Blocks::NoBlocks(3, Peer::for_test(3001)),
+            ]
+        );
+    }
+
+    #[test]
+    fn newer_fetch_replaces_the_stash() {
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, MuxLog::default());
+        let handler_b = network.stage("bf", handler);
+        let handler =
+            network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
+        let cr = (*out).clone();
+        let range = |id, cr| BlockFetchMessage::RequestRange { from: Point::Origin, through: Point::Origin, id, cr };
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(range(1, cr.clone())),
+                    Inputs::Local(range(2, cr.clone())),
+                    Inputs::Local(range(3, cr.clone())),
+                    Inputs::Local(range(4, cr)),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::skip_wakeups()).assert_idle();
+        let peer = Peer::for_test(3001);
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(2, peer), Blocks::NoBlocks(4, peer)]
+        );
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "RequestRange"]);
+    }
+
+    #[test]
+    fn close_while_busy_waits_for_inflight_slots() {
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, MuxLog::default());
+        let handler_b = network.stage("bf", handler);
+        let handler =
+            network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
+        let cr = (*out).clone();
+        let range = |id, cr| BlockFetchMessage::RequestRange { from: Point::Origin, through: Point::Origin, id, cr };
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(range(1, cr.clone())),
+                    Inputs::Local(range(2, cr)),
+                    Inputs::Local(BlockFetchMessage::Close),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        let blocked = running.run(Run::default());
+        assert!(
+            matches!(blocked, amaru_pure_stage::simulation::Blocked::Sleeping { .. }),
+            "Close while both slots are busy must not drop the handler: {blocked:?}"
+        );
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(running.get_state(&out).cloned().unwrap(), vec![Blocks::NoBlocks(1, Peer::for_test(3001))]);
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::skip_wakeups()).assert_idle();
+        let peer = Peer::for_test(3001);
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(2, peer)]
+        );
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "ClientDone"]);
     }
 
     #[test]
@@ -981,5 +1151,137 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    /// Both slots are busy and one range is stashed. The slot that finishes is idle
+    /// again, so the stash is offered. The mux is not receiving, the offer is
+    /// `NotAdmitted`, and the handler reports that id and stays up. The other
+    /// in-flight body is still attributed to its own id.
+    #[test]
+    fn stash_delivered_when_not_admitted_frees_the_slot() {
+        use amaru_pure_stage::simulation::Blocked;
+
+        #[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+        struct Gate {
+            admitted: u8,
+            wants: usize,
+            sends: Vec<String>,
+        }
+
+        async fn gate(mut gate: Gate, msg: MuxMessage, eff: Effects<MuxMessage>) -> Gate {
+            match msg {
+                MuxMessage::Send(_, bytes, cr) if gate.admitted < 2 => {
+                    let decoded: Message = cbor::decode(bytes.as_ref()).expect("cbor");
+                    gate.sends.push(decoded.message_type().to_string());
+                    gate.admitted += 1;
+                    eff.send(&cr, Sent).await;
+                }
+                MuxMessage::WantNext(_) if gate.wants == 0 => {
+                    gate.wants = 1;
+                }
+                // The next pull is accepted, then this stage stops receiving. The
+                // stashed range's call finds a rendezvous mailbox that is not waiting
+                // and comes back `NotAdmitted`.
+                MuxMessage::WantNext(_) => {
+                    eff.wait(std::time::Duration::from_secs(3600)).await;
+                }
+                MuxMessage::Send(_, _, _)
+                | MuxMessage::Register { .. }
+                | MuxMessage::Buffer(..)
+                | MuxMessage::FromNetwork(..)
+                | MuxMessage::Written
+                | MuxMessage::Terminate
+                | MuxMessage::SetSduTimeout(_)
+                | MuxMessage::IngressRetry
+                | MuxMessage::EgressRetry => {}
+            }
+            gate
+        }
+
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", gate).with_mailbox_size(0);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, Gate::default());
+        let handler_b = network.stage("bf", handler);
+        let handler =
+            network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
+        let cr = (*out).clone();
+        let range = |id, cr| BlockFetchMessage::RequestRange { from: Point::Origin, through: Point::Origin, id, cr };
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(range(1, cr.clone())),
+                    Inputs::Local(range(2, cr.clone())),
+                    Inputs::Local(range(3, cr)),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        let Blocked::Sleeping { next_wakeup } = running.run(Run::default()) else {
+            panic!("stashed range should be waiting on the admission deadline");
+        };
+        let peer = Peer::for_test(3001);
+        assert_eq!(running.get_state(&out).cloned().unwrap(), vec![Blocks::NoBlocks(1, peer)]);
+
+        let blocked = running.run(Run::until(next_wakeup));
+        assert!(matches!(blocked, Blocked::Sleeping { .. } | Blocked::Idle), "{blocked:?}");
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(3, peer)]
+        );
+        // The mux is inside the pull that made its mailbox refuse the stashed
+        // range, so its state is not readable. The handler is: it did not fault.
+        assert!(running.get_state(&handler).is_some(), "handler must still be running");
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(3, peer), Blocks::NoBlocks(2, peer)]
+        );
+    }
+
+    #[test]
+    fn blockfetch_handler_mailbox_is_max_10_or_2n_plus_4() {
+        use amaru_pure_stage::Effect;
+
+        let cases = [(1u8, 10usize), (2, 10), (4, 12)];
+        for (n, expected) in cases {
+            let depth = NonZeroU8::new(n).unwrap();
+            assert_eq!(blockfetch_handler_mailbox(depth), expected);
+
+            let mut network = SimulationBuilder::default();
+            let boot = network.stage("boot", async |_state: u8, depth: u8, eff: Effects<u8>| {
+                let mux = eff.stage("mux", async |s: u8, _msg: MuxMessage, _eff: Effects<MuxMessage>| s).await;
+                let mux = eff.wire_up(mux, 0u8).await;
+                let depth = NonZeroU8::new(depth).unwrap();
+                let _handler = register_blockfetch_initiator(&mux, Peer::for_test(1), depth, &eff, 0u8).await;
+                0
+            });
+            let boot = network.wire_up(boot, 0u8);
+            let mut running = network.run(test_runtime());
+            running.breakpoint(
+                "bf-mail",
+                |eff| matches!(eff, Effect::WireStage { name, .. } if name.as_str().starts_with("blockfetch")),
+            );
+            running.enqueue_msg(&boot, [n]);
+            running.run(Run::default()).assert_breakpoint("bf-mail");
+            let hit = running.breakpoint_effect();
+            let Effect::WireStage { mailbox_size, .. } = hit.effect() else {
+                panic!("expected the block-fetch handler to be wired");
+            };
+            assert_eq!(*mailbox_size, expected, "N={n}");
+        }
     }
 }
