@@ -54,10 +54,12 @@ pub const NETWORK_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bits per second.
 pub const MIN_PEER_BANDWIDTH_BPS: u64 = 500_000;
 
-/// Node-to-node mini-protocols that share one writer.
+/// Node-to-node mini-protocol families that share one writer.
 ///
-/// One lane per [`KnownProtocol`] variant. Adding a variant without counting it
-/// fails the const assert below.
+/// One lane per [`KnownProtocol`] variant. The match is exhaustive, so a new
+/// variant does not compile until `one` names it. The sum is a second list:
+/// forgetting `+ one(New)` still type-checks, and the const assert below
+/// rejects that build.
 pub const MAX_PROTOCOLS_PER_CONNECTION: usize = {
     const fn one(protocol: KnownProtocol) -> usize {
         match protocol {
@@ -76,6 +78,9 @@ pub const MAX_PROTOCOLS_PER_CONNECTION: usize = {
         + one(KnownProtocol::KeepAlive)
         + one(KnownProtocol::PeerShare)
 };
+
+// `variant_count` fails when a variant is added to the match and left out of the sum.
+const _: () = assert!(std::mem::variant_count::<KnownProtocol>() == MAX_PROTOCOLS_PER_CONNECTION);
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ProtocolId<T: RoleT>(u16, PhantomData<T>);
@@ -276,10 +281,17 @@ fn max_unsent_per_lane() -> usize {
 
 /// Worst-case wire bytes ahead of and including `payload_len`.
 ///
-/// One max segment is already in flight. Every registered lane holds
+/// One max segment is already in flight. Every [`KnownProtocol`] family holds
 /// [`max_unsent_per_lane`]. The payload is counted too, so the deadline covers
 /// admission and the drain of the last segment. Round-robin can serve the other
 /// lanes first; this bound does not assume a friendlier order.
+///
+/// The count is families, not both directions. A hot duplex connection registers
+/// the initiator and the responder (up to ten handlers). Empty lanes are not
+/// sent. Only the block-fetch responder streams a max block: its initiator sends
+/// a range, and the other protocols send smaller messages. The deadline is
+/// computed from the payload length before the mux call, so it does not count
+/// the lanes actually registered.
 pub fn egress_backlog_wire_bytes(payload_len: usize) -> u64 {
     let inflight = wire_bytes(crate::mux::MAX_SEGMENT_SIZE);
     let lanes = wire_bytes(max_unsent_per_lane())
@@ -308,6 +320,18 @@ pub fn egress_backlog_wire_bytes(payload_len: usize) -> u64 {
 /// plus the 1 s floor, 13.061 s. Counting the payload's own transmission and the
 /// last segment's full drain is later than the moment of admission. That slack
 /// is intentional. A tighter round-robin expression was not taken.
+///
+/// The six-lane term does not name the tx-submission size. It covers one
+/// in-flight max segment, one max block on each family, this payload, and the
+/// 1 s floor. A reply of [`TX_SUBMISSION_INGRESS`] (721_424 bytes) beside one
+/// streaming block-fetch lane, with one max segment already in flight, is that
+/// same 1_376_983 wire bytes: 22.032 s at 500 kbps, inside the 23.032 s
+/// deadline. The only slack is the 1 s floor. A reply of 1_000_000 bytes
+/// (~1 MB) in that mix is 16 segments plus 8 interleaved max blocks plus the
+/// in-flight segment, 1_852_231 wire bytes, 29.636 s, against a 27.490 s
+/// deadline. That mix exceeds the bound. This initiator does not send it: the
+/// window is 10 transactions and the ledger default transaction size is 16_384
+/// bytes, about 164 KB. A second sender of max blocks is outside the bound too.
 pub fn egress_admission_deadline(payload_len: usize) -> Duration {
     let millis =
         egress_backlog_wire_bytes(payload_len).saturating_mul(8).saturating_mul(1000).div_ceil(MIN_PEER_BANDWIDTH_BPS);
@@ -403,5 +427,52 @@ mod egress_deadline_tests {
         assert!(segment_ms > 1_000, "one max segment at 500 kbps takes longer than the 1 s floor");
         assert!(egress_admission_deadline(1) > Duration::from_millis(segment_ms));
         assert!(egress_admission_deadline(0) > NETWORK_SEND_TIMEOUT);
+    }
+
+    /// Wire bytes to hand `payload` to the writer while block-fetch keeps streaming.
+    ///
+    /// One max segment is already in flight. Then each of the reply's segments
+    /// is preceded by one segment of a refilled 96 KiB block.
+    fn streaming_block_mix_wire_bytes(payload: usize) -> u64 {
+        let block = crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
+        let segment = crate::mux::MAX_SEGMENT_SIZE;
+        let mut block_left = block;
+        let mut reply_left = payload;
+        let mut wire = wire_bytes(segment);
+        while reply_left > 0 {
+            if block_left == 0 {
+                block_left = block;
+            }
+            let block_seg = block_left.min(segment);
+            block_left -= block_seg;
+            wire += wire_bytes(block_seg);
+            let reply_seg = reply_left.min(segment);
+            reply_left -= reply_seg;
+            wire += wire_bytes(reply_seg);
+        }
+        wire
+    }
+
+    fn drain_millis(wire: u64) -> u64 {
+        wire.saturating_mul(8).saturating_mul(1000).div_ceil(MIN_PEER_BANDWIDTH_BPS)
+    }
+
+    #[test]
+    fn megabyte_reply_beside_a_streaming_block_exceeds_the_deadline() {
+        // 721_424 bytes is 12 segments, which is 6 max blocks of interleaved
+        // block-fetch. That is the formula's own backlog, so only the 1 s floor remains.
+        let cap = TX_SUBMISSION_INGRESS;
+        assert_eq!(streaming_block_mix_wire_bytes(cap), egress_backlog_wire_bytes(cap));
+        assert_eq!(streaming_block_mix_wire_bytes(cap), 1_376_983);
+        assert_eq!(drain_millis(streaming_block_mix_wire_bytes(cap)), 22_032);
+        assert_eq!(egress_admission_deadline(cap), Duration::from_millis(23_032));
+
+        // 1_000_000 bytes is 16 segments, 8 max blocks beside it: past the deadline.
+        let reply = 1_000_000;
+        let wire = streaming_block_mix_wire_bytes(reply);
+        assert_eq!(wire, 1_852_231);
+        assert_eq!(drain_millis(wire), 29_636);
+        assert_eq!(egress_admission_deadline(reply), Duration::from_millis(27_490));
+        assert!(Duration::from_millis(drain_millis(wire)) > egress_admission_deadline(reply));
     }
 }
