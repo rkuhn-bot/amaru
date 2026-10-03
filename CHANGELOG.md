@@ -37,6 +37,10 @@ Other guiding principles:
 
 ## v10.11.20261008 _[unreleased; planned for 2026-10-08]_
 
+### Added
+
+- **amaru-pure-stage**: a stage can try to send without waiting (`Queued`, `Full`, or `Gone`), and each stage can set its own mailbox size. The default stays 10. A call reports `NotAdmitted` when the deadline fired before the request was queued, and `TimedOut` when the request was queued and no reply came before the deadline.
+
 ### Fixed
 
 - **amaru**: a block fetch that cannot hand its request to a peer now hits that request's timeout and continues, instead of waiting forever and leaving the node stuck. ([#1453][])

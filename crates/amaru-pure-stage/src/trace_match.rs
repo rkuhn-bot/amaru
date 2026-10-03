@@ -25,8 +25,8 @@
 use std::{fmt, time::Duration};
 
 use crate::{
-    EPOCH, Effect, ExternalEffect, Name, SendData, StageResponse, serde::SendDataValue, simulation::SimulationRunning,
-    trace_buffer::TraceEntry,
+    EPOCH, Effect, ExternalEffect, Name, SendData, StageResponse, TrySend, serde::SendDataValue,
+    simulation::SimulationRunning, trace_buffer::TraceEntry,
 };
 
 /// A matcher for a [`TraceEntry`] or a breakpoint [`Effect`].
@@ -173,6 +173,25 @@ pub fn tm_send<'a>(from: &'a str, to: &'a str, msg: impl SendData) -> TraceMatch
     )
 }
 
+/// Creates a `TraceMatch` for a `TrySend` effect. The admission result is the resume, not this effect.
+pub fn tm_try_send<'a>(from: &'a str, to: &'a str, msg: impl SendData) -> TraceMatch<'a> {
+    let description = format!("TrySend(from: {:?}, to: {:?}, msg: {:?})", from, to, msg);
+    TraceMatch::Property(
+        Box::new(move |src| {
+            let Some(Effect::TrySend { from: f, to: t, msg: m }) = src.suspend() else {
+                return false;
+            };
+            f.as_str() == from && t.as_str().contains(to) && msg.test_eq(&**m)
+        }),
+        description,
+    )
+}
+
+/// Creates a `TraceMatch` for the [`StageResponse::TrySend`] that resumes `stage`.
+pub fn tm_resume_try_send(stage: impl AsRef<str>, outcome: TrySend) -> TraceMatch<'static> {
+    TraceEntry::resume(stage, StageResponse::TrySend(outcome)).into()
+}
+
 /// Creates a `TraceMatch` for a `Call` effect.
 pub fn tm_call<'a>(from: &'a str, to: &'a str, duration: Duration) -> TraceMatch<'a> {
     let description = format!("Call(from: {:?}, to: {:?}, duration: {:?})", from, to, duration);
@@ -261,7 +280,7 @@ pub fn tm_wire_stage_state<'a, T: SendData>(parent: &'a str, child: &'a str, sta
     let description = format!("WireStage(at_stage: {:?}, name: {:?}, state: {:?})", parent, child, state);
     TraceMatch::Property(
         Box::new(move |src| {
-            let Some(Effect::WireStage { at_stage, name, initial_state, tombstone }) = src.suspend() else {
+            let Some(Effect::WireStage { at_stage, name, initial_state, tombstone, .. }) = src.suspend() else {
                 return false;
             };
             parent == at_stage.as_str()
@@ -287,7 +306,7 @@ pub fn tm_wire_stage_state_supervised<'a, T: SendData, U: SendData>(
     );
     TraceMatch::Property(
         Box::new(move |src| {
-            let Some(Effect::WireStage { at_stage, name, initial_state, tombstone }) = src.suspend() else {
+            let Some(Effect::WireStage { at_stage, name, initial_state, tombstone, .. }) = src.suspend() else {
                 return false;
             };
             parent == at_stage.as_str()
