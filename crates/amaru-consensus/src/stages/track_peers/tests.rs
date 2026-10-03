@@ -14,17 +14,34 @@
 
 use std::{self, slice, time::Duration};
 
-use amaru_kernel::{BlockHeight, Epoch, EraHistory, EraName, HeaderHash, IsHeader, Peer, Point, num::CheckedSub};
+use amaru_kernel::{
+    BlockHeight, Epoch, EraHistory, EraName, Header, HeaderHash, IsHeader, Peer, Point, num::CheckedSub,
+};
 use amaru_observability::tracing::Level;
 use amaru_ouroboros::ConnectionId;
 use amaru_ouroboros_traits::{Nonces, has_stake_distribution::GetPoolError};
 use amaru_protocols::chainsync::{
-    self, ChainSyncInitiatorMsg, HeaderContent, InitiatorMessage, InitiatorMessage::RequestNext,
+    self, ChainSyncInitiatorMsg, HeaderContent, InitiatorMessage, InitiatorMessage::RequestNext, PIPELINE_DEPTH,
 };
 use amaru_pure_stage::{
-    Instant, assert_trace_contains, assert_trace_does_not_contain, assert_trace_match,
-    simulation::running::OverrideResult, tm_send,
+    DEFAULT_MAILBOX_SIZE, Effect, Instant, StageRef, TrySend, assert_trace_contains, assert_trace_does_not_contain,
+    assert_trace_match, assert_trace_match_filter,
+    simulation::{Blocked, Run, running::OverrideResult},
+    tm_send, tm_try_send,
 };
+
+fn tm_any_request_next() -> amaru_pure_stage::TraceMatch<'static> {
+    amaru_pure_stage::TraceMatch::Property(
+        Box::new(|src| {
+            let msg = match src.suspend() {
+                Some(Effect::Send { msg, .. } | Effect::TrySend { msg, .. }) => msg,
+                _ => return false,
+            };
+            msg.cast_ref::<InitiatorMessage>().is_ok_and(|message| matches!(message, InitiatorMessage::RequestNext))
+        }),
+        "RequestNext via send or try_send".to_string(),
+    )
+}
 
 use crate::{
     consensus_mode::{ChainLagSample, tip_lateness},
@@ -36,8 +53,8 @@ use crate::{
         track_peers::{
             TrackPeers, TrackPeersMsg,
             test_setup::{
-                HEIGHT_RECHECK_INTERVAL, SIM_INITIAL_CLOCK_SECS, build_store, build_store_with_nonces,
-                height_recheck_schedule_id, make_block_header, new_tip, schedule_id_at, setup, setup_base,
+                HEIGHT_RECHECK_INTERVAL, HandlerHold, SIM_INITIAL_CLOCK_SECS, build_store, build_store_with_nonces,
+                height_recheck_schedule_id, make_block_header, new_tip, open_fanout, schedule_id_at, setup, setup_base,
                 setup_with_ledger_tip_until_sleeping, slot_start_to_header_micros, te_clear_peer_availability,
                 te_clock, te_clock_suspend, te_get_best_chain_tip, te_get_nonces, te_header_rejected, te_load_header,
                 te_load_point, te_record_header_announcement, te_record_rollback, te_schedule,
@@ -200,7 +217,7 @@ fn test_intersect_found_missing_header_sends_done() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_load_point("tp-1", current.hash()).into(),
-            te_send("tp-1", &prep.handler, chainsync::InitiatorMessage::Done).into(),
+            tm_try_send("tp-1", "", chainsync::InitiatorMessage::Done, TrySend::Queued),
             te_state("tp-1", &state).into(),
         ],
     );
@@ -312,7 +329,7 @@ fn test_reconnect_intersect_then_roll_forward() {
             te_input("tp-1", &intersect_found).into(),
             te_load_point("tp-1", intersect.hash()).into(),
             te_input("tp-1", &roll_forward).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_send("tp-1", "downstream", new_tip(next_header.point(), intersect)).into(),
             te_state("tp-1", &expected).into(),
         ],
@@ -416,7 +433,7 @@ fn test_roll_forward_unknown_peer_removes_peer() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &state).into(),
@@ -456,7 +473,7 @@ fn test_roll_forward_known_peer_header_already_stored() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_get_nonces("tp-1", header.hash()).into(),
             te_record_header_announcement(
                 "tp-1",
@@ -552,7 +569,7 @@ fn test_roll_forward_stored_header_missing_nonces_revalidates() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
@@ -612,7 +629,7 @@ fn test_roll_forward_known_peer_new_header_forwards_tip() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
@@ -672,7 +689,7 @@ fn test_roll_forward_accepts_empty_slots_in_the_past() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
             te_send("tp-1", "downstream", new_tip(header.point(), parent.point())).into(),
@@ -780,7 +797,7 @@ fn test_roll_forward_invalid_parent_removes_peer() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
@@ -816,7 +833,7 @@ fn test_roll_forward_invalid_height_removes_peer() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
@@ -852,7 +869,7 @@ fn test_roll_forward_invalid_point_removes_peer() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
@@ -901,7 +918,7 @@ fn test_roll_forward_header_validation_failure_removes_peer() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_header_rejected("invalid header").into(),
@@ -953,7 +970,7 @@ fn test_roll_forward_header_slot_too_far_future_adversarial() {
             te_clock_suspend("tp-1").into(),
             te_get_best_chain_tip("tp-1").into(),
             te_sync_adoption_is_fast("tp-1", now).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
@@ -987,7 +1004,7 @@ fn test_roll_forward_slot_past_time_horizon_is_adversarial() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
@@ -1036,7 +1053,7 @@ fn test_roll_forward_header_slot_near_future_defers() {
         &[
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_clock_suspend("tp-1").into(),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 1, "clock skew deferred"),
             te_input("tp-1", &TrackPeersMsg::RecheckLedgerHeight).into(),
@@ -1090,7 +1107,7 @@ fn test_roll_forward_stake_dist_far_ahead_rejects() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_header_rejected("invalid header").into(),
@@ -1128,7 +1145,7 @@ fn test_roll_backward_updates_peer() {
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_load_point("tp-1", current.hash()).into(),
             te_load_header("tp-1", current.hash()).into(),
             te_clock_read("tp-1").into(),
@@ -1166,7 +1183,7 @@ fn test_roll_backward_unknown_peer_removes_peer() {
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_load_point("tp-1", current.hash()).into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &state).into(),
@@ -1199,7 +1216,7 @@ fn test_roll_backward_unknown_point_removes_peer() {
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_load_point("tp-1", current.hash()).into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
@@ -1262,7 +1279,7 @@ fn test_roll_forward_defers_request_next() {
     );
 
     // The handler must *not* have received an immediate RequestNext (that is the whole point of deferring).
-    assert_trace_does_not_contain(&running, &[tm_send("tp-1", "", InitiatorMessage::RequestNext)]);
+    assert_trace_does_not_contain(&running, &[tm_any_request_next()]);
 }
 
 #[test]
@@ -1325,7 +1342,7 @@ fn test_pipelined_headers_after_height_defer() {
             ),
         ],
     );
-    assert_trace_does_not_contain(&running, &[tm_send("tp-1", "", InitiatorMessage::RequestNext)]);
+    assert_trace_does_not_contain(&running, &[tm_any_request_next()]);
 }
 
 /// Height defer is released when a later recheck sees the applied ledger height advance.
@@ -1390,7 +1407,7 @@ fn test_height_defer_recheck_when_ledger_advances() {
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
             te_send("tp-1", "downstream", new_tip(header.point(), Point::Origin)).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             tm_state::<TrackPeers>(
                 "tp-1",
                 |s| s.deferred.is_empty() && s.recheck_timer.is_none(),
@@ -1452,7 +1469,7 @@ fn test_pipelined_headers_after_slot_near_future_defer() {
         &running,
         &[
             te_input("tp-1", &msg1).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 1, "first clock-skew deferred"),
             te_input("tp-1", &msg2).into(),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 2, "follow-up queued while deferred"),
@@ -1532,7 +1549,7 @@ fn test_pipelined_stake_defer_and_wake_sequence() {
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg1).into(),
             te_clock_suspend("tp-1").into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             te_get_nonces("tp-1", h1.hash()).into(),
             te_validate_header("tp-1", h1.clone()).into(),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 1, "first stake deferred"),
@@ -1550,7 +1567,7 @@ fn test_pipelined_stake_defer_and_wake_sequence() {
             te_validate_header("tp-1", h2.clone()).into(),
             te_store_validated_header("tp-1", h2.clone()).into(),
             te_send("tp-1", "downstream", new_tip(h2.point(), h1.point())).into(),
-            te_send("tp-1", &prep.handler, RequestNext).into(),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
             tm_state::<TrackPeers>(
                 "tp-1",
                 |s| {
@@ -1685,4 +1702,339 @@ fn test_redeferred_header_keeps_blocking_follow_ups() {
         ],
     );
     assert_trace_does_not_contain(&running, &[tm_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer))]);
+}
+
+fn linked_headers(len: u64) -> Vec<Header> {
+    let mut headers = vec![make_block_header(1, 1, None)];
+    for n in 1..len {
+        let parent = headers.last().expect("chain").hash();
+        headers.push(make_block_header(n + 1, n + 1, Some(parent)));
+    }
+    headers
+}
+
+fn roll_forward_msg(
+    peer: Peer,
+    conn_id: ConnectionId,
+    handler: &StageRef<InitiatorMessage>,
+    header: &Header,
+) -> TrackPeersMsg {
+    TrackPeersMsg::FromUpstream(ChainSyncInitiatorMsg {
+        peer,
+        conn_id,
+        handler: handler.clone(),
+        msg: chainsync::InitiatorResult::RollForward(HeaderContent::new(header, EraName::Conway), header.point()),
+    })
+}
+
+fn owed(state: &TrackPeers, conn_id: ConnectionId) -> Option<u8> {
+    match state.upstream.get(&conn_id) {
+        Some(super::PerPeer::Established { owed, .. }) => Some(*owed),
+        Some(super::PerPeer::Connecting { .. }) | None => None,
+    }
+}
+
+fn current_point(state: &TrackPeers, conn_id: ConnectionId) -> Option<Point> {
+    match state.upstream.get(&conn_id) {
+        Some(super::PerPeer::Established { current, .. }) => Some(*current),
+        Some(super::PerPeer::Connecting { .. }) | None => None,
+    }
+}
+
+fn park_handler_full(
+    running: &mut amaru_pure_stage::simulation::SimulationRunning,
+    handler: &impl AsRef<StageRef<InitiatorMessage>>,
+) -> Instant {
+    running.enqueue_msg(handler, [RequestNext]);
+    let parked = running.run(Run::default()).assert_sleeping();
+    for _ in 0..DEFAULT_MAILBOX_SIZE {
+        running.enqueue_msg(handler, [RequestNext]);
+    }
+    assert_eq!(running.mailbox_len(handler), DEFAULT_MAILBOX_SIZE);
+    parked
+}
+
+/// Run until the next wakeup or idle, resolving external effects without skipping the wakeup.
+fn drive(running: &mut amaru_pure_stage::simulation::SimulationRunning, rt: &tokio::runtime::Handle) -> Blocked {
+    loop {
+        match running.run(Run::default()) {
+            Blocked::Busy { .. } => {
+                rt.block_on(running.await_external_effect());
+            }
+            blocked @ (Blocked::Idle
+            | Blocked::Sleeping { .. }
+            | Blocked::Deadlock(_)
+            | Blocked::Breakpoint(_)
+            | Blocked::Terminated(_)) => return blocked,
+        }
+    }
+}
+
+fn tm_retry_timeout() -> amaru_pure_stage::TraceMatch<'static> {
+    amaru_pure_stage::TraceMatch::Property(
+        Box::new(|src| {
+            matches!(
+                src.suspend(),
+                Some(Effect::SetTimeout { slot, msg, .. })
+                    if *slot == super::REQUEST_RETRY_SLOT
+                        && msg
+                            .cast_ref::<TrackPeersMsg>()
+                            .is_ok_and(|message| matches!(message, TrackPeersMsg::RetryRequestNext))
+            )
+        }),
+        "owed RequestNext retry timeout".to_string(),
+    )
+}
+
+fn not_try_send() -> amaru_pure_stage::TraceMatch<'static> {
+    amaru_pure_stage::TraceMatch::Property(
+        Box::new(|src| !matches!(src.suspend(), Some(Effect::TrySend { .. }))),
+        "not a try_send".to_string(),
+    )
+}
+
+fn not_admission() -> amaru_pure_stage::TraceMatch<'static> {
+    amaru_pure_stage::TraceMatch::Property(
+        Box::new(|src| {
+            !matches!(
+                src.suspend(),
+                Some(Effect::TrySend { .. } | Effect::SetTimeout { .. } | Effect::ClearTimeout { .. })
+            )
+        }),
+        "not an admission or timeout".to_string(),
+    )
+}
+
+struct Ready {
+    rt: tokio::runtime::Runtime,
+    state: TrackPeers,
+    peer: Peer,
+    conn_id: ConnectionId,
+}
+
+fn ready_peer(headers: &[Header]) -> Ready {
+    let prep = test_prep();
+    let peer = Peer::for_test(3001);
+    let mut state = prep.state;
+    state.insert_peer(peer, prep.conn_id, headers[0].point(), headers[0].point());
+    Ready { rt: prep.rt, state, peer, conn_id: prep.conn_id }
+}
+
+/// A new `RequestNext` that does not fit counts one miss and leaves a `TrySend::Full` in the trace.
+#[test]
+fn full_on_a_new_request_counts_one() {
+    let headers = linked_headers(2);
+    let ready = ready_peer(&headers);
+    let mut opened =
+        open_fanout(ready.rt.handle(), ready.state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
+    park_handler_full(&mut opened.running, &opened.handler);
+    opened.running.trace_buffer().lock().clear();
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, &headers[1])]);
+    drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+
+    let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
+    assert_eq!(owed(state, ready.conn_id), Some(1));
+    assert!(state.request_retry_armed);
+    assert_trace_contains(
+        &opened.running,
+        &[tm_try_send("tp-1", "handler", RequestNext, TrySend::Full), tm_retry_timeout()],
+    );
+}
+
+/// Retrying a slot that is already counted does not count it again.
+#[test]
+fn full_retry_of_a_counted_slot_stays_at_one() {
+    let headers = linked_headers(2);
+    let ready = ready_peer(&headers);
+    let mut opened =
+        open_fanout(ready.rt.handle(), ready.state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
+    park_handler_full(&mut opened.running, &opened.handler);
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, &headers[1])]);
+    let retry_at = drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    opened.running.trace_buffer().lock().clear();
+    opened.running.run(Run::until(retry_at));
+
+    let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
+    assert_eq!(owed(state, ready.conn_id), Some(1));
+    assert_trace_match_filter(
+        &opened.running,
+        &[tm_try_send("tp-1", "handler", RequestNext, TrySend::Full), tm_retry_timeout()],
+        &[not_admission()],
+    );
+}
+
+/// A retry the handler accepts clears the one owed slot and offers exactly one `RequestNext`.
+#[test]
+fn queued_retry_clears_the_counter_with_one_request_next() {
+    let headers = linked_headers(2);
+    let ready = ready_peer(&headers);
+    let mut opened = open_fanout(
+        ready.rt.handle(),
+        ready.state,
+        build_store(slice::from_ref(&headers[0])),
+        HandlerHold::FirstMillis,
+    );
+    let parked = park_handler_full(&mut opened.running, &opened.handler);
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, &headers[1])]);
+    drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    assert_eq!(owed(opened.running.get_state(&opened.tp).expect("idle"), ready.conn_id), Some(1));
+
+    opened.running.run(Run::until(parked)).assert_sleeping();
+    opened.running.trace_buffer().lock().clear();
+    let retry_at = opened.running.run(Run::default()).assert_sleeping();
+    opened.running.run(Run::until(retry_at));
+
+    let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
+    assert_eq!(owed(state, ready.conn_id), Some(0));
+    assert!(!state.request_retry_armed);
+    assert_trace_match_filter(
+        &opened.running,
+        &[tm_try_send("tp-1", "handler", RequestNext, TrySend::Queued)],
+        &[not_try_send()],
+    );
+}
+
+/// Further misses once the counter is at the pipeline depth are not counted.
+#[test]
+fn owed_requests_saturate_at_pipeline_depth() {
+    let headers = linked_headers(u64::from(PIPELINE_DEPTH) + 2);
+    let ready = ready_peer(&headers);
+    let mut opened =
+        open_fanout(ready.rt.handle(), ready.state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
+    park_handler_full(&mut opened.running, &opened.handler);
+    for header in headers.iter().skip(1) {
+        opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, header)]);
+        drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    }
+    let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
+    assert_eq!(owed(state, ready.conn_id), Some(PIPELINE_DEPTH));
+    assert_eq!(current_point(state, ready.conn_id), Some(headers.last().expect("tip").point()));
+}
+
+/// A full handler does not stop header processing for a different peer.
+#[test]
+fn other_peer_keeps_moving_while_one_handler_is_full() {
+    let headers = linked_headers(2);
+    let prep = test_prep();
+    let peer_a = Peer::for_test(3001);
+    let peer_b = Peer::for_test(3002);
+    let mut ids = ConnectionId::initial();
+    let conn_a = ids.get_and_increment();
+    let conn_b = ids.get_and_increment();
+    let mut state = prep.state;
+    state.insert_peer(peer_a, conn_a, headers[0].point(), headers[0].point());
+    state.insert_peer(peer_b, conn_b, headers[0].point(), headers[0].point());
+
+    let mut opened = open_fanout(prep.rt.handle(), state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
+    park_handler_full(&mut opened.running, &opened.handler);
+    let handler_b = StageRef::<InitiatorMessage>::blackhole();
+    opened.running.enqueue_msg(
+        &opened.tp,
+        [
+            roll_forward_msg(peer_a, conn_a, &opened.handler, &headers[1]),
+            roll_forward_msg(peer_b, conn_b, &handler_b, &headers[1]),
+        ],
+    );
+    drive(&mut opened.running, prep.rt.handle()).assert_sleeping();
+
+    let state = opened.running.get_state(&opened.tp).expect("both peers were processed");
+    assert_eq!(owed(state, conn_a), Some(1));
+    assert_eq!(owed(state, conn_b), Some(0));
+    assert_eq!(current_point(state, conn_a), Some(headers[1].point()));
+    assert_eq!(current_point(state, conn_b), Some(headers[1].point()));
+    assert_trace_contains(
+        &opened.running,
+        &[
+            tm_try_send("tp-1", "handler", RequestNext, TrySend::Full),
+            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+        ],
+    );
+}
+
+/// `Gone` keeps the miss until `Terminated` drops the session and its counter.
+#[test]
+fn gone_handler_is_purged_by_terminated() {
+    let headers = linked_headers(2);
+    let ready = ready_peer(&headers);
+    let mut opened =
+        open_fanout(ready.rt.handle(), ready.state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
+    let gone = StageRef::<InitiatorMessage>::named_for_tests("gone-handler");
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &gone, &headers[1])]);
+    drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    let state = opened.running.get_state(&opened.tp).expect("idle after a gone send");
+    assert_eq!(owed(state, ready.conn_id), Some(1));
+    assert!(state.request_retry_armed);
+    assert_trace_contains(&opened.running, &[tm_try_send("tp-1", "gone-handler", RequestNext, TrySend::Gone)]);
+
+    opened.running.enqueue_msg(
+        &opened.tp,
+        [TrackPeersMsg::FromUpstream(ChainSyncInitiatorMsg {
+            peer: ready.peer,
+            conn_id: ready.conn_id,
+            handler: gone,
+            msg: chainsync::InitiatorResult::Terminated,
+        })],
+    );
+    drive(&mut opened.running, ready.rt.handle());
+    let state = opened.running.get_state(&opened.tp).expect("idle after terminate");
+    assert_eq!(owed(state, ready.conn_id), None);
+    assert!(!state.request_retry_armed);
+    assert!(state.upstream.is_empty());
+}
+
+/// A handler that accepts every `RequestNext` does not arm the retry timeout.
+#[test]
+fn no_retry_timeout_when_nothing_is_owed() {
+    let prep = test_prep();
+    let peer = Peer::for_test(3001);
+    let parent = &prep.headers[0];
+    let header = &prep.headers[1];
+    let mut state = prep.state.clone();
+    state.insert_peer(peer, prep.conn_id, parent.point(), parent.point());
+    let msg = roll_forward_msg(peer, prep.conn_id, &prep.handler, header);
+    let (running, _guards, _logs) =
+        setup(&prep.rt_handle(), state, msg, build_store_with_nonces(slice::from_ref(header)));
+    assert_trace_contains(
+        &running,
+        &[tm_state::<TrackPeers>(
+            "tp-1",
+            |s| !s.request_retry_armed && s.recheck_timer.is_none() && owed(s, prep.conn_id) == Some(0),
+            "nothing owed and no retry timeout",
+        )],
+    );
+    assert_trace_does_not_contain(&running, &[tm_retry_timeout()]);
+}
+
+/// After the handler drains, owed `RequestNext`s are admitted until the window is full again.
+#[test]
+fn handler_drain_refills_the_window_to_pipeline_depth() {
+    let depth = u64::from(PIPELINE_DEPTH);
+    let headers = linked_headers(depth + 1);
+    let ready = ready_peer(&headers);
+    let mut opened = open_fanout(
+        ready.rt.handle(),
+        ready.state,
+        build_store(slice::from_ref(&headers[0])),
+        HandlerHold::FirstMillis,
+    );
+    let parked = park_handler_full(&mut opened.running, &opened.handler);
+    for header in headers.iter().skip(1) {
+        opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, header)]);
+        drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    }
+    assert_eq!(owed(opened.running.get_state(&opened.tp).expect("idle"), ready.conn_id), Some(PIPELINE_DEPTH));
+
+    opened.running.run(Run::until(parked)).assert_sleeping();
+    opened.running.trace_buffer().lock().clear();
+    for _ in 0..PIPELINE_DEPTH {
+        let retry_at = opened.running.run(Run::default()).assert_sleeping();
+        opened.running.run(Run::until(retry_at));
+    }
+
+    let state = opened.running.get_state(&opened.tp).expect("window refilled");
+    assert_eq!(owed(state, ready.conn_id), Some(0));
+    assert!(!state.request_retry_armed);
+    let queued: Vec<_> =
+        (0..PIPELINE_DEPTH).map(|_| tm_try_send("tp-1", "handler", RequestNext, TrySend::Queued)).collect();
+    assert_trace_match_filter(&opened.running, &queued, &[not_try_send()]);
 }
