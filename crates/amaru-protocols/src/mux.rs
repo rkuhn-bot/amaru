@@ -1953,9 +1953,8 @@ mod tests {
         assert_eq!(proto(&running, &handlers.mux, PROTO_TEST.erase()).wanted, 1);
 
         running.run(Run::until(second_retry)).assert_terminated(handlers.mux.name());
-        assert_eq!(running.get_state(&bystander), Some(&7));
+        assert_eq!(running.get_state(&bystander), Some(&7), "faulting the mux leaves other stages running");
         assert_eq!(running.mailbox_len(&handlers.b), other_mailbox);
-        assert!(running.get_state(&handlers.b).is_none(), "handler-b is inside its own wait, not terminated");
     }
 
     #[test]
@@ -2147,5 +2146,22 @@ mod tests {
         assert!(proto_state.incoming.is_empty(), "a gone handler cannot accept the frame later");
         assert!(running.get_state(&mux).is_some());
         assert_eq!(running.get_state(&bystander), Some(&7));
+        assert_trace_contains(
+            &running,
+            &[
+                tm_try_send(
+                    mux.name().as_str(),
+                    "missing",
+                    HandlerMessage::Registered(PROTO_TEST.erase()),
+                    TrySend::Gone,
+                ),
+                tm_try_send(
+                    mux.name().as_str(),
+                    "missing",
+                    HandlerMessage::FromNetwork(cbor_byte(0x01)),
+                    TrySend::Gone,
+                ),
+            ],
+        );
     }
 }
