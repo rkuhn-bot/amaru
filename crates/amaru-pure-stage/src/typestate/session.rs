@@ -42,7 +42,7 @@ use super::{
     },
     list::{self, FinishIn, InputName, StateName},
 };
-use crate::{Effects, ExternalEffectAPI, Instant, ScheduleId, SendData, StageRef};
+use crate::{CallAdmission, Effects, ExternalEffectAPI, Instant, ScheduleId, SendData, StageRef};
 
 /// Witness that only [`initial_state`] and [`SessionOps::finish`] may construct a protocol state.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -622,9 +622,10 @@ pub trait SessionOps<M, Rem>: Sized {
     /// Protocol call. Consumes a [`Call<Tag, T>`](super::Call) allowance.
     ///
     /// Waits for [`IntoRoleCall::Reply`](super::IntoRoleCall::Reply) or
-    /// [`IntoRoleCall::TIMEOUT`](super::IntoRoleCall::TIMEOUT) (`None`). The
-    /// wait is the back-pressure: the session does not continue until the
-    /// callee answers (or the timer fires).
+    /// [`IntoRoleCall::timeout`](super::IntoRoleCall::timeout). The wait is the
+    /// back-pressure: the session does not continue until the callee answers
+    /// or the timer fires. [`CallAdmission::NotAdmitted`] means the request
+    /// never reached the callee. [`CallAdmission::TimedOut`] means it did.
     ///
     /// ```compile_fail
     /// use amaru_pure_stage::typestate::prelude::*;
@@ -643,7 +644,7 @@ pub trait SessionOps<M, Rem>: Sized {
         self,
         target: &Dest,
         msg: T,
-    ) -> impl Future<Output = (Option<Dest::Reply>, Session<M, <Rem as Take<CallEff<Tag, T>, I>>::Rest>)> + Send
+    ) -> impl Future<Output = (CallAdmission<Dest::Reply>, Session<M, <Rem as Take<CallEff<Tag, T>, I>>::Rest>)> + Send
     where
         Tag: RoleTag,
         Dest: IntoRoleCall<Tag, T> + Clone + Send + 'static,
@@ -793,7 +794,7 @@ impl<M, Rem> SessionOps<M, Rem> for Session<M, Rem> {
         self,
         target: &Dest,
         msg: T,
-    ) -> impl Future<Output = (Option<Dest::Reply>, Session<M, <Rem as Take<CallEff<Tag, T>, I>>::Rest>)> + Send
+    ) -> impl Future<Output = (CallAdmission<Dest::Reply>, Session<M, <Rem as Take<CallEff<Tag, T>, I>>::Rest>)> + Send
     where
         Tag: RoleTag,
         Dest: IntoRoleCall<Tag, T> + Clone + Send + 'static,
@@ -803,7 +804,8 @@ impl<M, Rem> SessionOps<M, Rem> for Session<M, Rem> {
     {
         let dest = target.clone();
         let mailbox = dest.mailbox().clone();
-        let call = self.effects.call(&mailbox, Dest::TIMEOUT, move |reply| dest.encode(msg, reply));
+        let timeout = dest.timeout(&msg);
+        let call = self.effects.call_with_admission(&mailbox, timeout, move |reply| dest.encode(msg, reply));
         async move {
             let reply = call.await;
             (reply, Session::new(self.effects))

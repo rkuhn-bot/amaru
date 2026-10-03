@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(type_alias_impl_trait, generic_const_exprs)]
+#![feature(type_alias_impl_trait, generic_const_exprs, variant_count)]
 #![allow(incomplete_features)]
 
 #[cfg(all(not(target_family = "wasm"), not(target_arch = "riscv32")))]

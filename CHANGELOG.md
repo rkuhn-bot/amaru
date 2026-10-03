@@ -44,6 +44,7 @@ Other guiding principles:
 ### Fixed
 
 - **amaru-protocols**: a protocol handler that stops reading no longer stalls the other protocols on that connection. If it still will not accept buffered data before that protocol's ingress deadline, the connection is closed and the peer is not marked adversarial.
+- **amaru-protocols**: the mux no longer waits on the peer while accepting a send. A peer slower than 500 kbps loses the connection and is not marked adversarial.
 - **amaru**: a block fetch that cannot hand its request to a peer now hits that request's timeout and continues, instead of waiting forever and leaving the node stuck. ([#1453][])
 - **amaru**: one peer that is not reading no longer stops block fetch from asking the other peers. `block.requested` lists only peers whose block-fetch handler accepted the request. The 5s fetch timeout is armed before the request is handed to the connection manager.
 - **amaru**: a broadcast block fetch no longer asks a peer again 30ms later when that peer's mailbox was full or its confirmation has not arrived yet. The broadcast covers those peers until the 5s timeout. A fetch that names its peers still asks further peers on that schedule.

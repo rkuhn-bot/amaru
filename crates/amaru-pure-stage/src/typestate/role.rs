@@ -66,7 +66,12 @@ where
 /// message must carry [`StageRef<Reply>`] so the callee can answer.
 pub trait IntoRoleCall<Tag: RoleTag, T>: Role<Tag> {
     type Reply: SendData + DeserializeOwned;
-    /// How long [`SessionOps::call`](super::SessionOps::call) waits for [`Self::Reply`].
+    /// How long [`SessionOps::call`](super::SessionOps::call) waits for [`Self::Reply`]
+    /// when [`timeout`](Self::timeout) is not overridden.
     const TIMEOUT: Duration;
+    /// Deadline for this payload. The default is [`TIMEOUT`](Self::TIMEOUT).
+    fn timeout(&self, _msg: &T) -> Duration {
+        Self::TIMEOUT
+    }
     fn encode(&self, msg: T, reply: StageRef<Self::Reply>) -> Self::Mailbox;
 }
