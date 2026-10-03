@@ -37,7 +37,7 @@ pub struct InitStageData {
     pub mailbox: VecDeque<Box<dyn SendData>>,
     pub state: InitStageState,
     pub transition: Transition,
-    pub mailbox_size: crate::stage_ref::MailboxSize,
+    pub mailbox_size: usize,
 }
 
 impl fmt::Debug for InitStageData {

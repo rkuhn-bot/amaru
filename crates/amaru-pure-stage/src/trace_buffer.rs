@@ -302,6 +302,11 @@ enum EffectRef<'a> {
         to: &'a Name,
         msg: &'a dyn SendData,
     },
+    TrySend {
+        from: &'a Name,
+        to: &'a Name,
+        msg: &'a dyn SendData,
+    },
     Call {
         from: &'a Name,
         to: &'a Name,
@@ -363,7 +368,8 @@ impl<'a> EffectRef<'a> {
         Some(match effect {
             StageEffect::Receive => EffectRef::Receive { at_stage },
             StageEffect::Send(to, _call, msg) => EffectRef::Send { from: at_stage, to, msg: &**msg },
-            StageEffect::Call(..) | StageEffect::TrySend(..) => return None,
+            StageEffect::TrySend(to, msg) => EffectRef::TrySend { from: at_stage, to, msg: &**msg },
+            StageEffect::Call(..) => return None,
             StageEffect::Clock => EffectRef::Clock { at_stage },
             StageEffect::Wait(duration) => EffectRef::Wait { at_stage, duration: *duration },
             StageEffect::Schedule(msg, id) => EffectRef::Schedule { at_stage, msg: &**msg, id: *id },

@@ -27,7 +27,7 @@ use amaru_pure_stage::{
     Receiver, Resources, ScheduleId, SendData, StageGraph, StageGraphRunning, StageRef, TrySend, assert_effect_match,
     assert_trace_contains,
     simulation::{RandStdRng, Run, SimulationBuilder, running::OverrideResult},
-    tm_add_stage, tm_call, tm_external_effect, tm_send, tm_try_send, tm_wire_stage,
+    tm_add_stage, tm_call, tm_external_effect, tm_resume_try_send, tm_send, tm_try_send, tm_wire_stage,
     trace_buffer::{TraceBuffer, TraceEntry},
 };
 use rand::{SeedableRng, rngs::StdRng};
@@ -1000,5 +1000,9 @@ fn try_send_through_contramap_delivers_the_injected_message() {
     running.enqueue_msg(&probe, [0]);
     running.run(Run::default()).assert_idle();
     assert_eq!(*running.get_state(&dest).unwrap(), 4);
-    assert_trace_contains(&running, &[tm_try_send(&probe_name, "dest", 4u32, TrySend::Queued)]);
+    // `assert_trace_contains` drops resumes. The admission result is the resume.
+    let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_trace_contains(&running, &[tm_try_send(&probe_name, "dest", 4u32)]);
+    let queued = tm_resume_try_send(&probe_name, TrySend::Queued);
+    assert!(trace.iter().any(|entry| queued == *entry), "try_send response missing from the trace: {trace:?}");
 }
