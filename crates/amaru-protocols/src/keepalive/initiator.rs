@@ -200,4 +200,120 @@ pub mod tests {
             Message::ResponseKeepAlive(_) => None,
         });
     }
+
+    use std::time::Duration;
+
+    use amaru_kernel::{NonEmptyBytes, Peer};
+    use amaru_ouroboros::ConnectionId;
+    use amaru_pure_stage::{
+        Effect, StageGraph, StageRef,
+        simulation::{Blocked, Run, SimulationBuilder},
+        trace_buffer::{TraceBuffer, TraceEntry},
+    };
+
+    use super::{InitiatorMessage, KeepAliveInitiator, initiator};
+    use crate::{
+        keepalive::messages::Cookie,
+        mux::{MuxMessage, Sent},
+        protocol::{Inputs, egress_admission_deadline},
+    };
+
+    async fn hold(_state: u8, msg: MuxMessage, eff: amaru_pure_stage::Effects<MuxMessage>) -> u8 {
+        if let MuxMessage::Send(_, _, _) = msg {
+            eff.wait(Duration::from_secs(3600)).await;
+        }
+        0
+    }
+
+    async fn reply(_state: u8, msg: MuxMessage, eff: amaru_pure_stage::Effects<MuxMessage>) -> u8 {
+        if let MuxMessage::Send(_, _, cr) = msg {
+            eff.send(&cr, Sent).await;
+        }
+        0
+    }
+
+    fn keepalive_bytes() -> usize {
+        NonEmptyBytes::encode(&Message::KeepAlive(Cookie::new())).len().get()
+    }
+
+    #[test]
+    fn egress_timeout_faults_before_want_next_and_leaves_the_protocol_state() {
+        let _guards = crate::mux::register_deserializers();
+        let _ka = crate::keepalive::register_deserializers();
+        let trace = TraceBuffer::new_shared(200, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace);
+        let mux = network.stage("mux", hold);
+        let mux = network.wire_up(mux, 0u8);
+        let handler_b = network.stage("ka", initiator());
+        let handler = network.wire_up(
+            handler_b,
+            KeepAliveInitiator::new(Peer::for_test(3007), ConnectionId::initial(), StageRef::clone(&mux)),
+        );
+        network.preload(&handler, [Inputs::Local(InitiatorMessage::SendKeepAlive)]).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        let deadline = egress_admission_deadline(keepalive_bytes());
+        let start = running.now();
+        let early = running.run(Run::until(start + deadline - Duration::from_millis(1)));
+        assert!(matches!(early, Blocked::Sleeping { .. }), "deadline has not fired, got {early:?}");
+        let _alive = running.mailbox_len(&handler);
+        let blocked = running.run(Run::until(start + deadline));
+        assert!(matches!(blocked, Blocked::Terminated(ref name) if name == handler.name()), "{blocked:?}");
+        let entries: Vec<TraceEntry> = running.trace_buffer().lock().iter_entries().map(|(_, e)| e).collect();
+        assert!(entries.iter().all(|entry| {
+            !matches!(
+                entry,
+                TraceEntry::Suspend(Effect::Send { from, msg, .. })
+                    if from == handler.name()
+                        && msg.cast_ref::<MuxMessage>().is_ok_and(|m| matches!(m, MuxMessage::WantNext(_)))
+            )
+        }));
+        for entry in &entries {
+            let TraceEntry::State { stage, state } = entry else { continue };
+            if stage != handler.name() {
+                continue;
+            }
+            let (proto, _) = state.cast_ref::<(State, KeepAliveInitiator)>().expect("keepalive state");
+            assert_eq!(*proto, State::Idle);
+        }
+    }
+
+    #[test]
+    fn accepted_egress_sends_want_next_after_the_payload() {
+        let _guards = crate::mux::register_deserializers();
+        let _ka = crate::keepalive::register_deserializers();
+        let trace = TraceBuffer::new_shared(200, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace);
+        let mux = network.stage("mux", reply);
+        let mux = network.wire_up(mux, 0u8);
+        let handler_b = network.stage("ka", initiator());
+        let handler = network.wire_up(
+            handler_b,
+            KeepAliveInitiator::new(Peer::for_test(3007), ConnectionId::initial(), StageRef::clone(&mux)),
+        );
+        network.preload(&handler, [Inputs::Local(InitiatorMessage::SendKeepAlive)]).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::skip_wakeups()).assert_idle();
+        let state = running.get_state(&handler).expect("handler");
+        assert_eq!(state.0, State::Waiting);
+        let entries: Vec<TraceEntry> = running.trace_buffer().lock().iter_entries().map(|(_, e)| e).collect();
+        let call_at = entries.iter().position(|entry| {
+            matches!(
+                entry,
+                TraceEntry::Suspend(Effect::Call { from, duration, .. })
+                    if from == handler.name() && *duration == egress_admission_deadline(keepalive_bytes())
+            )
+        });
+        let want_at = entries.iter().position(|entry| {
+            matches!(
+                entry,
+                TraceEntry::Suspend(Effect::Send { from, msg, .. })
+                    if from == handler.name()
+                        && msg.cast_ref::<MuxMessage>().is_ok_and(|m| matches!(m, MuxMessage::WantNext(_)))
+            )
+        });
+        let (call_at, want_at) = (call_at.expect("call"), want_at.expect("WantNext"));
+        assert!(call_at < want_at, "WantNext follows an accepted send");
+    }
 }

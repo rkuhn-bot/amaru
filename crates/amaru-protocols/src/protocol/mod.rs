@@ -54,6 +54,31 @@ pub const NETWORK_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bits per second.
 pub const MIN_PEER_BANDWIDTH_BPS: u64 = 500_000;
 
+/// How long a sender may wait for the mux to accept `payload_len` bytes into egress.
+///
+/// The wait is the time those bytes take at [`MIN_PEER_BANDWIDTH_BPS`], plus
+/// [`NETWORK_SEND_TIMEOUT`] as a floor so a few-byte message is not faulted in
+/// under a second. A peer that cannot take the bytes in that time is slow: the
+/// connection is closed and the peer is not recorded as adversarial.
+pub fn egress_admission_deadline(payload_len: usize) -> Duration {
+    let len = u64::try_from(payload_len).unwrap_or(u64::MAX);
+    let bits = len.saturating_mul(8);
+    let millis = bits.saturating_mul(1000).div_ceil(MIN_PEER_BANDWIDTH_BPS);
+    Duration::from_millis(millis) + NETWORK_SEND_TIMEOUT
+}
+
+#[cfg(test)]
+mod egress_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn floor_covers_an_empty_payload_and_one_second_of_bytes_adds_one_second() {
+        assert_eq!(egress_admission_deadline(0), NETWORK_SEND_TIMEOUT);
+        // 62_500 bytes is 500_000 bits, one second at MIN_PEER_BANDWIDTH_BPS.
+        assert_eq!(egress_admission_deadline(62_500), NETWORK_SEND_TIMEOUT + Duration::from_secs(1));
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ProtocolId<T: RoleT>(u16, PhantomData<T>);
 

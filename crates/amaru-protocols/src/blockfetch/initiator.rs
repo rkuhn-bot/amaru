@@ -23,10 +23,13 @@ use std::{
     time::Duration,
 };
 
-use amaru_kernel::{NetworkPoint, Peer, Point, RawBlock, cardano::network_block::NetworkBlock, utils::debug_bytes};
+use amaru_kernel::{
+    NetworkPoint, NonEmptyBytes, Peer, Point, RawBlock, cardano::network_block::NetworkBlock, utils::debug_bytes,
+};
 use amaru_observability::error;
 use amaru_pure_stage::{
-    DeserializerGuards, Effects, StageRef, define_role, define_role_tag, make_states, on_receive, typestate::prelude::*,
+    CallAdmission, DeserializerGuards, Effects, StageRef, define_role, define_role_tag, err, make_states, on_receive,
+    typestate::prelude::*,
 };
 
 use super::{BatchDone, Block, ClientDone, Message, NoBlocks, RequestRange, StartBatch, responder::MAX_FETCHED_BLOCKS};
@@ -35,7 +38,7 @@ use crate::{
     mux::{Frame, HandlerMessage, MuxMessage, Sent},
     protocol::{
         Inputs, Internal, MuxClient, NETWORK_SEND_TIMEOUT, PROTO_N2N_BLOCK_FETCH, Pipelined, Pull, ToMux, WantNext,
-        drive, from_wire, ingress_limit, pipelined,
+        drive, egress_admission_deadline, from_wire, ingress_limit, pipelined,
     },
 };
 
@@ -144,9 +147,15 @@ pub enum BlockFetchMessage {
 impl<T> IntoRoleCall<ToResponder, T> for MuxClient
 where
     Message: From<T>,
+    T: Clone,
 {
     type Reply = Sent;
     const TIMEOUT: Duration = NETWORK_SEND_TIMEOUT;
+
+    fn timeout(&self, msg: &T) -> Duration {
+        let encoded = NonEmptyBytes::encode(&Message::from(msg.clone()));
+        egress_admission_deadline(encoded.len().get())
+    }
 
     fn encode(&self, msg: T, reply: StageRef<Sent>) -> MuxMessage {
         self.encode_send(Message::from(msg), reply)
@@ -267,15 +276,32 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
         Proto::Idle(idle) => match idle.convert_input(mail) {
             Ok(PipelineIdleIn::Fetch(fetch)) => {
                 let range = RequestRange { from: fetch.from, through: fetch.through };
-                inflight = Some(Inflight { id: fetch.id, cr: fetch.cr.clone(), remaining: MAX_FETCHED_BLOCKS });
-                let (_, s) = idle.receive(&fetch, eff).call(&mux, range).await;
-                s.finish().into()
+                let (admission, s) = idle.receive(&fetch, eff.clone()).call(&mux, range).await;
+                match admission {
+                    CallAdmission::Reply(_) => {
+                        inflight = Some(Inflight { id: fetch.id, cr: fetch.cr.clone(), remaining: MAX_FETCHED_BLOCKS });
+                        s.finish().into()
+                    }
+                    // The range never reached the mux. Tell the collector and stay Idle,
+                    // so the driver does not arm `WantNext` or the agency timer.
+                    CallAdmission::NotAdmitted => {
+                        eff.send(&fetch.cr, Blocks::NoBlocks(fetch.id, peer)).await;
+                        initial_state::<Idle>().into()
+                    }
+                    // Admitted, then the deadline passed. The bytes may still leave later.
+                    // Closing the connection is the slow-peer fault; `NoBlocks` would claim
+                    // the peer had nothing.
+                    CallAdmission::TimedOut => return fault_egress(peer, eff).await,
+                }
             }
             Ok(PipelineIdleIn::Close(close)) => {
                 inflight = None;
                 pending_close = false;
-                let (_, s) = idle.receive(&close, eff).call(&mux, ClientDone).await;
-                s.finish().into()
+                let (admission, s) = idle.receive(&close, eff.clone()).call(&mux, ClientDone).await;
+                match admission {
+                    CallAdmission::Reply(_) => s.finish().into(),
+                    CallAdmission::NotAdmitted | CallAdmission::TimedOut => return fault_egress(peer, eff).await,
+                }
             }
             // TODO: handle timeouts generically to make mistakes impossible
             Err(Inputs::Internal(Internal::Timeout)) => idle.into(),
@@ -385,21 +411,33 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
         (true, _, Proto::Idle(idle)) => {
             pending_close = false;
             inflight = None;
-            let (_, s) = idle.receive(&Close, follow_eff).call(&mux, ClientDone).await;
-            s.finish().into()
+            let (admission, s) = idle.receive(&Close, follow_eff.clone()).call(&mux, ClientDone).await;
+            match admission {
+                CallAdmission::Reply(_) => s.finish().into(),
+                CallAdmission::NotAdmitted | CallAdmission::TimedOut => return fault_egress(peer, follow_eff).await,
+            }
         }
         (false, Some(fetch), Proto::Idle(idle)) => {
             let range = RequestRange { from: fetch.from, through: fetch.through };
-            inflight = Some(Inflight { id: fetch.id, cr: fetch.cr.clone(), remaining: MAX_FETCHED_BLOCKS });
-            let (_, s) = idle.receive(&fetch, follow_eff).call(&mux, range).await;
-            s.finish()
-                .receive(&Pull, pull_eff)
-                .send(&mux, WantNext)
-                .await
-                .set_timeout(BLOCKFETCH_AGENCY_TIMEOUT, Instance::timeout_mail())
-                .await
-                .finish()
-                .into()
+            let (admission, s) = idle.receive(&fetch, follow_eff.clone()).call(&mux, range).await;
+            match admission {
+                CallAdmission::Reply(_) => {
+                    inflight = Some(Inflight { id: fetch.id, cr: fetch.cr.clone(), remaining: MAX_FETCHED_BLOCKS });
+                    s.finish()
+                        .receive(&Pull, pull_eff)
+                        .send(&mux, WantNext)
+                        .await
+                        .set_timeout(BLOCKFETCH_AGENCY_TIMEOUT, Instance::timeout_mail())
+                        .await
+                        .finish()
+                        .into()
+                }
+                CallAdmission::NotAdmitted => {
+                    follow_eff.send(&fetch.cr, Blocks::NoBlocks(fetch.id, peer)).await;
+                    initial_state::<Idle>().into()
+                }
+                CallAdmission::TimedOut => return fault_egress(peer, follow_eff).await,
+            }
         }
         (_, fetch, proto) => {
             pending_fetch = fetch;
@@ -407,6 +445,12 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
         }
     };
     Instance { proto, mux, inflight, peer, pending_close, pending_fetch }
+}
+
+async fn fault_egress(peer: Peer, eff: Effects<Mail>) -> Instance {
+    err("mux egress")(format!("blockfetch initiator egress deadline for {peer}; peer is not treated as adversarial"))
+        .await;
+    eff.terminate().await
 }
 
 async fn invalid(peer: Peer, state: &str, input: impl std::fmt::Debug, eff: Effects<Mail>) -> Instance {
@@ -506,7 +550,8 @@ mod tests {
             | MuxMessage::Written
             | MuxMessage::Terminate
             | MuxMessage::SetSduTimeout(_)
-            | MuxMessage::IngressRetry => {}
+            | MuxMessage::IngressRetry
+            | MuxMessage::EgressRetry => {}
         }
         log
     }
@@ -848,5 +893,93 @@ mod tests {
         running.run(Run::skip_wakeups()).assert_idle();
         running.enqueue_msg(&handler, [Inputs::Internal(Internal::Timeout)]);
         running.run(Run::skip_wakeups()).assert_idle();
+    }
+
+    #[test]
+    fn request_that_never_reaches_the_mux_is_no_blocks_without_want_next() {
+        use amaru_pure_stage::{
+            DEFAULT_MAILBOX_SIZE, Effect,
+            simulation::Blocked,
+            trace_buffer::{TraceBuffer, TraceEntry},
+            trace_match::{TraceMatch, assert_trace_does_not_contain, tm_send_match},
+        };
+
+        // Park on every message, including the priming `IngressRetry`. A hold that
+        // ignores non-`Send` traffic returns Idle, so the mailbox never fills and
+        // the later call is admitted instead of `NotAdmitted`.
+        async fn hold(_state: u8, _msg: MuxMessage, eff: Effects<MuxMessage>) -> u8 {
+            eff.wait(Duration::from_secs(3600)).await;
+            0
+        }
+
+        let _mux = crate::mux::register_deserializers();
+        let _bf = super::register_deserializers();
+        let trace = TraceBuffer::new_shared(400, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace);
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", hold);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, 0u8);
+        let handler_b = network.stage("bf", lock_step);
+        let peer = Peer::for_test(3001);
+        let handler =
+            network.wire_up(handler_b, Instance::new(MuxClient::new(mux_ref, PROTO_N2N_BLOCK_FETCH.erase()), peer));
+        let mut running = network.run(test_runtime());
+
+        running.enqueue_msg(&mux, [MuxMessage::IngressRetry]);
+        assert!(matches!(running.run(Run::default()), Blocked::Sleeping { .. }));
+        for _ in 0..DEFAULT_MAILBOX_SIZE {
+            running.enqueue_msg(&mux, [MuxMessage::IngressRetry]);
+        }
+        assert_eq!(running.mailbox_len(&mux), DEFAULT_MAILBOX_SIZE);
+
+        running.enqueue_msg(
+            &handler,
+            [Inputs::Local(BlockFetchMessage::RequestRange {
+                from: Point::Origin,
+                through: Point::Origin,
+                id: 7,
+                cr: (*out).clone(),
+            })],
+        );
+        let Blocked::Sleeping { next_wakeup } = running.run(Run::default()) else {
+            panic!("call should be waiting on its deadline");
+        };
+        assert!(running.get_state(&out).unwrap().is_empty());
+        let early =
+            running.now() + next_wakeup.saturating_since(running.now()).saturating_sub(Duration::from_millis(1));
+        assert!(matches!(running.run(Run::until(early)), Blocked::Sleeping { .. }));
+        assert!(running.get_state(&out).unwrap().is_empty());
+        let _alive = running.mailbox_len(&handler);
+
+        let blocked = running.run(Run::until(next_wakeup));
+        assert!(matches!(blocked, Blocked::Sleeping { .. } | Blocked::Idle), "{blocked:?}");
+        assert_eq!(running.get_state(&out).unwrap().as_slice(), &[Blocks::NoBlocks(7, peer)]);
+        assert!(matches!(running.get_state(&handler).unwrap().proto, Proto::Idle(_)));
+
+        let from = handler.name().to_string();
+        let entries: Vec<TraceEntry> = running.trace_buffer().lock().iter_entries().map(|(_, e)| e).collect();
+        let no_blocks = tm_send_match::<Blocks>(&from, "out", |msg| matches!(msg, Blocks::NoBlocks(7, _)));
+        assert!(entries.iter().any(|entry| entry == &no_blocks), "expected NoBlocks via tm_send_match");
+        let from_timeout = from.clone();
+        assert_trace_does_not_contain(
+            &running,
+            &[
+                tm_send_match::<MuxMessage>(&from, "mux", |msg| matches!(msg, MuxMessage::WantNext(_))),
+                TraceMatch::Property(
+                    Box::new(move |src| {
+                        matches!(
+                            src.suspend(),
+                            Some(Effect::SetTimeout { at_stage, .. }) if at_stage.as_str() == from_timeout
+                        )
+                    }),
+                    "SetTimeout".into(),
+                ),
+            ],
+        );
     }
 }
