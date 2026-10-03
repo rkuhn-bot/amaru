@@ -142,11 +142,7 @@ impl Clock for TokioClock {
 }
 
 struct PendingStage {
-    mailbox_size: crate::stage_ref::MailboxSize,
-    /// Capacity the current channel was opened with. Compared against [`Self::mailbox_size`]
-    /// so a later override can rebuild the channel. Zero is stored as zero; the channel
-    /// itself is opened by [`open_mailbox`].
-    opened: usize,
+    mailbox_size: usize,
     tx: mpsc::Sender<Box<dyn SendData>>,
     rx: mpsc::Receiver<Box<dyn SendData>>,
     transition: TransitionFactory,
@@ -159,7 +155,7 @@ struct PendingStage {
 /// it is not waiting to receive. A message is admitted only while the stage is idle, the
 /// slot is empty, and no blocking sender is already waiting on it.
 fn open_mailbox(size: usize) -> (mpsc::Sender<Box<dyn SendData>>, mpsc::Receiver<Box<dyn SendData>>) {
-    mpsc::channel(if size == 0 { 1 } else { size })
+    mpsc::channel(size.max(1))
 }
 
 /// A [`StageGraph`] implementation that dispatches each stage as a task on the Tokio global pool.
@@ -229,12 +225,12 @@ impl TokioBuilder {
         self
     }
 
-    /// Default bulk mailbox capacity for stages that do not call
-    /// [`StageBuildRef::with_mailbox_size`](crate::StageBuildRef::with_mailbox_size).
+    /// Bulk mailbox capacity passed by [`StageGraph::stage`](crate::StageGraph::stage).
     ///
     /// This is the number of messages that may wait in the mailbox. The message currently
     /// being processed does not count. Defaults to [`DEFAULT_MAILBOX_SIZE`], matching
     /// [`SimulationBuilder::with_mailbox_size`](crate::simulation::SimulationBuilder::with_mailbox_size).
+    /// A single stage uses [`StageGraph::stage_with_mailbox_size`](crate::StageGraph::stage_with_mailbox_size).
     /// Zero is a rendezvous: see [`open_mailbox`].
     pub fn with_mailbox_size(mut self, size: usize) -> Self {
         self.inner.mailbox_size = size;
@@ -249,54 +245,35 @@ impl TokioBuilder {
         self.inner.priority_mailbox_size = size;
         self
     }
-
-    /// Apply a [`StageBuildRef::with_mailbox_size`] override before the channel is used.
-    fn reconcile(&mut self, name: &Name) {
-        let Some(pending) = self.pending.get_mut(name) else {
-            return;
-        };
-        let size = pending.mailbox_size.get();
-        if pending.opened == size {
-            return;
-        }
-        let (tx, rx) = open_mailbox(size);
-        let mut queued = Vec::new();
-        while let Ok(msg) = pending.rx.try_recv() {
-            queued.push(msg);
-        }
-        // Capacity zero still accepts one message while the stage is idle (the initial state).
-        let limit = if size == 0 { 1 } else { size };
-        #[expect(clippy::panic)]
-        if queued.len() > limit {
-            panic!("stage `{name}` was preloaded with {} messages but its mailbox size is {size}", queued.len());
-        }
-        for msg in queued {
-            #[expect(clippy::expect_used)]
-            tx.try_send(msg).expect("channel has room for the preloaded messages");
-        }
-        pending.tx = tx.clone();
-        pending.rx = rx;
-        pending.opened = size;
-        self.inner.senders.lock().insert(name.clone(), tx);
-    }
 }
 
 impl StageGraph for TokioBuilder {
+    fn stage<Msg, St, F, Fut>(&mut self, name: impl AsRef<str>, f: F) -> StageBuildRef<Msg, St, Box<dyn Any + Send>>
+    where
+        F: FnMut(St, Msg, Effects<Msg>) -> Fut + 'static + Send,
+        Fut: Future<Output = St> + 'static + Send,
+        Msg: SendData + serde::de::DeserializeOwned,
+        St: SendData,
+    {
+        self.stage_with_mailbox_size(name, f, self.inner.mailbox_size)
+    }
+
     #[expect(clippy::expect_used)]
-    fn stage<Msg: SendData, St: SendData, F, Fut>(
+    fn stage_with_mailbox_size<Msg, St, F, Fut>(
         &mut self,
         name: impl AsRef<str>,
         mut f: F,
+        mailbox_size: usize,
     ) -> StageBuildRef<Msg, St, Box<dyn Any + Send>>
     where
         F: FnMut(St, Msg, Effects<Msg>) -> Fut + 'static + Send,
         Fut: Future<Output = St> + 'static + Send,
+        Msg: SendData + serde::de::DeserializeOwned,
+        St: SendData,
     {
         // THIS MUST MATCH THE SIMULATION BUILDER
         let name = stage_name(&mut self.inner.stage_counter.lock(), name.as_ref());
-        let mailbox_size = crate::stage_ref::MailboxSize::new(self.inner.mailbox_size);
-        let opened = mailbox_size.get();
-        let (tx, rx) = open_mailbox(opened);
+        let (tx, rx) = open_mailbox(mailbox_size);
         self.inner.senders.lock().insert(name.clone(), tx.clone());
 
         let me = StageRef::new(name.clone());
@@ -325,8 +302,7 @@ impl StageGraph for TokioBuilder {
                     as BoxFuture<'static, Box<dyn SendData>>
             }) as Transition
         });
-        self.pending
-            .insert(name.clone(), PendingStage { mailbox_size: mailbox_size.clone(), opened, tx, rx, transition: ff });
+        self.pending.insert(name.clone(), PendingStage { mailbox_size, tx, rx, transition: ff });
 
         StageBuildRef { name, network: Box::new(()), mailbox_size, _ph: PhantomData }
     }
@@ -338,10 +314,8 @@ impl StageGraph for TokioBuilder {
         state: St,
     ) -> StageStateRef<Msg, St> {
         let StageBuildRef { name, .. } = stage;
-        self.reconcile(&name);
-        let PendingStage { rx, tx, mailbox_size, transition: ff, .. } =
+        let PendingStage { rx, tx, mailbox_size, transition: ff } =
             self.pending.remove(&name).expect("stage was already wired or was not created here");
-        let mailbox_size = mailbox_size.get();
         let stage_name = name.clone();
         let state = Box::new(state);
         let termination_tx = self.termination_tx.clone();
@@ -366,7 +340,6 @@ impl StageGraph for TokioBuilder {
         messages: impl IntoIterator<Item = Msg>,
     ) -> Result<(), Box<dyn SendData>> {
         let stage = stage.as_ref();
-        self.reconcile(stage.name());
         let senders = self.inner.senders.lock();
         for msg in messages {
             let (_name, leftover, payload) = stage.materialize_send(msg);
@@ -387,7 +360,6 @@ impl StageGraph for TokioBuilder {
 
     fn input<Msg: SendData>(&mut self, stage: impl AsRef<StageRef<Msg>>) -> Sender<Msg> {
         let stage = stage.as_ref();
-        self.reconcile(stage.name());
         mk_sender(stage, &self.inner)
     }
 
@@ -763,14 +735,6 @@ async fn interpreter(
                     Slot::Blackhole | Slot::Reserved(_) => TrySend::Queued,
                     Slot::Full => TrySend::Full,
                     Slot::Missing | Slot::Closed => TrySend::Gone,
-                };
-                // Serialize a copy while `msg` is still owned, then move it into the mailbox.
-                let effect = crate::Effect::TrySend { from: name.clone(), to: target, msg, outcome };
-                tb().push_suspend(&effect);
-                #[expect(clippy::panic, clippy::wildcard_enum_match_arm)]
-                let msg = match effect {
-                    crate::Effect::TrySend { msg, .. } => msg,
-                    other => panic!("try_send trace was built as {other:?}"),
                 };
                 if let Slot::Reserved(permit) = slot {
                     permit.send(msg);
