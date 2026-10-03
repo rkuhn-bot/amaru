@@ -173,68 +173,58 @@ pub fn tm_send<'a>(from: &'a str, to: &'a str, msg: impl SendData) -> TraceMatch
     )
 }
 
-/// Creates a `TraceMatch` for a `TrySend` effect, including the admission result.
-pub fn tm_try_send<'a>(from: &'a str, to: &'a str, msg: impl SendData, outcome: TrySend) -> TraceMatch<'a> {
-    let description = format!("TrySend(from: {:?}, to: {:?}, outcome: {:?}, msg: {:?})", from, to, outcome, msg);
+/// Creates a `TraceMatch` for a `TrySend` effect. The admission result is the resume, not this effect.
+pub fn tm_try_send<'a>(from: &'a str, to: &'a str, msg: impl SendData) -> TraceMatch<'a> {
+    let description = format!("TrySend(from: {:?}, to: {:?}, msg: {:?})", from, to, msg);
     TraceMatch::Property(
         Box::new(move |src| {
-            let Some(Effect::TrySend { from: f, to: t, msg: m, outcome: got }) = src.suspend() else {
+            let Some(Effect::TrySend { from: f, to: t, msg: m }) = src.suspend() else {
                 return false;
             };
-            f.as_str() == from && t.as_str().contains(to) && *got == outcome && msg.test_eq(&**m)
+            f.as_str() == from && t.as_str().contains(to) && msg.test_eq(&**m)
         }),
         description,
     )
 }
 
-/// Creates a `TraceMatch` for a `TrySend` whose payload is of type `T` and whose admission
-/// result is `outcome`.
+/// Creates a `TraceMatch` for the [`StageResponse::TrySend`] that resumes `stage`.
+pub fn tm_resume_try_send(stage: impl AsRef<str>, outcome: TrySend) -> TraceMatch<'static> {
+    TraceEntry::resume(stage, StageResponse::TrySend(outcome)).into()
+}
+
+/// Creates a `TraceMatch` for a `TrySend` whose payload is of type `T`.
 ///
+/// The admission result is the resume ([`tm_resume_try_send`]), not this effect.
 /// Use this when the payload cannot be built for [`tm_try_send`] (it contains a [`crate::StageRef`],
 /// or it was injected by [`crate::StageRef::contramap`] before it was traced).
-pub fn tm_try_send_type<'a, T: SendData>(from: &'a str, to: &'a str, outcome: TrySend) -> TraceMatch<'a> {
-    let description = format!(
-        "TrySend(from: {:?}, to: {:?}, outcome: {:?}, msg of type {})",
-        from,
-        to,
-        outcome,
-        std::any::type_name::<T>()
-    );
+pub fn tm_try_send_type<'a, T: SendData>(from: &'a str, to: &'a str) -> TraceMatch<'a> {
+    let description = format!("TrySend(from: {:?}, to: {:?}, msg of type {})", from, to, std::any::type_name::<T>());
     TraceMatch::Property(
         Box::new(move |src| {
-            let Some(Effect::TrySend { from: f, to: t, msg, outcome: got }) = src.suspend() else {
+            let Some(Effect::TrySend { from: f, to: t, msg }) = src.suspend() else {
                 return false;
             };
-            f.as_str() == from
-                && t.as_str().contains(to)
-                && *got == outcome
-                && msg.as_ref().type_id() == std::any::TypeId::of::<T>()
+            f.as_str() == from && t.as_str().contains(to) && msg.as_ref().type_id() == std::any::TypeId::of::<T>()
         }),
         description,
     )
 }
 
-/// Creates a `TraceMatch` for a `TrySend` whose payload is of type `T`, whose admission result
-/// is `outcome`, and whose payload satisfies `predicate`.
+/// Creates a `TraceMatch` for a `TrySend` whose payload is of type `T` and satisfies `predicate`.
+///
+/// The admission result is the resume ([`tm_resume_try_send`]), not this effect.
 pub fn tm_try_send_match<'a, T: SendData>(
     from: &'a str,
     to: &'a str,
-    outcome: TrySend,
     predicate: impl Fn(&T) -> bool + Send + 'a,
 ) -> TraceMatch<'a> {
-    let description = format!(
-        "TrySend(from: {:?}, to: {:?}, outcome: {:?}, msg matching {})",
-        from,
-        to,
-        outcome,
-        std::any::type_name::<T>()
-    );
+    let description = format!("TrySend(from: {:?}, to: {:?}, msg matching {})", from, to, std::any::type_name::<T>());
     TraceMatch::Property(
         Box::new(move |src| {
-            let Some(Effect::TrySend { from: f, to: t, msg, outcome: got }) = src.suspend() else {
+            let Some(Effect::TrySend { from: f, to: t, msg }) = src.suspend() else {
                 return false;
             };
-            if f.as_str() != from || !t.as_str().contains(to) || *got != outcome {
+            if f.as_str() != from || !t.as_str().contains(to) {
                 return false;
             }
             let Ok(typed) = msg.as_ref().cast_ref::<T>() else {
@@ -623,18 +613,26 @@ mod tests {
     use crate::trace_buffer::TraceEntry;
 
     #[test]
-    fn try_send_type_and_match_check_outcome_and_payload() {
-        let full = TraceEntry::suspend(Effect::try_send("mgr", "conn-a", Box::new(7u8), TrySend::Full));
-        assert_eq!(tm_try_send_type::<u8>("mgr", "conn-a", TrySend::Full), full);
-        assert_eq!(tm_try_send_match("mgr", "conn-a", TrySend::Full, |n: &u8| *n == 7), full);
-        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-a", TrySend::Queued), full);
-        assert_ne!(tm_try_send_type::<u16>("mgr", "conn-a", TrySend::Full), full);
-        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-b", TrySend::Full), full);
-        assert_ne!(tm_try_send_match("mgr", "conn-a", TrySend::Full, |n: &u8| *n == 8), full);
-        assert_ne!(tm_try_send_match("other", "conn-a", TrySend::Full, |_: &u8| true), full);
+    fn try_send_type_and_match_check_payload_and_resume() {
+        let effect = TraceEntry::suspend(Effect::try_send("mgr", "conn-a", Box::new(7u8)));
+        assert_eq!(tm_try_send_type::<u8>("mgr", "conn-a"), effect);
+        assert_eq!(tm_try_send_match("mgr", "conn-a", |n: &u8| *n == 7), effect);
+        assert_ne!(tm_try_send_type::<u16>("mgr", "conn-a"), effect);
+        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-b"), effect);
+        assert_ne!(tm_try_send_match("mgr", "conn-a", |n: &u8| *n == 8), effect);
+        assert_ne!(tm_try_send_match("other", "conn-a", |_: &u8| true), effect);
 
         let send = TraceEntry::suspend(Effect::send("mgr", "conn-a", Box::new(7u8)));
-        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-a", TrySend::Full), send);
-        assert_ne!(tm_try_send_match("mgr", "conn-a", TrySend::Queued, |_: &u8| true), send);
+        assert_ne!(tm_try_send_type::<u8>("mgr", "conn-a"), send);
+        assert_ne!(tm_try_send_match("mgr", "conn-a", |_: &u8| true), send);
+
+        let full = TraceEntry::resume("mgr", StageResponse::TrySend(TrySend::Full));
+        let queued = TraceEntry::resume("mgr", StageResponse::TrySend(TrySend::Queued));
+        assert_eq!(tm_resume_try_send("mgr", TrySend::Full), full);
+        assert_ne!(tm_resume_try_send("mgr", TrySend::Queued), full);
+        assert_ne!(tm_resume_try_send("other", TrySend::Full), full);
+        assert_ne!(tm_try_send_match("mgr", "conn-a", |_: &u8| true), full);
+        assert_ne!(tm_resume_try_send("mgr", TrySend::Full), effect);
+        assert_eq!(tm_resume_try_send("mgr", TrySend::Queued), queued);
     }
 }

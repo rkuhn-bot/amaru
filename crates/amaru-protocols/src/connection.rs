@@ -462,7 +462,7 @@ async fn do_initialize(
     // when it advertises full duplex. Those are the protocols the mux may hold before `Register`.
     let initiator_only = false;
     let advertisable = true;
-    let muxer = eff.stage("mux", mux::stage).await.with_mailbox_size(mux::MUX_MAILBOX_SIZE);
+    let muxer = eff.stage_with_mailbox_size("mux", mux::stage, mux::MUX_MAILBOX_SIZE).await;
     let muxer = eff.supervise(muxer, ConnectionMessage::ChildDied(ChildId::Mux));
     let early = early_mini_protocol_buffers(advertisable);
     let muxer = eff.wire_up(muxer, mux::State::new(*conn_id, &early, *role, peer)).await;
@@ -875,12 +875,13 @@ mod tests {
 
     use amaru_kernel::{BlockHeight, HeaderHash, PREPROD_ERA_HISTORY, Slot};
     use amaru_pure_stage::{
-        DEFAULT_MAILBOX_SIZE, Effect, Name, SendData, StageGraph, TraceMatch,
+        DEFAULT_MAILBOX_SIZE, Effect, Name, SendData, StageGraph, StageResponse, TraceMatch,
         simulation::{Run, SimulationBuilder, SimulationRunning},
         stage_ref::StageStateRef,
         trace_buffer::{TraceBuffer, TraceEntry},
         trace_match::{
-            assert_trace_contains, assert_trace_match_filter, tm_resume, tm_send, tm_state_match, tm_try_send_match,
+            assert_trace_contains, assert_trace_match_filter, tm_resume_try_send, tm_send, tm_state_match,
+            tm_try_send_match,
         },
     };
     use tokio::runtime::Runtime;
@@ -1117,6 +1118,18 @@ mod tests {
         )
     }
 
+    /// Drops resumes other than [`StageResponse::TrySend`]. The admission result is that resume.
+    fn drop_resume_except_try_send() -> TraceMatch<'static> {
+        TraceMatch::Property(
+            Box::new(|src| match src.entry() {
+                Some(TraceEntry::Resume { response: StageResponse::TrySend(_), .. }) => false,
+                Some(TraceEntry::Resume { .. }) => true,
+                _ => false,
+            }),
+            "Resume other than TrySend".to_string(),
+        )
+    }
+
     async fn hold_blockfetch(_state: (), _msg: Inputs<BlockFetchMessage>, eff: Effects<Inputs<BlockFetchMessage>>) {
         eff.wait(Duration::from_secs(3600)).await;
     }
@@ -1231,12 +1244,13 @@ mod tests {
             &running,
             &[
                 connection_input(name, |sent| matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })),
-                tm_try_send_match(name, "blockfetch", TrySend::Full, |sent: &Inputs<BlockFetchMessage>| {
+                tm_try_send_match(name, "blockfetch", |sent: &Inputs<BlockFetchMessage>| {
                     matches!(sent, Inputs::Local(BlockFetchMessage::RequestRange { id: 7, .. }))
                 }),
+                tm_resume_try_send(name, TrySend::Full),
                 tm_state_match(name, |state: &Connection| pending_point(state).is_none()),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 
@@ -1276,13 +1290,14 @@ mod tests {
             &running,
             &[
                 connection_input(name, |sent| matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })),
-                tm_try_send_match(name, "blockfetch", TrySend::Queued, |sent: &Inputs<BlockFetchMessage>| {
+                tm_try_send_match(name, "blockfetch", |sent: &Inputs<BlockFetchMessage>| {
                     matches!(sent, Inputs::Local(BlockFetchMessage::RequestRange { id: 7, .. }))
                 }),
+                tm_resume_try_send(name, TrySend::Queued),
                 tm_send(name, "asked", Blocks::PeersAsked(7, vec![peer])),
                 tm_state_match(name, |state: &Connection| pending_point(state).is_none()),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 
@@ -1322,11 +1337,13 @@ mod tests {
                     name.as_str(),
                     move |sent| matches!(sent, ConnectionMessage::NewTip(got, _) if *got == second),
                 ),
-                tm_try_send_match(name.as_str(), "chainsync", TrySend::Full, is_local_tip(first)),
-                tm_try_send_match(name.as_str(), "chainsync", TrySend::Full, is_local_tip(second)),
+                tm_try_send_match(name.as_str(), "chainsync", is_local_tip(first)),
+                tm_resume_try_send(name.as_str(), TrySend::Full),
+                tm_try_send_match(name.as_str(), "chainsync", is_local_tip(second)),
+                tm_resume_try_send(name.as_str(), TrySend::Full),
                 tm_state_match(name.as_str(), move |state: &Connection| pending_point(state) == Some(second)),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
 
         running.run(Run::until(parked)).assert_sleeping();
@@ -1340,10 +1357,11 @@ mod tests {
             &running,
             &[
                 connection_input(name.as_str(), |sent| matches!(sent, ConnectionMessage::StopTimeout)),
-                tm_try_send_match(name.as_str(), "chainsync", TrySend::Queued, is_local_tip(second)),
+                tm_try_send_match(name.as_str(), "chainsync", is_local_tip(second)),
+                tm_resume_try_send(name.as_str(), TrySend::Queued),
                 tm_state_match(name.as_str(), |state: &Connection| pending_point(state).is_none()),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
     }
 
@@ -1381,10 +1399,11 @@ mod tests {
                     name.as_str(),
                     move |sent| matches!(sent, ConnectionMessage::NewTip(got, _) if *got == point),
                 ),
-                tm_try_send_match(name.as_str(), "chainsync", TrySend::Full, is_local_tip(point)),
+                tm_try_send_match(name.as_str(), "chainsync", is_local_tip(point)),
+                tm_resume_try_send(name.as_str(), TrySend::Full),
                 tm_state_match(name.as_str(), move |state: &Connection| pending_point(state) == Some(point)),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
     }
 
@@ -1437,10 +1456,11 @@ mod tests {
                 connection_input(name.as_str(), |sent| {
                     matches!(sent, ConnectionMessage::RequestSharePeers { amount: 1, .. })
                 }),
-                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(1)),
+                tm_try_send_match(name.as_str(), "sharing", is_local_start(1)),
+                tm_resume_try_send(name.as_str(), TrySend::Full),
                 tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state) == Some(share_start(1))),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
 
         running.enqueue_msg(&connection, [share_request(2)]);
@@ -1457,11 +1477,13 @@ mod tests {
                 connection_input(name.as_str(), |sent| {
                     matches!(sent, ConnectionMessage::RequestSharePeers { amount: 2, .. })
                 }),
-                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(1)),
-                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(2)),
+                tm_try_send_match(name.as_str(), "sharing", is_local_start(1)),
+                tm_resume_try_send(name.as_str(), TrySend::Full),
+                tm_try_send_match(name.as_str(), "sharing", is_local_start(2)),
+                tm_resume_try_send(name.as_str(), TrySend::Full),
                 tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state) == Some(share_start(2))),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
 
         running.run(Run::until(parked)).assert_sleeping();
@@ -1476,10 +1498,11 @@ mod tests {
             &running,
             &[
                 connection_input(name.as_str(), |sent| matches!(sent, ConnectionMessage::StopTimeout)),
-                tm_try_send_match(name.as_str(), "sharing", TrySend::Queued, is_local_start(2)),
+                tm_try_send_match(name.as_str(), "sharing", is_local_start(2)),
+                tm_resume_try_send(name.as_str(), TrySend::Queued),
                 tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
     }
 
@@ -1505,10 +1528,11 @@ mod tests {
             &running,
             &[
                 connection_input(name.as_str(), |sent| matches!(sent, ConnectionMessage::StopTimeout)),
-                tm_try_send_match(name.as_str(), "missing-share", TrySend::Gone, is_start(1)),
+                tm_try_send_match(name.as_str(), "missing-share", is_start(1)),
+                tm_resume_try_send(name.as_str(), TrySend::Gone),
                 tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
 
         running.enqueue_msg(&connection, [share_request(2)]);
@@ -1520,10 +1544,11 @@ mod tests {
                 connection_input(name.as_str(), |sent| {
                     matches!(sent, ConnectionMessage::RequestSharePeers { amount: 2, .. })
                 }),
-                tm_try_send_match(name.as_str(), "missing-share", TrySend::Gone, is_start(2)),
+                tm_try_send_match(name.as_str(), "missing-share", is_start(2)),
+                tm_resume_try_send(name.as_str(), TrySend::Gone),
                 tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
             ],
-            &[tm_resume(), drop_other_stages(name.as_str())],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
         );
     }
 
@@ -1566,16 +1591,20 @@ mod tests {
         assert!(established.peer_sharing_initiator.is_none());
         assert!(established.stopping.is_empty());
         assert_eq!(running.mailbox_len(&sharing), DEFAULT_MAILBOX_SIZE);
+        // `assert_trace_contains` drops resumes. The admission result is the resume.
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
             &[
                 connection_input(name.as_str(), |sent| {
                     matches!(sent, ConnectionMessage::ChildDied(ChildId::PeerSharing))
                 }),
-                tm_try_send_match(name.as_str(), "sharing", TrySend::Full, is_local_start(1)),
+                tm_try_send_match(name.as_str(), "sharing", is_local_start(1)),
                 tm_state_match(name.as_str(), |state: &Connection| pending_share_of(state).is_none()),
             ],
         );
+        let full = tm_resume_try_send(name.as_str(), TrySend::Full);
+        assert!(trace.iter().any(|entry| full == *entry), "try_send response missing from the trace: {trace:?}");
     }
 
     #[test]
@@ -1614,9 +1643,10 @@ mod tests {
             &running,
             &[
                 connection_input(name, |sent| matches!(sent, ConnectionMessage::SetLocalUse(LocalUse::None))),
-                tm_try_send_match(name, "blockfetch", TrySend::Full, |sent: &Inputs<BlockFetchMessage>| {
+                tm_try_send_match(name, "blockfetch", |sent: &Inputs<BlockFetchMessage>| {
                     matches!(sent, Inputs::Local(BlockFetchMessage::Close))
                 }),
+                tm_resume_try_send(name, TrySend::Full),
                 stop_timeout(name, delay),
                 tm_state_match(name, |state: &Connection| {
                     let State::Established(established) = &state.state else {
@@ -1625,7 +1655,7 @@ mod tests {
                     established.stopping == BTreeSet::from([ChildId::BlockFetch])
                 }),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 

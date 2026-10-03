@@ -1063,12 +1063,12 @@ mod tests {
     use amaru_ouroboros::ConnectionsResource;
     use amaru_ouroboros_traits::ConnectionProvider;
     use amaru_pure_stage::{
-        Effect, ExternalEffect, Name, StageGraph, TrySend,
+        Effect, ExternalEffect, Name, StageGraph, TraceMatch, TrySend,
         simulation::{Blocked, Run, SimulationBuilder, SimulationRunning},
         stage_ref::StageStateRef,
         tokio::TokioBuilder,
         trace_buffer::{TraceBuffer, TraceEntry},
-        trace_match::{assert_trace_contains, tm_try_send},
+        trace_match::{assert_trace_contains, tm_resume_try_send, tm_try_send},
     };
     use futures_util::StreamExt;
     use tokio::{
@@ -1807,6 +1807,18 @@ mod tests {
         MuxMessage::FromNetwork(Timestamp(1), protocol.opposite(), cbor_byte(byte))
     }
 
+    /// `assert_trace_contains` drops every resume. The admission result is the following
+    /// [`StageResponse::TrySend`](amaru_pure_stage::StageResponse::TrySend) resume, in order.
+    fn assert_try_send_resumes(trace: &[TraceEntry], expected: &[TraceMatch<'static>]) {
+        let mut found = 0;
+        for entry in trace {
+            if found < expected.len() && expected[found] == *entry {
+                found += 1;
+            }
+        }
+        assert_eq!(found, expected.len(), "try_send responses missing from the trace: {trace:?}");
+    }
+
     fn traced() -> (SimulationBuilder, amaru_pure_stage::trace_buffer::DropGuard) {
         let trace = TraceBuffer::new_shared(200, 1_000_000);
         let guard = TraceBuffer::drop_guard(&trace);
@@ -1855,12 +1867,17 @@ mod tests {
         counted_retry_arms(&running, handlers.mux.name());
 
         let mux_name = handlers.mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
             &[
-                tm_try_send(mux_name, "handler-a", HandlerMessage::FromNetwork(frame), TrySend::Full),
-                tm_try_send(mux_name, "handler-b", HandlerMessage::FromNetwork(cbor_byte(0x02)), TrySend::Queued),
+                tm_try_send(mux_name, "handler-a", HandlerMessage::FromNetwork(frame)),
+                tm_try_send(mux_name, "handler-b", HandlerMessage::FromNetwork(cbor_byte(0x02))),
             ],
+        );
+        assert_try_send_resumes(
+            &trace,
+            &[tm_resume_try_send(mux_name, TrySend::Full), tm_resume_try_send(mux_name, TrySend::Queued)],
         );
     }
 
@@ -1901,15 +1918,13 @@ mod tests {
         assert!(delivered.incoming.is_empty());
         assert!(delivered.deferred_since.is_none());
         assert!(!running.get_state(&mux).unwrap().muxer.ingress_retry_armed);
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
-            &[tm_try_send(
-                mux.name().as_str(),
-                "handler-a",
-                HandlerMessage::FromNetwork(cbor_byte(0x01)),
-                TrySend::Queued,
-            )],
+            &[tm_try_send(mux_name, "handler-a", HandlerMessage::FromNetwork(cbor_byte(0x01)))],
         );
+        assert_try_send_resumes(&trace, &[tm_resume_try_send(mux_name, TrySend::Queued)]);
     }
 
     #[test]
@@ -1986,30 +2001,26 @@ mod tests {
         assert!(pending.registered_pending);
         assert!(pending.deferred_since.is_some());
         assert_eq!(running.mailbox_len(&handler), amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
-            &[tm_try_send(
-                mux.name().as_str(),
-                "handler-a",
-                HandlerMessage::Registered(PROTO_TEST.erase()),
-                TrySend::Full,
-            )],
+            &[tm_try_send(mux_name, "handler-a", HandlerMessage::Registered(PROTO_TEST.erase()))],
         );
+        assert_try_send_resumes(&trace, &[tm_resume_try_send(mux_name, TrySend::Full)]);
 
         let retry_at = running.run(Run::until(waiting)).assert_sleeping();
         assert_eq!(running.mailbox_len(&handler), 0);
         running.trace_buffer().lock().clear();
         running.run(Run::until(retry_at)).assert_idle();
         assert!(!proto(&running, &mux, PROTO_TEST.erase()).registered_pending);
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
-            &[tm_try_send(
-                mux.name().as_str(),
-                "handler-a",
-                HandlerMessage::Registered(PROTO_TEST.erase()),
-                TrySend::Queued,
-            )],
+            &[tm_try_send(mux_name, "handler-a", HandlerMessage::Registered(PROTO_TEST.erase()))],
         );
+        assert_try_send_resumes(&trace, &[tm_resume_try_send(mux_name, TrySend::Queued)]);
     }
 
     #[test]
@@ -2097,21 +2108,19 @@ mod tests {
         running.trace_buffer().lock().clear();
         running.run(Run::until(retry_at)).assert_sleeping();
         counted_retry_arms(&running, &mux_name);
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
             &[
-                tm_try_send(
-                    mux_name.as_str(),
-                    "handler-a",
-                    HandlerMessage::FromNetwork(cbor_byte(0x01)),
-                    TrySend::Full,
-                ),
-                tm_try_send(
-                    mux_name.as_str(),
-                    "handler-b",
-                    HandlerMessage::FromNetwork(cbor_byte(0x02)),
-                    TrySend::Full,
-                ),
+                tm_try_send(mux_name.as_str(), "handler-a", HandlerMessage::FromNetwork(cbor_byte(0x01))),
+                tm_try_send(mux_name.as_str(), "handler-b", HandlerMessage::FromNetwork(cbor_byte(0x02))),
+            ],
+        );
+        assert_try_send_resumes(
+            &trace,
+            &[
+                tm_resume_try_send(mux_name.as_str(), TrySend::Full),
+                tm_resume_try_send(mux_name.as_str(), TrySend::Full),
             ],
         );
     }
@@ -2146,22 +2155,18 @@ mod tests {
         assert!(proto_state.incoming.is_empty(), "a gone handler cannot accept the frame later");
         assert!(running.get_state(&mux).is_some());
         assert_eq!(running.get_state(&bystander), Some(&7));
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
         assert_trace_contains(
             &running,
             &[
-                tm_try_send(
-                    mux.name().as_str(),
-                    "missing",
-                    HandlerMessage::Registered(PROTO_TEST.erase()),
-                    TrySend::Gone,
-                ),
-                tm_try_send(
-                    mux.name().as_str(),
-                    "missing",
-                    HandlerMessage::FromNetwork(cbor_byte(0x01)),
-                    TrySend::Gone,
-                ),
+                tm_try_send(mux_name, "missing", HandlerMessage::Registered(PROTO_TEST.erase())),
+                tm_try_send(mux_name, "missing", HandlerMessage::FromNetwork(cbor_byte(0x01))),
             ],
+        );
+        assert_try_send_resumes(
+            &trace,
+            &[tm_resume_try_send(mux_name, TrySend::Gone), tm_resume_try_send(mux_name, TrySend::Gone)],
         );
     }
 }

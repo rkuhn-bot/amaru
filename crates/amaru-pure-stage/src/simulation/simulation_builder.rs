@@ -102,11 +102,11 @@ pub struct SimulationBuilder {
 }
 
 impl SimulationBuilder {
-    /// Default bulk mailbox capacity for stages that do not call
-    /// [`StageBuildRef::with_mailbox_size`](crate::StageBuildRef::with_mailbox_size).
+    /// Bulk mailbox capacity passed by [`StageGraph::stage`](crate::StageGraph::stage).
     ///
-    /// The default is [`DEFAULT_MAILBOX_SIZE`]. A stage that sets its own capacity does not
-    /// change this default for the stages it later wires up.
+    /// The default is [`DEFAULT_MAILBOX_SIZE`]. A stage created with
+    /// [`StageGraph::stage_with_mailbox_size`](crate::StageGraph::stage_with_mailbox_size)
+    /// does not change this value for the stages it later wires up.
     pub fn with_mailbox_size(mut self, size: usize) -> Self {
         self.mailbox_size = size;
         self
@@ -176,7 +176,7 @@ impl SimulationBuilder {
                     StageData {
                         name,
                         mailbox: data.mailbox,
-                        mailbox_size: data.mailbox_size.get(),
+                        mailbox_size: data.mailbox_size,
                         priority: VecDeque::new(),
                         tombstones: VecDeque::new(),
                         state,
@@ -231,7 +231,7 @@ impl SimulationBuilder {
             let data = StageData {
                 name: name.clone(),
                 mailbox,
-                mailbox_size: mailbox_size.get(),
+                mailbox_size,
                 priority: VecDeque::new(),
                 tombstones: VecDeque::new(),
                 state,
@@ -287,7 +287,22 @@ impl Default for SimulationBuilder {
 }
 
 impl StageGraph for SimulationBuilder {
-    fn stage<Msg, St, F, Fut>(&mut self, name: impl AsRef<str>, mut f: F) -> StageBuildRef<Msg, St, Box<dyn Any + Send>>
+    fn stage<Msg, St, F, Fut>(&mut self, name: impl AsRef<str>, f: F) -> StageBuildRef<Msg, St, Box<dyn Any + Send>>
+    where
+        F: FnMut(St, Msg, Effects<Msg>) -> Fut + 'static + Send,
+        Fut: Future<Output = St> + 'static + Send,
+        Msg: SendData + serde::de::DeserializeOwned,
+        St: SendData,
+    {
+        self.stage_with_mailbox_size(name, f, self.mailbox_size)
+    }
+
+    fn stage_with_mailbox_size<Msg, St, F, Fut>(
+        &mut self,
+        name: impl AsRef<str>,
+        mut f: F,
+        mailbox_size: usize,
+    ) -> StageBuildRef<Msg, St, Box<dyn Any + Send>>
     where
         F: FnMut(St, Msg, Effects<Msg>) -> Fut + 'static + Send,
         Fut: Future<Output = St> + 'static + Send,
@@ -297,7 +312,7 @@ impl StageGraph for SimulationBuilder {
         // THIS MUST MATCH THE TOKIO BUILDER
         let name = stage_name(&mut self.stage_counter, name.as_ref());
         let me = StageRef::new(name.clone());
-        let mailbox_size = crate::stage_ref::MailboxSize::new(self.mailbox_size);
+        let child_mailbox = self.mailbox_size;
         let effects = Effects::new(
             me,
             self.effect.clone(),
@@ -306,7 +321,7 @@ impl StageGraph for SimulationBuilder {
             self.resources.clone(),
             self.schedule_ids.clone(),
             self.trace_buffer.clone(),
-            mailbox_size.get(),
+            child_mailbox,
         );
         let transition: Transition = Box::new(move |state: Box<dyn SendData>, msg: Box<dyn SendData>| {
             let state = state.cast::<St>().expect("internal state type error");
@@ -317,12 +332,7 @@ impl StageGraph for SimulationBuilder {
 
         if let Some(old) = self.stages.insert(
             name.clone(),
-            InitStageData {
-                state: InitStageState::Uninitialized,
-                mailbox: VecDeque::new(),
-                transition,
-                mailbox_size: mailbox_size.clone(),
-            },
+            InitStageData { state: InitStageState::Uninitialized, mailbox: VecDeque::new(), transition, mailbox_size },
         ) {
             #[expect(clippy::panic)]
             {
@@ -380,7 +390,7 @@ fn deliver_message(
     let Some(data) = stages.get_mut(&name) else {
         return Err(Box::new(format!("stage {name} does not exist")));
     };
-    if data.mailbox.len() >= data.mailbox_size.get() {
+    if data.mailbox_size == 0 || data.mailbox.len() >= data.mailbox_size {
         return Err(msg);
     }
     data.mailbox.push_back(msg);
