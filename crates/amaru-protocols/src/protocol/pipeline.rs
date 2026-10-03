@@ -23,7 +23,9 @@
 //! only once that slot is idle again, and only after the receive cursor has
 //! already moved off a slot that just returned to the switch state. A sticky
 //! close waits until every slot is idle or finished, so it is not written while
-//! a range is still in flight.
+//! a range is still in flight. Once that one `ClientDone` has been written the
+//! pipeline stays shut: a later range is not sent, and a second close is not
+//! written.
 
 use std::{future::Future, num::NonZeroUsize};
 
@@ -75,8 +77,9 @@ impl IntoRoleMail<ToMux, WantNext> for MuxClient {
 
 /// N lock-step machines plus send/recv cursors.
 ///
-/// `stashed` and `sticky_close` are absent on a snapshot taken before they
-/// existed. A missing field decodes as nothing waiting.
+/// `stashed`, `sticky_close`, and `closed` are absent on a snapshot taken
+/// before they existed. A missing field decodes as nothing waiting and not
+/// closed.
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pipelined<S, L> {
     machines: Vec<Option<S>>,
@@ -88,6 +91,9 @@ pub struct Pipelined<S, L> {
     stashed: Option<L>,
     #[serde(default = "nothing_waiting")]
     sticky_close: Option<L>,
+    /// `ClientDone` has been written. One wire protocol, one close.
+    #[serde(default)]
+    closed: bool,
 }
 
 fn nothing_waiting<L>() -> Option<L> {
@@ -105,6 +111,7 @@ impl<S, L> Pipelined<S, L> {
             recv_armed: false,
             stashed: None,
             sticky_close: None,
+            closed: false,
         }
     }
 
@@ -193,7 +200,9 @@ where
             return eff.terminate().await;
         }
         Inputs::Local(msg) => {
-            if is_sticky_close(&msg) {
+            if p.closed {
+                // Agency was already given up. A later range is not a new request.
+            } else if is_sticky_close(&msg) {
                 // Close wins over a range that has not been sent yet.
                 p.sticky_close = Some(msg);
                 p.stashed = None;
@@ -288,7 +297,7 @@ where
     F: Fn(S, Inputs<L>, Effects<Inputs<L>>) -> Fut,
     Fut: Future<Output = S>,
 {
-    if !p.machine(p.send).in_switch() {
+    if p.closed || !p.machine(p.send).in_switch() {
         return;
     }
     if p.sticky_close.is_some() {
@@ -302,6 +311,9 @@ where
         };
         p.stashed = None;
         deliver_local(p, close, eff, step).await;
+        // The send cursor has moved on to another idle slot. Leave the
+        // pipeline shut so that slot cannot start a range after `ClientDone`.
+        p.closed = true;
         return;
     }
     let Some(fetch) = p.stashed.take() else {

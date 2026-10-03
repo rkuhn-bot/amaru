@@ -49,7 +49,7 @@ Other guiding principles:
 - **amaru**: one peer that is not reading no longer stops block fetch from asking the other peers. `block.requested` lists only peers whose block-fetch handler accepted the request. The 5s fetch timeout is armed before the request is handed to the connection manager.
 - **amaru**: a broadcast block fetch no longer asks a peer again 30ms later when that peer's mailbox was full or its confirmation has not arrived yet. The broadcast covers those peers until the 5s timeout. A fetch that names its peers still asks further peers on that schedule.
 - **amaru**: a peer-sharing start that the child does not accept is offered again on the connection's next message. A full child no longer loses that round for the life of the connection.
-- **amaru-protocols**: a block-fetch range that arrives while every pipeline slot is busy is kept and sent when a slot is idle again, instead of dropping the peer. A newer range replaces the one still waiting. Close waits until the ranges already on the wire have finished.
+- **amaru-protocols**: a block-fetch range that arrives while every pipeline slot is busy is kept and sent when a slot is idle again, instead of dropping the peer. A newer range replaces the one still waiting. Close waits until the ranges already on the wire have finished, and a range that arrives after that `ClientDone` is not sent.
 
 ## v10.11.20261001 _[unreleased; planned for 2026-10-01]_
 

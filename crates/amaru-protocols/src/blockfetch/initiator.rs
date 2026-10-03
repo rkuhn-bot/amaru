@@ -745,6 +745,102 @@ mod tests {
         assert_eq!(log.wants, 0);
     }
 
+    /// Probe: `Close` on an idle pipeline, then a range. `ClientDone` ends the
+    /// one wire protocol. The range is not sent, and a second `Close` is not
+    /// written either.
+    #[test]
+    fn close_on_idle_then_fetch_is_not_sent() {
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, MuxLog::default());
+        let handler_b = network.stage("bf", handler);
+        let handler =
+            network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(BlockFetchMessage::Close),
+                    Inputs::Local(BlockFetchMessage::RequestRange {
+                        from: Point::Origin,
+                        through: Point::Origin,
+                        id: 9,
+                        cr: (*out).clone(),
+                    }),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        running.run(Run::skip_wakeups()).assert_idle();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["ClientDone"]);
+        assert!(running.get_state(&out).unwrap().is_empty());
+
+        running.enqueue_msg(&handler, [Inputs::Local(BlockFetchMessage::Close)]);
+        running.enqueue_msg(
+            &handler,
+            [Inputs::Local(BlockFetchMessage::RequestRange {
+                from: Point::Origin,
+                through: Point::Origin,
+                id: 10,
+                cr: (*out).clone(),
+            })],
+        );
+        running.run(Run::skip_wakeups()).assert_idle();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["ClientDone"]);
+        assert!(running.get_state(&out).unwrap().is_empty());
+    }
+
+    /// The lock-step instance (`N = 1`) is already in `Done` after `ClientDone`.
+    /// A later range is not written; the instance faults that input.
+    #[test]
+    fn fetch_after_client_done_lock_step_terminates() {
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, MuxLog::default());
+        let handler_b = network.stage("bf", lock_step);
+        let mux_client = MuxClient::new(mux_ref, PROTO_N2N_BLOCK_FETCH.erase());
+        let handler = network.wire_up(handler_b, Instance::new(mux_client, Peer::for_test(3001)));
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(BlockFetchMessage::Close),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        running.run(Run::skip_wakeups()).assert_idle();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["ClientDone"]);
+
+        running.enqueue_msg(
+            &handler,
+            [Inputs::Local(BlockFetchMessage::RequestRange {
+                from: Point::Origin,
+                through: Point::Origin,
+                id: 9,
+                cr: (*out).clone(),
+            })],
+        );
+        let blocked = running.run(Run::skip_wakeups());
+        assert!(matches!(blocked, amaru_pure_stage::simulation::Blocked::Terminated(_)), "{blocked:?}");
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["ClientDone"]);
+        assert!(running.get_state(&out).unwrap().is_empty());
+    }
+
     #[test]
     fn third_fetch_while_full_is_sent_when_a_slot_idles() {
         let mut network = SimulationBuilder::default();
@@ -944,6 +1040,65 @@ mod tests {
             vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(2, peer)]
         );
         assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "ClientDone"]);
+    }
+
+    /// Two ranges in flight, a stashed third, `Close`, and a fourth while both
+    /// slots are busy. The stash and the fourth are not sent. After `ClientDone`
+    /// a further range is not sent either.
+    #[test]
+    fn fetch_after_client_done_is_not_sent() {
+        let mut network = SimulationBuilder::default();
+        let out = network.stage("out", async |mut inbox: Vec<Blocks>, msg: Blocks, _eff| {
+            inbox.push(msg);
+            inbox
+        });
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let out = network.wire_up(out, Vec::new());
+        let mux = network.wire_up(mux, MuxLog::default());
+        let handler_b = network.stage("bf", handler);
+        let handler =
+            network.wire_up(handler_b, Handler::for_peer(BLOCKFETCH_PIPELINE_N, mux_ref, Peer::for_test(3001)));
+        let cr = (*out).clone();
+        let range = |id, cr| BlockFetchMessage::RequestRange { from: Point::Origin, through: Point::Origin, id, cr };
+        network
+            .preload(
+                &handler,
+                [
+                    Inputs::Network(HandlerMessage::Registered(PROTO_N2N_BLOCK_FETCH.erase())),
+                    Inputs::Local(range(1, cr.clone())),
+                    Inputs::Local(range(2, cr.clone())),
+                    Inputs::Local(range(3, cr.clone())),
+                    Inputs::Local(BlockFetchMessage::Close),
+                    Inputs::Local(range(4, cr.clone())),
+                ],
+            )
+            .unwrap();
+        let mut running = network.run(test_runtime());
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::default()).assert_sleeping();
+        let peer = Peer::for_test(3001);
+        assert_eq!(running.get_state(&out).cloned().unwrap(), vec![Blocks::NoBlocks(1, peer)]);
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange"]);
+
+        running.enqueue_msg(&handler, [no_blocks_reply()]);
+        running.run(Run::skip_wakeups()).assert_idle();
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(2, peer)]
+        );
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "ClientDone"]);
+
+        running.enqueue_msg(&handler, [Inputs::Local(range(5, cr))]);
+        running.run(Run::skip_wakeups()).assert_idle();
+        assert_eq!(running.get_state(&mux).unwrap().sends, vec!["RequestRange", "RequestRange", "ClientDone"]);
+        assert_eq!(
+            running.get_state(&out).cloned().unwrap(),
+            vec![Blocks::NoBlocks(1, peer), Blocks::NoBlocks(2, peer)]
+        );
     }
 
     #[test]
