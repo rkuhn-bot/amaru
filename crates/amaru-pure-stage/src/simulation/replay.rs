@@ -86,7 +86,7 @@ impl Replay {
                     let name = actual.at_stage();
                     let expected = self.pending_suspend.remove(name);
                     ensure!(
-                        expected.as_ref().is_some_and(|expected| suspend_matches(expected, &actual)),
+                        expected.as_ref().is_some_and(|expected| expected == &actual),
                         "idx {}: stage {} suspended with effect {:?},\nbut expected {:?}",
                         idx,
                         name,
@@ -336,25 +336,11 @@ fn materialize_stage_response(response: StageResponse) -> anyhow::Result<StageRe
     }
 }
 
-/// `poll_stage` records [`TrySend::Queued`] as a placeholder. The traced effect carries the
-/// real admission result, which is what the stage already observed on resume.
-fn suspend_matches(expected: &Effect, actual: &Effect) -> bool {
-    match (expected, actual) {
-        (
-            Effect::TrySend { from, to, msg, .. },
-            Effect::TrySend { from: other_from, to: other_to, msg: other_msg, .. },
-        ) => from == other_from && to == other_to && msg == other_msg,
-        _ => expected == actual,
-    }
-}
-
 /// Recover the actual dyn SendData values in an effect.
 fn deserialize_effect(effect: Effect) -> anyhow::Result<Effect> {
     match effect {
         Effect::Send { from, to, msg } => Ok(Effect::Send { from, to, msg: deserialize_send_data_value(msg)? }),
-        Effect::TrySend { from, to, msg, outcome } => {
-            Ok(Effect::TrySend { from, to, msg: deserialize_send_data_value(msg)?, outcome })
-        }
+        Effect::TrySend { from, to, msg } => Ok(Effect::TrySend { from, to, msg: deserialize_send_data_value(msg)? }),
         Effect::Call { from, to, duration, msg } => {
             Ok(Effect::Call { from, to, duration, msg: deserialize_send_data_value(msg)? })
         }

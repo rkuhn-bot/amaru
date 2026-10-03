@@ -816,10 +816,12 @@ mod tests {
 
     use amaru_kernel::PREPROD_ERA_HISTORY;
     use amaru_pure_stage::{
-        DEFAULT_MAILBOX_SIZE, StageGraph, TraceMatch,
+        DEFAULT_MAILBOX_SIZE, StageGraph, StageResponse, TraceMatch,
         simulation::{Run, SimulationBuilder, SimulationRunning},
-        trace_buffer::TraceBuffer,
-        trace_match::{assert_trace_match_filter, tm_input, tm_resume, tm_send, tm_state_match, tm_try_send_match},
+        trace_buffer::{TraceBuffer, TraceEntry},
+        trace_match::{
+            assert_trace_match_filter, tm_input, tm_resume_try_send, tm_send, tm_state_match, tm_try_send_match,
+        },
     };
     use tokio::runtime::Runtime;
 
@@ -837,6 +839,18 @@ mod tests {
                 src.entry().and_then(|entry| entry.at_stage()).is_some_and(|stage| stage.as_str() != keep)
             }),
             description,
+        )
+    }
+
+    /// Drops resumes other than [`StageResponse::TrySend`]. The admission result is that resume.
+    fn drop_resume_except_try_send() -> TraceMatch<'static> {
+        TraceMatch::Property(
+            Box::new(|src| match src.entry() {
+                Some(TraceEntry::Resume { response: StageResponse::TrySend(_), .. }) => false,
+                Some(TraceEntry::Resume { .. }) => true,
+                _ => false,
+            }),
+            "Resume other than TrySend".to_string(),
         )
     }
 
@@ -963,15 +977,17 @@ mod tests {
             &running,
             &[
                 tm_input(name, &msg),
-                tm_try_send_match(name, "peer-full", TrySend::Full, |sent: &ConnectionMessage| {
+                tm_try_send_match(name, "peer-full", |sent: &ConnectionMessage| {
                     matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })
                 }),
-                tm_try_send_match(name, "peer-open", TrySend::Queued, |sent: &ConnectionMessage| {
+                tm_resume_try_send(name, TrySend::Full),
+                tm_try_send_match(name, "peer-open", |sent: &ConnectionMessage| {
                     matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })
                 }),
+                tm_resume_try_send(name, TrySend::Queued),
                 tm_state_match(name, |state: &Manager| state.connections.len() == 2),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 
@@ -993,15 +1009,17 @@ mod tests {
             &running,
             &[
                 tm_input(name, &msg),
-                tm_try_send_match(name, "peer-full", TrySend::Full, |sent: &ConnectionMessage| {
+                tm_try_send_match(name, "peer-full", |sent: &ConnectionMessage| {
                     matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })
                 }),
-                tm_try_send_match(name, "peer-open", TrySend::Full, |sent: &ConnectionMessage| {
+                tm_resume_try_send(name, TrySend::Full),
+                tm_try_send_match(name, "peer-open", |sent: &ConnectionMessage| {
                     matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })
                 }),
+                tm_resume_try_send(name, TrySend::Full),
                 tm_state_match(name, |state: &Manager| state.connections.len() == 2),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 
@@ -1044,7 +1062,7 @@ mod tests {
                 tm_send(name, "replies", Blocks::NoPeersAvailable(7)),
                 tm_state_match(name, |state: &Manager| state.connections.is_empty()),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 
@@ -1078,18 +1096,18 @@ mod tests {
                 tm_try_send_match(
                     name,
                     "peer-full",
-                    TrySend::Full,
                     |sent: &ConnectionMessage| matches!(sent, ConnectionMessage::NewTip(point, _) if *point == tip),
                 ),
+                tm_resume_try_send(name, TrySend::Full),
                 tm_try_send_match(
                     name,
                     "peer-open",
-                    TrySend::Queued,
                     |sent: &ConnectionMessage| matches!(sent, ConnectionMessage::NewTip(point, _) if *point == tip),
                 ),
+                tm_resume_try_send(name, TrySend::Queued),
                 tm_state_match(name, |state: &Manager| state.connections.len() == 2),
             ],
-            &[tm_resume(), drop_other_stages(name)],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
     }
 }
