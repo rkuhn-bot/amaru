@@ -741,8 +741,7 @@ impl SimulationRunning {
             self.clock.now(self.global_epoch_offset),
         );
 
-        // TrySend's outcome is filled in once admission is decided, and only then traced.
-        if !matches!(effect, Effect::Receive { .. } | Effect::TrySend { .. }) {
+        if !matches!(effect, Effect::Receive { .. }) {
             self.trace_buffer.lock().push_suspend(&effect);
         }
 
@@ -1086,7 +1085,7 @@ impl SimulationRunning {
                     return Some(blocked);
                 }
             }
-            Effect::TrySend { from, to, msg, .. } => {
+            Effect::TrySend { from, to, msg } => {
                 let outcome = if to.is_empty() {
                     tracing::info!(stage = %from, "try_send to blackhole dropped");
                     TrySend::Queued
@@ -1096,13 +1095,6 @@ impl SimulationRunning {
                         Some(data) if data.mailbox_accepts() => TrySend::Queued,
                         Some(_) => TrySend::Full,
                     }
-                };
-                // `push_suspend` serializes a copy; the message is then moved into the mailbox or dropped.
-                let effect = Effect::TrySend { from: from.clone(), to: to.clone(), msg, outcome };
-                self.trace_buffer.lock().push_suspend(&effect);
-                #[expect(clippy::panic)]
-                let Effect::TrySend { to, msg, outcome, .. } = effect else {
-                    panic!("try_send trace was just built");
                 };
                 if outcome == TrySend::Queued && !to.is_empty() {
                     match deliver_message(&mut self.stages, to.clone(), msg) {
@@ -1887,8 +1879,9 @@ mod admission_cleanup {
     fn parked_call() -> (tokio::runtime::Runtime, SimulationRunning, crate::Name, crate::Name) {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         let mut network = SimulationBuilder::default();
-        let callee = network
-            .stage("callee", async |out: StageRef<u8>, msg: u8, eff| {
+        let callee = network.stage_with_mailbox_size(
+            "callee",
+            async |out: StageRef<u8>, msg: u8, eff| {
                 if msg == 0 {
                     eff.send(&out, 1u8).await;
                     eff.wait(Duration::from_secs(10)).await;
@@ -1896,8 +1889,9 @@ mod admission_cleanup {
                     eff.send(&out, msg).await;
                 }
                 out
-            })
-            .with_mailbox_size(1);
+            },
+            1,
+        );
         let callee_ref = callee.sender();
         let caller = network.stage("caller", async |callee: StageRef<u8>, _: u8, eff| {
             let _ = eff.call(&callee, Duration::from_secs(30), |_: StageRef<u8>| 9u8).await;

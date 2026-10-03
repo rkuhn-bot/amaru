@@ -240,43 +240,21 @@ impl<M> Effects<M> {
     /// Admit `msg` into `target`'s bulk mailbox, or report why it was not admitted.
     ///
     /// Returns immediately. The sender is not parked on the destination, so a full mailbox
-    /// does not stop this transition from continuing to other peers. The message is not
+    /// does not stop this transition from continuing other work. The message is not
     /// retried: [`TrySend::Full`] means it will never be admitted later.
     ///
-    /// # Outcomes
+    /// * [`TrySend::Queued`] — admitted. The message is in the destination mailbox, or the
+    ///   destination is the blackhole and the message is dropped, or the capacity is zero and
+    ///   the destination was already waiting to receive.
+    /// * [`TrySend::Full`] — not admitted. The mailbox has no free slot, or a blocking
+    ///   [`send`](Self::send) is already parked on this destination and owns the next slot.
+    /// * [`TrySend::Gone`] — the destination stage does not exist.
     ///
-    /// * [`TrySend::Queued`] — the message is in the destination mailbox (or, when the
-    ///   capacity is zero, it was handed to a destination that was already waiting to receive).
-    /// * [`TrySend::Full`] — not admitted. A parked blocking [`send`](Self::send) ahead of this
-    ///   attempt also yields `Full`: that sender owns the next free slot, on both runtimes.
-    /// * [`TrySend::Gone`] — the destination does not exist. That is a stage that has
-    ///   terminated, or a name that was never registered. Same observation as a failed `send`
-    ///   on the simulation runtime. (A blocking `send` to an unknown name panics on Tokio;
-    ///   `try_send` does not.)
+    /// The result is the effect's response ([`StageResponse::TrySend`]). The traced request
+    /// is the attempt ([`Effect::TrySend`]) and does not carry that result.
     ///
-    /// # What this does not do
-    ///
-    /// * It does not use the priority mailbox, and it does not arm a timeout. Tombstones are
-    ///   not sent this way. A full bulk mailbox is `Full` even when priority ingress has room.
-    /// * A [blackhole](StageRef::blackhole) is `Queued`. `send` already completes and drops
-    ///   the message; there is no mailbox to fill and the destination has not terminated.
-    /// * Sending to this stage itself is an ordinary admission into its own mailbox. The
-    ///   message waits until a later receive. It does not deadlock: a full mailbox is `Full`.
-    /// * A call-reply [`StageRef`] (one that carries a reply extra) cannot be the target.
-    ///
-    /// The simulation trace records a [`Effect::TrySend`] for the attempt, including the
-    /// outcome, and the resume carries the same outcome. Replay compares that effect without
-    /// the outcome: the re-executed stage emits a placeholder, and the recorded entry has the
-    /// result the interpreter filled in.
-    ///
-    /// # Capacity zero
-    ///
-    /// [`tokio::sync::mpsc::channel`](https://docs.rs/tokio/latest/tokio/sync/mpsc/fn.channel.html)
-    /// rejects a buffer of zero. The Tokio runtime opens a one-slot channel and holds that slot
-    /// whenever the stage is not waiting to receive, so admission matches the simulation: the
-    /// destination is idle, the mailbox is empty, and no blocking sender is already parked.
-    /// A parked sender waits on the channel semaphore. A released permit is handed to that
-    /// waiter before [`Sender::try_reserve`](tokio::sync::mpsc::Sender::try_reserve) can take it.
+    /// Capacity zero admits a message only while the destination is waiting to receive, its
+    /// mailbox is empty, and no sender is already parked.
     #[expect(clippy::panic)]
     #[track_caller]
     pub fn try_send<Msg: SendData>(&self, target: &StageRef<Msg>, msg: Msg) -> BoxFuture<'static, TrySend> {
@@ -559,7 +537,27 @@ impl<M> Effects<M> {
     pub async fn stage<Msg, St, F, Fut>(
         &self,
         name: impl AsRef<str>,
+        f: F,
+    ) -> crate::StageBuildRef<Msg, St, (TransitionFactory, CanSupervise)>
+    where
+        F: FnMut(St, Msg, Effects<Msg>) -> Fut + 'static + Send,
+        Fut: Future<Output = St> + 'static + Send,
+        Msg: SendData + serde::de::DeserializeOwned,
+        St: SendData,
+    {
+        self.stage_with_mailbox_size(name, f, self.mailbox_size).await
+    }
+
+    /// Create a stage whose bulk mailbox holds `mailbox_size` messages.
+    ///
+    /// The size is fixed before the handle is returned. Stages this one later creates
+    /// with [`stage`](Self::stage) still use this effect's mailbox size.
+    #[expect(clippy::future_not_send)]
+    pub async fn stage_with_mailbox_size<Msg, St, F, Fut>(
+        &self,
+        name: impl AsRef<str>,
         mut f: F,
+        mailbox_size: usize,
     ) -> crate::StageBuildRef<Msg, St, (TransitionFactory, CanSupervise)>
     where
         F: FnMut(St, Msg, Effects<Msg>) -> Fut + 'static + Send,
@@ -581,7 +579,7 @@ impl<M> Effects<M> {
         let me = StageRef::new(name.clone());
         let trace_buffer = self.trace_buffer.clone();
         let schedule_ids = self.schedule_ids.clone();
-        let mailbox_size = self.mailbox_size;
+        let child_mailbox = self.mailbox_size;
 
         let transition = move |effect: EffectBox| {
             let eff = Effects::new(
@@ -592,7 +590,7 @@ impl<M> Effects<M> {
                 resources,
                 schedule_ids,
                 trace_buffer,
-                mailbox_size,
+                child_mailbox,
             );
             Box::new(move |state: Box<dyn SendData>, msg: Box<dyn SendData>| {
                 let state = state.cast::<St>().expect("internal state type error");
@@ -603,12 +601,7 @@ impl<M> Effects<M> {
             }) as Transition
         };
         let can_supervise = CanSupervise(name.clone());
-        crate::StageBuildRef {
-            name,
-            network: (Box::new(transition), can_supervise),
-            mailbox_size: crate::stage_ref::MailboxSize::new(self.mailbox_size),
-            _ph: PhantomData,
-        }
+        crate::StageBuildRef { name, network: (Box::new(transition), can_supervise), mailbox_size, _ph: PhantomData }
     }
 
     /// Supervise the given stage by sending the tombstone when it terminates.
@@ -636,7 +629,6 @@ impl<M> Effects<M> {
     {
         let StageBuildRef { name, network, mailbox_size, _ph } = stage;
         let (transition, tombstone) = network;
-        let mailbox_size = mailbox_size.get();
 
         airlock_effect(
             &self.effect,
@@ -1028,11 +1020,9 @@ impl StageEffect<Box<dyn SendData>> {
             StageEffect::Send(name, call, msg) => {
                 (StageEffect::Send(name.clone(), call, ()), Effect::Send { from: at_name, to: name, msg })
             }
-            StageEffect::TrySend(name, msg) => (
-                StageEffect::TrySend(name.clone(), ()),
-                // The interpreter overwrites `outcome` before the effect is traced.
-                Effect::TrySend { from: at_name, to: name, msg, outcome: TrySend::Queued },
-            ),
+            StageEffect::TrySend(name, msg) => {
+                (StageEffect::TrySend(name.clone(), ()), Effect::TrySend { from: at_name, to: name, msg })
+            }
             StageEffect::Call(name, duration, msg) => {
                 let id = schedule_ids.next_at(now + duration);
                 let CallExtra::CallFn(msg) = msg else {
@@ -1094,7 +1084,6 @@ pub enum Effect {
         to: Name,
         #[serde(with = "crate::serde::serialize_send_data")]
         msg: Box<dyn SendData>,
-        outcome: TrySend,
     },
     Call {
         from: Name,
@@ -1179,12 +1168,11 @@ impl Effect {
                     "msg": format!("{msg}"),
                 })
             }
-            Effect::TrySend { from, to, msg, outcome } => serde_json::json!({
+            Effect::TrySend { from, to, msg } => serde_json::json!({
                 "type": "try_send",
                 "from": from,
                 "to": to,
                 "msg": format!("{msg}"),
-                "outcome": format!("{outcome:?}"),
             }),
             Effect::Call { from, to, duration, msg } => serde_json::json!({
                 "type": "call",
@@ -1277,8 +1265,8 @@ impl Display for Effect {
             Effect::Send { from, to, msg } => {
                 write!(f, "send {from} -> {to}: {msg}",)
             }
-            Effect::TrySend { from, to, msg, outcome } => {
-                write!(f, "try_send {from} -> {to}: {outcome:?} {msg}")
+            Effect::TrySend { from, to, msg } => {
+                write!(f, "try_send {from} -> {to}: {msg}")
             }
             Effect::Call { from, to, duration, msg } => {
                 write!(f, "call {from} -> {to}: {duration:?} {msg}")
@@ -1318,9 +1306,9 @@ impl Effect {
         Self::Send { from: Name::from(from.as_ref()), to: Name::from(to.as_ref()), msg }
     }
 
-    /// Construct a try-send effect, including the admission result.
-    pub fn try_send(from: impl AsRef<str>, to: impl AsRef<str>, msg: Box<dyn SendData>, outcome: TrySend) -> Self {
-        Self::TrySend { from: Name::from(from.as_ref()), to: Name::from(to.as_ref()), msg, outcome }
+    /// Construct a try-send effect. The admission result is the effect response, not this value.
+    pub fn try_send(from: impl AsRef<str>, to: impl AsRef<str>, msg: Box<dyn SendData>) -> Self {
+        Self::TrySend { from: Name::from(from.as_ref()), to: Name::from(to.as_ref()), msg }
     }
 
     /// Construct a call effect.
@@ -1419,9 +1407,9 @@ impl PartialEq for Effect {
                 }
                 _ => false,
             },
-            Effect::TrySend { from, to, msg, outcome } => match other {
-                Effect::TrySend { from: other_from, to: other_to, msg: other_msg, outcome: other_outcome } => {
-                    from == other_from && to == other_to && msg == other_msg && outcome == other_outcome
+            Effect::TrySend { from, to, msg } => match other {
+                Effect::TrySend { from: other_from, to: other_to, msg: other_msg } => {
+                    from == other_from && to == other_to && msg == other_msg
                 }
                 _ => false,
             },

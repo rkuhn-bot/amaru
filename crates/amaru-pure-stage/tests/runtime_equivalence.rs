@@ -25,7 +25,7 @@ use std::{panic::AssertUnwindSafe, time::Duration};
 use amaru_pure_stage::{
     CallAdmission, Receiver, Sender, StageGraph, StageRef, TrySend, assert_trace_contains,
     simulation::{Run, SimulationBuilder},
-    tm_call, tm_try_send,
+    tm_call, tm_resume_try_send, tm_try_send,
     tokio::TokioBuilder,
     trace_buffer::TraceBuffer,
 };
@@ -1106,8 +1106,9 @@ fn drain_report(rx: &mut Receiver<Report>) -> Vec<Report> {
 fn install_outcomes(
     graph: &mut impl StageGraph,
 ) -> (Sender<u8>, Sender<u8>, Receiver<Report>, StageRef<u8>, StageRef<u8>) {
-    let sink = graph
-        .stage("sink", async |out: StageRef<Report>, msg: u8, eff| {
+    let sink = graph.stage_with_mailbox_size(
+        "sink",
+        async |out: StageRef<Report>, msg: u8, eff| {
             if msg == 0 {
                 eff.send(&out, Report::Holding).await;
                 eff.wait(HOLD).await;
@@ -1115,8 +1116,9 @@ fn install_outcomes(
                 eff.send(&out, Report::Saw(msg)).await;
             }
             out
-        })
-        .with_mailbox_size(1);
+        },
+        1,
+    );
     let sink_ref = sink.sender();
     let probe = graph.stage("probe", async |st: Probe, _: u8, eff| {
         let full = eff.try_send(&st.sink, 3u8).await;
@@ -1162,11 +1164,24 @@ fn try_send_full_blackhole_and_gone(runtime: Runtime) {
             assert_trace_contains(
                 &sim,
                 &[
-                    tm_try_send(&probe_name, &sink_name, 3u8, TrySend::Full),
-                    tm_try_send(&probe_name, "", 4u8, TrySend::Queued),
-                    tm_try_send(&probe_name, "never-registered", 5u8, TrySend::Gone),
+                    tm_try_send(&probe_name, &sink_name, 3u8),
+                    tm_try_send(&probe_name, "", 4u8),
+                    tm_try_send(&probe_name, "never-registered", 5u8),
                 ],
             );
+            // Resumes are dropped by `assert_trace_contains`. The admission result lives there.
+            let expected_resumes = [
+                tm_resume_try_send(&probe_name, TrySend::Full),
+                tm_resume_try_send(&probe_name, TrySend::Queued),
+                tm_resume_try_send(&probe_name, TrySend::Gone),
+            ];
+            let mut found = 0;
+            for entry in &trace {
+                if found < expected_resumes.len() && expected_resumes[found] == *entry {
+                    found += 1;
+                }
+            }
+            assert_eq!(found, expected_resumes.len(), "try_send responses missing from the trace: {trace:?}");
             let mut network = SimulationBuilder::default();
             install_outcomes(&mut network);
             network.replay().run_trace(trace).expect("try_send trace replays");
@@ -1194,8 +1209,9 @@ fn try_send_full_blackhole_and_gone(runtime: Runtime) {
 }
 
 fn install_self(graph: &mut impl StageGraph, size: usize) -> (StageRef<u8>, Sender<u8>, Receiver<Report>) {
-    let stage = graph
-        .stage("self", async |st: SelfSink, msg: u8, eff| {
+    let stage = graph.stage_with_mailbox_size(
+        "self",
+        async |st: SelfSink, msg: u8, eff| {
             if msg == 0 {
                 let first = eff.try_send(&st.me, 1u8).await;
                 let second = eff.try_send(&st.me, 2u8).await;
@@ -1205,8 +1221,9 @@ fn install_self(graph: &mut impl StageGraph, size: usize) -> (StageRef<u8>, Send
                 eff.send(&st.out, Report::Saw(msg)).await;
             }
             st
-        })
-        .with_mailbox_size(size);
+        },
+        size,
+    );
     let me = stage.sender();
     let (out, rx) = graph.output("out", 8);
     graph.wire_up(stage, SelfSink { me: me.clone(), out });
@@ -1254,8 +1271,9 @@ struct Ends2 {
 }
 
 fn install_fan(graph: &mut impl StageGraph) -> Ends2 {
-    let full = graph
-        .stage("full", async |st: Peer, msg: u8, eff| {
+    let full = graph.stage_with_mailbox_size(
+        "full",
+        async |st: Peer, msg: u8, eff| {
             if msg == 0 {
                 eff.send(&st.out, Report::Holding).await;
                 eff.wait(HOLD).await;
@@ -1263,8 +1281,9 @@ fn install_fan(graph: &mut impl StageGraph) -> Ends2 {
                 eff.send(&st.out, Report::Got(st.id)).await;
             }
             st
-        })
-        .with_mailbox_size(1);
+        },
+        1,
+    );
     let other_a = graph.stage("a", async |st: Peer, msg: u8, eff| {
         if msg != 0 {
             eff.send(&st.out, Report::Got(st.id)).await;
@@ -1344,8 +1363,9 @@ fn assert_fan(msgs: &[Report]) {
 fn install_park(
     graph: &mut impl StageGraph,
 ) -> (StageRef<u8>, StageRef<u8>, StageRef<u8>, Sender<u8>, Sender<u8>, Sender<u8>, Receiver<Report>) {
-    let dest = graph
-        .stage("dest", async |out: StageRef<Report>, msg: u8, eff| {
+    let dest = graph.stage_with_mailbox_size(
+        "dest",
+        async |out: StageRef<Report>, msg: u8, eff| {
             if msg == 0 {
                 eff.send(&out, Report::Holding).await;
                 eff.wait(HOLD).await;
@@ -1353,8 +1373,9 @@ fn install_park(
                 eff.send(&out, Report::Saw(msg)).await;
             }
             out
-        })
-        .with_mailbox_size(0);
+        },
+        0,
+    );
     let dest_ref = dest.sender();
     let blocker = graph.stage("blocker", async |st: ParkProbe, _: u8, eff| {
         eff.send(&st.dest, 7u8).await;
@@ -1434,18 +1455,30 @@ fn install_capacity(
     graph: &mut impl StageGraph,
     size: Option<usize>,
 ) -> (StageRef<u8>, StageRef<u8>, Sender<u8>, Sender<u8>, Receiver<Report>) {
-    let mut sink = graph.stage("sink", async |out: StageRef<Report>, msg: u8, eff| {
-        if msg == 0 {
-            eff.send(&out, Report::Holding).await;
-            eff.wait(HOLD).await;
-        } else {
-            eff.send(&out, Report::Saw(msg)).await;
-        }
-        out
-    });
-    if let Some(size) = size {
-        sink = sink.with_mailbox_size(size);
-    }
+    let sink = match size {
+        Some(size) => graph.stage_with_mailbox_size(
+            "sink",
+            async |out: StageRef<Report>, msg: u8, eff| {
+                if msg == 0 {
+                    eff.send(&out, Report::Holding).await;
+                    eff.wait(HOLD).await;
+                } else {
+                    eff.send(&out, Report::Saw(msg)).await;
+                }
+                out
+            },
+            size,
+        ),
+        None => graph.stage("sink", async |out: StageRef<Report>, msg: u8, eff| {
+            if msg == 0 {
+                eff.send(&out, Report::Holding).await;
+                eff.wait(HOLD).await;
+            } else {
+                eff.send(&out, Report::Saw(msg)).await;
+            }
+            out
+        }),
+    };
     let sink_ref = sink.sender();
     let probe = graph.stage("probe", async |st: Probe, _: u8, eff| {
         let outcome = eff.try_send(&st.sink, 9u8).await;
@@ -1501,8 +1534,9 @@ fn mailbox_accepts_n_then_try_send_is_full(runtime: Runtime, size: Option<usize>
 fn install_blocking(
     graph: &mut impl StageGraph,
 ) -> (StageRef<u8>, StageRef<u8>, Sender<u8>, Sender<u8>, Receiver<Report>) {
-    let sink = graph
-        .stage("sink", async |out: StageRef<Report>, msg: u8, eff| {
+    let sink = graph.stage_with_mailbox_size(
+        "sink",
+        async |out: StageRef<Report>, msg: u8, eff| {
             if msg == 0 {
                 eff.send(&out, Report::Holding).await;
                 eff.wait(HOLD).await;
@@ -1510,8 +1544,9 @@ fn install_blocking(
                 eff.send(&out, Report::Saw(msg)).await;
             }
             out
-        })
-        .with_mailbox_size(1);
+        },
+        1,
+    );
     let sink_ref = sink.sender();
     let sender = graph.stage("sender", async |st: ParkProbe, _: u8, eff| {
         eff.send(&st.dest, 7u8).await;
@@ -1586,8 +1621,9 @@ fn install_call_probe(
     mailbox: usize,
     slow_reply: bool,
 ) -> (StageRef<Mail>, StageRef<u8>, Sender<Mail>, Sender<u8>, Receiver<Report>) {
-    let callee = graph
-        .stage("callee", async |st: CalleeSt, msg: Mail, eff| {
+    let callee = graph.stage_with_mailbox_size(
+        "callee",
+        async |st: CalleeSt, msg: Mail, eff| {
             match msg {
                 Mail::Occupy => {
                     eff.send(&st.out, Report::Holding).await;
@@ -1603,8 +1639,9 @@ fn install_call_probe(
                 }
             }
             st
-        })
-        .with_mailbox_size(mailbox);
+        },
+        mailbox,
+    );
     let callee_ref = callee.sender();
     let caller = graph.stage("caller", async |st: CallProbe, _: u8, eff| {
         let result = eff.call_with_admission(&st.callee, CALL_TIMEOUT, Mail::Ping).await;
@@ -1702,17 +1739,20 @@ fn call_timed_out_is_not_retracted(runtime: Runtime) {
 fn install_dynamic(graph: &mut impl StageGraph) -> (Sender<u8>, Receiver<Report>) {
     let root = graph.stage("root", async |out: StageRef<Report>, _: u8, eff| {
         let child = eff
-            .stage("child", async |out: StageRef<Report>, msg: u8, eff| {
-                if msg == 0 {
-                    eff.send(&out, Report::Holding).await;
-                    eff.wait(HOLD).await;
-                } else {
-                    eff.send(&out, Report::Saw(msg)).await;
-                }
-                out
-            })
-            .await
-            .with_mailbox_size(1);
+            .stage_with_mailbox_size(
+                "child",
+                async |out: StageRef<Report>, msg: u8, eff| {
+                    if msg == 0 {
+                        eff.send(&out, Report::Holding).await;
+                        eff.wait(HOLD).await;
+                    } else {
+                        eff.send(&out, Report::Saw(msg)).await;
+                    }
+                    out
+                },
+                1,
+            )
+            .await;
         let child = eff.wire_up(child, out.clone()).await;
         eff.send(&child, 0u8).await;
         eff.wait(SLOT_WAIT).await;
@@ -1738,17 +1778,20 @@ fn dynamic_stage_mailbox_size(runtime: Runtime) {
             let (root_tx, mut rx) = {
                 let root = network.stage("root", async |out: StageRef<Report>, _: u8, eff| {
                     let child = eff
-                        .stage("child", async |out: StageRef<Report>, msg: u8, eff| {
-                            if msg == 0 {
-                                eff.send(&out, Report::Holding).await;
-                                eff.wait(HOLD).await;
-                            } else {
-                                eff.send(&out, Report::Saw(msg)).await;
-                            }
-                            out
-                        })
-                        .await
-                        .with_mailbox_size(1);
+                        .stage_with_mailbox_size(
+                            "child",
+                            async |out: StageRef<Report>, msg: u8, eff| {
+                                if msg == 0 {
+                                    eff.send(&out, Report::Holding).await;
+                                    eff.wait(HOLD).await;
+                                } else {
+                                    eff.send(&out, Report::Saw(msg)).await;
+                                }
+                                out
+                            },
+                            1,
+                        )
+                        .await;
                     let child = eff.wire_up(child, out.clone()).await;
                     eff.send(&child, 0u8).await;
                     eff.wait(SLOT_WAIT).await;
@@ -1789,8 +1832,9 @@ fn dynamic_stage_mailbox_size(runtime: Runtime) {
 fn install_caller_gone(
     graph: &mut impl StageGraph,
 ) -> (StageRef<Mail>, StageRef<RootMsg>, Sender<Mail>, Sender<RootMsg>, Receiver<Report>) {
-    let callee = graph
-        .stage("callee", async |out: StageRef<Report>, msg: Mail, eff| {
+    let callee = graph.stage_with_mailbox_size(
+        "callee",
+        async |out: StageRef<Report>, msg: Mail, eff| {
             match msg {
                 Mail::Occupy => {
                     eff.send(&out, Report::Holding).await;
@@ -1800,8 +1844,9 @@ fn install_caller_gone(
                 Mail::Ping(_) => eff.send(&out, Report::Saw(9)).await,
             }
             out
-        })
-        .with_mailbox_size(1);
+        },
+        1,
+    );
     let callee_ref = callee.sender();
     let root = graph.stage("root", async |mut st: RootState, msg: RootMsg, eff| {
         match msg {
@@ -1933,20 +1978,23 @@ fn install_parked_call_loses_callee(
     let parent = graph.stage("parent", async |mut st: ParkParent, msg: ParentMsg, eff| match msg {
         ParentMsg::Boot => {
             let callee = eff
-                .stage("callee", async |out: StageRef<Report>, msg: Mail, eff| {
-                    match msg {
-                        Mail::Occupy => {
-                            eff.send(&out, Report::Holding).await;
-                            eff.wait(SLOT_WAIT).await;
-                            return eff.terminate().await;
+                .stage_with_mailbox_size(
+                    "callee",
+                    async |out: StageRef<Report>, msg: Mail, eff| {
+                        match msg {
+                            Mail::Occupy => {
+                                eff.send(&out, Report::Holding).await;
+                                eff.wait(SLOT_WAIT).await;
+                                return eff.terminate().await;
+                            }
+                            Mail::Filler(n) => eff.send(&out, Report::Saw(n)).await,
+                            Mail::Ping(_) => eff.send(&out, Report::Saw(9)).await,
                         }
-                        Mail::Filler(n) => eff.send(&out, Report::Saw(n)).await,
-                        Mail::Ping(_) => eff.send(&out, Report::Saw(9)).await,
-                    }
-                    out
-                })
-                .await
-                .with_mailbox_size(1);
+                        out
+                    },
+                    1,
+                )
+                .await;
             let callee = eff.supervise(callee, ParentMsg::Gone);
             let callee = eff.wire_up(callee, st.out.clone()).await;
             eff.send(&st.caller, Kick::Bind(callee.clone())).await;

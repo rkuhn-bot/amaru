@@ -173,18 +173,23 @@ pub fn tm_send<'a>(from: &'a str, to: &'a str, msg: impl SendData) -> TraceMatch
     )
 }
 
-/// Creates a `TraceMatch` for a `TrySend` effect, including the admission result.
-pub fn tm_try_send<'a>(from: &'a str, to: &'a str, msg: impl SendData, outcome: TrySend) -> TraceMatch<'a> {
-    let description = format!("TrySend(from: {:?}, to: {:?}, outcome: {:?}, msg: {:?})", from, to, outcome, msg);
+/// Creates a `TraceMatch` for a `TrySend` effect. The admission result is the resume, not this effect.
+pub fn tm_try_send<'a>(from: &'a str, to: &'a str, msg: impl SendData) -> TraceMatch<'a> {
+    let description = format!("TrySend(from: {:?}, to: {:?}, msg: {:?})", from, to, msg);
     TraceMatch::Property(
         Box::new(move |src| {
-            let Some(Effect::TrySend { from: f, to: t, msg: m, outcome: got }) = src.suspend() else {
+            let Some(Effect::TrySend { from: f, to: t, msg: m }) = src.suspend() else {
                 return false;
             };
-            f.as_str() == from && t.as_str().contains(to) && *got == outcome && msg.test_eq(&**m)
+            f.as_str() == from && t.as_str().contains(to) && msg.test_eq(&**m)
         }),
         description,
     )
+}
+
+/// Creates a `TraceMatch` for the [`StageResponse::TrySend`] that resumes `stage`.
+pub fn tm_resume_try_send(stage: impl AsRef<str>, outcome: TrySend) -> TraceMatch<'static> {
+    TraceEntry::resume(stage, StageResponse::TrySend(outcome)).into()
 }
 
 /// Creates a `TraceMatch` for a `Call` effect.
