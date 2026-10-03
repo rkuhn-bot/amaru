@@ -24,6 +24,8 @@
 //! The responder bit (`0x8000`) selects the direction on the wire. It does not select a
 //! different size: both directions of a mini-protocol share one limit.
 
+use std::time::Duration;
+
 use super::{ProtocolId, RoleT};
 use crate::protocol::KnownProtocol;
 
@@ -64,6 +66,35 @@ const _: () = {
     assert!(KEEP_ALIVE_INGRESS == 1_408);
     assert!(PEER_SHARING_INGRESS == 5_760);
 };
+
+/// Chain-sync defines no agency or idle timeout.
+///
+/// Deferred ingress means the local handler has stopped reading, not that the
+/// peer holds agency. The wait is the longest agency timeout this crate defines,
+/// which is block-fetch's.
+pub const CHAIN_SYNC_INGRESS_DEADLINE: Duration = crate::blockfetch::BLOCKFETCH_AGENCY_TIMEOUT;
+
+/// How long the mux may keep this protocol's ingress deferred before closing the connection.
+///
+/// The value is that protocol's longest agency or idle timeout already defined for it.
+/// Handshake has no agency timer; it uses the mux handshake SDU timer. Chain-sync has
+/// none; it uses [`CHAIN_SYNC_INGRESS_DEADLINE`]. Peer sharing has none; it uses the
+/// outbound share interval. A handler that still will not accept the frame is not
+/// scored as adversarial: the connection is closed and nothing else is.
+pub fn ingress_deadline<R: RoleT>(protocol: ProtocolId<R>) -> Duration {
+    use super::KnownProtocol::*;
+    let Ok(proto) = KnownProtocol::try_from(protocol) else {
+        return CHAIN_SYNC_INGRESS_DEADLINE;
+    };
+    match proto {
+        Handshake => crate::mux::SDU_TIMEOUT_HANDSHAKE,
+        ChainSync => CHAIN_SYNC_INGRESS_DEADLINE,
+        BlockFetch => crate::blockfetch::BLOCKFETCH_AGENCY_TIMEOUT,
+        TxSubmission => crate::tx_submission::DEFAULT_INFLIGHT_FETCH_TIMEOUT.as_duration(),
+        KeepAlive => crate::keepalive::KEEPALIVE_INTERVAL,
+        PeerShare => crate::peer_sharing::PEER_SHARING_INGRESS_DEADLINE,
+    }
+}
 
 /// Ingress buffer for `protocol`, ignoring the responder bit.
 ///

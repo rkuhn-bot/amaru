@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use amaru_kernel::Peer;
 use amaru_observability::{Instrument, debug, debug_span};
 use amaru_ouroboros::ConnectionId;
@@ -127,9 +125,9 @@ impl StageState<State, Initiator> for KeepAliveInitiator {
             let delay = if u16::from(input.cookie) == 0 {
                 // this is only for the very first keep-alive message, which the Haskell node expects within the first
                 // five seconds
-                Duration::from_secs(1)
+                super::KEEPALIVE_FIRST_DELAY
             } else {
-                Duration::from_secs(30)
+                super::KEEPALIVE_INTERVAL
             };
             eff.schedule_after(Inputs::Local(InitiatorMessage::SendKeepAlive), delay).await;
             Ok((None, self))
