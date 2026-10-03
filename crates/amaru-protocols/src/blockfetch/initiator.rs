@@ -499,11 +499,11 @@ pub async fn register_blockfetch_initiator<M: amaru_pure_stage::SendData>(
     let mailbox = blockfetch_handler_mailbox(n);
     let blockfetch = if n.get() == 1 {
         let mux = MuxClient::new(muxer.clone(), PROTO_N2N_BLOCK_FETCH.erase());
-        let blockfetch = eff.stage("blockfetch", lock_step).await.with_mailbox_size(mailbox);
+        let blockfetch = eff.stage_with_mailbox_size("blockfetch", lock_step, mailbox).await;
         let blockfetch = eff.supervise(blockfetch, tombstone);
         eff.wire_up(blockfetch, Instance::new(mux, peer)).await
     } else {
-        let blockfetch = eff.stage("blockfetch", handler).await.with_mailbox_size(mailbox);
+        let blockfetch = eff.stage_with_mailbox_size("blockfetch", handler, mailbox).await;
         let blockfetch = eff.supervise(blockfetch, tombstone);
         eff.wire_up(blockfetch, Handler::for_peer(n, muxer.clone(), peer)).await
     };
@@ -1358,7 +1358,7 @@ mod tests {
             inbox.push(msg);
             inbox
         });
-        let mux = network.stage("mux", gate).with_mailbox_size(0);
+        let mux = network.stage_with_mailbox_size("mux", gate, 0);
         let mux_ref = mux.sender();
         let out = network.wire_up(out, Vec::new());
         let mux = network.wire_up(mux, Gate::default());
