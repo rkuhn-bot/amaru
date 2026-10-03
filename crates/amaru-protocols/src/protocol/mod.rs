@@ -54,30 +54,28 @@ pub const NETWORK_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bits per second.
 pub const MIN_PEER_BANDWIDTH_BPS: u64 = 500_000;
 
-/// How long a sender may wait for the mux to accept `payload_len` bytes into egress.
+/// Node-to-node mini-protocols that share one writer.
 ///
-/// The wait is the time those bytes take at [`MIN_PEER_BANDWIDTH_BPS`], plus
-/// [`NETWORK_SEND_TIMEOUT`] as a floor so a few-byte message is not faulted in
-/// under a second. A peer that cannot take the bytes in that time is slow: the
-/// connection is closed and the peer is not recorded as adversarial.
-pub fn egress_admission_deadline(payload_len: usize) -> Duration {
-    let len = u64::try_from(payload_len).unwrap_or(u64::MAX);
-    let bits = len.saturating_mul(8);
-    let millis = bits.saturating_mul(1000).div_ceil(MIN_PEER_BANDWIDTH_BPS);
-    Duration::from_millis(millis) + NETWORK_SEND_TIMEOUT
-}
-
-#[cfg(test)]
-mod egress_deadline_tests {
-    use super::*;
-
-    #[test]
-    fn floor_covers_an_empty_payload_and_one_second_of_bytes_adds_one_second() {
-        assert_eq!(egress_admission_deadline(0), NETWORK_SEND_TIMEOUT);
-        // 62_500 bytes is 500_000 bits, one second at MIN_PEER_BANDWIDTH_BPS.
-        assert_eq!(egress_admission_deadline(62_500), NETWORK_SEND_TIMEOUT + Duration::from_secs(1));
+/// One lane per [`KnownProtocol`] variant. Adding a variant without counting it
+/// fails the const assert below.
+pub const MAX_PROTOCOLS_PER_CONNECTION: usize = {
+    const fn one(protocol: KnownProtocol) -> usize {
+        match protocol {
+            KnownProtocol::Handshake => 1,
+            KnownProtocol::ChainSync => 1,
+            KnownProtocol::BlockFetch => 1,
+            KnownProtocol::TxSubmission => 1,
+            KnownProtocol::KeepAlive => 1,
+            KnownProtocol::PeerShare => 1,
+        }
     }
-}
+    one(KnownProtocol::Handshake)
+        + one(KnownProtocol::ChainSync)
+        + one(KnownProtocol::BlockFetch)
+        + one(KnownProtocol::TxSubmission)
+        + one(KnownProtocol::KeepAlive)
+        + one(KnownProtocol::PeerShare)
+};
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ProtocolId<T: RoleT>(u16, PhantomData<T>);
@@ -255,6 +253,67 @@ impl<R: RoleT> TryFrom<ProtocolId<R>> for KnownProtocol {
     }
 }
 
+/// Bytes on the wire for `payload` bytes of mini-protocol data.
+///
+/// Each segment carries [`crate::mux::SEGMENT_HEADER_LEN`] extra bytes. An empty
+/// payload contributes nothing.
+fn wire_bytes(payload: usize) -> u64 {
+    if payload == 0 {
+        return 0;
+    }
+    let payload = u64::try_from(payload).unwrap_or(u64::MAX);
+    let segment = u64::try_from(crate::mux::MAX_SEGMENT_SIZE).unwrap_or(u64::MAX);
+    let header = u64::try_from(crate::mux::SEGMENT_HEADER_LEN).unwrap_or(u64::MAX);
+    let segments = payload.div_ceil(segment);
+    payload.saturating_add(segments.saturating_mul(header))
+}
+
+/// Largest unsent buffer one lane can hold: one segment, or one max block when
+/// the lane was empty.
+fn max_unsent_per_lane() -> usize {
+    crate::mux::MAX_SEGMENT_SIZE.max(crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES)
+}
+
+/// Worst-case wire bytes ahead of and including `payload_len`.
+///
+/// One max segment is already in flight. Every registered lane holds
+/// [`max_unsent_per_lane`]. The payload is counted too, so the deadline covers
+/// admission and the drain of the last segment. Round-robin can serve the other
+/// lanes first; this bound does not assume a friendlier order.
+pub fn egress_backlog_wire_bytes(payload_len: usize) -> u64 {
+    let inflight = wire_bytes(crate::mux::MAX_SEGMENT_SIZE);
+    let lanes = wire_bytes(max_unsent_per_lane())
+        .saturating_mul(u64::try_from(MAX_PROTOCOLS_PER_CONNECTION).unwrap_or(u64::MAX));
+    inflight.saturating_add(lanes).saturating_add(wire_bytes(payload_len))
+}
+
+/// How long a sender may wait for the mux to accept `payload_len` bytes.
+///
+/// The connection has one writer. A peer sustaining [`MIN_PEER_BANDWIDTH_BPS`]
+/// drains [`egress_backlog_wire_bytes`] before this payload is both admitted and
+/// written. [`NETWORK_SEND_TIMEOUT`] is added on top so scheduling jitter cannot
+/// fault that peer. A slower peer is dropped and is not recorded as adversarial.
+///
+/// ```text
+/// wire(n) = 0, if n = 0
+///         = n + ceil(n / MAX_SEGMENT_SIZE) * SEGMENT_HEADER_LEN, otherwise
+/// backlog = wire(MAX_SEGMENT_SIZE)
+///         + MAX_PROTOCOLS_PER_CONNECTION * wire(max(MAX_SEGMENT_SIZE, BLOCKFETCH_MAX_BLOCK_WIRE_BYTES))
+///         + wire(payload_len)
+/// deadline = ceil(backlog * 8 * 1000 / MIN_PEER_BANDWIDTH_BPS) milliseconds
+///          + NETWORK_SEND_TIMEOUT
+/// ```
+///
+/// For a 96 KiB block the backlog is 753_783 wire bytes: 12.061 s at 500 kbps,
+/// plus the 1 s floor, 13.061 s. Counting the payload's own transmission and the
+/// last segment's full drain is later than the moment of admission. That slack
+/// is intentional. A tighter round-robin expression was not taken.
+pub fn egress_admission_deadline(payload_len: usize) -> Duration {
+    let millis =
+        egress_backlog_wire_bytes(payload_len).saturating_mul(8).saturating_mul(1000).div_ceil(MIN_PEER_BANDWIDTH_BPS);
+    Duration::from_millis(millis) + NETWORK_SEND_TIMEOUT
+}
+
 // The below are only for information regarding the allocated numbers, Amaru will not implement N2C protocols.
 
 // pub const PROTO_N2C_CHAIN_SYNC: ProtocolId<Initiator> = ProtocolId::<Initiator>(5, PhantomData);
@@ -317,5 +376,32 @@ impl ProtocolId<Initiator> {
 impl ProtocolId<Responder> {
     pub const fn initiator(self) -> ProtocolId<Initiator> {
         ProtocolId(self.0 & !RESPONDER, PhantomData)
+    }
+}
+
+#[cfg(test)]
+mod egress_deadline_tests {
+    use super::*;
+
+    #[test]
+    fn largest_block_worst_case_is_thirteen_seconds() {
+        // wire(65535) = 65543
+        // wire(98304) = 98320
+        // 65543 + 7 * 98320 = 753_783
+        // ceil(753_783 * 8 * 1000 / 500_000) = 12_061 ms, plus the 1 s floor.
+        assert_eq!(egress_backlog_wire_bytes(crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES), 753_783);
+        assert_eq!(
+            egress_admission_deadline(crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES),
+            Duration::from_millis(13_061)
+        );
+    }
+
+    #[test]
+    fn one_max_segment_is_longer_than_the_floor_and_the_backlog_covers_it() {
+        let segment = crate::mux::MAX_SEGMENT_SIZE + crate::mux::SEGMENT_HEADER_LEN;
+        let segment_ms = u64::try_from(segment).unwrap() * 8 * 1000 / MIN_PEER_BANDWIDTH_BPS;
+        assert!(segment_ms > 1_000, "one max segment at 500 kbps takes longer than the 1 s floor");
+        assert!(egress_admission_deadline(1) > Duration::from_millis(segment_ms));
+        assert!(egress_admission_deadline(0) > NETWORK_SEND_TIMEOUT);
     }
 }
