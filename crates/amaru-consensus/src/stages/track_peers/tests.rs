@@ -24,10 +24,11 @@ use amaru_protocols::chainsync::{
     self, ChainSyncInitiatorMsg, HeaderContent, InitiatorMessage, InitiatorMessage::RequestNext, PIPELINE_DEPTH,
 };
 use amaru_pure_stage::{
-    DEFAULT_MAILBOX_SIZE, Effect, Instant, StageRef, TrySend, assert_trace_contains, assert_trace_does_not_contain,
-    assert_trace_match, assert_trace_match_filter,
+    DEFAULT_MAILBOX_SIZE, Effect, Instant, StageRef, StageResponse, TrySend, assert_trace_contains,
+    assert_trace_does_not_contain, assert_trace_match, assert_trace_match_filter,
     simulation::{Blocked, Run, running::OverrideResult},
     tm_send, tm_try_send,
+    trace_buffer::TraceEntry,
 };
 
 fn tm_any_request_next() -> amaru_pure_stage::TraceMatch<'static> {
@@ -211,16 +212,18 @@ fn test_intersect_found_missing_header_sends_done() {
     });
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_load_point("tp-1", current.hash()).into(),
-            tm_try_send("tp-1", "", chainsync::InitiatorMessage::Done, TrySend::Queued),
+            tm_try_send("tp-1", "", chainsync::InitiatorMessage::Done),
             te_state("tp-1", &state).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::WARN, &["chainsync.unknown_intersection_point"]).assert_no_remaining_at([
         Level::DEBUG,
         Level::INFO,
@@ -320,6 +323,7 @@ fn test_reconnect_intersect_then_roll_forward() {
         },
     );
 
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
@@ -329,11 +333,12 @@ fn test_reconnect_intersect_then_roll_forward() {
             te_input("tp-1", &intersect_found).into(),
             te_load_point("tp-1", intersect.hash()).into(),
             te_input("tp-1", &roll_forward).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_send("tp-1", "downstream", new_tip(next_header.point(), intersect)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     assert_trace_does_not_contain(&running, &[tm_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer))]);
     logs.assert_and_remove(Level::INFO, &["chainsync.terminated"])
         .assert_and_remove(Level::INFO, &["chainsync.initialized"])
@@ -427,18 +432,20 @@ fn test_roll_forward_unknown_peer_removes_peer() {
     });
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &state).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle", "Unknown peer"])
@@ -467,13 +474,14 @@ fn test_roll_forward_known_peer_header_already_stored() {
     let received_at = Instant::at_offset(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
     let (running, _guards, mut logs) =
         setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store_with_nonces(slice::from_ref(header)));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_get_nonces("tp-1", header.hash()).into(),
             te_record_header_announcement(
                 "tp-1",
@@ -488,6 +496,7 @@ fn test_roll_forward_known_peer_header_already_stored() {
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["chainsync.roll_forward_done", r#"outcome="already_stored""#])
         .assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
@@ -563,13 +572,14 @@ fn test_roll_forward_stored_header_missing_nonces_revalidates() {
     let received_at = Instant::at_offset(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
     let (running, _guards, mut logs) =
         setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(slice::from_ref(header)));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
@@ -587,6 +597,7 @@ fn test_roll_forward_stored_header_missing_nonces_revalidates() {
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["chainsync.roll_forward_done", r#"outcome="stored""#])
         .assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(
@@ -623,13 +634,14 @@ fn test_roll_forward_known_peer_new_header_forwards_tip() {
 
     let received_at = Instant::at_offset(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
@@ -647,6 +659,7 @@ fn test_roll_forward_known_peer_new_header_forwards_tip() {
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["chainsync.roll_forward_done", r#"outcome="stored""#])
         .assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(
@@ -683,19 +696,21 @@ fn test_roll_forward_accepts_empty_slots_in_the_past() {
     expected.insert_peer(peer, prep.conn_id, header.point(), header.point());
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
             te_send("tp-1", "downstream", new_tip(header.point(), parent.point())).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     assert_trace_does_not_contain(&running, &[tm_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer))]);
     logs.assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(Level::DEBUG, &["chainsync.roll_forward_done", r#"outcome="stored""#])
@@ -791,18 +806,20 @@ fn test_roll_forward_invalid_parent_removes_peer() {
     state.insert_peer(peer, prep.conn_id, parent.point(), parent.point());
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle", "Invalid header parent"])
@@ -827,18 +844,20 @@ fn test_roll_forward_invalid_height_removes_peer() {
     state.insert_peer(peer, prep.conn_id, parent.point(), parent.point());
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle", "Invalid header height"])
@@ -863,18 +882,20 @@ fn test_roll_forward_invalid_point_removes_peer() {
     state.insert_peer(peer, prep.conn_id, parent.point(), parent.point());
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::DEBUG, &["roll_forward.process", r#"peer="127.0.0.1:3001""#])
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle", "Invalid header point"])
@@ -912,13 +933,14 @@ fn test_roll_forward_header_validation_failure_removes_peer() {
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_header_rejected("invalid header").into(),
@@ -926,6 +948,7 @@ fn test_roll_forward_header_validation_failure_removes_peer() {
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
 }
 
 /// Header onset more than two seconds ahead of sim clock → adversarial.
@@ -962,6 +985,7 @@ fn test_roll_forward_header_slot_too_far_future_adversarial() {
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle", "ahead of local time"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
@@ -970,12 +994,13 @@ fn test_roll_forward_header_slot_too_far_future_adversarial() {
             te_clock_suspend("tp-1").into(),
             te_get_best_chain_tip("tp-1").into(),
             te_sync_adoption_is_fast("tp-1", now).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
 }
 
 /// A slot beyond the foreseeable horizon (`EraHistoryError::PastTimeHorizon`) is adversarial.
@@ -998,18 +1023,20 @@ fn test_roll_forward_slot_past_time_horizon_is_adversarial() {
     state.insert_peer(peer, prep.conn_id, parent.point(), parent.point());
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_header_rejected("invalid header").into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::ERROR, &["perf.header.lifecycle", "past time horizon"]).assert_no_remaining_at([
         Level::INFO,
         Level::WARN,
@@ -1048,12 +1075,13 @@ fn test_roll_forward_header_slot_near_future_defers() {
         )
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
     // Clock-skew defers, then sim advances and RecheckLedgerHeight processes the header.
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_clock_suspend("tp-1").into(),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 1, "clock skew deferred"),
             te_input("tp-1", &TrackPeersMsg::RecheckLedgerHeight).into(),
@@ -1062,6 +1090,7 @@ fn test_roll_forward_header_slot_near_future_defers() {
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.is_empty(), "processed after recheck"),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     assert_trace_does_not_contain(&running, &[tm_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer))]);
 }
 
@@ -1101,13 +1130,14 @@ fn test_roll_forward_stake_dist_far_ahead_rejects() {
         .assert_and_remove(Level::DEBUG, &["perf.header.lifecycle", r#"outcome="invalid_header""#])
         .assert_and_remove(Level::ERROR, &["perf.header.lifecycle"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_get_nonces("tp-1", header.hash()).into(),
             te_validate_header("tp-1", header.clone()).into(),
             te_header_rejected("invalid header").into(),
@@ -1115,6 +1145,7 @@ fn test_roll_forward_stake_dist_far_ahead_rejects() {
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
 }
 
 #[test]
@@ -1140,12 +1171,13 @@ fn test_roll_backward_updates_peer() {
     let now = Instant::at_offset(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
     let (running, _guards, mut logs) =
         setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(slice::from_ref(header)));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_load_point("tp-1", current.hash()).into(),
             te_load_header("tp-1", current.hash()).into(),
             te_clock_read("tp-1").into(),
@@ -1153,6 +1185,7 @@ fn test_roll_backward_updates_peer() {
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::INFO, &["chainsync.roll_backward"]).assert_no_remaining_at([
         Level::DEBUG,
         Level::INFO,
@@ -1178,17 +1211,19 @@ fn test_roll_backward_unknown_peer_removes_peer() {
 
     let (running, _guards, mut logs) =
         setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(slice::from_ref(header)));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_load_point("tp-1", current.hash()).into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &state).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::ERROR, &["chainsync.roll_backward_failed", "Unknown peer"])
         .assert_and_remove(Level::INFO, &["chainsync.roll_backward"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
@@ -1211,17 +1246,19 @@ fn test_roll_backward_unknown_point_removes_peer() {
     state.insert_peer(peer, prep.conn_id, Point::Origin, Point::Origin);
 
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_load_point("tp-1", current.hash()).into(),
             te_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer)).into(),
             te_state("tp-1", &expected).into(),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
     logs.assert_and_remove(Level::ERROR, &["chainsync.roll_backward_failed", "Unknown point"])
         .assert_and_remove(Level::INFO, &["chainsync.roll_backward"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
@@ -1389,6 +1426,7 @@ fn test_height_defer_recheck_when_ledger_advances() {
         )
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
 
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
@@ -1407,7 +1445,7 @@ fn test_height_defer_recheck_when_ledger_advances() {
             te_validate_header("tp-1", header.clone()).into(),
             te_store_validated_header("tp-1", header.clone()).into(),
             te_send("tp-1", "downstream", new_tip(header.point(), Point::Origin)).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             tm_state::<TrackPeers>(
                 "tp-1",
                 |s| s.deferred.is_empty() && s.recheck_timer.is_none(),
@@ -1415,6 +1453,7 @@ fn test_height_defer_recheck_when_ledger_advances() {
             ),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
 }
 
 #[test]
@@ -1465,16 +1504,20 @@ fn test_pipelined_headers_after_slot_near_future_defer() {
         .assert_and_remove(Level::DEBUG, &["header.announced", &format!(r#"header_hash="{h2_hash}""#), "rank=1"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
     // First header clock-skew defers; second is FollowUp; recheck may drain both before run ends.
+    // Both headers ask the blackhole for the next header, and both are admitted.
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_input("tp-1", &msg1).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 1, "first clock-skew deferred"),
             te_input("tp-1", &msg2).into(),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 2, "follow-up queued while deferred"),
+            tm_try_send("tp-1", "", RequestNext),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued, TrySend::Queued]);
     assert_trace_does_not_contain(&running, &[tm_send("tp-1", "peer_selection", PeerSelectionMsg::adversarial(peer))]);
 }
 
@@ -1543,13 +1586,14 @@ fn test_pipelined_stake_defer_and_wake_sequence() {
         .assert_and_remove(Level::DEBUG, &["header.announced", &format!(r#"header_hash="{h2_hash}""#), "rank=1"])
         .assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
     // h1 stake-deferred after RN; h2 is FollowUp (peer already deferred); wake reprocesses both in order.
+    let admission = running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg1).into(),
             te_clock_suspend("tp-1").into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             te_get_nonces("tp-1", h1.hash()).into(),
             te_validate_header("tp-1", h1.clone()).into(),
             tm_state::<TrackPeers>("tp-1", |s| s.deferred.len() == 1, "first stake deferred"),
@@ -1567,7 +1611,7 @@ fn test_pipelined_stake_defer_and_wake_sequence() {
             te_validate_header("tp-1", h2.clone()).into(),
             te_store_validated_header("tp-1", h2.clone()).into(),
             te_send("tp-1", "downstream", new_tip(h2.point(), h1.point())).into(),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
+            tm_try_send("tp-1", "", RequestNext),
             tm_state::<TrackPeers>(
                 "tp-1",
                 |s| {
@@ -1581,6 +1625,7 @@ fn test_pipelined_stake_defer_and_wake_sequence() {
             ),
         ],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Queued, TrySend::Queued]);
 }
 
 /// Two headers deferred for the same connection; on recheck the first fails validation and
@@ -1793,6 +1838,26 @@ fn not_try_send() -> amaru_pure_stage::TraceMatch<'static> {
     )
 }
 
+/// The admission result is the resume of `tp-1`, not the `TrySend` effect.
+fn assert_try_send_resumes(trace: &[TraceEntry], outcomes: &[TrySend]) {
+    let got: Vec<TrySend> = trace
+        .iter()
+        .filter_map(|entry| match entry {
+            TraceEntry::Resume { stage, response: StageResponse::TrySend(outcome) } if stage.as_str() == "tp-1" => {
+                Some(*outcome)
+            }
+            TraceEntry::Resume { .. }
+            | TraceEntry::Suspend(_)
+            | TraceEntry::Clock(_)
+            | TraceEntry::Input { .. }
+            | TraceEntry::State { .. }
+            | TraceEntry::Terminated { .. }
+            | TraceEntry::InvalidBytes(..) => None,
+        })
+        .collect();
+    assert_eq!(got, outcomes, "try_send responses missing or reordered: {trace:?}");
+}
+
 fn not_admission() -> amaru_pure_stage::TraceMatch<'static> {
     amaru_pure_stage::TraceMatch::Property(
         Box::new(|src| {
@@ -1835,10 +1900,9 @@ fn full_on_a_new_request_counts_one() {
     let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
     assert_eq!(owed(state, ready.conn_id), Some(1));
     assert!(state.request_retry_armed);
-    assert_trace_contains(
-        &opened.running,
-        &[tm_try_send("tp-1", "handler", RequestNext, TrySend::Full), tm_retry_timeout()],
-    );
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_trace_contains(&opened.running, &[tm_try_send("tp-1", "handler", RequestNext), tm_retry_timeout()]);
+    assert_try_send_resumes(&admission, &[TrySend::Full]);
 }
 
 /// Retrying a slot that is already counted does not count it again.
@@ -1856,11 +1920,13 @@ fn full_retry_of_a_counted_slot_stays_at_one() {
 
     let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
     assert_eq!(owed(state, ready.conn_id), Some(1));
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match_filter(
         &opened.running,
-        &[tm_try_send("tp-1", "handler", RequestNext, TrySend::Full), tm_retry_timeout()],
+        &[tm_try_send("tp-1", "handler", RequestNext), tm_retry_timeout()],
         &[not_admission()],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Full]);
 }
 
 /// A retry the handler accepts clears the one owed slot and offers exactly one `RequestNext`.
@@ -1887,11 +1953,9 @@ fn queued_retry_clears_the_counter_with_one_request_next() {
     let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
     assert_eq!(owed(state, ready.conn_id), Some(0));
     assert!(!state.request_retry_armed);
-    assert_trace_match_filter(
-        &opened.running,
-        &[tm_try_send("tp-1", "handler", RequestNext, TrySend::Queued)],
-        &[not_try_send()],
-    );
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_trace_match_filter(&opened.running, &[tm_try_send("tp-1", "handler", RequestNext)], &[not_try_send()]);
+    assert_try_send_resumes(&admission, &[TrySend::Queued]);
 }
 
 /// Further misses once the counter is at the pipeline depth are not counted.
@@ -1942,13 +2006,12 @@ fn other_peer_keeps_moving_while_one_handler_is_full() {
     assert_eq!(owed(state, conn_b), Some(0));
     assert_eq!(current_point(state, conn_a), Some(headers[1].point()));
     assert_eq!(current_point(state, conn_b), Some(headers[1].point()));
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(
         &opened.running,
-        &[
-            tm_try_send("tp-1", "handler", RequestNext, TrySend::Full),
-            tm_try_send("tp-1", "", RequestNext, TrySend::Queued),
-        ],
+        &[tm_try_send("tp-1", "handler", RequestNext), tm_try_send("tp-1", "", RequestNext)],
     );
+    assert_try_send_resumes(&admission, &[TrySend::Full, TrySend::Queued]);
 }
 
 /// `Gone` keeps the miss until `Terminated` drops the session and its counter.
@@ -1964,7 +2027,9 @@ fn gone_handler_is_purged_by_terminated() {
     let state = opened.running.get_state(&opened.tp).expect("idle after a gone send");
     assert_eq!(owed(state, ready.conn_id), Some(1));
     assert!(state.request_retry_armed);
-    assert_trace_contains(&opened.running, &[tm_try_send("tp-1", "gone-handler", RequestNext, TrySend::Gone)]);
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_trace_contains(&opened.running, &[tm_try_send("tp-1", "gone-handler", RequestNext)]);
+    assert_try_send_resumes(&admission, &[TrySend::Gone]);
 
     opened.running.enqueue_msg(
         &opened.tp,
@@ -2034,7 +2099,9 @@ fn handler_drain_refills_the_window_to_pipeline_depth() {
     let state = opened.running.get_state(&opened.tp).expect("window refilled");
     assert_eq!(owed(state, ready.conn_id), Some(0));
     assert!(!state.request_retry_armed);
-    let queued: Vec<_> =
-        (0..PIPELINE_DEPTH).map(|_| tm_try_send("tp-1", "handler", RequestNext, TrySend::Queued)).collect();
+    let queued: Vec<_> = (0..PIPELINE_DEPTH).map(|_| tm_try_send("tp-1", "handler", RequestNext)).collect();
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match_filter(&opened.running, &queued, &[not_try_send()]);
+    let outcomes: Vec<_> = (0..PIPELINE_DEPTH).map(|_| TrySend::Queued).collect();
+    assert_try_send_resumes(&admission, &outcomes);
 }
