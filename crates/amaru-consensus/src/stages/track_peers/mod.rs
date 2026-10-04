@@ -166,7 +166,6 @@ pub struct TrackPeers {
     /// Single outstanding self-schedule for height/clock deferred rechecks.
     recheck_timer: Option<ScheduleId>,
     /// `REQUEST_RETRY_SLOT` is armed while any session still owes a `RequestNext`.
-    #[serde(default)]
     request_retry_armed: bool,
     /// Last time a near-now header was compared with the adopted tip.
     last_chain_lag_check: Option<Instant>,
@@ -186,14 +185,11 @@ enum PerPeer {
         highest: Point,
         /// `RequestNext`s a live handler has not accepted. Capped at [`PIPELINE_DEPTH`].
         /// Dropped when `try_send` returns [`TrySend::Gone`].
-        #[serde(default)]
         owed: u8,
         /// Last handler for this session, used to retry owed `RequestNext`s.
-        #[serde(default)]
         handler: Option<StageRef<chainsync::InitiatorMessage>>,
         /// The last `try_send` to `handler` returned [`TrySend::Gone`].
         /// Further offers to that same handler are skipped.
-        #[serde(default)]
         handler_gone: bool,
     },
 }

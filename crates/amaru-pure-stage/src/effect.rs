@@ -1144,13 +1144,8 @@ pub enum Effect {
         initial_state: Box<dyn SendData>,
         #[serde(with = "crate::serde::serialize_send_data")]
         tombstone: Box<dyn SendData>,
-        #[serde(default = "default_mailbox_size")]
         mailbox_size: usize,
     },
-}
-
-fn default_mailbox_size() -> usize {
-    crate::DEFAULT_MAILBOX_SIZE
 }
 
 impl Effect {
@@ -1367,7 +1362,7 @@ impl Effect {
             name: Name::from(name.as_ref()),
             initial_state,
             tombstone: tombstone.unwrap_or_else(|| SendDataValue::boxed(&CanSupervise(Name::from(name.as_ref())))),
-            mailbox_size: default_mailbox_size(),
+            mailbox_size: crate::DEFAULT_MAILBOX_SIZE,
         }
     }
 

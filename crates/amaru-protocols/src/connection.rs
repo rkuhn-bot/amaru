@@ -136,14 +136,12 @@ struct Established {
     ///
     /// Flushed with `try_send` at the start of the next transition. A newer tip replaces the
     /// stored one. `Queued` or `Gone` drops it; `Full` keeps it for the transition after that.
-    #[serde(default)]
     pending_tip: Option<(Point, TraceContext)>,
     /// One `PeerSharingMessage::Start` the peer-sharing child did not accept.
     ///
     /// Flushed with `try_send` at the start of the next transition. A newer Start replaces the
     /// stored one. `Queued` or `Gone` drops it; `Full` keeps it. Cleared when that child is
     /// stopped or dies.
-    #[serde(default)]
     pending_share: Option<PeerSharingMessage>,
 }
 

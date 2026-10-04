@@ -181,7 +181,6 @@ pub struct FetchBlocks {
     /// Confirmations arrive once per connection. Peers chosen together share this instant.
     /// A widen records its own clock. A broadcast, which names nobody up front, is absent here
     /// and falls back to [`Self::fetch_started_at`].
-    #[serde(default)]
     asked_at: BTreeMap<Peer, amaru_pure_stage::Instant>,
     /// Which [`FETCH_WIDEN_DELAYS`] entry is armed in [`Self::widen`], or the length of that array once all have fired.
     widen_index: u8,
