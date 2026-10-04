@@ -55,6 +55,11 @@ on_receive!(Idle as ServerIdleIn {
     ClientDone => { Send<ToMux, WantNext> => Done }
 });
 on_receive!(Done as DoneIn {});
+on_receive!(Done, Stay => Idle);
+
+/// The spec edge for `ClientDone` ends in [`Done`]. The handler is still registered,
+/// so this token continues that session back to [`Idle`].
+struct Stay;
 
 /// Range of points to fetch, newest first, at least one point.
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
@@ -262,9 +267,9 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                 }
             }
             Ok(ServerIdleIn::ClientDone(done)) => {
-                // Remainder dest is spec Done; live token restarts Idle on this mux registration.
-                let _: Done = idle.receive(&done, eff).send(&mux, WantNext).await.finish();
-                initial_state::<Idle>().into()
+                // Spec remainder is Done. The handler is still registered, so Stay continues to Idle.
+                let done_state: Done = idle.receive(&done, eff.clone()).send(&mux, WantNext).await.finish();
+                done_state.receive(&Stay, eff).finish().into()
             }
             Err(Inputs::Internal(Internal::Timeout)) => idle.into(),
             Err(mail) => return invalid(peer, idle.name(), mail, eff).await,

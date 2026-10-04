@@ -69,17 +69,37 @@ const INGRESS_RETRY_SLOT: u64 = 1;
 
 /// One coalesced retry when the writer returned [`TrySend::Full`].
 ///
-/// A payload waiting on the segment cap is admitted in the transition that hands
-/// the blocking segment to the writer, not on this timer.
+/// Bytes still waiting for free space in the egress buffer are copied in the
+/// transition that hands a segment to the writer, not on this timer.
 const EGRESS_RETRY_SLOT: u64 = 2;
 
-/// Room for `payload` on top of this lane's unsent bytes.
+/// Copy pending bytes into `outgoing` until it holds one segment.
 ///
-/// A segment holds up to [`MAX_SEGMENT_SIZE`] bytes and can contain several messages.
-/// The lane queues at most one segment, or one larger payload when it is empty.
-/// Bytes already handed to the writer are not in `queued`.
-fn egress_has_room(queued: usize, payload: usize) -> bool {
-    queued == 0 || queued.saturating_add(payload) <= MAX_SEGMENT_SIZE
+/// A message that does not fit is split. [`Sent`](crate::mux::Sent) for that
+/// message is returned only once its last byte has been copied. `outgoing`
+/// never grows past [`MAX_SEGMENT_SIZE`].
+fn fill_egress(outgoing: &mut BytesMut, pending: &mut VecDeque<DeferredSend>) -> Vec<StageRef<Sent>> {
+    let mut done = Vec::new();
+    while outgoing.len() < MAX_SEGMENT_SIZE {
+        let (chunk, finished) = {
+            let Some(front) = pending.front_mut() else {
+                break;
+            };
+            let room = MAX_SEGMENT_SIZE - outgoing.len();
+            let n = room.min(front.bytes.len());
+            if n == 0 {
+                break;
+            }
+            let chunk = front.bytes.split_to(n);
+            (chunk, front.bytes.is_empty())
+        };
+        outgoing.extend_from_slice(&chunk);
+        if finished && let Some(item) = pending.pop_front() {
+            done.push(item.sent);
+        }
+    }
+    debug_assert!(outgoing.len() <= MAX_SEGMENT_SIZE);
+    done
 }
 
 const HEADER_LEADING_EDGE: NonZeroUsize = NonZeroUsize::MIN;
@@ -361,10 +381,12 @@ pub enum MuxMessage {
     Buffer(ProtocolId<Erased>, usize),
     /// Send the given message on the protocol ID.
     ///
-    /// [`Sent`] means these bytes are in the lane's unsent egress ([`egress_has_room`]).
-    /// A segment handed to the writer can contain bytes of several messages. A payload
-    /// that does not fit waits, in arrival order. The mux does not block on the writer
-    /// to answer this call.
+    /// [`Sent`] is delivered once the last byte of this message has been copied
+    /// into the lane's egress buffer. That buffer holds at most one segment
+    /// ([`MAX_SEGMENT_SIZE`]). Bytes already in it can belong to several messages,
+    /// and one message can be split across segments. The rest of a message waits,
+    /// in arrival order, until a segment leaves room. The mux does not block on
+    /// the writer to answer this call.
     Send(ProtocolId<Erased>, NonEmptyBytes, StageRef<Sent>),
     /// internal message coming from the TCP stream reader
     FromNetwork(Timestamp, ProtocolId<Erased>, NonEmptyBytes),
@@ -380,8 +402,8 @@ pub enum MuxMessage {
     IngressRetry,
     /// Retry a segment the writer returned [`TrySend::Full`] for.
     ///
-    /// Payloads deferred on the segment cap are not woken by this timer. They are
-    /// admitted in the transition that hands a segment to the writer.
+    /// Bytes waiting for room in the egress buffer are not woken by this timer.
+    /// They are copied in the transition that hands a segment to the writer.
     EgressRetry,
 }
 
@@ -501,10 +523,7 @@ async fn handle_msg(
         MuxMessage::Buffer(proto_id, limit) => muxer.buffer(proto_id, limit),
         MuxMessage::Send(proto_id, bytes, sent) => {
             trace!(protocols::mux::protocol::SEND, proto_id = proto_id.to_string(), bytes = bytes.len().get() as u64);
-            if let Some(sent) = muxer.accept_or_defer(proto_id, bytes.into(), sent) {
-                // Answer in this transition. The writer is a later `try_send`.
-                eff.send(&sent, Sent).await;
-            }
+            muxer.defer_send(proto_id, bytes.into(), sent);
             pump(muxer, sending, writer, eff).await?;
             muxer.sync_egress_retry(eff).await;
             Ok(())
@@ -550,11 +569,12 @@ async fn handle_msg(
     }
 }
 
-/// Admit deferred payloads, then hand at most one segment to the writer.
+/// Fill each lane's egress buffer, then hand at most one segment to the writer.
 ///
-/// `TrySend::Queued` frees room on that lane. Payloads that now fit are admitted
-/// in this same transition, and their `Sent` replies are delivered here. The
-/// one-second [`MuxMessage::EgressRetry`] is not used for that wait.
+/// [`Sent`] is delivered here once a message's last byte has been copied into
+/// that buffer. `TrySend::Queued` frees the buffer, and bytes that were waiting
+/// are copied in this same transition. [`MuxMessage::EgressRetry`] is not used
+/// for that wait.
 ///
 /// `TrySend::Full` leaves the segment queued and does not set `sending`: the
 /// one-outstanding-SDU invariant broke, and [`MuxMessage::EgressRetry`] tries
@@ -565,14 +585,13 @@ async fn pump(
     writer: &StageRef<OutgoingSdu>,
     eff: &Effects<MuxMessage>,
 ) -> anyhow::Result<()> {
-    muxer.admit_deferred(eff).await;
+    muxer.feed_egress(eff).await;
     if *sending {
         return Ok(());
     }
     if let Emit::Queued = muxer.try_emit(writer, eff).await? {
         *sending = true;
-        // Room freed on this lane. Deliver `Sent` before the transition returns.
-        muxer.admit_deferred(eff).await;
+        muxer.feed_egress(eff).await;
     }
     Ok(())
 }
@@ -730,10 +749,8 @@ pub struct Muxer {
     /// `INGRESS_RETRY_SLOT` is armed. Replaced only after it fires or is cleared.
     ingress_retry_armed: bool,
     /// `EGRESS_RETRY_SLOT` is armed.
-    #[serde(default)]
     egress_retry_armed: bool,
     /// The writer returned [`TrySend::Full`] for a segment that is still queued.
-    #[serde(default)]
     writer_blocked: bool,
 }
 
@@ -833,17 +850,10 @@ impl Muxer {
         }
     }
 
-    /// Accept `bytes` into unsent egress, or queue the reply until [`egress_has_room`].
+    /// Queue `bytes` behind anything already waiting on this protocol.
     ///
-    /// Returns the reply stage when the bytes were appended in this call. A `None`
-    /// result is still in `deferred`, behind anything that arrived earlier on this
-    /// protocol. Nothing is appended twice.
-    fn accept_or_defer(
-        &mut self,
-        proto_id: ProtocolId<Erased>,
-        bytes: Bytes,
-        sent: StageRef<Sent>,
-    ) -> Option<StageRef<Sent>> {
+    /// [`feed_egress`](Self::feed_egress) copies what fits into the bounded buffer.
+    fn defer_send(&mut self, proto_id: ProtocolId<Erased>, bytes: Bytes, sent: StageRef<Sent>) {
         let _span = debug_span!(
             protocols::mux::protocol::OUTGOING,
             proto_id = format!("{}", proto_id),
@@ -852,36 +862,22 @@ impl Muxer {
         let _guard = _span.enter();
 
         trace!(protocols::mux::protocol::ENQUEUE, proto_id = proto_id.to_string(), bytes = bytes.len() as u64);
-        #[allow(clippy::expect_used)]
-        let proto = self
-            .protocols
-            .get_mut(&proto_id)
-            .ok_or_else(|| anyhow::anyhow!("protocol {} not registered", proto_id))
-            .expect("internal error");
-        if !proto.deferred.is_empty() || !egress_has_room(proto.outgoing.len(), bytes.len()) {
-            proto.deferred.push_back(DeferredSend { bytes, sent });
-            return None;
-        }
-        proto.outgoing.extend_from_slice(&bytes);
-        Some(sent)
+        self.proto_mut(proto_id).deferred.push_back(DeferredSend { bytes, sent });
     }
 
-    /// Pop the next deferred payload that fits this protocol's unsent egress.
-    fn take_admissible(&mut self, proto_id: ProtocolId<Erased>) -> Option<DeferredSend> {
-        let proto = self.protocols.get_mut(&proto_id)?;
-        let next = proto.deferred.front()?;
-        if !egress_has_room(proto.outgoing.len(), next.bytes.len()) {
-            return None;
-        }
-        proto.deferred.pop_front()
-    }
-
-    /// Move deferred payloads into unsent egress, registration order, FIFO per protocol.
-    async fn admit_deferred(&mut self, eff: &Effects<MuxMessage>) {
+    /// Copy waiting bytes into each lane's egress buffer, registration order.
+    ///
+    /// Delivers [`Sent`] once a message's last byte is in that buffer.
+    async fn feed_egress(&mut self, eff: &Effects<MuxMessage>) {
         let order = self.outgoing.clone();
         for proto_id in order {
-            while let Some(DeferredSend { bytes, sent }) = self.take_admissible(proto_id) {
-                self.proto_mut(proto_id).outgoing.extend_from_slice(&bytes);
+            let done = {
+                let Some(proto) = self.protocols.get_mut(&proto_id) else {
+                    continue;
+                };
+                fill_egress(&mut proto.outgoing, &mut proto.deferred)
+            };
+            for sent in done {
                 eff.send(&sent, Sent).await;
             }
         }
@@ -947,7 +943,7 @@ impl Muxer {
     }
 
     async fn sync_egress_retry(&mut self, eff: &Effects<MuxMessage>) {
-        // Deferred payloads wake up when a segment is handed off, not on a timer.
+        // Waiting bytes are copied when a segment is handed off, not on a timer.
         let need = self.writer_blocked;
         if need && !self.egress_retry_armed {
             eff.set_timeout_at(EGRESS_RETRY_SLOT, crate::protocol::NETWORK_SEND_TIMEOUT, MuxMessage::EgressRetry).await;
@@ -1148,7 +1144,10 @@ impl Muxer {
 struct PerProto {
     incoming: BytesMut,
     outgoing: BytesMut,
-    /// Payloads waiting until [`egress_has_room`], in arrival order.
+    /// Bytes not yet copied into [`Self::outgoing`], in arrival order.
+    ///
+    /// A front message may already have had a prefix copied. [`Sent`] stays here
+    /// until that message's last byte is in the buffer.
     deferred: VecDeque<DeferredSend>,
     handler: StageRef<HandlerMessage>,
     wanted: usize,
@@ -1530,14 +1529,14 @@ mod tests {
         let cr5 = send_msg(running, 105, 5, 66000, PROTO_N2N_BLOCK_FETCH);
 
         resume_send(running);
-        // Each protocol's egress was empty, so these are accepted while the writer is busy.
-        // `Sent` means "in the segment cap", which is before the bytes are written.
+        // Messages that fit are `Sent` while the writer is busy. A message larger than one
+        // segment is `Sent` only after the handoff that frees room for its last byte.
         assert_respond(running, &cr2);
         assert_respond(running, &cr3);
-        assert_respond(running, &cr4);
-        assert_respond(running, &cr5);
         assert_and_resume_send(running, &[(65535, 5)], PROTO_N2N_BLOCK_FETCH);
+        assert_respond(running, &cr5);
         assert_and_resume_send(running, &[(65535, 4)], PROTO_HANDSHAKE);
+        assert_respond(running, &cr4);
         assert_and_resume_send(running, &[(1024, 2), (10, 3)], PROTO_TEST);
         assert_and_resume_send(running, &[(465, 5)], PROTO_N2N_BLOCK_FETCH);
         assert_and_resume_send(running, &[(465, 4)], PROTO_HANDSHAKE);
@@ -2491,20 +2490,54 @@ mod tests {
     }
 
     #[test]
-    fn oversized_payload_is_accepted_only_when_egress_is_empty() {
-        with_writer(|running, mux, _writer, sent_a, sent_b, _sent_c| {
+    fn message_larger_than_the_buffer_is_split_and_sent_after_its_last_byte() {
+        with_writer(|running, mux, writer, sent_a, sent_b, _sent_c| {
             let big = MAX_SEGMENT_SIZE + 64;
-            running.enqueue_msg(mux, [MuxMessage::Send(PROTO_TEST.erase(), payload(9, big), StageRef::clone(sent_a))]);
+            running.enqueue_msg(mux, [MuxMessage::Send(PROTO_TEST.erase(), payload(1, 1), StageRef::clone(sent_a))]);
             assert!(matches!(drive_steps(running, 16), Blocked::Busy { .. }));
             assert!(seen(running, sent_a));
-            assert_eq!(proto(running, mux, PROTO_TEST.erase()).outgoing.len(), big - MAX_SEGMENT_SIZE);
-            assert!(proto(running, mux, PROTO_TEST.erase()).deferred.is_empty());
+            assert!(running.get_state(mux).unwrap().sending);
 
-            running.enqueue_msg(mux, [MuxMessage::Send(PROTO_TEST.erase(), payload(8, big), StageRef::clone(sent_b))]);
+            running.enqueue_msg(mux, [MuxMessage::Send(PROTO_TEST.erase(), payload(9, big), StageRef::clone(sent_b))]);
             assert!(matches!(drive_steps(running, 8), Blocked::Busy { .. }));
+            assert!(!seen(running, sent_b), "Sent waits for the last byte");
+            let pp = proto(running, mux, PROTO_TEST.erase());
+            assert_eq!(pp.outgoing.len(), MAX_SEGMENT_SIZE);
+            assert!(pp.outgoing.iter().all(|byte| *byte == 9));
+            assert_eq!(pp.deferred.len(), 1);
+            assert_eq!(pp.deferred[0].bytes.len(), 64);
+
+            running.complete_external(writer, Ok::<(), SendError>(()));
+            assert!(matches!(drive_steps(running, 16), Blocked::Busy { .. }));
+            assert!(seen(running, sent_b), "Sent follows the last byte into the buffer");
+            let pp = proto(running, mux, PROTO_TEST.erase());
+            assert!(pp.deferred.is_empty());
+            assert_eq!(pp.outgoing.len(), 64);
+            assert!(pp.outgoing.len() <= MAX_SEGMENT_SIZE);
+        });
+    }
+
+    #[test]
+    fn egress_buffer_never_exceeds_one_segment() {
+        with_writer(|running, mux, _writer, sent_a, sent_b, sent_c| {
+            running.enqueue_msg(mux, [MuxMessage::Send(PROTO_TEST.erase(), payload(1, 1), StageRef::clone(sent_a))]);
+            assert!(matches!(drive_steps(running, 16), Blocked::Busy { .. }));
+            let big = MAX_SEGMENT_SIZE * 3;
+            running.enqueue_msg(
+                mux,
+                [
+                    MuxMessage::Send(PROTO_TEST.erase(), payload(2, big), StageRef::clone(sent_b)),
+                    MuxMessage::Send(PROTO_TEST.erase(), payload(3, big), StageRef::clone(sent_c)),
+                ],
+            );
+            assert!(matches!(drive_steps(running, 8), Blocked::Busy { .. }));
+            let pp = proto(running, mux, PROTO_TEST.erase());
+            assert!(pp.outgoing.len() <= MAX_SEGMENT_SIZE);
+            assert_eq!(pp.outgoing.len(), MAX_SEGMENT_SIZE);
             assert!(!seen(running, sent_b));
-            assert_eq!(proto(running, mux, PROTO_TEST.erase()).deferred.len(), 1);
-            assert_eq!(proto(running, mux, PROTO_TEST.erase()).outgoing.len(), big - MAX_SEGMENT_SIZE);
+            assert!(!seen(running, sent_c));
+            let waiting: usize = pp.deferred.iter().map(|item| item.bytes.len()).sum();
+            assert_eq!(waiting, big * 2 - MAX_SEGMENT_SIZE);
         });
     }
 
@@ -2658,7 +2691,7 @@ mod tests {
             let before = running.now();
             running.complete_external(writer, Ok::<(), SendError>(()));
             assert!(matches!(drive_steps(running, 16), Blocked::Busy { .. }));
-            assert!(seen(running, sent_c), "Sent is delivered when the segment is handed off");
+            assert!(seen(running, sent_c), "Sent is delivered once the last byte is in the buffer");
             assert_eq!(running.now(), before, "admission must not wait for the egress retry timer");
             assert!(proto(running, mux, PROTO_TEST.erase()).deferred.is_empty());
             assert!(!running.get_state(mux).expect("mux").muxer.egress_retry_armed);
@@ -2791,12 +2824,14 @@ mod tests {
             send_now(running, mux, sent, bf, 1, 8);
             assert!(running.get_state(mux).expect("mux").sending);
             send_now(running, mux, sent, bf, 2, 90_112);
-            assert_eq!(proto(running, mux, bf).outgoing.len(), 90_112);
+            let queued = proto(running, mux, bf);
+            assert_eq!(queued.outgoing.len(), MAX_SEGMENT_SIZE);
+            assert_eq!(queued.deferred.iter().map(|item| item.bytes.len()).sum::<usize>(), 90_112 - MAX_SEGMENT_SIZE);
 
             let t0 = running.now();
             running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, 4) }]);
             settle(running);
-            assert_eq!(proto(running, mux, bf).deferred.len(), 1);
+            assert!(proto(running, mux, bf).deferred.len() >= 1);
             assert!(!running.get_state(mux).expect("mux").muxer.egress_retry_armed);
 
             let waited =
@@ -2807,64 +2842,97 @@ mod tests {
         });
     }
 
-    /// Bytes already in the writer when the caller's block arrives.
-    ///
-    /// The queued 96 KiB block cannot start until this segment finishes, and the
-    /// caller's block is admitted only once that block's first segment has also
-    /// drained. At 500 kbps the wait is 1.625 s. The deadline is 2.574 s (margin
-    /// 949 ms). At 250 kbps the same bytes take 3.250 s and the call times out.
-    const IN_FLIGHT_BEFORE_BLOCK: usize = 36_000;
-
-    fn queue_block_behind_inflight(
+    /// One short segment is already in the writer. The caller's block is the only
+    /// message still to buffer, so its last byte enters when that segment drains.
+    fn prime_inflight(
         running: &mut SimulationRunning,
         mux: &StageStateRef<MuxMessage, State>,
         sent: &StageStateRef<Sent, ()>,
         proto_id: ProtocolId<Erased>,
-        block: usize,
     ) {
-        send_now(running, mux, sent, proto_id, 1, IN_FLIGHT_BEFORE_BLOCK);
+        send_now(running, mux, sent, proto_id, 1, 8);
         assert!(running.get_state(mux).expect("mux").sending);
         assert_eq!(proto(running, mux, proto_id).outgoing.len(), 0);
-        send_now(running, mux, sent, proto_id, 2, block);
-        assert_eq!(proto(running, mux, proto_id).outgoing.len(), block);
-        assert!(running.get_state(mux).expect("mux").sending);
+        assert!(proto(running, mux, proto_id).deferred.is_empty());
     }
 
     #[test]
-    fn honest_peer_at_500_kbps_admits_the_lanes_own_block() {
+    fn honest_peer_at_500_kbps_admits_when_nothing_is_queued_ahead() {
         let bf = PROTO_N2N_BLOCK_FETCH.erase();
         let block = crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
         with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &[bf], |running, mux, caller, sent| {
-            queue_block_behind_inflight(running, mux, sent, bf, block);
+            prime_inflight(running, mux, sent, bf);
             let t0 = running.now();
             running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, block) }]);
             settle(running);
-            assert_eq!(proto(running, mux, bf).deferred.len(), 1);
+            // `Sent` has not been delivered: the caller is still inside the call, so its state
+            // is not parked on receive. An early `Sent` would leave `admitted` set.
+            assert!(
+                running.get_state(caller).is_none(),
+                "Sent arrived before the last byte fit in the buffer: {:?}",
+                running.get_state(caller)
+            );
+            let pp = proto(running, mux, bf);
+            assert_eq!(pp.outgoing.len(), MAX_SEGMENT_SIZE);
+            assert!(pp.outgoing.len() <= MAX_SEGMENT_SIZE);
+            assert_eq!(pp.deferred.iter().map(|item| item.bytes.len()).sum::<usize>(), block - MAX_SEGMENT_SIZE);
             assert!(!running.get_state(mux).expect("mux").muxer.egress_retry_armed);
 
             let limit = egress_admission_deadline(block);
             let waited = await_admission(running, caller, t0, t0 + limit).expect("honest peer admitted");
             assert!(waited <= limit, "waited {waited:?} past {limit:?}");
-            assert!(waited > Duration::from_secs(1), "waited {waited:?}");
-            assert!(
-                limit.saturating_sub(waited) >= Duration::from_millis(900),
-                "margin {} ms lost the 1 s floor",
-                limit.saturating_sub(waited).as_millis()
-            );
+            assert!(waited < Duration::from_millis(10), "waited for more than the in-flight segment: {waited:?}");
+            assert_eq!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE, true);
         });
     }
 
+    /// One earlier 96 KiB block still fits in this message's own deadline: the last
+    /// byte enters about two segment-drains later (~2.1 s), and 2.574 s covers that.
     #[test]
-    fn writer_at_250_kbps_faults_the_handler() {
+    fn one_earlier_block_on_the_lane_still_meets_the_own_message_deadline() {
         let bf = PROTO_N2N_BLOCK_FETCH.erase();
         let block = crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
-        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS / 2, &[bf], |running, mux, caller, sent| {
-            queue_block_behind_inflight(running, mux, sent, bf, block);
+        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &[bf], |running, mux, caller, sent| {
+            prime_inflight(running, mux, sent, bf);
+            send_now(running, mux, sent, bf, 2, block);
+            let queued = proto(running, mux, bf);
+            assert_eq!(queued.outgoing.len(), MAX_SEGMENT_SIZE);
+            assert!(!queued.deferred.is_empty());
+
+            let t0 = running.now();
+            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, block) }]);
+            settle(running);
+            assert!(
+                running.get_state(caller).is_none(),
+                "Sent arrived before the earlier block had left the buffer: {:?}",
+                running.get_state(caller)
+            );
+            let limit = egress_admission_deadline(block);
+            let waited = await_admission(running, caller, t0, t0 + limit).expect("one queued block still admitted");
+            assert!(waited > Duration::from_secs(2), "waited {waited:?}");
+            assert!(waited <= limit, "waited {waited:?} past {limit:?}");
+            assert!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE);
+        });
+    }
+
+    /// Two earlier 96 KiB blocks push the last byte past this message's own deadline.
+    /// The budget is not extended for bytes already queued on the lane.
+    #[test]
+    fn two_earlier_blocks_on_the_lane_miss_the_own_message_deadline() {
+        let bf = PROTO_N2N_BLOCK_FETCH.erase();
+        let block = crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
+        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &[bf], |running, mux, caller, sent| {
+            prime_inflight(running, mux, sent, bf);
+            send_now(running, mux, sent, bf, 2, block);
+            send_now(running, mux, sent, bf, 4, block);
+            assert!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE);
+
             let t0 = running.now();
             running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, block) }]);
             settle(running);
             let limit = egress_admission_deadline(block);
-            let blocked = await_admission(running, caller, t0, t0 + limit).expect_err("slow lane must fault");
+            let blocked = await_admission(running, caller, t0, t0 + limit)
+                .expect_err("two queued blocks are outside the deadline");
             assert!(matches!(blocked, Blocked::Terminated(ref name) if name == caller.name()), "{blocked:?}");
             let waited = running.now().saturating_since(t0);
             assert!(
@@ -2872,6 +2940,7 @@ mod tests {
                 "faulted before the message's own wire time: {waited:?}"
             );
             assert!(waited <= limit, "ran past the deadline: {waited:?} > {limit:?}");
+            assert!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE);
         });
     }
 }
