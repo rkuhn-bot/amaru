@@ -18,8 +18,8 @@ use crate::{BLACKHOLE_NAME, Name, SendData};
 
 /// A handle to a stage during the building phase of a [`StageGraph`](crate::StageGraph).
 ///
-/// `mailbox_size` is fixed by [`StageGraph::stage_with_mailbox_size`](crate::StageGraph::stage_with_mailbox_size)
-/// before this handle is returned. The provided [`StageGraph::stage`](crate::StageGraph::stage)
+/// `mailbox_size` is fixed by [`StageGraph::stage_with_mailbox_size`]
+/// before this handle is returned. The provided [`StageGraph::stage`]
 /// passes [`crate::DEFAULT_MAILBOX_SIZE`].
 pub struct StageBuildRef<Msg, St, RefAux> {
     pub name: Name,

@@ -43,9 +43,9 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// programming error and must fail loudly).
 pub const PRIORITY_MAILBOX_SIZE: usize = 10;
 
-/// Default bulk mailbox capacity passed by [`StageGraph::stage`](crate::StageGraph::stage).
+/// Default bulk mailbox capacity passed by [`StageGraph::stage`].
 ///
-/// A different capacity is [`StageGraph::stage_with_mailbox_size`](crate::StageGraph::stage_with_mailbox_size),
+/// A different capacity is [`StageGraph::stage_with_mailbox_size`],
 /// chosen before the stage handle exists.
 /// [`SimulationBuilder::with_mailbox_size`](crate::simulation::SimulationBuilder::with_mailbox_size)
 /// and [`TokioBuilder::with_mailbox_size`](crate::tokio::TokioBuilder::with_mailbox_size) change the

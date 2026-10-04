@@ -225,13 +225,14 @@ impl TokioBuilder {
         self
     }
 
-    /// Bulk mailbox capacity passed by [`StageGraph::stage`](crate::StageGraph::stage).
+    /// Bulk mailbox capacity passed by [`StageGraph::stage`].
     ///
     /// This is the number of messages that may wait in the mailbox. The message currently
     /// being processed does not count. Defaults to [`DEFAULT_MAILBOX_SIZE`], matching
     /// [`SimulationBuilder::with_mailbox_size`](crate::simulation::SimulationBuilder::with_mailbox_size).
-    /// A single stage uses [`StageGraph::stage_with_mailbox_size`](crate::StageGraph::stage_with_mailbox_size).
-    /// Zero is a rendezvous: see [`open_mailbox`].
+    /// A single stage uses [`StageGraph::stage_with_mailbox_size`].
+    /// Zero is a rendezvous: a message is admitted only when the destination is already
+    /// waiting and no sender is parked ahead.
     pub fn with_mailbox_size(mut self, size: usize) -> Self {
         self.inner.mailbox_size = size;
         self

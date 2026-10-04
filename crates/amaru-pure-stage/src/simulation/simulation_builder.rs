@@ -102,10 +102,10 @@ pub struct SimulationBuilder {
 }
 
 impl SimulationBuilder {
-    /// Bulk mailbox capacity passed by [`StageGraph::stage`](crate::StageGraph::stage).
+    /// Bulk mailbox capacity passed by [`StageGraph::stage`].
     ///
     /// The default is [`DEFAULT_MAILBOX_SIZE`]. A stage created with
-    /// [`StageGraph::stage_with_mailbox_size`](crate::StageGraph::stage_with_mailbox_size)
+    /// [`StageGraph::stage_with_mailbox_size`]
     /// does not change this value for the stages it later wires up.
     pub fn with_mailbox_size(mut self, size: usize) -> Self {
         self.mailbox_size = size;
