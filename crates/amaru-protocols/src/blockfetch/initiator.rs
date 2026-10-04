@@ -23,9 +23,7 @@ use std::{
     time::Duration,
 };
 
-use amaru_kernel::{
-    NetworkPoint, NonEmptyBytes, Peer, Point, RawBlock, cardano::network_block::NetworkBlock, utils::debug_bytes,
-};
+use amaru_kernel::{NetworkPoint, Peer, Point, RawBlock, cardano::network_block::NetworkBlock, utils::debug_bytes};
 use amaru_observability::error;
 use amaru_pure_stage::{
     CallAdmission, DeserializerGuards, Effects, StageRef, define_role, define_role_tag, err, make_states, on_receive,
@@ -38,7 +36,7 @@ use crate::{
     mux::{Frame, HandlerMessage, MuxMessage, Sent},
     protocol::{
         Inputs, Internal, MuxClient, NETWORK_SEND_TIMEOUT, PROTO_N2N_BLOCK_FETCH, Pipelined, Pull, ToMux, WantNext,
-        drive, egress_admission_deadline, from_wire, ingress_limit, pipelined,
+        drive, from_wire, ingress_limit, pipelined,
     },
 };
 
@@ -147,18 +145,12 @@ pub enum BlockFetchMessage {
 impl<T> IntoRoleCall<ToResponder, T> for MuxClient
 where
     Message: From<T>,
-    T: Clone,
 {
     type Reply = Sent;
     const TIMEOUT: Duration = NETWORK_SEND_TIMEOUT;
 
-    fn timeout(&self, msg: &T) -> Duration {
-        let encoded = NonEmptyBytes::encode(&Message::from(msg.clone()));
-        egress_admission_deadline(encoded.len().get())
-    }
-
-    fn encode(&self, msg: T, reply: StageRef<Sent>) -> MuxMessage {
-        self.encode_send(Message::from(msg), reply)
+    fn into_call(self, msg: T) -> (Duration, impl FnOnce(StageRef<Sent>) -> MuxMessage + std::marker::Send + 'static) {
+        self.call_encoded(&Message::from(msg))
     }
 }
 

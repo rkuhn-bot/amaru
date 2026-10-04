@@ -298,12 +298,15 @@ pub mod tests {
         let state = running.get_state(&handler).expect("handler");
         assert_eq!(state.0, State::Waiting);
         let entries: Vec<TraceEntry> = running.trace_buffer().lock().iter_entries().map(|(_, e)| e).collect();
-        let call_at = entries.iter().position(|entry| {
-            matches!(
-                entry,
-                TraceEntry::Suspend(Effect::Call { from, duration, .. })
-                    if from == handler.name() && *duration == egress_admission_deadline(keepalive_bytes())
-            )
+        let call_at = entries.iter().position(|entry| match entry {
+            TraceEntry::Suspend(Effect::Call { from, duration, msg, .. }) if from == handler.name() => {
+                let Ok(MuxMessage::Send(_, bytes, _)) = msg.cast_ref::<MuxMessage>() else {
+                    return false;
+                };
+                bytes.as_ref() == NonEmptyBytes::encode(&Message::KeepAlive(Cookie::new())).as_ref()
+                    && *duration == egress_admission_deadline(bytes.len().get())
+            }
+            _ => false,
         });
         let want_at = entries.iter().position(|entry| {
             matches!(

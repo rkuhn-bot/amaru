@@ -20,7 +20,7 @@
 
 use std::time::Duration;
 
-use amaru_kernel::{IsHeader, NetworkPoint, NonEmptyBytes, NonEmptyVec, Peer, Point, RawBlock};
+use amaru_kernel::{IsHeader, NetworkPoint, NonEmptyVec, Peer, Point, RawBlock};
 use amaru_metrics::protocol::ServedBlockCountMetrics;
 use amaru_observability::{debug, error};
 use amaru_pure_stage::{
@@ -168,18 +168,12 @@ impl PointsRange {
 impl<T> IntoRoleCall<ToInitiator, T> for MuxClient
 where
     Message: From<T>,
-    T: Clone,
 {
     type Reply = Sent;
     const TIMEOUT: Duration = NETWORK_SEND_TIMEOUT;
 
-    fn timeout(&self, msg: &T) -> Duration {
-        let encoded = NonEmptyBytes::encode(&Message::from(msg.clone()));
-        egress_admission_deadline(encoded.len().get())
-    }
-
-    fn encode(&self, msg: T, reply: StageRef<Sent>) -> MuxMessage {
-        self.encode_send(Message::from(msg), reply)
+    fn into_call(self, msg: T) -> (Duration, impl FnOnce(StageRef<Sent>) -> MuxMessage + std::marker::Send + 'static) {
+        self.call_encoded(&Message::from(msg))
     }
 }
 
@@ -714,8 +708,13 @@ pub mod tests {
             panic!("block send should wait out its deadline");
         };
         let entries: Vec<TraceEntry> = running.trace_buffer().lock().iter_entries().map(|(_, e)| e).collect();
-        let call_duration = entries.iter().rev().find_map(|entry| match entry {
-            TraceEntry::Suspend(Effect::Call { from, duration, .. }) if from == handler.name() => Some(*duration),
+        let call = entries.iter().rev().find_map(|entry| match entry {
+            TraceEntry::Suspend(Effect::Call { from, duration, msg, .. }) if from == handler.name() => {
+                let MuxMessage::Send(_, bytes, _) = msg.cast_ref::<MuxMessage>().expect("mux message") else {
+                    panic!("block call was not a send");
+                };
+                Some((*duration, bytes.clone()))
+            }
             TraceEntry::Suspend(_)
             | TraceEntry::Resume { .. }
             | TraceEntry::Clock(_)
@@ -724,7 +723,12 @@ pub mod tests {
             | TraceEntry::Terminated { .. }
             | TraceEntry::InvalidBytes(..) => None,
         });
-        assert_eq!(call_duration, Some(expected[0]));
+        let (call_duration, sent) = call.expect("call");
+        let encoded = NonEmptyBytes::encode(&Message::from(Block { body: chain[0].raw.as_ref().to_vec() }));
+        assert_eq!(sent.as_ref(), encoded.as_ref());
+        assert_ne!(sent.len().get(), chain[0].raw.as_ref().len());
+        assert_eq!(call_duration, egress_admission_deadline(sent.len().get()));
+        assert_eq!(call_duration, expected[0]);
         let early =
             running.now() + next_wakeup.saturating_since(running.now()).saturating_sub(Duration::from_millis(1));
         assert!(matches!(running.run(Run::until(early)), Blocked::Sleeping { .. }));

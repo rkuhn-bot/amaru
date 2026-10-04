@@ -621,8 +621,8 @@ pub trait SessionOps<M, Rem>: Sized {
 
     /// Protocol call. Consumes a [`Call<Tag, T>`](super::Call) allowance.
     ///
-    /// Waits for [`IntoRoleCall::Reply`](super::IntoRoleCall::Reply) or
-    /// [`IntoRoleCall::timeout`](super::IntoRoleCall::timeout). The wait is the
+    /// Waits for [`IntoRoleCall::Reply`](super::IntoRoleCall::Reply) or the
+    /// deadline from [`IntoRoleCall::into_call`](super::IntoRoleCall::into_call). The wait is the
     /// back-pressure: the session does not continue until the callee answers
     /// or the timer fires. [`CallAdmission::NotAdmitted`] means the request
     /// never reached the callee. [`CallAdmission::TimedOut`] means it did.
@@ -646,7 +646,7 @@ pub trait SessionOps<M, Rem>: Sized {
         msg: T,
     ) -> impl Future<Output = (CallAdmission<Dest::Reply>, Session<M, <Rem as Take<CallEff<Tag, T>, I>>::Rest>)> + Send
     where
-        Tag: RoleTag,
+        Tag: RoleTag + 'static,
         Dest: IntoRoleCall<Tag, T> + Clone + Send + 'static,
         Rem: Take<CallEff<Tag, T>, I>,
         M: Send,
@@ -796,7 +796,7 @@ impl<M, Rem> SessionOps<M, Rem> for Session<M, Rem> {
         msg: T,
     ) -> impl Future<Output = (CallAdmission<Dest::Reply>, Session<M, <Rem as Take<CallEff<Tag, T>, I>>::Rest>)> + Send
     where
-        Tag: RoleTag,
+        Tag: RoleTag + 'static,
         Dest: IntoRoleCall<Tag, T> + Clone + Send + 'static,
         Rem: Take<CallEff<Tag, T>, I>,
         M: Send,
@@ -804,8 +804,8 @@ impl<M, Rem> SessionOps<M, Rem> for Session<M, Rem> {
     {
         let dest = target.clone();
         let mailbox = dest.mailbox().clone();
-        let timeout = dest.timeout(&msg);
-        let call = self.effects.call_with_admission(&mailbox, timeout, move |reply| dest.encode(msg, reply));
+        let (timeout, encode) = dest.into_call(msg);
+        let call = self.effects.call_with_admission(&mailbox, timeout, encode);
         async move {
             let reply = call.await;
             (reply, Session::new(self.effects))
