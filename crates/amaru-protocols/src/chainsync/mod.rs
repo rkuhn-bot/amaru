@@ -129,6 +129,13 @@ mod mailbox {
         crate::deserializers::register_deserializers()
     }
 
+    /// `stage_name` appends `-{n}`. `chainsync-1` matches `"chainsync"`; `chainsync-responder-2` does not.
+    fn is_numbered_stage(name: &str, prefix: &str) -> bool {
+        name.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+    }
+
     #[test]
     fn chainsync_initiator_mailbox_is_pipeline_depth_plus_4() {
         let _guards = trace_guards();
@@ -154,8 +161,10 @@ mod mailbox {
         });
         let boot = network.wire_up(boot, ());
         let mut running = network.run(test_runtime());
-        running
-            .breakpoint("cs-mail", |eff| matches!(eff, Effect::WireStage { name, .. } if name.as_str() == "chainsync"));
+        running.breakpoint(
+            "cs-mail",
+            |eff| matches!(eff, Effect::WireStage { name, .. } if is_numbered_stage(name.as_str(), "chainsync")),
+        );
         running.enqueue_msg(&boot, [ConnectionMessage::Disconnect]);
         running.run(Run::default()).assert_breakpoint("cs-mail");
         let hit = running.breakpoint_effect();
@@ -185,10 +194,9 @@ mod mailbox {
         });
         let boot = network.wire_up(boot, ());
         let mut running = network.run(test_runtime());
-        running.breakpoint(
-            "cs-mail",
-            |eff| matches!(eff, Effect::WireStage { name, .. } if name.as_str() == "chainsync-responder"),
-        );
+        running.breakpoint("cs-mail", |eff| {
+            matches!(eff, Effect::WireStage { name, .. } if is_numbered_stage(name.as_str(), "chainsync-responder"))
+        });
         running.enqueue_msg(&boot, [ConnectionMessage::Disconnect]);
         running.run(Run::default()).assert_breakpoint("cs-mail");
         let hit = running.breakpoint_effect();
