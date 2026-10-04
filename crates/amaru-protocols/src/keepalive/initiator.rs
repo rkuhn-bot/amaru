@@ -306,7 +306,13 @@ pub mod tests {
                 bytes.as_ref() == NonEmptyBytes::encode(&Message::KeepAlive(Cookie::new())).as_ref()
                     && *duration == egress_admission_deadline(bytes.len().get())
             }
-            _ => false,
+            TraceEntry::Suspend(_)
+            | TraceEntry::Resume { .. }
+            | TraceEntry::Clock(_)
+            | TraceEntry::Input { .. }
+            | TraceEntry::State { .. }
+            | TraceEntry::Terminated { .. }
+            | TraceEntry::InvalidBytes(..) => false,
         });
         let want_at = entries.iter().position(|entry| {
             matches!(
