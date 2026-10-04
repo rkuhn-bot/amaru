@@ -557,7 +557,8 @@ pub mod tests {
             | MuxMessage::FromNetwork(..)
             | MuxMessage::Written
             | MuxMessage::Terminate
-            | MuxMessage::SetSduTimeout(_) => {}
+            | MuxMessage::SetSduTimeout(_)
+            | MuxMessage::IngressRetry => {}
         }
         log
     }

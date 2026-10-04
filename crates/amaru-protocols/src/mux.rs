@@ -24,7 +24,7 @@ use std::{
 use amaru_kernel::{NonEmptyBytes, Peer, cbor};
 use amaru_observability::{Instrument, debug, debug_span, error, info, trace, warn};
 use amaru_ouroboros::ConnectionId;
-use amaru_pure_stage::{Effects, Instant, OrTerminateWith, SendData, StageRef, TryInStage, Void};
+use amaru_pure_stage::{Effects, Instant, OrTerminateWith, SendData, StageRef, TryInStage, TrySend, Void};
 use anyhow::Context;
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 
@@ -53,6 +53,27 @@ const MAX_SEGMENT_SIZE: usize = 65535;
 pub const SDU_TIMEOUT_HANDSHAKE: Duration = Duration::from_secs(10);
 /// Mux SDU assembly/send timer after that Handshake has finished.
 pub const SDU_TIMEOUT_ESTABLISHED: Duration = Duration::from_secs(30);
+
+/// Bulk mailbox of the mux stage.
+///
+/// A hot duplex connection runs up to ten handlers. One `Send` and one `WantNext`
+/// from each, plus `FromNetwork` and `Written`, is 22; 24 leaves room for a
+/// `Register` or `SetSduTimeout` in the same burst.
+pub const MUX_MAILBOX_SIZE: usize = 24;
+
+/// How long a handler mailbox may stay full before this connection is closed.
+///
+/// The stall is local queueing, not the peer's network or agency time, so every
+/// protocol waits the same. The retry fires once a second; five seconds is a few
+/// of those retries, then a handler that has stopped reading faults the connection.
+/// The peer is not scored as adversarial.
+pub const INGRESS_DEADLINE: Duration = Duration::from_secs(5);
+
+/// One coalesced retry for ingress the handler mailbox did not accept.
+///
+/// Slot 0 is the default timeout ([`amaru_pure_stage::Effects::set_timeout`]).
+/// This timer uses another slot so that default cannot replace it.
+const INGRESS_RETRY_SLOT: u64 = 1;
 
 const HEADER_LEADING_EDGE: NonZeroUsize = NonZeroUsize::MIN;
 const HEADER_REST: NonZeroUsize = const {
@@ -106,25 +127,34 @@ impl Frame {
     /// `OneCborItem` uses minicbor's iterative skip. An incomplete item returns `Ok(None)` and
     /// leaves `data` unchanged.
     pub fn try_consume(&self, data: &mut BytesMut) -> Result<Option<NonEmptyBytes>, cbor::decode::Error> {
+        let Some(len) = self.peek_len(data)? else {
+            return Ok(None);
+        };
+        Ok(Some(take_frame(data, len)))
+    }
+
+    /// Byte length of the next complete message, without removing it.
+    ///
+    /// `Ok(None)` means the buffer does not yet hold a whole message.
+    pub fn peek_len(&self, data: &[u8]) -> Result<Option<usize>, cbor::decode::Error> {
         match self {
-            Frame::OneCborItem => take_one_cbor_item(data),
+            Frame::OneCborItem => {
+                let mut decoder = cbor::Decoder::new(data);
+                match decoder.skip() {
+                    Ok(()) => Ok(Some(decoder.position())),
+                    Err(e) if e.is_end_of_input() => Ok(None),
+                    Err(e) => Err(e),
+                }
+            }
             Frame::Buffer => Ok(None),
         }
     }
 }
 
-fn take_one_cbor_item(data: &mut BytesMut) -> Result<Option<NonEmptyBytes>, cbor::decode::Error> {
-    let len = {
-        let mut decoder = cbor::Decoder::new(data);
-        match decoder.skip() {
-            Ok(()) => decoder.position(),
-            Err(e) if e.is_end_of_input() => return Ok(None),
-            Err(e) => return Err(e),
-        }
-    };
+fn take_frame(data: &mut BytesMut, len: usize) -> NonEmptyBytes {
     let item = data.copy_to_bytes(len);
     #[expect(clippy::expect_used)]
-    Ok(Some(item.try_into().expect("guaranteed by CBOR standard")))
+    item.try_into().expect("frame length is non-zero")
 }
 
 #[cfg(test)]
@@ -150,6 +180,13 @@ mod one_cbor_item_tests {
         let (item, rest) = consume(&[]).unwrap();
         assert_eq!(item, None);
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn peek_len_leaves_the_bytes_in_place() {
+        let data = [0x01, 0x02];
+        assert_eq!(Frame::OneCborItem.peek_len(&data).unwrap(), Some(1));
+        assert_eq!(data, [0x01, 0x02]);
     }
 
     #[test]
@@ -317,6 +354,8 @@ pub enum MuxMessage {
     Terminate,
     /// Switch the SDU assembly/send timer (10s during first Handshake, 30s afterwards).
     SetSduTimeout(Duration),
+    /// Retry ingress that stayed buffered because a handler mailbox was full.
+    IngressRetry,
 }
 
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -477,6 +516,7 @@ async fn handle_msg(
             muxer.sdu_timeout = timeout;
             Ok(())
         }
+        MuxMessage::IngressRetry => muxer.retry_ingress(eff).await,
     }
 }
 
@@ -614,6 +654,8 @@ pub struct Muxer {
     next_out: usize,
     role: Role,
     sdu_timeout: Duration,
+    /// `INGRESS_RETRY_SLOT` is armed. Replaced only after it fires or is cleared.
+    ingress_retry_armed: bool,
 }
 
 impl Muxer {
@@ -624,6 +666,7 @@ impl Muxer {
             next_out: 0,
             role,
             sdu_timeout: SDU_TIMEOUT_HANDSHAKE,
+            ingress_retry_armed: false,
         }
     }
 
@@ -642,17 +685,18 @@ impl Muxer {
         Header::encode(proto_id, bytes, timestamp)
     }
 
-    pub async fn register<M>(
+    pub async fn register(
         &mut self,
         proto_id: ProtocolId<Erased>,
         frame: Frame,
         max_buffer: usize,
         handler: StageRef<HandlerMessage>,
-        eff: &Effects<M>,
+        eff: &Effects<MuxMessage>,
     ) -> anyhow::Result<()> {
         async {
-            eff.send(&handler, HandlerMessage::Registered(proto_id)).await;
-            self.do_register(proto_id, frame, max_buffer, handler);
+            self.do_register(proto_id, frame, max_buffer, handler).registered_pending = true;
+            self.flush_protocol(proto_id, eff).await?;
+            self.sync_ingress_retry(eff).await;
             Ok(())
         }
         .instrument(debug_span!(protocols::mux::protocol::REGISTER,))
@@ -672,6 +716,11 @@ impl Muxer {
             anyhow::bail!("reducing buffer ({}) leads to excess data ({})", limit, pp.incoming.len());
         }
         Ok(())
+    }
+
+    fn proto_mut(&mut self, proto_id: ProtocolId<Erased>) -> &mut PerProto {
+        #[expect(clippy::expect_used)]
+        self.protocols.get_mut(&proto_id).expect("protocol registered")
     }
 
     fn do_register(
@@ -738,37 +787,188 @@ impl Muxer {
         .await
     }
 
-    pub async fn received<M>(
+    pub async fn received(
         &mut self,
-        timestamp: Timestamp,
+        _timestamp: Timestamp,
         proto_id: ProtocolId<Erased>,
         bytes: Bytes,
-        eff: &Effects<M>,
+        eff: &Effects<MuxMessage>,
     ) -> anyhow::Result<()> {
         let byte_len = bytes.len() as u64;
         async {
-            let Some(proto) = self.protocols.get_mut(&proto_id) else {
-                anyhow::bail!("received data for unknown protocol {}", proto_id);
-            };
-            proto.received(timestamp, bytes, eff).await
+            {
+                let Some(proto) = self.protocols.get_mut(&proto_id) else {
+                    anyhow::bail!("received data for unknown protocol {}", proto_id);
+                };
+                if proto.max_buffer == 0 {
+                    debug!(protocols::mux::protocol::IGNORING_BYTES, bytes = bytes.len());
+                    return Ok(());
+                }
+                trace!(protocols::mux::protocol::BYTES_RECEIVED, wanted = proto.wanted);
+                if proto.incoming.len() + bytes.len() > proto.max_buffer {
+                    info!(
+                        protocols::mux::protocol::BUFFER_EXCEEDED,
+                        buffered = proto.incoming.len(),
+                        max_buffer = proto.max_buffer
+                    );
+                    anyhow::bail!(
+                        "message (size {}) plus buffer (size {}) exceeds limit ({})",
+                        bytes.len(),
+                        proto.incoming.len(),
+                        proto.max_buffer
+                    );
+                }
+                proto.incoming.extend(&bytes);
+            }
+            self.flush_protocol(proto_id, eff).await?;
+            self.sync_ingress_retry(eff).await;
+            Ok(())
         }
         .instrument(debug_span!(protocols::mux::protocol::RECEIVED, bytes = byte_len))
         .await
     }
 
-    pub async fn want_next<M>(&mut self, proto_id: ProtocolId<Erased>, eff: &Effects<M>) -> anyhow::Result<()> {
+    pub async fn want_next(&mut self, proto_id: ProtocolId<Erased>, eff: &Effects<MuxMessage>) -> anyhow::Result<()> {
         async {
-            #[allow(clippy::expect_used)]
-            self.protocols
-                .get_mut(&proto_id)
-                .ok_or_else(|| anyhow::anyhow!("protocol {} not registered", proto_id))
-                .expect("internal error")
-                .want_next(eff)
-                .await?;
+            let buffered = {
+                #[allow(clippy::expect_used)]
+                let proto = self
+                    .protocols
+                    .get_mut(&proto_id)
+                    .ok_or_else(|| anyhow::anyhow!("protocol {} not registered", proto_id))
+                    .expect("internal error");
+                trace!(protocols::mux::protocol::BYTES_RECEIVED, wanted = proto.wanted);
+                let buffered = proto.frame.peek_len(&proto.incoming)?;
+                proto.wanted += 1;
+                buffered
+            };
+            if buffered.is_none() {
+                trace!(protocols::mux::protocol::DELIVERY_DEFERRED);
+            }
+            self.flush_protocol(proto_id, eff).await?;
+            self.sync_ingress_retry(eff).await;
             Ok(())
         }
         .instrument(debug_span!(protocols::mux::protocol::WANT_NEXT,))
         .await
+    }
+
+    /// Deliver deferred ingress in registration order.
+    ///
+    /// The timer that scheduled this wakeup has fired, so it is no longer armed. A protocol
+    /// whose frame is still deferred once [`INGRESS_DEADLINE`] has elapsed closes the connection.
+    /// That is a local handler that stopped reading. The peer is not treated as adversarial:
+    /// nothing is scored, and no other connection is involved.
+    ///
+    /// `TrySend::Gone` drops the message and continues. The handler stage is already gone, which
+    /// is the same observation as a failed `send` today; the bytes will not be admitted later,
+    /// so they are removed instead of held until the buffer limit faults the bearer.
+    async fn retry_ingress(&mut self, eff: &Effects<MuxMessage>) -> anyhow::Result<()> {
+        self.ingress_retry_armed = false;
+        let now = eff.clock().await;
+        let order = self.outgoing.clone();
+        for proto_id in order {
+            self.flush_protocol(proto_id, eff).await?;
+        }
+        self.fault_expired(now)?;
+        self.sync_ingress_retry(eff).await;
+        Ok(())
+    }
+
+    fn fault_expired(&self, now: Instant) -> anyhow::Result<()> {
+        for proto_id in &self.outgoing {
+            let Some(proto) = self.protocols.get(proto_id) else {
+                continue;
+            };
+            let Some(since) = proto.deferred_since else {
+                continue;
+            };
+            if now.saturating_since(since) >= INGRESS_DEADLINE {
+                anyhow::bail!(
+                    "ingress deferred past deadline for protocol {proto_id}; handler did not accept buffered data; peer is not treated as adversarial"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn sync_ingress_retry(&mut self, eff: &Effects<MuxMessage>) {
+        let deferred =
+            self.outgoing.iter().any(|id| self.protocols.get(id).is_some_and(|pp| pp.deferred_since.is_some()));
+        if deferred && !self.ingress_retry_armed {
+            eff.set_timeout_at(INGRESS_RETRY_SLOT, crate::protocol::NETWORK_SEND_TIMEOUT, MuxMessage::IngressRetry)
+                .await;
+            self.ingress_retry_armed = true;
+        } else if !deferred && self.ingress_retry_armed {
+            eff.clear_timeout_at(INGRESS_RETRY_SLOT).await;
+            self.ingress_retry_armed = false;
+        }
+    }
+
+    async fn flush_protocol(&mut self, proto_id: ProtocolId<Erased>, eff: &Effects<MuxMessage>) -> anyhow::Result<()> {
+        loop {
+            let Some(proto) = self.protocols.get_mut(&proto_id) else {
+                return Ok(());
+            };
+            if proto.registered_pending {
+                let handler = proto.handler.clone();
+                proto.registered_pending = false;
+                match eff.try_send(&handler, HandlerMessage::Registered(proto_id)).await {
+                    TrySend::Queued => {}
+                    TrySend::Full => {
+                        self.proto_mut(proto_id).registered_pending = true;
+                        self.note_deferred(proto_id, eff).await;
+                        return Ok(());
+                    }
+                    // The handler is gone. The notice was not queued. A dead handler is already
+                    // the supervisor's event, so this does not fault the connection. The next
+                    // iteration drops any buffered frame the same way.
+                    TrySend::Gone => {}
+                }
+                continue;
+            }
+
+            if proto.wanted == 0 {
+                proto.deferred_since = None;
+                return Ok(());
+            }
+            let Some(len) = proto.frame.peek_len(&proto.incoming)? else {
+                proto.deferred_since = None;
+                return Ok(());
+            };
+            let mut prefix = proto.incoming.split_to(len);
+            proto.wanted -= 1;
+            let handler = proto.handler.clone();
+            #[expect(clippy::expect_used)]
+            let frame = NonEmptyBytes::from_slice(&prefix).expect("peeked length is non-empty");
+            match eff.try_send(&handler, HandlerMessage::FromNetwork(frame)).await {
+                TrySend::Queued => {
+                    trace!(protocols::mux::protocol::MESSAGE_EXTRACTED, bytes = prefix.len());
+                }
+                TrySend::Full => {
+                    {
+                        let proto = self.proto_mut(proto_id);
+                        let suffix = std::mem::take(&mut proto.incoming);
+                        prefix.unsplit(suffix);
+                        proto.incoming = prefix;
+                        proto.wanted += 1;
+                    }
+                    self.note_deferred(proto_id, eff).await;
+                    return Ok(());
+                }
+                // The frame was already taken off the buffer. A later iteration clears the
+                // deferral once nothing complete remains. A dead handler is not a fault.
+                TrySend::Gone => {}
+            }
+        }
+    }
+
+    async fn note_deferred(&mut self, proto_id: ProtocolId<Erased>, eff: &Effects<MuxMessage>) {
+        if self.protocols.get(&proto_id).is_some_and(|pp| pp.deferred_since.is_some()) {
+            return;
+        }
+        let now = eff.clock().await;
+        self.proto_mut(proto_id).deferred_since = Some(now);
     }
 }
 
@@ -782,6 +982,10 @@ struct PerProto {
     wanted: usize,
     frame: Frame,
     max_buffer: usize,
+    /// `Registered` has not been admitted to `handler` yet.
+    registered_pending: bool,
+    /// When the current mailbox deferral started. `None` when nothing is waiting on the handler.
+    deferred_since: Option<Instant>,
 }
 
 impl std::fmt::Debug for PerProto {
@@ -795,6 +999,8 @@ impl std::fmt::Debug for PerProto {
             .field("wanted", &self.wanted)
             .field("frame", &self.frame)
             .field("max_buffer", &self.max_buffer)
+            .field("registered_pending", &self.registered_pending)
+            .field("deferred_since", &self.deferred_since)
             .finish()
     }
 }
@@ -810,51 +1016,9 @@ impl PerProto {
             wanted: 0,
             frame,
             max_buffer,
+            registered_pending: false,
+            deferred_since: None,
         }
-    }
-
-    pub async fn received<M>(&mut self, _timestamp: Timestamp, bytes: Bytes, eff: &Effects<M>) -> anyhow::Result<()> {
-        if self.max_buffer == 0 {
-            debug!(protocols::mux::protocol::IGNORING_BYTES, bytes = bytes.len());
-            return Ok(());
-        }
-        trace!(protocols::mux::protocol::BYTES_RECEIVED, wanted = self.wanted);
-        if self.incoming.len() + bytes.len() > self.max_buffer {
-            info!(
-                protocols::mux::protocol::BUFFER_EXCEEDED,
-                buffered = self.incoming.len(),
-                max_buffer = self.max_buffer
-            );
-            anyhow::bail!(
-                "message (size {}) plus buffer (size {}) exceeds limit ({})",
-                bytes.len(),
-                self.incoming.len(),
-                self.max_buffer
-            );
-        }
-        self.incoming.extend(&bytes);
-        while self.wanted > 0
-            && let Some(bytes) = self.frame.try_consume(&mut self.incoming)?
-        {
-            trace!(protocols::mux::protocol::MESSAGE_EXTRACTED, bytes = bytes.len().get());
-            eff.send(&self.handler, HandlerMessage::FromNetwork(bytes)).await;
-            self.wanted -= 1;
-        }
-        Ok(())
-    }
-
-    pub async fn want_next<M>(&mut self, eff: &Effects<M>) -> anyhow::Result<()> {
-        trace!(protocols::mux::protocol::BYTES_RECEIVED, wanted = self.wanted);
-        if !self.incoming.is_empty()
-            && let Some(bytes) = self.frame.try_consume(&mut self.incoming)?
-        {
-            trace!(protocols::mux::protocol::MESSAGE_EXTRACTED, bytes = bytes.len().get());
-            eff.send(&self.handler, HandlerMessage::FromNetwork(bytes)).await;
-        } else {
-            trace!(protocols::mux::protocol::DELIVERY_DEFERRED);
-            self.wanted += 1;
-        }
-        Ok(())
     }
 
     pub fn enqueue_send(&mut self, bytes: Bytes, sent: StageRef<Sent>) {
@@ -889,10 +1053,12 @@ mod tests {
     use amaru_ouroboros::ConnectionsResource;
     use amaru_ouroboros_traits::ConnectionProvider;
     use amaru_pure_stage::{
-        Effect, ExternalEffect, Name, StageGraph,
+        Effect, ExternalEffect, Name, StageGraph, TraceMatch, TrySend,
         simulation::{Blocked, Run, SimulationBuilder, SimulationRunning},
+        stage_ref::StageStateRef,
         tokio::TokioBuilder,
-        trace_buffer::TraceBuffer,
+        trace_buffer::{TraceBuffer, TraceEntry},
+        trace_match::{assert_trace_contains, tm_resume_try_send, tm_try_send},
     };
     use futures_util::StreamExt;
     use tokio::{
@@ -1110,10 +1276,13 @@ mod tests {
             let mux_name = mux.name().clone();
             let writer = writer.clone();
             let reader = reader.clone();
-            running.breakpoint(
-                "mux",
-                move |eff| matches!(eff, Effect::Send { from, to, .. } if from == &mux_name && to != &writer && to != &reader),
-            );
+            running.breakpoint("mux", move |eff| {
+                matches!(
+                    eff,
+                    Effect::Send { from, to, .. } | Effect::TrySend { from, to, .. }
+                        if from == &mux_name && to != &writer && to != &reader
+                )
+            });
         }
 
         running.run(Run::skip_wakeups()).assert_breakpoint("recv");
@@ -1126,8 +1295,8 @@ mod tests {
         running.run(Run::skip_wakeups()).assert_breakpoint("mux");
         {
             let hit = running.breakpoint_effect();
-            let Effect::Send { to, msg, .. } = hit.effect() else {
-                panic!("expected send, got {:?}", hit.effect());
+            let Effect::TrySend { to, msg, .. } = hit.effect() else {
+                panic!("expected try_send, got {:?}", hit.effect());
             };
             assert_eq!(to, chain_sync.name());
             assert_eq!(
@@ -1252,8 +1421,8 @@ mod tests {
                     running.run(Run::skip_wakeups()).assert_breakpoint("mux");
                     {
                         let hit = running.breakpoint_effect();
-                        let Effect::Send { to, msg, .. } = hit.effect() else {
-                            panic!("expected send, got {:?}", hit.effect());
+                        let Effect::TrySend { to, msg, .. } = hit.effect() else {
+                            panic!("expected try_send, got {:?}", hit.effect());
                         };
                         assert_eq!(to, chain_sync.name());
                         assert_eq!(
@@ -1297,14 +1466,14 @@ mod tests {
         let mut running = network.run(rt.handle());
         running.breakpoint("recv", |eff| matches!(eff, Effect::External { effect, .. } if effect.is::<RecvEffect>()));
         let handler_name = StageRef::<HandlerMessage>::named_for_tests("handler").name().clone();
-        running.breakpoint("to-handler", move |eff| matches!(eff, Effect::Send { to, .. } if to == &handler_name));
+        running.breakpoint("to-handler", move |eff| matches!(eff, Effect::TrySend { to, .. } if to == &handler_name));
         test(&mut running, &mux);
     }
 
     fn assert_to_handler(running: &SimulationRunning, expected: &HandlerMessage) {
         let hit = running.breakpoint_effect();
-        let Effect::Send { msg, .. } = hit.effect() else {
-            panic!("expected send, got {:?}", hit.effect());
+        let Effect::TrySend { msg, .. } = hit.effect() else {
+            panic!("expected try_send, got {:?}", hit.effect());
         };
         assert_eq!(msg.cast_ref::<HandlerMessage>().expect("HandlerMessage"), expected);
     }
@@ -1509,5 +1678,464 @@ mod tests {
         assert_eq!(report.unexpected_exits, vec![mux.name().clone()]);
 
         trace_guard.defuse();
+    }
+
+    fn cbor_byte(byte: u8) -> NonEmptyBytes {
+        NonEmptyBytes::from_slice(&[byte]).unwrap()
+    }
+
+    async fn block_handler(_state: (), _msg: HandlerMessage, eff: Effects<HandlerMessage>) {
+        eff.wait(Duration::from_secs(3600)).await;
+    }
+
+    /// The first message waits briefly. Later messages return immediately, which drains a full mailbox.
+    async fn hold_then_drain(holding: bool, _msg: HandlerMessage, eff: Effects<HandlerMessage>) -> bool {
+        if holding {
+            eff.wait(Duration::from_millis(500)).await;
+        }
+        false
+    }
+
+    async fn remember(state: u8, _msg: u8, _eff: Effects<u8>) -> u8 {
+        state
+    }
+
+    fn ingress_guards() -> amaru_pure_stage::DeserializerGuards {
+        super::register_deserializers()
+    }
+
+    fn drive(running: &mut SimulationRunning) -> Blocked {
+        running.run(Run::default())
+    }
+
+    /// Fill a handler that is already inside `wait`, so these messages sit until that wait ends.
+    fn fill_handler(running: &mut SimulationRunning, handler: &StageStateRef<HandlerMessage, ()>) {
+        for _ in 0..amaru_pure_stage::DEFAULT_MAILBOX_SIZE {
+            running.enqueue_msg(handler, [HandlerMessage::Registered(PROTO_TEST.erase())]);
+        }
+        assert_eq!(running.mailbox_len(handler), amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
+    }
+
+    fn proto<'a>(
+        running: &'a SimulationRunning,
+        mux: &StageStateRef<MuxMessage, State>,
+        id: ProtocolId<Erased>,
+    ) -> &'a PerProto {
+        running.get_state(mux).expect("mux is receiving").muxer.protocols.get(&id).expect("protocol registered")
+    }
+
+    struct Handlers {
+        mux: StageStateRef<MuxMessage, State>,
+        a: StageStateRef<HandlerMessage, ()>,
+        b: StageStateRef<HandlerMessage, ()>,
+    }
+
+    fn wire_blocked(network: &mut SimulationBuilder) -> Handlers {
+        let mux = network.stage("mux", super::stage);
+        let mux = network.wire_up(mux, State::new(ConnectionId::initial(), &[], Role::Initiator, test_peer()));
+        let a = network.stage("handler-a", block_handler);
+        let a = network.wire_up(a, ());
+        let b = network.stage("handler-b", block_handler);
+        let b = network.wire_up(b, ());
+        Handlers { mux, a, b }
+    }
+
+    fn start(running: &mut SimulationRunning) {
+        // The reader blocks on a network recv. Leaving that child real pins the simulation on
+        // Busy and the ingress retry timer never fires. The child is not under test.
+        running.use_virtual_child_stages(true);
+        running.run(Run::default()).assert_idle();
+    }
+
+    #[expect(clippy::wildcard_enum_match_arm)]
+    fn counted_retry_arms(running: &SimulationRunning, mux: &Name) {
+        let mut armed = false;
+        let mut overlaps = 0usize;
+        for (_, entry) in running.trace_buffer().lock().iter_entries() {
+            match &entry {
+                TraceEntry::Suspend(Effect::SetTimeout { at_stage, slot, .. })
+                    if at_stage == mux && *slot == INGRESS_RETRY_SLOT =>
+                {
+                    if armed {
+                        overlaps += 1;
+                    }
+                    armed = true;
+                }
+                TraceEntry::Suspend(Effect::ClearTimeout { at_stage, slot })
+                    if at_stage == mux && *slot == INGRESS_RETRY_SLOT =>
+                {
+                    armed = false;
+                }
+                TraceEntry::Input { stage, input }
+                    if stage == mux
+                        && input.cast_ref::<MuxMessage>().is_ok_and(|msg| matches!(msg, MuxMessage::IngressRetry)) =>
+                {
+                    armed = false;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(overlaps, 0, "a second ingress retry was armed while one was still pending");
+    }
+
+    fn register_msg(protocol: ProtocolId<Erased>, handler: StageRef<HandlerMessage>) -> MuxMessage {
+        MuxMessage::Register { protocol, frame: Frame::OneCborItem, handler, max_buffer: 64 }
+    }
+
+    fn from_network(protocol: ProtocolId<Erased>, byte: u8) -> MuxMessage {
+        MuxMessage::FromNetwork(Timestamp(1), protocol.opposite(), cbor_byte(byte))
+    }
+
+    /// `assert_trace_contains` drops every resume. The admission result is the following
+    /// [`StageResponse::TrySend`](amaru_pure_stage::StageResponse::TrySend) resume, in order.
+    fn assert_try_send_resumes(trace: &[TraceEntry], expected: &[TraceMatch<'static>]) {
+        let mut found = 0;
+        for entry in trace {
+            if found < expected.len() && expected[found] == *entry {
+                found += 1;
+            }
+        }
+        assert_eq!(found, expected.len(), "try_send responses missing from the trace: {trace:?}");
+    }
+
+    fn traced() -> (SimulationBuilder, amaru_pure_stage::trace_buffer::DropGuard) {
+        let trace = TraceBuffer::new_shared(200, 1_000_000);
+        let guard = TraceBuffer::drop_guard(&trace);
+        let network = SimulationBuilder::default().with_trace_buffer(trace);
+        (network, guard)
+    }
+
+    #[test]
+    fn full_handler_keeps_the_frame_and_other_protocols_continue() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let handlers = wire_blocked(&mut network);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone())]);
+        drive(&mut running).assert_sleeping();
+        fill_handler(&mut running, &handlers.a);
+
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone())]);
+        drive(&mut running).assert_sleeping();
+        running.trace_buffer().lock().clear();
+
+        let frame = cbor_byte(0x01);
+        running.enqueue_msg(
+            &handlers.mux,
+            [
+                MuxMessage::WantNext(PROTO_TEST.erase()),
+                from_network(PROTO_TEST.erase(), 0x01),
+                MuxMessage::WantNext(PROTO_HANDSHAKE.erase()),
+                from_network(PROTO_HANDSHAKE.erase(), 0x02),
+            ],
+        );
+        drive(&mut running).assert_sleeping();
+
+        let stalled = proto(&running, &handlers.mux, PROTO_TEST.erase());
+        assert_eq!(stalled.wanted, 1, "credit stays until the frame is admitted");
+        assert_eq!(stalled.incoming.as_ref(), frame.as_ref());
+        assert!(stalled.deferred_since.is_some());
+        assert!(running.get_state(&handlers.mux).unwrap().muxer.ingress_retry_armed);
+        assert_eq!(proto(&running, &handlers.mux, PROTO_HANDSHAKE.erase()).wanted, 0);
+        assert!(proto(&running, &handlers.mux, PROTO_HANDSHAKE.erase()).incoming.is_empty());
+        counted_retry_arms(&running, handlers.mux.name());
+
+        let mux_name = handlers.mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        assert_trace_contains(
+            &running,
+            &[
+                tm_try_send(mux_name, "handler-a", HandlerMessage::FromNetwork(frame)),
+                tm_try_send(mux_name, "handler-b", HandlerMessage::FromNetwork(cbor_byte(0x02))),
+            ],
+        );
+        assert_try_send_resumes(
+            &trace,
+            &[tm_resume_try_send(mux_name, TrySend::Full), tm_resume_try_send(mux_name, TrySend::Queued)],
+        );
+    }
+
+    #[test]
+    fn retry_delivers_once_the_handler_drains() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let mux = network.stage("mux", super::stage);
+        let mux = network.wire_up(mux, State::new(ConnectionId::initial(), &[], Role::Initiator, test_peer()));
+        let handler = network.stage("handler-a", hold_then_drain);
+        let handler = network.wire_up(handler, true);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        running.enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), handler.as_ref().clone())]);
+        let parked = drive(&mut running).assert_sleeping();
+        for _ in 0..amaru_pure_stage::DEFAULT_MAILBOX_SIZE {
+            running.enqueue_msg(&handler, [HandlerMessage::Registered(PROTO_TEST.erase())]);
+        }
+        assert_eq!(running.mailbox_len(&handler), amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
+
+        running.enqueue_msg(&mux, [MuxMessage::WantNext(PROTO_TEST.erase()), from_network(PROTO_TEST.erase(), 0x01)]);
+        let waiting = drive(&mut running).assert_sleeping();
+        assert_eq!(waiting, parked, "the handler drains before the ingress retry");
+        assert_eq!(proto(&running, &mux, PROTO_TEST.erase()).wanted, 1);
+        assert_eq!(proto(&running, &mux, PROTO_TEST.erase()).incoming.as_ref(), &[0x01]);
+
+        let retry_at = running.run(Run::until(waiting)).assert_sleeping();
+        assert_eq!(running.mailbox_len(&handler), 0, "the handler drained before the retry");
+        running.trace_buffer().lock().clear();
+
+        running.run(Run::until(retry_at)).assert_idle();
+        let delivered = proto(&running, &mux, PROTO_TEST.erase());
+        assert_eq!(delivered.wanted, 0);
+        assert!(delivered.incoming.is_empty());
+        assert!(delivered.deferred_since.is_none());
+        assert!(!running.get_state(&mux).unwrap().muxer.ingress_retry_armed);
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        assert_trace_contains(
+            &running,
+            &[tm_try_send(mux_name, "handler-a", HandlerMessage::FromNetwork(cbor_byte(0x01)))],
+        );
+        assert_try_send_resumes(&trace, &[tm_resume_try_send(mux_name, TrySend::Queued)]);
+    }
+
+    #[test]
+    fn deferred_ingress_faults_the_mux_and_leaves_other_stages() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let handlers = wire_blocked(&mut network);
+        let bystander = network.stage("bystander", remember);
+        let bystander = network.wire_up(bystander, 7u8);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone())]);
+        drive(&mut running).assert_sleeping();
+        fill_handler(&mut running, &handlers.a);
+
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone())]);
+        drive(&mut running).assert_sleeping();
+        for _ in 0..2 {
+            running.enqueue_msg(&handlers.b, [HandlerMessage::Registered(PROTO_HANDSHAKE.erase())]);
+        }
+        let other_mailbox = running.mailbox_len(&handlers.b);
+
+        running.enqueue_msg(
+            &handlers.mux,
+            [MuxMessage::WantNext(PROTO_TEST.erase()), from_network(PROTO_TEST.erase(), 0x01)],
+        );
+        let mut wake = drive(&mut running).assert_sleeping();
+        assert!(running.get_state(&handlers.mux).is_some(), "still inside the deadline");
+        assert!(INGRESS_DEADLINE > crate::protocol::NETWORK_SEND_TIMEOUT, "one retry must land before the deadline");
+
+        // Fault is checked after a retry flush. Wakeups strictly inside the deadline stay up;
+        // the wakeup that reaches the deadline closes the connection.
+        let still_inside = (INGRESS_DEADLINE.as_secs() / crate::protocol::NETWORK_SEND_TIMEOUT.as_secs()) - 1;
+        for _ in 0..still_inside {
+            wake = running.run(Run::until(wake)).assert_sleeping();
+            assert!(running.get_state(&handlers.mux).is_some(), "retry is still inside the deadline");
+            assert_eq!(proto(&running, &handlers.mux, PROTO_TEST.erase()).wanted, 1);
+        }
+
+        running.run(Run::until(wake)).assert_terminated(handlers.mux.name());
+        assert_eq!(running.get_state(&bystander), Some(&7), "faulting the mux leaves other stages running");
+        assert_eq!(running.mailbox_len(&handlers.b), other_mailbox);
+    }
+
+    #[test]
+    fn registered_is_deferred_when_the_handler_is_full() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let mux = network.stage("mux", super::stage);
+        let mux = network.wire_up(mux, State::new(ConnectionId::initial(), &[], Role::Initiator, test_peer()));
+        let handler = network.stage("handler-a", hold_then_drain);
+        let handler = network.wire_up(handler, true);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        running.enqueue_msg(&handler, [HandlerMessage::FromNetwork(cbor_byte(0x01))]);
+        let parked = running.run(Run::default()).assert_sleeping();
+        for _ in 0..amaru_pure_stage::DEFAULT_MAILBOX_SIZE {
+            running.enqueue_msg(&handler, [HandlerMessage::FromNetwork(cbor_byte(0x01))]);
+        }
+        assert_eq!(running.mailbox_len(&handler), amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
+        running.trace_buffer().lock().clear();
+
+        running.enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), handler.as_ref().clone())]);
+        let waiting = drive(&mut running).assert_sleeping();
+        assert_eq!(waiting, parked, "the handler drains before the ingress retry");
+        let pending = proto(&running, &mux, PROTO_TEST.erase());
+        assert!(pending.registered_pending);
+        assert!(pending.deferred_since.is_some());
+        assert_eq!(running.mailbox_len(&handler), amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        assert_trace_contains(
+            &running,
+            &[tm_try_send(mux_name, "handler-a", HandlerMessage::Registered(PROTO_TEST.erase()))],
+        );
+        assert_try_send_resumes(&trace, &[tm_resume_try_send(mux_name, TrySend::Full)]);
+
+        let retry_at = running.run(Run::until(waiting)).assert_sleeping();
+        assert_eq!(running.mailbox_len(&handler), 0);
+        running.trace_buffer().lock().clear();
+        running.run(Run::until(retry_at)).assert_idle();
+        assert!(!proto(&running, &mux, PROTO_TEST.erase()).registered_pending);
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        assert_trace_contains(
+            &running,
+            &[tm_try_send(mux_name, "handler-a", HandlerMessage::Registered(PROTO_TEST.erase()))],
+        );
+        assert_try_send_resumes(&trace, &[tm_resume_try_send(mux_name, TrySend::Queued)]);
+    }
+
+    #[test]
+    fn ingress_limit_still_applies_while_a_frame_is_deferred() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let mux = network.stage("mux", super::stage);
+        let mux = network.wire_up(mux, State::new(ConnectionId::initial(), &[], Role::Initiator, test_peer()));
+        let handler = network.stage("handler-a", block_handler);
+        let handler = network.wire_up(handler, ());
+        let bystander = network.stage("bystander", remember);
+        let bystander = network.wire_up(bystander, 7u8);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        running.enqueue_msg(
+            &mux,
+            [MuxMessage::Register {
+                protocol: PROTO_TEST.erase(),
+                frame: Frame::OneCborItem,
+                handler: handler.as_ref().clone(),
+                max_buffer: 1,
+            }],
+        );
+        drive(&mut running).assert_sleeping();
+        fill_handler(&mut running, &handler);
+        running.enqueue_msg(&mux, [MuxMessage::WantNext(PROTO_TEST.erase()), from_network(PROTO_TEST.erase(), 0x01)]);
+        drive(&mut running).assert_sleeping();
+        assert_eq!(proto(&running, &mux, PROTO_TEST.erase()).incoming.len(), 1);
+
+        running.enqueue_msg(&mux, [from_network(PROTO_TEST.erase(), 0x02)]);
+        drive(&mut running).assert_terminated(mux.name());
+        assert_eq!(running.get_state(&bystander), Some(&7));
+    }
+
+    #[test]
+    fn one_wakeup_retries_deferred_protocols_in_registration_order() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let handlers = wire_blocked(&mut network);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        // PROTO_TEST's id is greater than handshake. Registration order, not id order, is the retry order.
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone())]);
+        drive(&mut running).assert_sleeping();
+        fill_handler(&mut running, &handlers.a);
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone())]);
+        drive(&mut running).assert_sleeping();
+        fill_handler(&mut running, &handlers.b);
+        running.trace_buffer().lock().clear();
+
+        running.enqueue_msg(
+            &handlers.mux,
+            [
+                MuxMessage::WantNext(PROTO_TEST.erase()),
+                from_network(PROTO_TEST.erase(), 0x01),
+                MuxMessage::WantNext(PROTO_HANDSHAKE.erase()),
+                from_network(PROTO_HANDSHAKE.erase(), 0x02),
+            ],
+        );
+        let retry_at = drive(&mut running).assert_sleeping();
+        counted_retry_arms(&running, handlers.mux.name());
+        let mux_name = handlers.mux.name().clone();
+        let sets = running
+            .trace_buffer()
+            .lock()
+            .iter_entries()
+            .filter(|(_, entry)| {
+                matches!(
+                    entry,
+                    TraceEntry::Suspend(Effect::SetTimeout { at_stage, slot, .. })
+                        if at_stage == &mux_name && *slot == 1
+                )
+            })
+            .count();
+        assert_eq!(sets, 1, "two deferred protocols share one wakeup");
+
+        running.trace_buffer().lock().clear();
+        running.run(Run::until(retry_at)).assert_sleeping();
+        counted_retry_arms(&running, &mux_name);
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        assert_trace_contains(
+            &running,
+            &[
+                tm_try_send(mux_name.as_str(), "handler-a", HandlerMessage::FromNetwork(cbor_byte(0x01))),
+                tm_try_send(mux_name.as_str(), "handler-b", HandlerMessage::FromNetwork(cbor_byte(0x02))),
+            ],
+        );
+        assert_try_send_resumes(
+            &trace,
+            &[
+                tm_resume_try_send(mux_name.as_str(), TrySend::Full),
+                tm_resume_try_send(mux_name.as_str(), TrySend::Full),
+            ],
+        );
+    }
+
+    #[test]
+    fn gone_handler_drops_ingress_without_faulting() {
+        let _guards = ingress_guards();
+        let (mut network, _drop) = traced();
+        let mux = network.stage("mux", super::stage);
+        let mux = network.wire_up(mux, State::new(ConnectionId::initial(), &[], Role::Initiator, test_peer()));
+        let bystander = network.stage("bystander", remember);
+        let bystander = network.wire_up(bystander, 7u8);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        start(&mut running);
+
+        running.enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), StageRef::named_for_tests("missing"))]);
+        drive(&mut running).assert_idle();
+        let proto_state = proto(&running, &mux, PROTO_TEST.erase());
+        assert!(!proto_state.registered_pending);
+        assert!(proto_state.deferred_since.is_none());
+        assert!(!running.get_state(&mux).unwrap().muxer.ingress_retry_armed);
+
+        running.enqueue_msg(&mux, [MuxMessage::WantNext(PROTO_TEST.erase()), from_network(PROTO_TEST.erase(), 0x01)]);
+        drive(&mut running).assert_idle();
+        let proto_state = proto(&running, &mux, PROTO_TEST.erase());
+        assert_eq!(proto_state.wanted, 0);
+        assert!(proto_state.incoming.is_empty(), "a gone handler cannot accept the frame later");
+        assert!(running.get_state(&mux).is_some());
+        assert_eq!(running.get_state(&bystander), Some(&7));
+        let mux_name = mux.name().as_str();
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        assert_trace_contains(
+            &running,
+            &[
+                tm_try_send(mux_name, "missing", HandlerMessage::Registered(PROTO_TEST.erase())),
+                tm_try_send(mux_name, "missing", HandlerMessage::FromNetwork(cbor_byte(0x01))),
+            ],
+        );
+        assert_try_send_resumes(
+            &trace,
+            &[tm_resume_try_send(mux_name, TrySend::Gone), tm_resume_try_send(mux_name, TrySend::Gone)],
+        );
     }
 }

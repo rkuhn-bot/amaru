@@ -47,6 +47,13 @@ pub enum Input<L, R> {
 // TODO(network) find right value
 pub const NETWORK_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Slowest sustained rate at which a peer is still only slow.
+///
+/// A peer is expected to sustain 100 Mbps. Below this rate, in a challenging
+/// situation, the connection is closed. The peer is not recorded as adversarial.
+/// Bits per second.
+pub const MIN_PEER_BANDWIDTH_BPS: u64 = 500_000;
+
 #[derive(serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ProtocolId<T: RoleT>(u16, PhantomData<T>);
 
