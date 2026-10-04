@@ -145,7 +145,7 @@ pub fn test_prep_with_max_peer_lead(max_peer_lead: u64) -> TestPrep {
     );
     let rt = crate::stages::test_utils::test_runtime();
     // A blackhole admits `try_send` (`Queued`) without adding a second stage to the trace.
-    // A name that was never wired is `Gone` and would arm the retry timeout.
+    // A name that was never wired is `Gone` and drops the owed count instead of arming a retry.
     let handler = StageRef::<InitiatorMessage>::blackhole();
     let conn_id = ConnectionId::initial();
     let h1 = make_block_header(1, 1, None);

@@ -142,11 +142,11 @@ pub const MAX_HEADER_CLOCK_SKEW: Duration = Duration::from_secs(2);
 ///   [`TraceContext`] on ledger and store operations.
 /// - **Sends**: per-peer `RequestNext` / `Done` with `try_send` (a full or gone handler does not
 ///   stall this stage); `Adversarial(peer, TraceContext)` to peer selection; [`NewTip`] to
-///   downstream when a new header is stored. A `RequestNext` that does not hit the mailbox is
+///   downstream when a new header is stored. A `RequestNext` that finds a full mailbox is
 ///   counted, up to [`PIPELINE_DEPTH`], and retried from the next message for that peer and from
 ///   one coalesced timeout ([`REQUEST_RETRY_SLOT`], [`REQUEST_RETRY_DELAY`]). That retry offers
-///   every owed `RequestNext` the handler will accept, then arms the same slot again only if
-///   some remain.
+///   every owed `RequestNext` the handler will accept, then arms the same slot again only while
+///   some live session still owes one. `Gone` drops that session's count and is not tried again.
 ///
 /// Logging: INFO (init / intersect / rollback), DEBUG (store / defer), TRACE (roll-forward entry),
 /// ERROR (failures), WARN (unknown intersect).
@@ -184,12 +184,17 @@ enum PerPeer {
         peer: Peer,
         current: Point,
         highest: Point,
-        /// `RequestNext`s the handler has not accepted. Capped at [`PIPELINE_DEPTH`].
+        /// `RequestNext`s a live handler has not accepted. Capped at [`PIPELINE_DEPTH`].
+        /// Dropped when `try_send` returns [`TrySend::Gone`].
         #[serde(default)]
         owed: u8,
         /// Last handler for this session, used to retry owed `RequestNext`s.
         #[serde(default)]
         handler: Option<StageRef<chainsync::InitiatorMessage>>,
+        /// The last `try_send` to `handler` returned [`TrySend::Gone`].
+        /// Further offers to that same handler are skipped.
+        #[serde(default)]
+        handler_gone: bool,
     },
 }
 
@@ -410,7 +415,14 @@ impl TrackPeers {
     pub fn insert_peer(&mut self, peer: Peer, conn_id: ConnectionId, current: Point, highest: Point) {
         self.upstream.insert(
             conn_id,
-            PerPeer::Established { peer, current, highest, owed: 0, handler: Some(StageRef::blackhole()) },
+            PerPeer::Established {
+                peer,
+                current,
+                highest,
+                owed: 0,
+                handler: Some(StageRef::blackhole()),
+                handler_gone: false,
+            },
         );
     }
 
@@ -887,24 +899,37 @@ impl TrackPeers {
         }
     }
 
-    /// Count a `RequestNext` the handler did not accept, or clear one that a retry admitted.
+    /// Count a `RequestNext` a live handler did not accept, or clear one that a retry admitted.
     ///
     /// A new `Queued` does not change the counter: that request was admitted, and any earlier
-    /// miss is still owed. A retry `Queued` clears one owed slot and is the only decrement.
-    /// `Full` or `Gone` on a new request increments, saturating at [`PIPELINE_DEPTH`]. The same
-    /// outcomes on a retry leave the counter unchanged: that slot is still owed once.
+    /// miss is still owed. A retry `Queued` clears one owed slot.
+    /// `Full` on a new request increments, saturating at [`PIPELINE_DEPTH`]. `Full` on a retry
+    /// leaves the counter unchanged: that slot is still owed once.
+    /// `Gone` drops the counter. The handler is gone, so nothing remains to deliver.
     fn record_request_next(&mut self, conn_id: ConnectionId, outcome: TrySend, retry: bool) {
-        let Some(PerPeer::Established { owed, .. }) = self.upstream.get_mut(&conn_id) else {
+        let Some(PerPeer::Established { owed, handler_gone, .. }) = self.upstream.get_mut(&conn_id) else {
             return;
         };
+        *handler_gone = matches!(outcome, TrySend::Gone);
         match outcome {
+            TrySend::Gone => *owed = 0,
             TrySend::Queued if retry => *owed = owed.saturating_sub(1),
-            TrySend::Full | TrySend::Gone if !retry => *owed = owed.saturating_add(1).min(PIPELINE_DEPTH),
-            TrySend::Queued | TrySend::Full | TrySend::Gone => {}
+            TrySend::Full if !retry => *owed = owed.saturating_add(1).min(PIPELINE_DEPTH),
+            TrySend::Queued | TrySend::Full => {}
+        }
+    }
+
+    /// `true` when this session already saw [`TrySend::Gone`] for `handler`.
+    fn handler_is_gone(&self, conn_id: ConnectionId, handler: &StageRef<chainsync::InitiatorMessage>) -> bool {
+        match self.upstream.get(&conn_id) {
+            Some(PerPeer::Established { handler_gone: true, handler: Some(stored), .. }) => stored == handler,
+            Some(PerPeer::Established { .. } | PerPeer::Connecting { .. }) | None => false,
         }
     }
 
     /// Offer one `RequestNext`. `retry` admits an already-counted slot; otherwise this is a new one.
+    ///
+    /// A handler already known to be gone is not offered again.
     async fn offer_request_next(
         &mut self,
         conn_id: ConnectionId,
@@ -912,7 +937,7 @@ impl TrackPeers {
         eff: &Effects<TrackPeersMsg>,
         retry: bool,
     ) {
-        if retry && self.owed(conn_id) == 0 {
+        if self.handler_is_gone(conn_id, handler) || (retry && self.owed(conn_id) == 0) {
             return;
         }
         let outcome = eff.try_send(handler, chainsync::InitiatorMessage::RequestNext).await;
@@ -924,9 +949,9 @@ impl TrackPeers {
 
     /// Offer every owed `RequestNext` each session's handler will accept.
     ///
-    /// `Full` or `Gone` stops that session: the slot is still owed once, and another
-    /// try in this wakeup would not admit it. The counter stays capped at [`PIPELINE_DEPTH`].
-    /// One timeout is armed afterwards, and only while something remains owed.
+    /// `Full` stops that session: the slot is still owed once, and another try in this wakeup
+    /// would not admit it. `Gone` drops the count, so the loop stops. The counter stays capped
+    /// at [`PIPELINE_DEPTH`]. One timeout is armed afterwards, and only while something remains owed.
     async fn retry_owed(&mut self, eff: &Effects<TrackPeersMsg>) {
         let due: Vec<_> = self
             .upstream
@@ -992,8 +1017,10 @@ impl TrackPeers {
                 let current_tip = Store::new(eff.clone()).load_point(&current.hash()).await;
                 let Some(current_tip) = current_tip else {
                     warn!(consensus::chainsync::UNKNOWN_INTERSECTION_POINT, peer, current, highest = tip);
-                    // A `Done` the handler does not accept is not an owed `RequestNext`. The session
-                    // was never established, so there is no counter to retry.
+                    // One attempt. This session was never established, so `Done` is not an owed
+                    // `RequestNext`. `Gone`: the handler does not exist, and there is nothing to
+                    // retry. `Full`: the mailbox did not accept it; that miss is not counted and
+                    // not retried.
                     let _ = eff.try_send(&handler, chainsync::InitiatorMessage::Done).await;
                     return;
                 };
@@ -1014,6 +1041,7 @@ impl TrackPeers {
                         highest: tip,
                         owed: 0,
                         handler: Some(handler.clone()),
+                        handler_gone: false,
                     },
                 );
             }

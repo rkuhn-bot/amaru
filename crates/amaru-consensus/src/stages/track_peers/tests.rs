@@ -2016,7 +2016,7 @@ fn other_peer_keeps_moving_while_one_handler_is_full() {
     assert_try_send_resumes(&admission, &[TrySend::Full, TrySend::Queued]);
 }
 
-/// `Gone` keeps the miss until `Terminated` drops the session and its counter.
+/// `Gone` drops the miss immediately. `Terminated` still drops the session.
 #[test]
 fn gone_handler_is_purged_by_terminated() {
     let headers = linked_headers(2);
@@ -2025,10 +2025,10 @@ fn gone_handler_is_purged_by_terminated() {
         open_fanout(ready.rt.handle(), ready.state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
     let gone = StageRef::<InitiatorMessage>::named_for_tests("gone-handler");
     opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &gone, &headers[1])]);
-    drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    drive(&mut opened.running, ready.rt.handle()).assert_idle();
     let state = opened.running.get_state(&opened.tp).expect("idle after a gone send");
-    assert_eq!(owed(state, ready.conn_id), Some(1));
-    assert!(state.request_retry_armed);
+    assert_eq!(owed(state, ready.conn_id), Some(0));
+    assert!(!state.request_retry_armed);
     let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_contains(&opened.running, &[tm_try_send("tp-1", "gone-handler", RequestNext)]);
     assert_try_send_resumes(&admission, &[TrySend::Gone]);
@@ -2047,6 +2047,62 @@ fn gone_handler_is_purged_by_terminated() {
     assert_eq!(owed(state, ready.conn_id), None);
     assert!(!state.request_retry_armed);
     assert!(state.upstream.is_empty());
+}
+
+/// `Gone` leaves no owed count and no armed retry. A later header is not offered to that
+/// handler. Another session that still owes keeps the one retry slot. A `Gone` on the retry
+/// of a counted slot drops that count, sends nothing further, and clears the slot when
+/// nobody else owes one.
+#[test]
+fn gone_handler_drops_owed_and_is_not_asked_again() {
+    let headers = linked_headers(4);
+    let prep = test_prep();
+    let peer_a = Peer::for_test(3001);
+    let peer_b = Peer::for_test(3002);
+    let mut ids = ConnectionId::initial();
+    let conn_a = ids.get_and_increment();
+    let conn_b = ids.get_and_increment();
+    let mut state = prep.state;
+    state.insert_peer(peer_a, conn_a, headers[0].point(), headers[0].point());
+    state.insert_peer(peer_b, conn_b, headers[0].point(), headers[0].point());
+
+    let mut opened = open_fanout(prep.rt.handle(), state, build_store(slice::from_ref(&headers[0])), HandlerHold::Hour);
+    park_handler_full(&mut opened.running, &opened.handler);
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(peer_a, conn_a, &opened.handler, &headers[1])]);
+    drive(&mut opened.running, prep.rt.handle()).assert_sleeping();
+    assert_eq!(owed(opened.running.get_state(&opened.tp).expect("idle"), conn_a), Some(1));
+
+    let gone = StageRef::<InitiatorMessage>::named_for_tests("gone-handler");
+    opened.running.trace_buffer().lock().clear();
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(peer_b, conn_b, &gone, &headers[1])]);
+    drive(&mut opened.running, prep.rt.handle()).assert_sleeping();
+    let state = opened.running.get_state(&opened.tp).expect("peer b is gone");
+    assert_eq!(owed(state, conn_b), Some(0));
+    assert_eq!(owed(state, conn_a), Some(1));
+    assert!(state.request_retry_armed);
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_try_send_resumes(&admission, &[TrySend::Gone]);
+
+    opened.running.trace_buffer().lock().clear();
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(peer_b, conn_b, &gone, &headers[2])]);
+    drive(&mut opened.running, prep.rt.handle()).assert_sleeping();
+    let state = opened.running.get_state(&opened.tp).expect("peer b was not asked again");
+    assert_eq!(owed(state, conn_b), Some(0));
+    assert!(state.request_retry_armed);
+    assert_eq!(current_point(state, conn_b), Some(headers[2].point()));
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_try_send_resumes(&admission, &[]);
+
+    opened.running.trace_buffer().lock().clear();
+    opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(peer_a, conn_a, &gone, &headers[2])]);
+    drive(&mut opened.running, prep.rt.handle()).assert_sleeping();
+    let state = opened.running.get_state(&opened.tp).expect("counted slot dropped");
+    assert_eq!(owed(state, conn_a), Some(0));
+    assert!(!state.request_retry_armed);
+    assert_eq!(current_point(state, conn_a), Some(headers[2].point()));
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_try_send_resumes(&admission, &[TrySend::Gone]);
+    assert_trace_does_not_contain(&opened.running, &[tm_retry_timeout()]);
 }
 
 /// A handler that accepts every `RequestNext` does not arm the retry timeout.
