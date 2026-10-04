@@ -2831,7 +2831,7 @@ mod tests {
             let t0 = running.now();
             running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, 4) }]);
             settle(running);
-            assert!(proto(running, mux, bf).deferred.len() >= 1);
+            assert!(!proto(running, mux, bf).deferred.is_empty());
             assert!(!running.get_state(mux).expect("mux").muxer.egress_retry_armed);
 
             let waited =
@@ -2882,7 +2882,7 @@ mod tests {
             let waited = await_admission(running, caller, t0, t0 + limit).expect("honest peer admitted");
             assert!(waited <= limit, "waited {waited:?} past {limit:?}");
             assert!(waited < Duration::from_millis(10), "waited for more than the in-flight segment: {waited:?}");
-            assert_eq!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE, true);
+            assert!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE);
         });
     }
 
