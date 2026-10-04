@@ -77,9 +77,9 @@ impl IntoRoleMail<ToMux, WantNext> for MuxClient {
 
 /// N lock-step machines plus send/recv cursors.
 ///
-/// `stashed`, `sticky_close`, and `closed` are absent on a snapshot taken
-/// before they existed. A missing field decodes as nothing waiting and not
-/// closed.
+/// `stashed` is the one newer range waiting for an idle send slot.
+/// `sticky_close` is a close held until every slot is idle. `closed` is set
+/// once that close has been written.
 #[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pipelined<S, L> {
     machines: Vec<Option<S>>,
@@ -87,17 +87,10 @@ pub struct Pipelined<S, L> {
     recv: usize,
     registered: bool,
     recv_armed: bool,
-    #[serde(default = "nothing_waiting")]
     stashed: Option<L>,
-    #[serde(default = "nothing_waiting")]
     sticky_close: Option<L>,
     /// `ClientDone` has been written. One wire protocol, one close.
-    #[serde(default)]
     closed: bool,
-}
-
-fn nothing_waiting<L>() -> Option<L> {
-    None
 }
 
 impl<S, L> Pipelined<S, L> {
@@ -320,4 +313,26 @@ where
         return;
     };
     deliver_local(p, fetch, eff, step).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Pipelined;
+
+    #[test]
+    fn pipelined_round_trips() {
+        let state = Pipelined {
+            machines: vec![Some(1u8), None],
+            send: 1,
+            recv: 0,
+            registered: true,
+            recv_armed: true,
+            stashed: Some(4u8),
+            sticky_close: Some(9u8),
+            closed: true,
+        };
+        let bytes = amaru_pure_stage::serde::to_cbor(&state);
+        let back: Pipelined<u8, u8> = amaru_pure_stage::serde::from_cbor(&bytes).expect("cbor");
+        assert_eq!(back, state);
+    }
 }
