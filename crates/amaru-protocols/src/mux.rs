@@ -61,8 +61,19 @@ pub const SDU_TIMEOUT_ESTABLISHED: Duration = Duration::from_secs(30);
 /// `Register` or `SetSduTimeout` in the same burst.
 pub const MUX_MAILBOX_SIZE: usize = 24;
 
+/// How long a handler mailbox may stay full before this connection is closed.
+///
+/// The stall is local queueing, not the peer's network or agency time, so every
+/// protocol waits the same. The retry fires once a second; five seconds is a few
+/// of those retries, then a handler that has stopped reading faults the connection.
+/// The peer is not scored as adversarial.
+pub const INGRESS_DEADLINE: Duration = Duration::from_secs(5);
+
 /// One coalesced retry for ingress the handler mailbox did not accept.
-const INGRESS_RETRY_SLOT: u64 = 0;
+///
+/// Slot 0 is the default timeout ([`amaru_pure_stage::Effects::set_timeout`]).
+/// This timer uses another slot so that default cannot replace it.
+const INGRESS_RETRY_SLOT: u64 = 1;
 
 const HEADER_LEADING_EDGE: NonZeroUsize = NonZeroUsize::MIN;
 const HEADER_REST: NonZeroUsize = const {
@@ -124,8 +135,7 @@ impl Frame {
 
     /// Byte length of the next complete message, without removing it.
     ///
-    /// `Ok(None)` means the buffer does not yet hold a whole message. The bytes stay put so a
-    /// later `try_send` can refuse them without consuming credit.
+    /// `Ok(None)` means the buffer does not yet hold a whole message.
     pub fn peek_len(&self, data: &[u8]) -> Result<Option<usize>, cbor::decode::Error> {
         match self {
             Frame::OneCborItem => {
@@ -299,7 +309,6 @@ pub async fn install_done_trap<M: SendData>(
             frame: Frame::OneCborItem,
             handler: trap,
             max_buffer: crate::protocol::ingress_limit(protocol),
-            ingress_deadline: crate::protocol::ingress_deadline(protocol),
         },
     )
     .await;
@@ -326,15 +335,7 @@ pub enum MuxMessage {
     ///
     /// Note that the handler explicitly needs to request each network message by sending `WantNext`.
     /// This is necessary to allow proper handling of TCP simultaneous open in the handshake protocol.
-    Register {
-        protocol: ProtocolId<Erased>,
-        frame: Frame,
-        handler: StageRef<HandlerMessage>,
-        max_buffer: usize,
-        /// How long ingress kept back by a full handler mailbox may wait before this connection
-        /// is closed. Closing is not an adversarial-peer score.
-        ingress_deadline: Duration,
-    },
+    Register { protocol: ProtocolId<Erased>, frame: Frame, handler: StageRef<HandlerMessage>, max_buffer: usize },
     /// Buffer incoming data for this protocol ID up to the given limit
     /// (this should be followed by Register eventually, to then consume the data)
     ///
@@ -467,8 +468,8 @@ async fn handle_msg(
     reader: &StageRef<Read>,
 ) -> anyhow::Result<()> {
     match msg {
-        MuxMessage::Register { protocol, frame, handler, max_buffer, ingress_deadline } => {
-            muxer.register(protocol, frame, max_buffer, ingress_deadline, handler, eff).await
+        MuxMessage::Register { protocol, frame, handler, max_buffer } => {
+            muxer.register(protocol, frame, max_buffer, handler, eff).await
         }
         MuxMessage::Buffer(proto_id, limit) => muxer.buffer(proto_id, limit),
         MuxMessage::Send(proto_id, bytes, sent) => {
@@ -689,17 +690,11 @@ impl Muxer {
         proto_id: ProtocolId<Erased>,
         frame: Frame,
         max_buffer: usize,
-        ingress_deadline: Duration,
         handler: StageRef<HandlerMessage>,
         eff: &Effects<MuxMessage>,
     ) -> anyhow::Result<()> {
         async {
-            self.do_register(proto_id, frame, max_buffer, handler);
-            {
-                let pp = self.proto_mut(proto_id);
-                pp.ingress_deadline = ingress_deadline;
-                pp.registered_pending = true;
-            }
+            self.do_register(proto_id, frame, max_buffer, handler).registered_pending = true;
             self.flush_protocol(proto_id, eff).await?;
             self.sync_ingress_retry(eff).await;
             Ok(())
@@ -861,7 +856,7 @@ impl Muxer {
     /// Deliver deferred ingress in registration order.
     ///
     /// The timer that scheduled this wakeup has fired, so it is no longer armed. A protocol
-    /// whose frame is still deferred once `ingress_deadline` has elapsed closes the connection.
+    /// whose frame is still deferred once [`INGRESS_DEADLINE`] has elapsed closes the connection.
     /// That is a local handler that stopped reading. The peer is not treated as adversarial:
     /// nothing is scored, and no other connection is involved.
     ///
@@ -888,7 +883,7 @@ impl Muxer {
             let Some(since) = proto.deferred_since else {
                 continue;
             };
-            if now.saturating_since(since) >= proto.ingress_deadline {
+            if now.saturating_since(since) >= INGRESS_DEADLINE {
                 anyhow::bail!(
                     "ingress deferred past deadline for protocol {proto_id}; handler did not accept buffered data; peer is not treated as adversarial"
                 );
@@ -917,26 +912,22 @@ impl Muxer {
             };
             if proto.registered_pending {
                 let handler = proto.handler.clone();
+                proto.registered_pending = false;
                 match eff.try_send(&handler, HandlerMessage::Registered(proto_id)).await {
-                    TrySend::Queued => {
-                        self.proto_mut(proto_id).registered_pending = false;
-                    }
+                    TrySend::Queued => {}
                     TrySend::Full => {
+                        self.proto_mut(proto_id).registered_pending = true;
                         self.note_deferred(proto_id, eff).await;
                         return Ok(());
                     }
-                    // The handler is gone. Drop the registration notice; do not retry it and do
-                    // not fault this connection. A dead handler is already the supervisor's event.
-                    TrySend::Gone => {
-                        let proto = self.proto_mut(proto_id);
-                        proto.registered_pending = false;
-                        proto.deferred_since = None;
-                    }
+                    // The handler is gone. The notice was not queued. A dead handler is already
+                    // the supervisor's event, so this does not fault the connection. The next
+                    // iteration drops any buffered frame the same way.
+                    TrySend::Gone => {}
                 }
                 continue;
             }
 
-            let proto = self.proto_mut(proto_id);
             if proto.wanted == 0 {
                 proto.deferred_since = None;
                 return Ok(());
@@ -945,26 +936,29 @@ impl Muxer {
                 proto.deferred_since = None;
                 return Ok(());
             };
-            #[expect(clippy::expect_used)]
-            let frame = NonEmptyBytes::from_slice(&proto.incoming[..len]).expect("peeked length is non-empty");
+            let mut prefix = proto.incoming.split_to(len);
+            proto.wanted -= 1;
             let handler = proto.handler.clone();
+            #[expect(clippy::expect_used)]
+            let frame = NonEmptyBytes::from_slice(&prefix).expect("peeked length is non-empty");
             match eff.try_send(&handler, HandlerMessage::FromNetwork(frame)).await {
                 TrySend::Queued => {
-                    let proto = self.proto_mut(proto_id);
-                    let bytes = take_frame(&mut proto.incoming, len);
-                    trace!(protocols::mux::protocol::MESSAGE_EXTRACTED, bytes = bytes.len().get());
-                    proto.wanted -= 1;
+                    trace!(protocols::mux::protocol::MESSAGE_EXTRACTED, bytes = prefix.len());
                 }
                 TrySend::Full => {
+                    {
+                        let proto = self.proto_mut(proto_id);
+                        let suffix = std::mem::take(&mut proto.incoming);
+                        prefix.unsplit(suffix);
+                        proto.incoming = prefix;
+                        proto.wanted += 1;
+                    }
                     self.note_deferred(proto_id, eff).await;
                     return Ok(());
                 }
-                TrySend::Gone => {
-                    let proto = self.proto_mut(proto_id);
-                    let _ = take_frame(&mut proto.incoming, len);
-                    proto.wanted -= 1;
-                    proto.deferred_since = None;
-                }
+                // The frame was already taken off the buffer. A later iteration clears the
+                // deferral once nothing complete remains. A dead handler is not a fault.
+                TrySend::Gone => {}
             }
         }
     }
@@ -992,8 +986,6 @@ struct PerProto {
     registered_pending: bool,
     /// When the current mailbox deferral started. `None` when nothing is waiting on the handler.
     deferred_since: Option<Instant>,
-    /// How long `deferred_since` may last before the connection is closed.
-    ingress_deadline: Duration,
 }
 
 impl std::fmt::Debug for PerProto {
@@ -1009,7 +1001,6 @@ impl std::fmt::Debug for PerProto {
             .field("max_buffer", &self.max_buffer)
             .field("registered_pending", &self.registered_pending)
             .field("deferred_since", &self.deferred_since)
-            .field("ingress_deadline", &self.ingress_deadline)
             .finish()
     }
 }
@@ -1027,7 +1018,6 @@ impl PerProto {
             max_buffer,
             registered_pending: false,
             deferred_since: None,
-            ingress_deadline: Duration::ZERO,
         }
     }
 
@@ -1200,7 +1190,6 @@ mod tests {
                 frame: Frame::OneCborItem,
                 handler: output,
                 max_buffer: 100,
-                ingress_deadline: Duration::from_secs(60),
             })
             .await
             .unwrap();
@@ -1276,7 +1265,6 @@ mod tests {
                 frame: Frame::OneCborItem,
                 handler: chain_sync.clone(),
                 max_buffer: 1024,
-                ingress_deadline: Duration::from_secs(60),
             }],
         );
         running.run(Run::skip_wakeups()).assert_breakpoint("spawn");
@@ -1517,7 +1505,6 @@ mod tests {
                         frame: Frame::OneCborItem,
                         handler: StageRef::named_for_tests("handler"),
                         max_buffer: 1024,
-                        ingress_deadline: Duration::from_secs(60),
                     },
                 ],
             );
@@ -1570,7 +1557,6 @@ mod tests {
                 frame: Frame::OneCborItem,
                 handler: StageRef::named_for_tests("handler"),
                 max_buffer: 1024,
-                ingress_deadline: Duration::from_secs(60),
             }],
         );
         running.run(Run::skip_wakeups()).assert_breakpoint("spawn");
@@ -1664,7 +1650,6 @@ mod tests {
                 frame: Frame::OneCborItem,
                 handler: output,
                 max_buffer: 100,
-                ingress_deadline: Duration::from_secs(60),
             })
             .await
             .unwrap();
@@ -1793,14 +1778,8 @@ mod tests {
         assert_eq!(overlaps, 0, "a second ingress retry was armed while one was still pending");
     }
 
-    fn register_msg(protocol: ProtocolId<Erased>, handler: StageRef<HandlerMessage>, deadline: Duration) -> MuxMessage {
-        MuxMessage::Register {
-            protocol,
-            frame: Frame::OneCborItem,
-            handler,
-            max_buffer: 64,
-            ingress_deadline: deadline,
-        }
+    fn register_msg(protocol: ProtocolId<Erased>, handler: StageRef<HandlerMessage>) -> MuxMessage {
+        MuxMessage::Register { protocol, frame: Frame::OneCborItem, handler, max_buffer: 64 }
     }
 
     fn from_network(protocol: ProtocolId<Erased>, byte: u8) -> MuxMessage {
@@ -1835,13 +1814,11 @@ mod tests {
         let mut running = network.run(rt.handle());
         start(&mut running);
 
-        let deadline = Duration::from_secs(30);
-        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone(), deadline)]);
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone())]);
         drive(&mut running).assert_sleeping();
         fill_handler(&mut running, &handlers.a);
 
-        running
-            .enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone(), deadline)]);
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone())]);
         drive(&mut running).assert_sleeping();
         running.trace_buffer().lock().clear();
 
@@ -1894,8 +1871,7 @@ mod tests {
         let mut running = network.run(rt.handle());
         start(&mut running);
 
-        running
-            .enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), handler.as_ref().clone(), Duration::from_secs(30))]);
+        running.enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), handler.as_ref().clone())]);
         let parked = drive(&mut running).assert_sleeping();
         for _ in 0..amaru_pure_stage::DEFAULT_MAILBOX_SIZE {
             running.enqueue_msg(&handler, [HandlerMessage::Registered(PROTO_TEST.erase())]);
@@ -1939,17 +1915,11 @@ mod tests {
         let mut running = network.run(rt.handle());
         start(&mut running);
 
-        running.enqueue_msg(
-            &handlers.mux,
-            [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone(), Duration::from_millis(1500))],
-        );
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone())]);
         drive(&mut running).assert_sleeping();
         fill_handler(&mut running, &handlers.a);
 
-        running.enqueue_msg(
-            &handlers.mux,
-            [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone(), Duration::from_secs(30))],
-        );
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone())]);
         drive(&mut running).assert_sleeping();
         for _ in 0..2 {
             running.enqueue_msg(&handlers.b, [HandlerMessage::Registered(PROTO_HANDSHAKE.erase())]);
@@ -1960,14 +1930,20 @@ mod tests {
             &handlers.mux,
             [MuxMessage::WantNext(PROTO_TEST.erase()), from_network(PROTO_TEST.erase(), 0x01)],
         );
-        let first_retry = drive(&mut running).assert_sleeping();
+        let mut wake = drive(&mut running).assert_sleeping();
         assert!(running.get_state(&handlers.mux).is_some(), "still inside the deadline");
+        assert!(INGRESS_DEADLINE > crate::protocol::NETWORK_SEND_TIMEOUT, "one retry must land before the deadline");
 
-        let second_retry = running.run(Run::until(first_retry)).assert_sleeping();
-        assert!(running.get_state(&handlers.mux).is_some(), "the first retry is before the deadline");
-        assert_eq!(proto(&running, &handlers.mux, PROTO_TEST.erase()).wanted, 1);
+        // Fault is checked after a retry flush. Wakeups strictly inside the deadline stay up;
+        // the wakeup that reaches the deadline closes the connection.
+        let still_inside = (INGRESS_DEADLINE.as_secs() / crate::protocol::NETWORK_SEND_TIMEOUT.as_secs()) - 1;
+        for _ in 0..still_inside {
+            wake = running.run(Run::until(wake)).assert_sleeping();
+            assert!(running.get_state(&handlers.mux).is_some(), "retry is still inside the deadline");
+            assert_eq!(proto(&running, &handlers.mux, PROTO_TEST.erase()).wanted, 1);
+        }
 
-        running.run(Run::until(second_retry)).assert_terminated(handlers.mux.name());
+        running.run(Run::until(wake)).assert_terminated(handlers.mux.name());
         assert_eq!(running.get_state(&bystander), Some(&7), "faulting the mux leaves other stages running");
         assert_eq!(running.mailbox_len(&handlers.b), other_mailbox);
     }
@@ -1993,8 +1969,7 @@ mod tests {
         assert_eq!(running.mailbox_len(&handler), amaru_pure_stage::DEFAULT_MAILBOX_SIZE);
         running.trace_buffer().lock().clear();
 
-        running
-            .enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), handler.as_ref().clone(), Duration::from_secs(30))]);
+        running.enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), handler.as_ref().clone())]);
         let waiting = drive(&mut running).assert_sleeping();
         assert_eq!(waiting, parked, "the handler drains before the ingress retry");
         let pending = proto(&running, &mux, PROTO_TEST.erase());
@@ -2045,7 +2020,6 @@ mod tests {
                 frame: Frame::OneCborItem,
                 handler: handler.as_ref().clone(),
                 max_buffer: 1,
-                ingress_deadline: Duration::from_secs(30),
             }],
         );
         drive(&mut running).assert_sleeping();
@@ -2068,13 +2042,11 @@ mod tests {
         let mut running = network.run(rt.handle());
         start(&mut running);
 
-        let deadline = Duration::from_secs(30);
         // PROTO_TEST's id is greater than handshake. Registration order, not id order, is the retry order.
-        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone(), deadline)]);
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_TEST.erase(), handlers.a.as_ref().clone())]);
         drive(&mut running).assert_sleeping();
         fill_handler(&mut running, &handlers.a);
-        running
-            .enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone(), deadline)]);
+        running.enqueue_msg(&handlers.mux, [register_msg(PROTO_HANDSHAKE.erase(), handlers.b.as_ref().clone())]);
         drive(&mut running).assert_sleeping();
         fill_handler(&mut running, &handlers.b);
         running.trace_buffer().lock().clear();
@@ -2099,7 +2071,7 @@ mod tests {
                 matches!(
                     entry,
                     TraceEntry::Suspend(Effect::SetTimeout { at_stage, slot, .. })
-                        if at_stage == &mux_name && *slot == INGRESS_RETRY_SLOT
+                        if at_stage == &mux_name && *slot == 1
                 )
             })
             .count();
@@ -2138,10 +2110,7 @@ mod tests {
         let mut running = network.run(rt.handle());
         start(&mut running);
 
-        running.enqueue_msg(
-            &mux,
-            [register_msg(PROTO_TEST.erase(), StageRef::named_for_tests("missing"), Duration::from_millis(1))],
-        );
+        running.enqueue_msg(&mux, [register_msg(PROTO_TEST.erase(), StageRef::named_for_tests("missing"))]);
         drive(&mut running).assert_idle();
         let proto_state = proto(&running, &mux, PROTO_TEST.erase());
         assert!(!proto_state.registered_pending);

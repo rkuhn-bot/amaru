@@ -114,7 +114,6 @@ pub async fn register_tx_submission(
             frame: mux::Frame::OneCborItem,
             handler,
             max_buffer: ingress_limit(protocol),
-            ingress_deadline: crate::protocol::ingress_deadline(protocol),
         },
     )
     .await;

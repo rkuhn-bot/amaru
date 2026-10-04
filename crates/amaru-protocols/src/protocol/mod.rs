@@ -28,8 +28,8 @@ mod want_next;
 
 pub use check::ProtoSpec;
 pub use limits::{
-    BLOCK_FETCH_INGRESS, CHAIN_SYNC_INGRESS, CHAIN_SYNC_INGRESS_DEADLINE, HANDSHAKE_INGRESS, KEEP_ALIVE_INGRESS,
-    PEER_SHARING_INGRESS, TX_SUBMISSION_INGRESS, ingress_deadline, ingress_limit,
+    BLOCK_FETCH_INGRESS, CHAIN_SYNC_INGRESS, HANDSHAKE_INGRESS, KEEP_ALIVE_INGRESS, PEER_SHARING_INGRESS,
+    TX_SUBMISSION_INGRESS, ingress_limit,
 };
 pub use miniprotocol::{
     Inputs, Internal, Miniprotocol, Outcome, ProtocolState, Pull, StageState, Timeout, from_wire, miniprotocol, outcome,

@@ -92,7 +92,6 @@ fn test_against_node() {
                 frame: mux::Frame::OneCborItem,
                 handler: handshake_bytes,
                 max_buffer: ingress_limit(PROTO_HANDSHAKE),
-                ingress_deadline: crate::protocol::ingress_deadline(PROTO_HANDSHAKE),
             }],
         )
         .unwrap();
@@ -165,7 +164,6 @@ fn test_against_node_with_tokio() {
                 frame: mux::Frame::OneCborItem,
                 handler: handshake_bytes,
                 max_buffer: ingress_limit(PROTO_HANDSHAKE),
-                ingress_deadline: crate::protocol::ingress_deadline(PROTO_HANDSHAKE),
             }],
         )
         .unwrap();
@@ -244,7 +242,6 @@ async fn haskell_ping_handshake_negotiates_over_tcp() {
                 frame: mux::Frame::OneCborItem,
                 handler: handshake.contramap(Inputs::Network),
                 max_buffer: ingress_limit(PROTO_HANDSHAKE),
-                ingress_deadline: crate::protocol::ingress_deadline(PROTO_HANDSHAKE.responder()),
             }],
         )
         .unwrap();

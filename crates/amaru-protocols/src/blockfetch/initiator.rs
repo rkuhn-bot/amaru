@@ -460,7 +460,6 @@ pub async fn register_blockfetch_initiator<M: amaru_pure_stage::SendData>(
             frame: Frame::OneCborItem,
             handler: blockfetch.contramap(Inputs::Network),
             max_buffer: ingress_limit(protocol).max(blockfetch_pipeline_max_buffer(n)),
-            ingress_deadline: crate::protocol::ingress_deadline(protocol),
         },
     )
     .await;

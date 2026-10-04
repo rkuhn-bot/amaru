@@ -65,7 +65,6 @@ mod register {
                 frame: Frame::OneCborItem,
                 handler: chainsync.contramap(Inputs::Network),
                 max_buffer: ingress_limit(PROTO_N2N_CHAIN_SYNC),
-                ingress_deadline: crate::protocol::ingress_deadline(PROTO_N2N_CHAIN_SYNC),
             },
         )
         .await;
@@ -90,7 +89,6 @@ mod register {
                 frame: Frame::OneCborItem,
                 handler: chainsync.contramap(Inputs::Network),
                 max_buffer: ingress_limit(PROTO_N2N_CHAIN_SYNC.responder()),
-                ingress_deadline: crate::protocol::ingress_deadline(PROTO_N2N_CHAIN_SYNC.responder()),
             },
         )
         .await;

@@ -109,7 +109,6 @@ pub async fn register_keepalive(
             frame: mux::Frame::OneCborItem,
             handler,
             max_buffer: ingress_limit(protocol),
-            ingress_deadline: crate::protocol::ingress_deadline(protocol),
         },
     )
     .await;

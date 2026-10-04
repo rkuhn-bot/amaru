@@ -31,7 +31,7 @@ use crate::{
     peer_sharing::{PeerSharingMessage, ShareResult, register_peer_sharing_initiator, register_peer_sharing_responder},
     protocol::{
         Erased, Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
-        PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, ProtocolId, Role, ingress_deadline, ingress_limit,
+        PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, ProtocolId, Role, ingress_limit,
     },
     protocol_messages::{
         handshake::HandshakeResult, version_data::VersionData, version_number::VersionNumber,
@@ -506,13 +506,7 @@ async fn do_initialize(
     };
     eff.send(
         &muxer,
-        MuxMessage::Register {
-            protocol,
-            frame: mux::Frame::OneCborItem,
-            handler,
-            max_buffer: ingress_limit(protocol),
-            ingress_deadline: ingress_deadline(protocol),
-        },
+        MuxMessage::Register { protocol, frame: mux::Frame::OneCborItem, handler, max_buffer: ingress_limit(protocol) },
     )
     .await;
 

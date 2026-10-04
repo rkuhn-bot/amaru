@@ -25,7 +25,7 @@ mod initiator;
 mod messages;
 mod responder;
 
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
 use amaru_kernel::Peer;
 use amaru_ouroboros::ConnectionId;
@@ -33,12 +33,6 @@ use amaru_pure_stage::{DeserializerGuards, Effects, StageRef};
 pub use initiator::{PeerSharingInitiator, PeerSharingMessage, ShareResult, initiator};
 pub use messages::{MAX_MESSAGE_BYTES, Message};
 pub use responder::{PeerSharingResponder, ResponderMessage, register_peer_sharing_responder, responder};
-
-/// How long peer-sharing ingress may stay deferred before the connection is closed.
-///
-/// Peer sharing defines no agency timeout. This matches the outbound share cadence
-/// `peer_selection::SHARE_REQUEST_INTERVAL`.
-pub const PEER_SHARING_INGRESS_DEADLINE: Duration = Duration::from_secs(900);
 
 use crate::{
     mux::{Frame, MuxMessage},
@@ -106,7 +100,6 @@ pub async fn register_peer_sharing_initiator<M: amaru_pure_stage::SendData>(
             frame: Frame::OneCborItem,
             handler: ps.contramap(Inputs::<PeerSharingMessage>::Network),
             max_buffer: ingress_limit(PROTO_N2N_PEER_SHARE),
-            ingress_deadline: crate::protocol::ingress_deadline(PROTO_N2N_PEER_SHARE),
         },
     )
     .await;

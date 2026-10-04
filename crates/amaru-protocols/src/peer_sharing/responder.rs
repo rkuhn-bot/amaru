@@ -71,7 +71,6 @@ pub async fn register_peer_sharing_responder<M: amaru_pure_stage::SendData>(
             frame: Frame::OneCborItem,
             handler: ps.contramap(Inputs::<ResponderMessage>::Network),
             max_buffer: ingress_limit(PROTO_N2N_PEER_SHARE.responder()),
-            ingress_deadline: crate::protocol::ingress_deadline(PROTO_N2N_PEER_SHARE.responder()),
         },
     )
     .await;
