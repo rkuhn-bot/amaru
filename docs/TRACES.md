@@ -1062,6 +1062,7 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | `decode_failed` | `TRACE` | public | Failed to decode a block received from a peer | peer, error |  |
 | `find_missing_failed` | `TRACE` | public | Failed to compute the set of missing blocks | error |  |
 | `header_not_found` | `TRACE` | public | A header required for block fetching could not be loaded from the store | header_hash |  |
+| `none_accepted` | `TRACE` | public | Every candidate connection refused the request, and no other peer was asked | req_id |  |
 | `nothing_to_fetch` | `TRACE` | public | The batch of missing blocks is empty; resume fetching from the tip | tip, parent |  |
 | `paused` | `TRACE` | public | Block fetching paused because no upstream peers are available | req_id |  |
 | `point_mismatch` | `TRACE` | public | Received a block out of order: its point is not the next missing point | actual | expected |
@@ -1092,6 +1093,14 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | field | type | required |
 | --- | --- | --- |
 | `header_hash` | `string` | ✓ |
+
+</details>
+
+<details><summary>span: `none_accepted`</summary>
+
+| field | type | required |
+| --- | --- | --- |
+| `req_id` | `integer` | ✓ |
 
 </details>
 
@@ -2751,12 +2760,22 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | name | level | public | description | required fields | optional fields |
 | --- | --- | --- | --- | --- | --- |
 | `fetch_no_peers` | `TRACE` | public | No connection was available to serve a block-fetch request | id |  |
+| `fetch_none_accepted` | `TRACE` | public | Every candidate connection refused a block-fetch request | id, candidates |  |
 
 <details><summary>span: `fetch_no_peers`</summary>
 
 | field | type | required |
 | --- | --- | --- |
 | `id` | `integer` | ✓ |
+
+</details>
+
+<details><summary>span: `fetch_none_accepted`</summary>
+
+| field | type | required |
+| --- | --- | --- |
+| `id` | `integer` | ✓ |
+| `candidates` | `integer` | ✓ |
 
 </details>
 

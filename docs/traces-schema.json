@@ -2756,6 +2756,24 @@
       "description": "A header required for block fetching could not be loaded from the store",
       "public": true
     },
+    "amaru::consensus::blocks::NONE_ACCEPTED": {
+      "type": "object",
+      "properties": {
+        "req_id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "req_id"
+      ],
+      "optional": [],
+      "additionalProperties": false,
+      "name": "none_accepted",
+      "level": "TRACE",
+      "target": "amaru::consensus::blocks",
+      "description": "Every candidate connection refused the request, and no other peer was asked",
+      "public": true
+    },
     "amaru::consensus::blocks::NOTHING_TO_FETCH": {
       "type": "object",
       "properties": {
@@ -7253,6 +7271,28 @@
       "level": "TRACE",
       "target": "amaru::protocols::keepalive::peer",
       "description": "Measured round-trip time for a keepalive exchange on an established peer connection.",
+      "public": true
+    },
+    "amaru::protocols::manager::blocks::FETCH_NONE_ACCEPTED": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "candidates": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "candidates"
+      ],
+      "optional": [],
+      "additionalProperties": false,
+      "name": "fetch_none_accepted",
+      "level": "TRACE",
+      "target": "amaru::protocols::manager::blocks",
+      "description": "Every candidate connection refused a block-fetch request",
       "public": true
     },
     "amaru::protocols::manager::blocks::FETCH_NO_PEERS": {
