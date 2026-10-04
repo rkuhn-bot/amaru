@@ -33,8 +33,8 @@ use crate::{
     metrics_effects::{Metrics, MetricsOps},
     mux::{Frame, HandlerMessage, MuxMessage, Sent},
     protocol::{
-        Inputs, Internal, MuxClient, NETWORK_SEND_TIMEOUT, PROTO_N2N_BLOCK_FETCH, Pull, ToMux, WantNext,
-        egress_admission_deadline, from_wire, ingress_limit,
+        Inputs, Internal, MuxClient, NETWORK_SEND_TIMEOUT, PROTO_N2N_BLOCK_FETCH, Pull, ToMux, WantNext, from_wire,
+        ingress_limit,
     },
     store_effects::Store,
 };
@@ -343,7 +343,7 @@ pub mod tests {
     use super::*;
     use crate::{
         mux::{MuxMessage, Sent},
-        protocol::Inputs,
+        protocol::{Inputs, egress_admission_deadline},
         store_effects::ResourceHeaderStore,
     };
 
