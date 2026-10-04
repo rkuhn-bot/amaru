@@ -2616,6 +2616,15 @@ define_schemas! {
                     required role: String
                 }
             }
+            /// A protocol send missed the bandwidth deadline, so the connection is closed.
+            /// The peer is not recorded as adversarial.
+            /// Reason ∈ {range_deadline, client_done_not_admitted, client_done_deadline,
+            /// start_batch, block, batch_done, no_blocks, not_admitted, deadline}.
+            public EGRESS_DEADLINE {
+                required proto: String
+                required reason: String
+                optional peer: %amaru_kernel::Peer
+            }
             /// A protocol handler received invalid input
             public INVALID_INPUT {
                 required proto: String

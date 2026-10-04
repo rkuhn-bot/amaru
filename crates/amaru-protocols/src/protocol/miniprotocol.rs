@@ -15,6 +15,7 @@
 use std::future::Future;
 
 use amaru_kernel::{NonEmptyBytes, cbor};
+use amaru_observability::warn;
 use amaru_pure_stage::{
     BoxFuture, CallAdmission, Effects, OrTerminateWith, SendData, StageRef, TryInStage, Void, err,
     typestate::FromMailbox,
@@ -196,11 +197,12 @@ where
         let timeout = egress_admission_deadline(msg.len().get());
         match eff.call_with_admission(&muxer, timeout, move |cr| MuxMessage::Send(proto_id.erase(), msg, cr)).await {
             CallAdmission::Reply(Sent) => {}
-            CallAdmission::NotAdmitted | CallAdmission::TimedOut => {
-                err("mux egress")(
-                    "egress was not accepted before the bandwidth deadline; peer is not treated as adversarial",
-                )
-                .await;
+            CallAdmission::NotAdmitted(_) => {
+                warn!(protocols::EGRESS_DEADLINE, proto = proto_id.to_string(), reason = "not_admitted");
+                return false;
+            }
+            CallAdmission::TimedOut(_) => {
+                warn!(protocols::EGRESS_DEADLINE, proto = proto_id.to_string(), reason = "deadline");
                 return false;
             }
         }

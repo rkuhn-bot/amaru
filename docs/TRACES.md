@@ -2642,7 +2642,18 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 
 | name | level | public | description | required fields | optional fields |
 | --- | --- | --- | --- | --- | --- |
+| `egress_deadline` | `TRACE` | public | A protocol send missed the bandwidth deadline, so the connection is closed. The peer is not recorded as adversarial. Reason ∈ {range_deadline, client_done_not_admitted, client_done_deadline, start_batch, block, batch_done, no_blocks, not_admitted, deadline}. | proto, reason | peer |
 | `invalid_input` | `TRACE` | public | A protocol handler received invalid input | proto, peer, state, input |  |
+
+<details><summary>span: `egress_deadline`</summary>
+
+| field | type | required |
+| --- | --- | --- |
+| `proto` | `string` | ✓ |
+| `reason` | `string` | ✓ |
+| `peer` | `string` |  |
+
+</details>
 
 <details><summary>span: `invalid_input`</summary>
 

@@ -61,21 +61,23 @@ pub const SDU_TIMEOUT_ESTABLISHED: Duration = Duration::from_secs(30);
 /// `Register` or `SetSduTimeout` in the same burst.
 pub const MUX_MAILBOX_SIZE: usize = 24;
 
-/// One coalesced retry for ingress the handler mailbox did not accept.
-const INGRESS_RETRY_SLOT: u64 = 0;
+/// Protocol code arms an agency timer with [`Effects::set_timeout`](amaru_pure_stage::Effects::set_timeout),
+/// which is slot 0 on that stage. These retries are on the mux stage and sit above slot 0
+/// so a default timeout there does not replace them. Ingress is slot 1. Egress is slot 2.
+/// The two do not share a slot.
+const INGRESS_RETRY_SLOT: u64 = 1;
 
 /// One coalesced retry when the writer returned [`TrySend::Full`].
 ///
 /// A payload waiting on the segment cap is admitted in the transition that hands
 /// the blocking segment to the writer, not on this timer.
-const EGRESS_RETRY_SLOT: u64 = 1;
+const EGRESS_RETRY_SLOT: u64 = 2;
 
-/// Unsent bytes for one protocol fit in a single segment, unless the buffer is empty.
+/// Room for `payload` on top of this lane's unsent bytes.
 ///
-/// A payload larger than [`MAX_SEGMENT_SIZE`] (a block can be) is accepted when
-/// `queued == 0`. Otherwise it waits until this protocol's unsent egress drains.
-/// A smaller payload is accepted while `queued + payload` still fits in one segment.
-/// Bytes already handed to the writer are not part of `queued`.
+/// A segment holds up to [`MAX_SEGMENT_SIZE`] bytes and can contain several messages.
+/// The lane queues at most one segment, or one larger payload when it is empty.
+/// Bytes already handed to the writer are not in `queued`.
 fn egress_has_room(queued: usize, payload: usize) -> bool {
     queued == 0 || queued.saturating_add(payload) <= MAX_SEGMENT_SIZE
 }
@@ -359,10 +361,10 @@ pub enum MuxMessage {
     Buffer(ProtocolId<Erased>, usize),
     /// Send the given message on the protocol ID.
     ///
-    /// The reply is [`Sent`] once the bytes are in this protocol's bounded unsent
-    /// egress, not once they reach the writer. See [`egress_has_room`]. A payload
-    /// that does not fit is held, in arrival order, until it does. The mux does
-    /// not wait on the writer to answer this.
+    /// [`Sent`] means these bytes are in the lane's unsent egress ([`egress_has_room`]).
+    /// A segment handed to the writer can contain bytes of several messages. A payload
+    /// that does not fit waits, in arrival order. The mux does not block on the writer
+    /// to answer this call.
     Send(ProtocolId<Erased>, NonEmptyBytes, StageRef<Sent>),
     /// internal message coming from the TCP stream reader
     FromNetwork(Timestamp, ProtocolId<Erased>, NonEmptyBytes),
@@ -2683,7 +2685,7 @@ mod tests {
                 state.admitted = true;
                 state
             }
-            CallAdmission::NotAdmitted | CallAdmission::TimedOut => eff.terminate().await,
+            CallAdmission::NotAdmitted(_) | CallAdmission::TimedOut(_) => eff.terminate().await,
         }
     }
 

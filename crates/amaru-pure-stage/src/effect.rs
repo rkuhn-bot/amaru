@@ -168,8 +168,12 @@ impl ScheduleIds {
     }
 }
 
-#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CallTimeout;
+/// Token for [`CallAdmission::TimedOut`].
+///
+/// The request was admitted, then the deadline passed. It stays queued. A later
+/// receive may use this token to allow termination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CallTimeout;
 
 impl CallTimeout {
     /// The value a caller observes as [`CallAdmission::TimedOut`]: the request was admitted,
@@ -179,10 +183,12 @@ impl CallTimeout {
     }
 }
 
-/// The value a caller observes as [`CallAdmission::NotAdmitted`]: the deadline fired before
-/// admission. The request is never delivered.
-#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CallNotAdmitted;
+/// Token for [`CallAdmission::NotAdmitted`].
+///
+/// The deadline fired before admission. The request is never delivered. A later
+/// receive may use this token to open the follow-up transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CallNotAdmitted;
 
 impl CallNotAdmitted {
     pub(crate) fn boxed() -> Box<dyn SendData> {
@@ -210,20 +216,20 @@ pub enum TrySend {
 /// to `None`.
 #[derive(Debug, PartialEq)]
 pub enum CallAdmission<T> {
-    /// A reply arrived before the deadline.
+    /// A reply arrived before the deadline. The value is the callee's token.
     Reply(T),
     /// The deadline fired before admission. The request is never delivered.
-    NotAdmitted,
+    NotAdmitted(CallNotAdmitted),
     /// The request was admitted, then the deadline passed. The request stays queued.
     /// A late reply is ignored.
-    TimedOut,
+    TimedOut(CallTimeout),
 }
 
 pub(crate) fn call_admission<Resp: SendData + DeserializeOwned>(resp: Box<dyn SendData>) -> CallAdmission<Resp> {
     if resp.typetag_name() == type_name::<CallNotAdmitted>() {
-        CallAdmission::NotAdmitted
+        CallAdmission::NotAdmitted(CallNotAdmitted)
     } else if resp.typetag_name() == type_name::<CallTimeout>() {
-        CallAdmission::TimedOut
+        CallAdmission::TimedOut(CallTimeout)
     } else {
         CallAdmission::Reply(resp.cast_deserialize::<Resp>().expect("internal message type error"))
     }
@@ -318,7 +324,7 @@ impl<M> Effects<M> {
         Box::pin(async move {
             match result.await {
                 CallAdmission::Reply(resp) => Some(resp),
-                CallAdmission::NotAdmitted | CallAdmission::TimedOut => None,
+                CallAdmission::NotAdmitted(_) | CallAdmission::TimedOut(_) => None,
             }
         })
     }

@@ -624,8 +624,10 @@ pub trait SessionOps<M, Rem>: Sized {
     /// Waits for [`IntoRoleCall::Reply`](super::IntoRoleCall::Reply) or the
     /// deadline from [`IntoRoleCall::into_call`](super::IntoRoleCall::into_call). The wait is the
     /// back-pressure: the session does not continue until the callee answers
-    /// or the timer fires. [`CallAdmission::NotAdmitted`] means the request
-    /// never reached the callee. [`CallAdmission::TimedOut`] means it did.
+    /// or the timer fires. [`CallAdmission::NotAdmitted`] carries a
+    /// [`CallNotAdmitted`](crate::CallNotAdmitted) token: the request never reached
+    /// the callee. [`CallAdmission::TimedOut`] carries a [`CallTimeout`](crate::CallTimeout)
+    /// token: it did. [`CallAdmission::Reply`] carries the callee's token.
     ///
     /// ```compile_fail
     /// use amaru_pure_stage::typestate::prelude::*;

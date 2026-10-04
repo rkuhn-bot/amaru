@@ -307,7 +307,9 @@ fn call_waits_for_the_reply() {
                 let (reply, s) = asking.receive(&ping, eff).call(&state.echo, n).await;
                 let got = match reply {
                     amaru_pure_stage::CallAdmission::Reply(v) => Some(v),
-                    amaru_pure_stage::CallAdmission::NotAdmitted | amaru_pure_stage::CallAdmission::TimedOut => None,
+                    amaru_pure_stage::CallAdmission::NotAdmitted(_) | amaru_pure_stage::CallAdmission::TimedOut(_) => {
+                        None
+                    }
                 };
                 RpcServer { live: s.finish().into(), got, echo: state.echo }
             }

@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use amaru_kernel::{IsHeader, NetworkPoint, NonEmptyVec, Peer, Point, RawBlock};
 use amaru_metrics::protocol::ServedBlockCountMetrics;
-use amaru_observability::{debug, error};
+use amaru_observability::{debug, error, warn};
 use amaru_pure_stage::{
-    CallAdmission, DeserializerGuards, Effects, StageRef, Void, define_role_tag, err, make_states, on_receive,
+    CallAdmission, DeserializerGuards, Effects, StageRef, Void, define_role_tag, make_states, on_receive,
     typestate::prelude::*,
 };
 
@@ -227,7 +227,7 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                         let metrics = Metrics::new(&metrics_eff);
                         let (admission, mut session) = idle.receive(&range, eff).call(&mux, StartBatch).await;
                         if !matches!(admission, CallAdmission::Reply(_)) {
-                            return fault_egress(peer, for_err).await;
+                            return fault_egress(peer, "start_batch", for_err).await;
                         }
                         loop {
                             let (block, rest) = match points.next_block(&store).await {
@@ -238,7 +238,7 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                             let admission;
                             (admission, session) = session.call(&mux, Block { body: block.to_vec() }).await;
                             if !matches!(admission, CallAdmission::Reply(_)) {
-                                return fault_egress(peer, for_err.clone()).await;
+                                return fault_egress(peer, "block", for_err.clone()).await;
                             }
                             match rest {
                                 Some(next) => points = next,
@@ -247,14 +247,14 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                         }
                         let (admission, session) = session.discard_repeat().call(&mux, BatchDone).await;
                         if !matches!(admission, CallAdmission::Reply(_)) {
-                            return fault_egress(peer, for_err).await;
+                            return fault_egress(peer, "batch_done", for_err).await;
                         }
                         session.send(&mux, WantNext).await.finish().into()
                     }
                     Ok(None) => {
                         let (admission, session) = idle.receive(&range, eff.clone()).call(&mux, NoBlocks).await;
                         if !matches!(admission, CallAdmission::Reply(_)) {
-                            return fault_egress(peer, eff).await;
+                            return fault_egress(peer, "no_blocks", eff).await;
                         }
                         session.send(&mux, WantNext).await.finish().into()
                     }
@@ -279,9 +279,8 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
     Instance { proto, mux, peer }
 }
 
-async fn fault_egress(peer: Peer, eff: Effects<Mail>) -> Instance {
-    err("mux egress")(format!("blockfetch responder egress deadline for {peer}; peer is not treated as adversarial"))
-        .await;
+async fn fault_egress(peer: Peer, reason: &'static str, eff: Effects<Mail>) -> Instance {
+    warn!(protocols::EGRESS_DEADLINE, proto = "block_fetch", peer, reason = reason);
     eff.terminate().await
 }
 

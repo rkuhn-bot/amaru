@@ -24,10 +24,10 @@ use std::{
 };
 
 use amaru_kernel::{NetworkPoint, Peer, Point, RawBlock, cardano::network_block::NetworkBlock, utils::debug_bytes};
-use amaru_observability::error;
+use amaru_observability::{error, warn};
 use amaru_pure_stage::{
-    CallAdmission, DeserializerGuards, Effects, StageRef, define_role, define_role_tag, err, make_states, on_receive,
-    typestate::prelude::*,
+    CallAdmission, CallNotAdmitted, DeserializerGuards, Effects, StageRef, define_role, define_role_tag, make_states,
+    on_receive, typestate::prelude::*,
 };
 
 use super::{BatchDone, Block, ClientDone, Message, NoBlocks, RequestRange, StartBatch, responder::MAX_FETCHED_BLOCKS};
@@ -69,11 +69,13 @@ on_receive!(Idle as PipelineIdleIn {
     Fetch => { Call<ToResponder, RequestRange> => Busy }
     Close => { Call<ToResponder, ClientDone> | Repeat<SendAny<ToCollector>> => Done }
 });
+on_receive!(Idle, CallNotAdmitted => Send<ToCollector, Blocks> => Idle);
 on_receive!(Busy as ClientBusyIn {
     Pull => { Send<ToMux, WantNext>, SetTimeout => Busy }
     StartBatch => { Send<ToMux, WantNext>, SetTimeout => Streaming }
     NoBlocks => { ClearTimeout, Repeat<SendAny<ToCollector>> => Idle }
 });
+on_receive!(Busy, Sent => Send<ToMux, WantNext>, SetTimeout => Busy);
 on_receive!(Streaming as ClientStreamingIn {
     Block => { Send<ToMux, WantNext>, Repeat<SendAny<ToCollector>>, SetTimeout => Streaming }
     BatchDone => { ClearTimeout, Repeat<SendAny<ToCollector>> => Idle }
@@ -274,16 +276,10 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                         inflight = Some(Inflight { id: fetch.id, cr: fetch.cr.clone(), remaining: MAX_FETCHED_BLOCKS });
                         s.finish().into()
                     }
-                    // The range never reached the mux. Tell the collector and stay Idle,
-                    // so the driver does not arm `WantNext` or the agency timer.
-                    CallAdmission::NotAdmitted => {
-                        eff.send(&fetch.cr, Blocks::NoBlocks(fetch.id, peer)).await;
-                        initial_state::<Idle>().into()
+                    CallAdmission::NotAdmitted(token) => idle_no_blocks(token, fetch.id, fetch.cr, peer, eff).await,
+                    CallAdmission::TimedOut(_token) => {
+                        return fault_egress(peer, "range_deadline", eff).await;
                     }
-                    // Admitted, then the deadline passed. The bytes may still leave later.
-                    // Closing the connection is the slow-peer fault; `NoBlocks` would claim
-                    // the peer had nothing.
-                    CallAdmission::TimedOut => return fault_egress(peer, eff).await,
                 }
             }
             Ok(PipelineIdleIn::Close(close)) => {
@@ -292,7 +288,12 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                 let (admission, s) = idle.receive(&close, eff.clone()).call(&mux, ClientDone).await;
                 match admission {
                     CallAdmission::Reply(_) => s.finish().into(),
-                    CallAdmission::NotAdmitted | CallAdmission::TimedOut => return fault_egress(peer, eff).await,
+                    CallAdmission::NotAdmitted(_token) => {
+                        return fault_egress(peer, "client_done_not_admitted", eff).await;
+                    }
+                    CallAdmission::TimedOut(_token) => {
+                        return fault_egress(peer, "client_done_deadline", eff).await;
+                    }
                 }
             }
             // TODO: handle timeouts generically to make mistakes impossible
@@ -406,17 +407,22 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
             let (admission, s) = idle.receive(&Close, follow_eff.clone()).call(&mux, ClientDone).await;
             match admission {
                 CallAdmission::Reply(_) => s.finish().into(),
-                CallAdmission::NotAdmitted | CallAdmission::TimedOut => return fault_egress(peer, follow_eff).await,
+                CallAdmission::NotAdmitted(_token) => {
+                    return fault_egress(peer, "client_done_not_admitted", follow_eff).await;
+                }
+                CallAdmission::TimedOut(_token) => {
+                    return fault_egress(peer, "client_done_deadline", follow_eff).await;
+                }
             }
         }
         (false, Some(fetch), Proto::Idle(idle)) => {
             let range = RequestRange { from: fetch.from, through: fetch.through };
             let (admission, s) = idle.receive(&fetch, follow_eff.clone()).call(&mux, range).await;
             match admission {
-                CallAdmission::Reply(_) => {
+                CallAdmission::Reply(sent) => {
                     inflight = Some(Inflight { id: fetch.id, cr: fetch.cr.clone(), remaining: MAX_FETCHED_BLOCKS });
                     s.finish()
-                        .receive(&Pull, pull_eff)
+                        .receive(&sent, pull_eff)
                         .send(&mux, WantNext)
                         .await
                         .set_timeout(BLOCKFETCH_AGENCY_TIMEOUT, Instance::timeout_mail())
@@ -424,11 +430,8 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
                         .finish()
                         .into()
                 }
-                CallAdmission::NotAdmitted => {
-                    follow_eff.send(&fetch.cr, Blocks::NoBlocks(fetch.id, peer)).await;
-                    initial_state::<Idle>().into()
-                }
-                CallAdmission::TimedOut => return fault_egress(peer, follow_eff).await,
+                CallAdmission::NotAdmitted(token) => idle_no_blocks(token, fetch.id, fetch.cr, peer, follow_eff).await,
+                CallAdmission::TimedOut(_token) => return fault_egress(peer, "range_deadline", follow_eff).await,
             }
         }
         (_, fetch, proto) => {
@@ -439,9 +442,19 @@ async fn instance(inst: Instance, mail: Mail, eff: Effects<Mail>) -> Instance {
     Instance { proto, mux, inflight, peer, pending_close, pending_fetch }
 }
 
-async fn fault_egress(peer: Peer, eff: Effects<Mail>) -> Instance {
-    err("mux egress")(format!("blockfetch initiator egress deadline for {peer}; peer is not treated as adversarial"))
-        .await;
+async fn idle_no_blocks(
+    token: CallNotAdmitted,
+    id: u64,
+    cr: StageRef<Blocks>,
+    peer: Peer,
+    eff: Effects<Mail>,
+) -> Proto {
+    let collector = CollectorOut::new(cr);
+    initial_state::<Idle>().receive(&token, eff).send(&collector, Blocks::NoBlocks(id, peer)).await.finish().into()
+}
+
+async fn fault_egress(peer: Peer, reason: &'static str, eff: Effects<Mail>) -> Instance {
+    warn!(protocols::EGRESS_DEADLINE, proto = "block_fetch", peer, reason = reason);
     eff.terminate().await
 }
 

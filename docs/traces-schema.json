@@ -7055,6 +7055,33 @@
       "description": "The transaction submission HTTP server stopped with an error",
       "public": true
     },
+    "amaru::protocols::EGRESS_DEADLINE": {
+      "type": "object",
+      "properties": {
+        "proto": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "peer": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "proto",
+        "reason"
+      ],
+      "optional": [
+        "peer"
+      ],
+      "additionalProperties": false,
+      "name": "egress_deadline",
+      "level": "TRACE",
+      "target": "amaru::protocols",
+      "description": "A protocol send missed the bandwidth deadline, so the connection is closed. The peer is not recorded as adversarial. Reason ∈ {range_deadline, client_done_not_admitted, client_done_deadline, start_batch, block, batch_done, no_blocks, not_admitted, deadline}.",
+      "public": true
+    },
     "amaru::protocols::INVALID_INPUT": {
       "type": "object",
       "properties": {
