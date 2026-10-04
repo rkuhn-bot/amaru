@@ -387,6 +387,11 @@ pub enum MuxMessage {
     /// and one message can be split across segments. The rest of a message waits,
     /// in arrival order, until a segment leaves room. The mux does not block on
     /// the writer to answer this call.
+    ///
+    /// One handler runs on a lane and submits the next message only after this
+    /// call returns, so the previous message's last byte is already in the buffer.
+    /// Nothing queues ahead of a live call beyond that one buffer and the segment
+    /// already on the wire.
     Send(ProtocolId<Erased>, NonEmptyBytes, StageRef<Sent>),
     /// internal message coming from the TCP stream reader
     FromNetwork(Timestamp, ProtocolId<Erased>, NonEmptyBytes),
@@ -1229,8 +1234,8 @@ mod tests {
     use crate::{
         network_effects::{ReceiveError, RecvEffect, SendEffect, SendError},
         protocol::{
-            Initiator, MIN_PEER_BANDWIDTH_BPS, NETWORK_SEND_TIMEOUT, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH,
-            PROTO_TEST, Responder, egress_admission_deadline,
+            Initiator, MIN_PEER_BANDWIDTH_BPS, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_TEST, Responder,
+            egress_admission_deadline, egress_buffer_drain,
         },
     };
 
@@ -2886,8 +2891,12 @@ mod tests {
         });
     }
 
-    /// One earlier 96 KiB block still fits in this message's own deadline: the last
-    /// byte enters about two segment-drains later (~2.1 s), and 2.574 s covers that.
+    /// One earlier 96 KiB block still fits in this message's own deadline.
+    ///
+    /// A handler would already have been admitted for that earlier block before
+    /// submitting this one, so production does not queue a whole block ahead.
+    /// The last byte here enters about two segment-drains later (~2.1 s). The
+    /// deadline is one buffer drain plus this message's wire time (~2.623 s).
     #[test]
     fn one_earlier_block_on_the_lane_still_meets_the_own_message_deadline() {
         let bf = PROTO_N2N_BLOCK_FETCH.erase();
@@ -2916,7 +2925,10 @@ mod tests {
     }
 
     /// Two earlier 96 KiB blocks push the last byte past this message's own deadline.
-    /// The budget is not extended for bytes already queued on the lane.
+    ///
+    /// A handler submits one message at a time, so two earlier blocks cannot sit
+    /// ahead of a live call. If that invariant is broken, the budget is still
+    /// not extended for bytes already queued, and the caller is faulted.
     #[test]
     fn two_earlier_blocks_on_the_lane_miss_the_own_message_deadline() {
         let bf = PROTO_N2N_BLOCK_FETCH.erase();
@@ -2936,11 +2948,86 @@ mod tests {
             assert!(matches!(blocked, Blocked::Terminated(ref name) if name == caller.name()), "{blocked:?}");
             let waited = running.now().saturating_since(t0);
             assert!(
-                waited > limit.saturating_sub(NETWORK_SEND_TIMEOUT),
+                waited > limit.saturating_sub(egress_buffer_drain()),
                 "faulted before the message's own wire time: {waited:?}"
             );
             assert!(waited <= limit, "ran past the deadline: {waited:?} > {limit:?}");
             assert!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE);
         });
+    }
+
+    /// Wire time of one full segment, header included, at 500 kbps.
+    fn full_segment_wire_time() -> Duration {
+        let bytes = u128::try_from(MAX_SEGMENT_SIZE + SEGMENT_HEADER_LEN).unwrap();
+        let nanos = bytes * 8 * 1_000_000_000 / u128::from(MIN_PEER_BANDWIDTH_BPS);
+        Duration::from_nanos(u64::try_from(nanos).unwrap())
+    }
+
+    /// In-flight full segment, buffer already full, then a 65_537-byte message.
+    ///
+    /// That is the most a sequential handler can have ahead of one call: the
+    /// previous message's last byte is already in the buffer, and one segment
+    /// may still be on the wire. Returns how long admission took.
+    fn await_just_over_one_segment() -> Duration {
+        let bf = PROTO_N2N_BLOCK_FETCH.erase();
+        let payload_len = MAX_SEGMENT_SIZE + 2;
+        assert_eq!(payload_len, 65_537);
+        let mut waited = None;
+        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &[bf], |running, mux, caller, sent| {
+            send_now(running, mux, sent, bf, 1, MAX_SEGMENT_SIZE);
+            assert!(running.get_state(mux).expect("mux").sending);
+            assert_eq!(proto(running, mux, bf).outgoing.len(), 0);
+            assert!(proto(running, mux, bf).deferred.is_empty());
+            let inflight_at = running.now();
+
+            send_now(running, mux, sent, bf, 2, MAX_SEGMENT_SIZE);
+            assert_eq!(running.now(), inflight_at, "filling the buffer must not start another segment");
+            assert!(running.get_state(mux).expect("mux").sending);
+            assert_eq!(proto(running, mux, bf).outgoing.len(), MAX_SEGMENT_SIZE);
+            assert!(proto(running, mux, bf).deferred.is_empty());
+
+            let t0 = running.now();
+            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, payload_len) }]);
+            settle(running);
+            assert!(
+                running.get_state(caller).is_none(),
+                "Sent arrived before the last two bytes fit: {:?}",
+                running.get_state(caller)
+            );
+            let queued = proto(running, mux, bf);
+            assert_eq!(queued.outgoing.len(), MAX_SEGMENT_SIZE);
+            assert_eq!(queued.deferred.iter().map(|item| item.bytes.len()).sum::<usize>(), payload_len);
+
+            let limit = egress_admission_deadline(payload_len);
+            let admitted = await_admission(running, caller, t0, t0 + limit).expect("65_537-byte message admitted");
+            assert!(admitted <= limit, "waited {admitted:?} past {limit:?}");
+            assert!(proto(running, mux, bf).outgoing.len() <= MAX_SEGMENT_SIZE);
+            waited = Some(admitted);
+        });
+        waited.expect("admission time")
+    }
+
+    /// A 65_537-byte message behind a full in-flight segment and a full buffer
+    /// takes two segment drains (~2.097 s). A fixed 1 s slack plus its own wire
+    /// time is 2.049 s, so that slack faults an honest peer.
+    #[test]
+    fn just_over_one_segment_outlasts_a_one_second_slack() {
+        let waited = await_just_over_one_segment();
+        let two_segments = full_segment_wire_time() + full_segment_wire_time();
+        assert_eq!(two_segments, Duration::from_nanos(2_097_376_000));
+        assert_eq!(waited, two_segments, "waited {waited:?}");
+        // wire millis 1049 + the old 1 s slack.
+        assert!(waited > Duration::from_millis(2_049), "waited {waited:?} would have met the old 1 s slack");
+    }
+
+    /// The same worst case is inside the buffer-drain deadline, so a peer that
+    /// holds 500 kbps is not faulted.
+    #[test]
+    fn honest_peer_at_500_kbps_admits_just_over_one_segment() {
+        let limit = egress_admission_deadline(MAX_SEGMENT_SIZE + 2);
+        assert_eq!(limit, Duration::from_nanos(2_097_560_000));
+        let waited = await_just_over_one_segment();
+        assert!(waited <= limit, "waited {waited:?} past {limit:?}");
+        assert!(waited > Duration::from_millis(2_049), "waited {waited:?} did not reach the old miss");
     }
 }

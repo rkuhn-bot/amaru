@@ -74,8 +74,8 @@ mod encode_once {
 
     #[test]
     fn responder_deadline_is_the_encoded_block() {
-        // 112 B of body is 1.002 s. The CBOR item is long enough that its wire
-        // time is 1.003 s, so a deadline taken from the raw body does not match.
+        // The encoded CBOR item takes one millisecond more wire time than the
+        // 112 B body, so a deadline taken from the raw body does not match.
         let body = vec![0xab; 112];
         let msg = Block { body: body.clone() };
         let wire = Message::from(msg.clone());
