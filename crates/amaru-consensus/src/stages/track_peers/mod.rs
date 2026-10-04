@@ -50,11 +50,11 @@ pub const HEIGHT_RECHECK_INTERVAL: Duration = Duration::from_millis(200);
 /// Distinct from [`TrackPeers::recheck_timer`], which is a schedule id, not a timeout slot.
 const REQUEST_RETRY_SLOT: u64 = 1;
 
-/// Wait before offering an owed `RequestNext` again.
+/// Wait before offering owed `RequestNext`s again.
 ///
-/// One second is the network send timeout: long enough for a handler to finish one call
-/// and read its mailbox. The design does not name a different delay.
-const REQUEST_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// A handler that did not accept one is busy for a short call, not for a network
+/// timeout. 100ms is long enough for it to finish that call and read its mailbox.
+const REQUEST_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Permissible header clock skew: slots whose onset is at most this far in the future are deferred.
 /// Further ahead is treated as adversarial.
@@ -144,7 +144,9 @@ pub const MAX_HEADER_CLOCK_SKEW: Duration = Duration::from_secs(2);
 ///   stall this stage); `Adversarial(peer, TraceContext)` to peer selection; [`NewTip`] to
 ///   downstream when a new header is stored. A `RequestNext` that does not hit the mailbox is
 ///   counted, up to [`PIPELINE_DEPTH`], and retried from the next message for that peer and from
-///   one coalesced timeout ([`REQUEST_RETRY_SLOT`]).
+///   one coalesced timeout ([`REQUEST_RETRY_SLOT`], [`REQUEST_RETRY_DELAY`]). That retry offers
+///   every owed `RequestNext` the handler will accept, then arms the same slot again only if
+///   some remain.
 ///
 /// Logging: INFO (init / intersect / rollback), DEBUG (store / defer), TRACE (roll-forward entry),
 /// ERROR (failures), WARN (unknown intersect).
@@ -185,7 +187,7 @@ enum PerPeer {
         /// `RequestNext`s the handler has not accepted. Capped at [`PIPELINE_DEPTH`].
         #[serde(default)]
         owed: u8,
-        /// Last handler for this session, used to retry an owed `RequestNext`.
+        /// Last handler for this session, used to retry owed `RequestNext`s.
         #[serde(default)]
         handler: Option<StageRef<chainsync::InitiatorMessage>>,
     },
@@ -920,7 +922,11 @@ impl TrackPeers {
         }
     }
 
-    /// Admit one owed `RequestNext` per session that still has one.
+    /// Offer every owed `RequestNext` each session's handler will accept.
+    ///
+    /// `Full` or `Gone` stops that session: the slot is still owed once, and another
+    /// try in this wakeup would not admit it. The counter stays capped at [`PIPELINE_DEPTH`].
+    /// One timeout is armed afterwards, and only while something remains owed.
     async fn retry_owed(&mut self, eff: &Effects<TrackPeersMsg>) {
         let due: Vec<_> = self
             .upstream
@@ -933,7 +939,13 @@ impl TrackPeers {
             })
             .collect();
         for (conn_id, handler) in due {
-            self.offer_request_next(conn_id, &handler, eff, true).await;
+            while self.owed(conn_id) > 0 {
+                let before = self.owed(conn_id);
+                self.offer_request_next(conn_id, &handler, eff, true).await;
+                if self.owed(conn_id) == before {
+                    break;
+                }
+            }
         }
     }
 

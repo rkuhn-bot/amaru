@@ -441,6 +441,50 @@ pub fn open_fanout(rt: &Handle, state: TrackPeers, store: Arc<InMemoryChainStore
     OpenedFanout { running, guards, tp, handler }
 }
 
+pub struct OpenedQuick {
+    pub running: SimulationRunning,
+    #[expect(dead_code)]
+    pub guards: DeserializerGuards,
+    pub tp: StageStateRef<TrackPeersMsg, TrackPeers>,
+    pub handler: StageStateRef<InitiatorMessage, u8>,
+}
+
+/// Wire a handler that waits 1ms for its first `quick` messages, then an hour.
+///
+/// Advancing those short waits frees one mailbox slot each, and the hour wait
+/// then leaves those slots free until a later retry.
+pub fn open_fanout_quick_then_hour(
+    rt: &Handle,
+    state: TrackPeers,
+    store: Arc<InMemoryChainStore>,
+    quick: u8,
+) -> OpenedQuick {
+    use amaru_pure_stage::StageGraph;
+
+    let mut opened = None;
+    let (running, guards, _logs) = run_simulation_with(
+        rt,
+        register_guards(),
+        |mut network| {
+            let tp = network.stage("tp", stage);
+            let tp = network.wire_up(tp, state);
+            let handler = network.stage("handler", hold_quick_then_hour);
+            let handler = network.wire_up(handler, quick);
+            opened = Some((tp, handler));
+            network
+        },
+        |resources| install_track_peers_resources(resources, store.clone()),
+        |running| {
+            running.override_external_effect::<ValidateHeaderEffect>(usize::MAX, |_| {
+                OverrideResult::handled(Ok(Nonces::for_tests()))
+            });
+        },
+        SimulationRunMode::UntilSleeping,
+    );
+    let (tp, handler) = opened.expect("fan-out stages wired");
+    OpenedQuick { running, guards, tp, handler }
+}
+
 fn install_track_peers_resources(resources: &amaru_pure_stage::Resources, store: Arc<InMemoryChainStore>) {
     resources.put::<crate::performance::ResourcePerformance>(Arc::new(crate::performance::Performance::new()));
     resources.put::<ResourceHeaderStore>(store.clone());
@@ -467,4 +511,14 @@ async fn hold_hour(hold: bool, _msg: InitiatorMessage, eff: Effects<InitiatorMes
         eff.wait(Duration::from_secs(3600)).await;
     }
     true
+}
+
+async fn hold_quick_then_hour(left: u8, _msg: InitiatorMessage, eff: Effects<InitiatorMessage>) -> u8 {
+    if left > 0 {
+        eff.wait(Duration::from_millis(1)).await;
+        left - 1
+    } else {
+        eff.wait(Duration::from_secs(3600)).await;
+        0
+    }
 }

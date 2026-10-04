@@ -47,7 +47,7 @@ Other guiding principles:
 - **amaru**: one peer that is not reading no longer stops block fetch from asking the other peers. `block.requested` lists only peers whose block-fetch handler accepted the request. The 5s fetch timeout is armed before the request is handed to the connection manager.
 - **amaru**: a broadcast block fetch no longer asks a peer again 30ms later when that peer's mailbox was full or its confirmation has not arrived yet. The broadcast covers those peers until the 5s timeout. A fetch that names its peers still asks further peers on that schedule.
 - **amaru**: a peer-sharing start that the child does not accept is offered again on the connection's next message. A full child no longer loses that round for the life of the connection.
-- **amaru**: one peer whose chain-sync handler is not reading no longer stops header processing for the other peers. A request for the next header that does not fit is offered again until the handler accepts it or the session ends.
+- **amaru**: one peer whose chain-sync handler is not reading no longer stops header processing for the other peers. Requests for the next header that do not fit are offered again together, 100ms later, for as many as that handler will accept, until the session ends.
 
 ## v10.11.20261001 _[unreleased; planned for 2026-10-01]_
 

@@ -55,11 +55,11 @@ use crate::{
             TrackPeers, TrackPeersMsg,
             test_setup::{
                 HEIGHT_RECHECK_INTERVAL, HandlerHold, SIM_INITIAL_CLOCK_SECS, build_store, build_store_with_nonces,
-                height_recheck_schedule_id, make_block_header, new_tip, open_fanout, schedule_id_at, setup, setup_base,
-                setup_with_ledger_tip_until_sleeping, slot_start_to_header_micros, te_clear_peer_availability,
-                te_clock, te_clock_suspend, te_get_best_chain_tip, te_get_nonces, te_header_rejected, te_load_header,
-                te_load_point, te_record_header_announcement, te_record_rollback, te_schedule,
-                te_store_validated_header, te_sync_adoption_is_fast, te_validate_header, test_prep,
+                height_recheck_schedule_id, make_block_header, new_tip, open_fanout, open_fanout_quick_then_hour,
+                schedule_id_at, setup, setup_base, setup_with_ledger_tip_until_sleeping, slot_start_to_header_micros,
+                te_clear_peer_availability, te_clock, te_clock_suspend, te_get_best_chain_tip, te_get_nonces,
+                te_header_rejected, te_load_header, te_load_point, te_record_header_announcement, te_record_rollback,
+                te_schedule, te_store_validated_header, te_sync_adoption_is_fast, te_validate_header, test_prep,
                 test_prep_with_max_peer_lead, tm_volatile_tip,
             },
         },
@@ -1820,8 +1820,9 @@ fn tm_retry_timeout() -> amaru_pure_stage::TraceMatch<'static> {
         Box::new(|src| {
             matches!(
                 src.suspend(),
-                Some(Effect::SetTimeout { slot, msg, .. })
+                Some(Effect::SetTimeout { slot, delay, msg, .. })
                     if *slot == super::REQUEST_RETRY_SLOT
+                        && *delay == super::REQUEST_RETRY_DELAY
                         && msg
                             .cast_ref::<TrackPeersMsg>()
                             .is_ok_and(|message| matches!(message, TrackPeersMsg::RetryRequestNext))
@@ -1895,7 +1896,8 @@ fn full_on_a_new_request_counts_one() {
     park_handler_full(&mut opened.running, &opened.handler);
     opened.running.trace_buffer().lock().clear();
     opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, &headers[1])]);
-    drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    let retry_at = drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    assert_eq!(retry_at.saturating_since(opened.running.now()), super::REQUEST_RETRY_DELAY);
 
     let state = opened.running.get_state(&opened.tp).expect("track_peers idle");
     assert_eq!(owed(state, ready.conn_id), Some(1));
@@ -2070,7 +2072,7 @@ fn no_retry_timeout_when_nothing_is_owed() {
     assert_trace_does_not_contain(&running, &[tm_retry_timeout()]);
 }
 
-/// After the handler drains, owed `RequestNext`s are admitted until the window is full again.
+/// After the handler drains, one retry admits every owed `RequestNext` that now fits.
 #[test]
 fn handler_drain_refills_the_window_to_pipeline_depth() {
     let depth = u64::from(PIPELINE_DEPTH);
@@ -2091,10 +2093,8 @@ fn handler_drain_refills_the_window_to_pipeline_depth() {
 
     opened.running.run(Run::until(parked)).assert_sleeping();
     opened.running.trace_buffer().lock().clear();
-    for _ in 0..PIPELINE_DEPTH {
-        let retry_at = opened.running.run(Run::default()).assert_sleeping();
-        opened.running.run(Run::until(retry_at));
-    }
+    let retry_at = opened.running.run(Run::default()).assert_sleeping();
+    opened.running.run(Run::until(retry_at));
 
     let state = opened.running.get_state(&opened.tp).expect("window refilled");
     assert_eq!(owed(state, ready.conn_id), Some(0));
@@ -2103,5 +2103,43 @@ fn handler_drain_refills_the_window_to_pipeline_depth() {
     let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
     assert_trace_match_filter(&opened.running, &queued, &[not_try_send()]);
     let outcomes: Vec<_> = (0..PIPELINE_DEPTH).map(|_| TrySend::Queued).collect();
+    assert_try_send_resumes(&admission, &outcomes);
+}
+
+/// A mailbox with `k` free slots takes `k` owed requests in one retry. The next is `Full`,
+/// so the loop stops and the single retry slot is armed again for what is still owed.
+#[test]
+fn retry_fills_free_slots_then_stops_and_rearms() {
+    const FREE: u8 = 3;
+    const OWED: u8 = 4;
+    let headers = linked_headers(u64::from(OWED) + 1);
+    let ready = ready_peer(&headers);
+    let mut opened =
+        open_fanout_quick_then_hour(ready.rt.handle(), ready.state, build_store(slice::from_ref(&headers[0])), FREE);
+    park_handler_full(&mut opened.running, &opened.handler);
+    for header in headers.iter().skip(1) {
+        opened.running.enqueue_msg(&opened.tp, [roll_forward_msg(ready.peer, ready.conn_id, &opened.handler, header)]);
+        drive(&mut opened.running, ready.rt.handle()).assert_sleeping();
+    }
+    assert_eq!(owed(opened.running.get_state(&opened.tp).expect("idle"), ready.conn_id), Some(OWED));
+
+    for _ in 0..FREE {
+        let wake = opened.running.run(Run::default()).assert_sleeping();
+        opened.running.run(Run::until(wake)).assert_sleeping();
+    }
+    opened.running.trace_buffer().lock().clear();
+    let retry_at = opened.running.run(Run::default()).assert_sleeping();
+    opened.running.run(Run::until(retry_at));
+
+    let state = opened.running.get_state(&opened.tp).expect("retry stopped on a full mailbox");
+    assert_eq!(owed(state, ready.conn_id), Some(OWED - FREE));
+    assert!(state.request_retry_armed);
+    let mut expected: Vec<_> = (0..FREE).map(|_| tm_try_send("tp-1", "handler", RequestNext)).collect();
+    expected.push(tm_try_send("tp-1", "handler", RequestNext));
+    expected.push(tm_retry_timeout());
+    let admission = opened.running.trace_buffer().lock().hydrate_without_timestamps();
+    assert_trace_match_filter(&opened.running, &expected, &[not_admission()]);
+    let mut outcomes = vec![TrySend::Queued; usize::from(FREE)];
+    outcomes.push(TrySend::Full);
     assert_try_send_resumes(&admission, &outcomes);
 }
