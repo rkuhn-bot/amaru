@@ -1003,6 +1003,8 @@ mod tests {
         let Effect::WireStage { mailbox_size, .. } = hit.effect() else {
             panic!("expected the mux to be wired");
         };
+        assert_eq!(mux::MUX_MAILBOX_SIZE, 24);
+        assert_eq!(*mailbox_size, 24);
         assert_eq!(*mailbox_size, mux::MUX_MAILBOX_SIZE);
     }
 
