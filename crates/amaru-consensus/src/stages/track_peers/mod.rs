@@ -144,7 +144,7 @@ pub const MAX_HEADER_CLOCK_SKEW: Duration = Duration::from_secs(2);
 ///   stall this stage); `Adversarial(peer, TraceContext)` to peer selection; [`NewTip`] to
 ///   downstream when a new header is stored. A `RequestNext` that finds a full mailbox is
 ///   counted, up to [`PIPELINE_DEPTH`], and retried from the next message for that peer and from
-///   one coalesced timeout ([`REQUEST_RETRY_SLOT`], [`REQUEST_RETRY_DELAY`]). That retry offers
+///   one coalesced 100ms timeout. That retry offers
 ///   every owed `RequestNext` the handler will accept, then arms the same slot again only while
 ///   some live session still owes one. `Gone` drops that session's count and is not tried again.
 ///
