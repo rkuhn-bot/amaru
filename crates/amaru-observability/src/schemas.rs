@@ -221,6 +221,10 @@ define_schemas! {
                 public PAUSED {
                     required req_id: u64
                 }
+                /// Every candidate connection refused the request, and no other peer was asked
+                public NONE_ACCEPTED {
+                    required req_id: u64
+                }
                 /// Retry block fetching after a no-peers pause
                 RETRY {
                     required req_id: u64
@@ -2145,6 +2149,11 @@ define_schemas! {
                     /// No connection was available to serve a block-fetch request
                     public FETCH_NO_PEERS {
                         required id: u64
+                    }
+                    /// Every candidate connection refused a block-fetch request
+                    public FETCH_NONE_ACCEPTED {
+                        required id: u64
+                        required candidates: usize
                     }
                 }
                 sharing {

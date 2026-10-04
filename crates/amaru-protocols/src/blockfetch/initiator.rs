@@ -102,9 +102,15 @@ pub enum Blocks {
     NoBlocks(u64, Peer),
     /// No initiating connection existed to attempt this request.
     ///
-    /// Every candidate connection refusing the message is not this outcome: nobody was asked,
-    /// and the fetch timeout retries.
+    /// The fetch stage pauses and the armed timeout retries. A connection that exists
+    /// but does not admit the request is [`Self::NoneAccepted`], not this outcome.
     NoPeersAvailable(u64),
+    /// At least one candidate connection existed, and none admitted the request.
+    ///
+    /// The fetch stage asks peers it has not already chosen. When it has none, it pauses
+    /// on the same timeout as [`Self::NoPeersAvailable`] instead of offering the request
+    /// to these connections again.
+    NoneAccepted(u64),
     /// Peers whose block-fetch handler admitted this request.
     ///
     /// The connection sends one peer, itself, when that handler's mailbox accepts the range.
@@ -119,6 +125,7 @@ impl std::fmt::Debug for Blocks {
         match self {
             Self::NoBlocks(id, peer) => f.debug_tuple("NoBlocks").field(id).field(peer).finish(),
             Self::NoPeersAvailable(id) => f.debug_tuple("NoPeersAvailable").field(id).finish(),
+            Self::NoneAccepted(id) => f.debug_tuple("NoneAccepted").field(id).finish(),
             Self::PeersAsked(id, peers) => f.debug_tuple("PeersAsked").field(id).field(peers).finish(),
             Self::Block(id, peer, block) => {
                 f.debug_tuple("Block").field(id).field(peer).field(&debug_bytes(block.as_slice(), 80)).finish()

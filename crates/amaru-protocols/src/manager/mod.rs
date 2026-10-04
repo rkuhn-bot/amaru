@@ -84,9 +84,11 @@ pub enum ManagerMessage {
     /// When `None`, every initiating connection is asked (cold-start / empty-selection fallback).
     ///
     /// Each connection is offered the request without waiting. One that cannot take it is
-    /// skipped. [`Blocks::NoPeersAvailable`] is sent only when no initiating connection exists
-    /// to attempt. The connection reports [`Blocks::PeersAsked`] itself once its block-fetch
-    /// handler has admitted the request.
+    /// skipped. [`Blocks::NoPeersAvailable`] is sent when no initiating connection exists
+    /// to attempt. [`Blocks::NoneAccepted`] is sent when at least one did and none admitted
+    /// the request, so the fetch stage can ask other peers, or pause, without waiting out
+    /// the timeout in silence. The connection reports [`Blocks::PeersAsked`] itself once its
+    /// block-fetch handler has admitted the request.
     FetchBlocks { from: Point, through: Point, cr: StageRef<Blocks>, id: u64, peers: Option<Vec<Peer>> },
     /// Start periodic peer-sharing requests on one outbound connection.
     ///
@@ -640,12 +642,16 @@ impl Manager {
                 }
             }
         }
-        // A connection that exists but did not accept the message is not "no peers":
-        // nobody was asked, and the fetch stage's timeout retries.
+        // No initiating connection is a pause. Connections that exist but all refused
+        // are reported at once: the fetch stage asks someone it has not already chosen,
+        // or pauses on the timeout it already armed, instead of staying silent.
         if candidates == 0 {
             debug!(protocols::manager::blocks::FETCH_NO_PEERS, id);
             eff.send(&cr, Blocks::NoPeersAvailable(id)).await;
-        } else if admitted > 0 {
+        } else if admitted == 0 {
+            debug!(protocols::manager::blocks::FETCH_NONE_ACCEPTED, id, candidates);
+            eff.send(&cr, Blocks::NoneAccepted(id)).await;
+        } else {
             debug!(protocols::manager::blocks::FETCH_SENT, id, sent = admitted);
         }
     }
@@ -992,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn nonblocking_fetch_all_full_emits_nothing() {
+    fn nonblocking_fetch_all_full_notifies_immediately() {
         let Fanout { manager, full, open, replies, replies_ref, full_peer, open_peer, mut running, guards: _guards } =
             fanout(true);
         let msg = fetch(7, replies_ref, Some(vec![full_peer, open_peer]));
@@ -1002,7 +1008,7 @@ mod tests {
         assert!(running.get_state(&manager).is_some(), "manager waited on a full peer");
         assert_eq!(running.mailbox_len(&full), DEFAULT_MAILBOX_SIZE);
         assert_eq!(running.mailbox_len(&open), DEFAULT_MAILBOX_SIZE);
-        assert!(running.get_state(&replies).unwrap().is_empty());
+        assert_eq!(running.get_state(&replies).unwrap().as_slice(), &[Blocks::NoneAccepted(7)]);
 
         let name = manager.name().as_str();
         assert_trace_match_filter(
@@ -1017,7 +1023,66 @@ mod tests {
                     matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })
                 }),
                 tm_resume_try_send(name, TrySend::Full),
+                tm_send(name, "replies", Blocks::NoneAccepted(7)),
                 tm_state_match(name, |state: &Manager| state.connections.len() == 2),
+            ],
+            &[drop_resume_except_try_send(), drop_other_stages(name)],
+        );
+    }
+
+    #[test]
+    fn nonblocking_fetch_all_gone_notifies_immediately() {
+        let trace_buffer = TraceBuffer::new_shared(100, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace_buffer);
+        let manager = network.stage("manager", stage);
+        let replies = network.stage("replies", async |mut seen: Vec<Blocks>, msg: Blocks, _eff: Effects<Blocks>| {
+            seen.push(msg);
+            seen
+        });
+        let replies_sender = replies.sender();
+        let replies = network.wire_up(replies, Vec::new());
+        let peer = Peer::for_test(3001);
+        let mut state = Manager::new(
+            NetworkMagic::PREPROD,
+            ManagerConfig::default(),
+            Arc::new(PREPROD_ERA_HISTORY.clone()),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+        );
+        state.connections.insert(
+            ConnectionId::initial(),
+            Connection {
+                peer,
+                stage: StageRef::named_for_tests("peer-gone"),
+                direction: ConnectionDirection::Outbound,
+                may_initiate: true,
+                full_duplex_capable: true,
+            },
+        );
+        let manager = network.wire_up(manager, state);
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        let _guards = crate::deserializers::register_deserializers();
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
+
+        let msg = fetch(7, replies_sender, Some(vec![peer]));
+        running.enqueue_msg(&manager, [msg.clone()]);
+        running.run(Run::default()).assert_idle();
+        assert_eq!(running.get_state(&replies).unwrap().as_slice(), &[Blocks::NoneAccepted(7)]);
+
+        let name = manager.name().as_str();
+        assert_trace_match_filter(
+            &running,
+            &[
+                tm_input(name, &msg),
+                tm_try_send_match(name, "peer-gone", |sent: &ConnectionMessage| {
+                    matches!(sent, ConnectionMessage::FetchBlocks { id: 7, .. })
+                }),
+                tm_resume_try_send(name, TrySend::Gone),
+                tm_send(name, "replies", Blocks::NoneAccepted(7)),
+                tm_state_match(name, |state: &Manager| state.connections.len() == 1),
             ],
             &[drop_resume_except_try_send(), drop_other_stages(name)],
         );

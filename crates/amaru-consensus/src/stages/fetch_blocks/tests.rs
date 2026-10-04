@@ -1108,6 +1108,144 @@ fn test_no_peers_available_stale_is_ignored() {
     logs.assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
 }
 
+/// Every candidate refused, and a peer this attempt has not chosen is still available.
+/// Ask that peer now. Asking the refused peer again would spin on its full mailbox.
+#[test]
+fn test_none_accepted_asks_a_peer_not_already_chosen() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use crate::performance::SelectPeersForFetchEffect;
+
+    let mut prep = test_prep();
+    let alice = Peer::for_test(3001);
+    let bob = Peer::for_test(3002);
+    let schedule_id = prep.schedule_at(Duration::from_secs(5));
+    prep.state = prep.state_with_request(
+        MissingBlocks::new(prep.headers.h0.point(), vec![prep.headers.h1.point()]),
+        1,
+        schedule_id,
+    );
+    prep.state.asked = BTreeSet::from([alice]);
+    prep.state.asked_at =
+        BTreeMap::from([(alice, Instant::at_offset(Duration::from_secs(9), start_in_era().relative_time))]);
+    prep.state.trace_context = Some(Default::default());
+
+    let msg = FetchBlocksMsg::NoneAccepted(1);
+    let (running, _guards, mut logs) = setup_with_overrides(&prep, [msg], move |running| {
+        running.override_external_effect::<SelectPeersForFetchEffect>(usize::MAX, move |effect| {
+            let peers = if effect.params.exclude.contains(&alice) { vec![bob] } else { vec![alice] };
+            OverrideResult::handled(FetchPeerSet { peers, weak: false })
+        });
+    });
+
+    assert_eq!(manager_fetch_peers(&running), vec![Some(vec![bob])]);
+    assert_trace_contains(
+        &running,
+        &[tm_state(
+            "fb-1",
+            move |s: &FetchBlocks| !s.no_peers_pause && s.asked.contains(&alice) && s.asked.contains(&bob),
+            "the refused peer stays excluded and the other peer is asked",
+        )],
+    );
+    logs.assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
+}
+
+/// A broadcast already offered every initiating connection. Another immediate offer
+/// would hit the same full mailboxes. Pause on the armed timeout and keep `asked`.
+#[test]
+fn test_none_accepted_broadcast_pauses_without_reasking() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut prep = test_prep();
+    let alice = Peer::for_test(3001);
+    let schedule_id = prep.schedule_at(Duration::from_secs(5));
+    let chosen_at = Instant::at_offset(Duration::from_secs(9), start_in_era().relative_time);
+    prep.state = prep.state_with_request(
+        MissingBlocks::new(prep.headers.h0.point(), vec![prep.headers.h1.point()]),
+        1,
+        schedule_id,
+    );
+    prep.state.asked = BTreeSet::from([alice]);
+    prep.state.asked_at = BTreeMap::from([(alice, chosen_at)]);
+    prep.state.awaiting_broadcast = true;
+    prep.state.trace_context = Some(Default::default());
+
+    let msg = FetchBlocksMsg::NoneAccepted(1);
+    let (running, _guards, mut logs) = setup(&prep, msg.clone());
+    let state_after_pause = {
+        let mut state = prep.state.clone();
+        state.no_peers_pause = true;
+        state
+    };
+
+    assert_trace(
+        &running,
+        &[te_state("fb-1", &prep.state), te_input("fb-1", &msg), te_state("fb-1", &state_after_pause)],
+    );
+    logs.assert_and_remove(Level::INFO, &["blocks.none_accepted", "req_id=1"]).assert_no_remaining_at([
+        Level::DEBUG,
+        Level::INFO,
+        Level::WARN,
+        Level::ERROR,
+    ]);
+}
+
+/// A peer already confirmed is still in flight. A later wave that nobody accepted
+/// must not pause, or the timeout would stop scoring that peer.
+#[test]
+fn test_none_accepted_leaves_a_confirmed_peer_on_the_timeout() {
+    use std::collections::BTreeSet;
+
+    use crate::performance::SelectPeersForFetchEffect;
+
+    let mut prep = test_prep();
+    let alice = Peer::for_test(3001);
+    let schedule_id = prep.schedule_at(Duration::from_secs(5));
+    prep.state = prep.state_with_request(
+        MissingBlocks::new(prep.headers.h0.point(), vec![prep.headers.h1.point()]),
+        1,
+        schedule_id,
+    );
+    prep.state.asked = BTreeSet::from([alice]);
+    prep.state.fetch_peers = BTreeSet::from([alice]);
+    prep.state.trace_context = Some(Default::default());
+
+    let msg = FetchBlocksMsg::NoneAccepted(1);
+    let (running, _guards, mut logs) = setup_with_overrides(&prep, [msg], move |running| {
+        running.override_external_effect::<SelectPeersForFetchEffect>(usize::MAX, move |_effect| {
+            OverrideResult::handled(FetchPeerSet { peers: Vec::new(), weak: true })
+        });
+    });
+
+    assert_eq!(manager_fetch_peers(&running), Vec::<Option<Vec<Peer>>>::new());
+    assert_trace_contains(
+        &running,
+        &[tm_state(
+            "fb-1",
+            move |s: &FetchBlocks| !s.no_peers_pause && s.fetch_peers.contains(&alice),
+            "a confirmed peer stays on the timeout",
+        )],
+    );
+    logs.assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
+}
+
+#[test]
+fn test_none_accepted_stale_is_ignored() {
+    let mut prep = test_prep();
+    let schedule_id = prep.schedule_at(Duration::from_secs(5));
+    prep.state = prep.state_with_request(
+        MissingBlocks::new(prep.headers.h0.point(), vec![prep.headers.h1.point()]),
+        5,
+        schedule_id,
+    );
+
+    let msg = FetchBlocksMsg::NoneAccepted(3);
+    let (running, _guards, mut logs) = setup(&prep, msg.clone());
+
+    assert_trace(&running, &[te_state("fb-1", &prep.state), te_input("fb-1", &msg), te_state("fb-1", &prep.state)]);
+    logs.assert_no_remaining_at([Level::DEBUG, Level::INFO, Level::WARN, Level::ERROR]);
+}
+
 #[test]
 fn test_first_message_wires_cleanup_replies_child() {
     let mut prep = test_prep();
