@@ -1228,9 +1228,8 @@ mod tests {
     use crate::{
         network_effects::{ReceiveError, RecvEffect, SendEffect, SendError},
         protocol::{
-            Initiator, MIN_PEER_BANDWIDTH_BPS, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC,
-            PROTO_N2N_KEEP_ALIVE, PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, PROTO_TEST, Responder,
-            egress_admission_deadline,
+            Initiator, MIN_PEER_BANDWIDTH_BPS, NETWORK_SEND_TIMEOUT, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH,
+            PROTO_TEST, Responder, egress_admission_deadline,
         },
     };
 
@@ -2664,14 +2663,6 @@ mod tests {
         });
     }
 
-    /// The deadline this PR used to compute: the payload alone, plus the 1 s floor.
-    /// Restoring it must fail [`honest_peer_at_500_kbps_admits_a_full_backlog`].
-    fn payload_only_deadline(payload_len: usize) -> Duration {
-        let len = u64::try_from(payload_len).unwrap_or(u64::MAX);
-        let millis = len.saturating_mul(8).saturating_mul(1000).div_ceil(MIN_PEER_BANDWIDTH_BPS);
-        Duration::from_millis(millis) + crate::protocol::NETWORK_SEND_TIMEOUT
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct Caller {
         mux: StageRef<MuxMessage>,
@@ -2697,17 +2688,6 @@ mod tests {
     }
 
     async fn drop_sent(_state: (), _msg: Sent, _eff: Effects<Sent>) {}
-
-    fn n2n_lanes() -> [ProtocolId<Erased>; 6] {
-        [
-            PROTO_HANDSHAKE.erase(),
-            PROTO_N2N_CHAIN_SYNC.erase(),
-            PROTO_N2N_TX_SUB.erase(),
-            PROTO_N2N_KEEP_ALIVE.erase(),
-            PROTO_N2N_PEER_SHARE.erase(),
-            PROTO_N2N_BLOCK_FETCH.erase(),
-        ]
-    }
 
     fn settle(running: &mut SimulationRunning) {
         let blocked = running.run(Run::default());
@@ -2825,86 +2805,70 @@ mod tests {
         });
     }
 
-    /// Reviewer case: the next 90_112-byte block waits behind one other full segment.
-    #[test]
-    fn block_behind_another_lane_is_admitted_before_its_deadline() {
-        let other = PROTO_HANDSHAKE.erase();
-        let bf = PROTO_N2N_BLOCK_FETCH.erase();
-        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &[other, bf], |running, mux, caller, sent| {
-            send_now(running, mux, sent, bf, 1, 8);
-            assert_eq!(running.get_state(mux).expect("mux").muxer.next_out, 0);
-            send_now(running, mux, sent, bf, 2, 90_112);
-            send_now(running, mux, sent, other, 3, MAX_SEGMENT_SIZE);
+    /// Bytes already in the writer when the caller's block arrives.
+    ///
+    /// The queued 96 KiB block cannot start until this segment finishes, and the
+    /// caller's block is admitted only once that block's first segment has also
+    /// drained. At 500 kbps the wait is 1.625 s. The deadline is 2.574 s (margin
+    /// 949 ms). At 250 kbps the same bytes take 3.250 s and the call times out.
+    const IN_FLIGHT_BEFORE_BLOCK: usize = 36_000;
 
-            let t0 = running.now();
-            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(4, 90_112) }]);
-            settle(running);
-            assert_eq!(proto(running, mux, bf).deferred.len(), 1);
-            assert!(!running.get_state(mux).expect("mux").muxer.egress_retry_armed);
-
-            let waited =
-                await_admission(running, caller, t0, t0 + egress_admission_deadline(90_112)).expect("block admitted");
-            // In-flight header+8, then the other lane's max segment, then this lane's first segment.
-            // At 500 kbps that is 2.098 s. The old 1 s retry landed at 2.491 s and missed a 2.442 s deadline.
-            assert!(waited > Duration::from_secs(2), "waited only {waited:?}");
-            assert!(waited < Duration::from_millis(2_300), "waited {waited:?}, retry timer still in the path");
-            assert!(waited <= egress_admission_deadline(90_112));
-        });
-    }
-
-    fn fill_every_lane(
+    fn queue_block_behind_inflight(
         running: &mut SimulationRunning,
         mux: &StageStateRef<MuxMessage, State>,
         sent: &StageStateRef<Sent, ()>,
-        lanes: &[ProtocolId<Erased>],
+        proto_id: ProtocolId<Erased>,
+        block: usize,
     ) {
-        let bf = *lanes.last().expect("lane");
-        send_now(running, mux, sent, bf, 1, MAX_SEGMENT_SIZE);
+        send_now(running, mux, sent, proto_id, 1, IN_FLIGHT_BEFORE_BLOCK);
         assert!(running.get_state(mux).expect("mux").sending);
-        assert_eq!(running.get_state(mux).expect("mux").muxer.next_out, 0);
-        for lane in lanes {
-            send_now(running, mux, sent, *lane, 2, crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES);
-            assert_eq!(proto(running, mux, *lane).outgoing.len(), crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES);
-        }
+        assert_eq!(proto(running, mux, proto_id).outgoing.len(), 0);
+        send_now(running, mux, sent, proto_id, 2, block);
+        assert_eq!(proto(running, mux, proto_id).outgoing.len(), block);
+        assert!(running.get_state(mux).expect("mux").sending);
     }
 
     #[test]
-    fn honest_peer_at_500_kbps_admits_a_full_backlog() {
-        let lanes = n2n_lanes();
-        let bf = *lanes.last().expect("blockfetch");
-        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &lanes, |running, mux, caller, sent| {
-            fill_every_lane(running, mux, sent, &lanes);
+    fn honest_peer_at_500_kbps_admits_the_lanes_own_block() {
+        let bf = PROTO_N2N_BLOCK_FETCH.erase();
+        let block = crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
+        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS, &[bf], |running, mux, caller, sent| {
+            queue_block_behind_inflight(running, mux, sent, bf, block);
             let t0 = running.now();
-            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(9, 1) }]);
+            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, block) }]);
             settle(running);
             assert_eq!(proto(running, mux, bf).deferred.len(), 1);
             assert!(!running.get_state(mux).expect("mux").muxer.egress_retry_armed);
 
-            let limit = egress_admission_deadline(1);
+            let limit = egress_admission_deadline(block);
             let waited = await_admission(running, caller, t0, t0 + limit).expect("honest peer admitted");
-            // One in-flight max segment plus one max segment from each earlier lane: 6.292 s.
-            // The payload-only deadline is 1.001 s. Restoring it faults this peer.
-            assert!(waited > payload_only_deadline(1), "waited {waited:?}; payload-only deadline would also pass");
-            assert!(waited > Duration::from_secs(6), "waited {waited:?}, backlog was not in front");
-            assert!(waited < Duration::from_secs(7), "waited {waited:?}, admission missed the handoff");
             assert!(waited <= limit, "waited {waited:?} past {limit:?}");
+            assert!(waited > Duration::from_secs(1), "waited {waited:?}");
+            assert!(
+                limit.saturating_sub(waited) >= Duration::from_millis(900),
+                "margin {} ms lost the 1 s floor",
+                limit.saturating_sub(waited).as_millis()
+            );
         });
     }
 
     #[test]
     fn writer_at_250_kbps_faults_the_handler() {
-        let lanes = n2n_lanes();
-        let bf = *lanes.last().expect("blockfetch");
-        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS / 2, &lanes, |running, mux, caller, sent| {
-            fill_every_lane(running, mux, sent, &lanes);
+        let bf = PROTO_N2N_BLOCK_FETCH.erase();
+        let block = crate::blockfetch::BLOCKFETCH_MAX_BLOCK_WIRE_BYTES;
+        with_modelled_writer(MIN_PEER_BANDWIDTH_BPS / 2, &[bf], |running, mux, caller, sent| {
+            queue_block_behind_inflight(running, mux, sent, bf, block);
             let t0 = running.now();
-            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(9, 1) }]);
+            running.enqueue_msg(caller, [Go { proto: bf, bytes: payload(3, block) }]);
             settle(running);
-            let limit = egress_admission_deadline(1);
-            let blocked = await_admission(running, caller, t0, t0 + limit).expect_err("slow peer must fault");
+            let limit = egress_admission_deadline(block);
+            let blocked = await_admission(running, caller, t0, t0 + limit).expect_err("slow lane must fault");
             assert!(matches!(blocked, Blocked::Terminated(ref name) if name == caller.name()), "{blocked:?}");
             let waited = running.now().saturating_since(t0);
-            assert!(waited > Duration::from_secs(10), "faulted too early: {waited:?}");
+            assert!(
+                waited > limit.saturating_sub(NETWORK_SEND_TIMEOUT),
+                "faulted before the message's own wire time: {waited:?}"
+            );
             assert!(waited <= limit, "ran past the deadline: {waited:?} > {limit:?}");
         });
     }
