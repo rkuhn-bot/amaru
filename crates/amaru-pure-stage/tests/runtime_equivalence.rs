@@ -1610,8 +1610,8 @@ fn blocking_send_parks_until_the_mailbox_drains(runtime: Runtime) {
 
 fn call_code(result: CallAdmission<u32>) -> u8 {
     match result {
-        CallAdmission::NotAdmitted => 0,
-        CallAdmission::TimedOut => 1,
+        CallAdmission::NotAdmitted(_) => 0,
+        CallAdmission::TimedOut(_) => 1,
         CallAdmission::Reply(_) => 2,
     }
 }
