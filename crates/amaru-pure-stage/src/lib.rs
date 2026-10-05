@@ -46,8 +46,8 @@ pub mod typestate;
 
 pub use duration_dist::DurationDist;
 pub use effect::{
-    CallAdmission, Effect, Effects, ExternalEffect, ExternalEffectAPI, ScheduleIds, StageResponse, TrySend,
-    UnknownExternalEffect,
+    CallAdmission, CallNotAdmitted, CallTimeout, Effect, Effects, ExternalEffect, ExternalEffectAPI, ScheduleIds,
+    StageResponse, TrySend, UnknownExternalEffect,
 };
 pub use output::OutputEffect;
 pub use receiver::Receiver;

@@ -20,12 +20,12 @@
 //! instances with send/recv cursors, and treats a local request while the send
 //! cursor is off the switch state as an error.
 
-use std::{future::Future, num::NonZeroUsize};
+use std::{future::Future, num::NonZeroUsize, time::Duration};
 
 use amaru_kernel::NonEmptyBytes;
 use amaru_pure_stage::{Effects, SendData, StageRef, define_role_tag, err, typestate::prelude::*};
 
-use super::{Erased, Inputs, Internal, ProtocolId};
+use super::{Erased, Inputs, Internal, ProtocolId, egress_admission_deadline};
 use crate::mux::{HandlerMessage, MuxMessage, Sent};
 
 define_role_tag!(pub ToMux);
@@ -49,8 +49,15 @@ impl MuxClient {
         Self { muxer, proto }
     }
 
-    pub(crate) fn encode_send<T: amaru_kernel::cbor::Encode<()>>(&self, msg: T, reply: StageRef<Sent>) -> MuxMessage {
-        MuxMessage::Send(self.proto, NonEmptyBytes::encode(&msg), reply)
+    /// One CBOR encoding of `msg`. The deadline is that length. The closure sends those bytes.
+    pub(crate) fn call_encoded<T: amaru_kernel::cbor::Encode<()> + 'static>(
+        &self,
+        msg: &T,
+    ) -> (Duration, impl FnOnce(StageRef<Sent>) -> MuxMessage + std::marker::Send + use<T>) {
+        let bytes = NonEmptyBytes::encode(msg);
+        let timeout = egress_admission_deadline(bytes.len().get());
+        let proto = self.proto;
+        (timeout, move |reply| MuxMessage::Send(proto, bytes, reply))
     }
 }
 
