@@ -381,8 +381,8 @@ pub enum MuxMessage {
     /// Send the given message on the protocol ID.
     ///
     /// [`Sent`] is delivered once the last byte of this message has been copied
-    /// into the lane's egress buffer. That buffer holds at most one segment
-    /// ([`MAX_SEGMENT_SIZE`]). Bytes already in it can belong to several messages,
+    /// into the lane's egress buffer. That buffer holds at most one segment.
+    /// Bytes already in it can belong to several messages,
     /// and one message can be split across segments. The rest of a message waits,
     /// in arrival order, until a segment leaves room. The mux does not block on
     /// the writer to answer this call.

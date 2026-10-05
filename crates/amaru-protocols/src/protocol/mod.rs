@@ -262,7 +262,7 @@ pub(crate) fn egress_buffer_drain() -> Duration {
 /// that rate is faulted and is not recorded as adversarial. Other lanes are
 /// not part of this budget.
 ///
-/// The slack is [`egress_buffer_drain`], not a fixed second: one sequential
+/// The slack is one full egress buffer, not a fixed second: one sequential
 /// handler per lane means the previous message's last byte is already in the
 /// one-segment buffer. The rest is this message's own wire time at 500 kbps,
 /// including segment headers.
