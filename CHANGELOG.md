@@ -51,6 +51,7 @@ Other guiding principles:
 - **amaru**: when every peer offered a block-fetch request refuses it, the node asks peers it has not already chosen. If there are none, it pauses on the same 5s retry used when no peers are connected, instead of staying silent until that timeout. It does not immediately offer the request to the same full mailboxes again.
 - **amaru**: a peer-sharing start that the child does not accept is offered again on the connection's next message. A full child no longer loses that round for the life of the connection.
 - **amaru**: one peer whose chain-sync handler is not reading no longer stops header processing for the other peers. Requests for the next header that do not fit are offered again together, 100ms later, for as many as that handler will accept. A handler that is gone is not asked again.
+- **amaru-protocols**: a block-fetch range that arrives while every pipeline slot is busy is kept and sent when a slot is idle again, instead of dropping the peer. A newer range replaces the one still waiting. Close waits until the ranges already on the wire have finished, and a range that arrives after that `ClientDone` is not sent.
 
 ## v10.11.20261001 _[unreleased; planned for 2026-10-01]_
 
