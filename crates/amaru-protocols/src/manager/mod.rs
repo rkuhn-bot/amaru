@@ -94,7 +94,8 @@ pub enum ManagerMessage {
     ///
     /// The initiator schedules the first request after `initial_delay`, then every `interval`
     /// after each reply. Results are delivered on `reply_to` until the connection ends.
-    /// If no initiating connection exists, an empty [`ShareResult`] is sent once.
+    /// If no initiating connection exists, or that connection does not accept the request,
+    /// an empty [`ShareResult`] is sent once.
     RequestSharePeers {
         peer: Peer,
         amount: u8,
@@ -212,7 +213,7 @@ pub struct Manager {
     peer_selection: StageRef<PeerSelectionNotify>,
 }
 
-#[derive(Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 enum OutboundState {
     #[default]
     None,
@@ -223,7 +224,7 @@ enum OutboundState {
     },
 }
 
-#[derive(Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct PeerState {
     outbound: OutboundState,
     inbound: Option<ConnectionId>,
@@ -450,7 +451,10 @@ impl Manager {
                 ),
             )
             .await;
-        eff.send(&connection, ConnectionMessage::Initialize).await;
+        // The stage was just wired, so this is the first message. `try_send` keeps the manager
+        // runnable if that mailbox cannot take it. Nothing is recorded in `connections` until
+        // the handshake completes, and a dead stage is dropped by `ConnectionDied`.
+        let _ = eff.try_send(&connection, ConnectionMessage::Initialize).await;
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -514,37 +518,128 @@ impl Manager {
             )
             .await;
         } else {
-            info!(protocols::manager::peer::DUPLICATE_TERMINATED, peer, conn_id = conn_id.as_u64());
-            eff.send(&stage, ConnectionMessage::Disconnect).await;
+            // The duplicate was not inserted. `Full` leaves it running: the manager has no
+            // entry that claims it was disconnected. `Gone` is already dead.
+            match eff.try_send(&stage, ConnectionMessage::Disconnect).await {
+                TrySend::Queued | TrySend::Gone => {
+                    info!(protocols::manager::peer::DUPLICATE_TERMINATED, peer, conn_id = conn_id.as_u64());
+                }
+                TrySend::Full => {
+                    debug!(
+                        protocols::manager::peer::DISCONNECT_IGNORED,
+                        peer,
+                        reason = "not_admitted",
+                        conn_id = conn_id.as_u64()
+                    );
+                }
+            }
         }
     }
 
-    #[expect(clippy::expect_used)]
     async fn remove_peer(&mut self, peer: Peer, eff: &Effects<ManagerMessage>) {
-        let Some(entry) = self.peers.remove(&peer) else {
+        let Some(entry) = self.peers.get(&peer).cloned() else {
             info!(protocols::manager::peer::DISCONNECT_IGNORED, peer, reason = "not_connected");
             return;
         };
-        if let Some(conn_id) = entry.inbound {
-            info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = "inbound");
-            let connection = self.connections.remove(&conn_id).expect("PeerState implies Connection");
-            eff.send(
-                &self.peer_selection,
-                PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Inbound },
-            )
-            .await;
-            eff.send(&connection.stage, ConnectionMessage::Disconnect).await;
+        // Drop a direction only once Disconnect is in that connection's mailbox, or the stage
+        // is already gone. `Full` keeps the entry: the connection is still up and never heard it.
+        let mut inbound = entry.inbound;
+        let mut outbound = entry.outbound;
+        if let Some(conn_id) = inbound {
+            if self.disconnect_tracked(peer, conn_id, true, eff).await {
+                inbound = None;
+            } else {
+                inbound = Some(conn_id);
+            }
         }
-        if let OutboundState::Connected { conn_id } = entry.outbound {
-            info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = "outbound");
-            let connection = self.connections.remove(&conn_id).expect("PeerState implies Connection");
-            eff.send(
-                &self.peer_selection,
-                PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Outbound },
-            )
-            .await;
-            eff.send(&connection.stage, ConnectionMessage::Disconnect).await;
+        if let OutboundState::Connected { conn_id } = outbound {
+            if self.disconnect_tracked(peer, conn_id, true, eff).await {
+                outbound = OutboundState::None;
+            } else {
+                outbound = OutboundState::Connected { conn_id };
+            }
         }
+        let still_connected = inbound.is_some() || matches!(outbound, OutboundState::Connected { .. });
+        if still_connected {
+            if let Some(state) = self.peers.get_mut(&peer) {
+                state.inbound = inbound;
+                state.outbound = outbound;
+            }
+        } else {
+            // No live connection remains. An in-flight dial (`Scheduled`) is forgotten too,
+            // as it was when the peer entry was removed before the send.
+            self.peers.remove(&peer);
+        }
+    }
+
+    /// Offer `Disconnect` to a tracked connection.
+    ///
+    /// Returns whether the manager no longer tracks it. `forget_when_queued` is set for
+    /// `RemovePeer`, which drops the entry once the message is admitted. A lone `Disconnect`
+    /// leaves the entry until `ConnectionDied`, unless the stage is already `Gone`.
+    async fn disconnect_tracked(
+        &mut self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        forget_when_queued: bool,
+        eff: &Effects<ManagerMessage>,
+    ) -> bool {
+        let Some(connection) = self.connections.get(&conn_id) else {
+            return true;
+        };
+        let stage = connection.stage.clone();
+        let direction = connection.direction;
+        let direction_name = match direction {
+            ConnectionDirection::Inbound => "inbound",
+            ConnectionDirection::Outbound => "outbound",
+        };
+        info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = direction_name);
+        match eff.try_send(&stage, ConnectionMessage::Disconnect).await {
+            TrySend::Full => false,
+            TrySend::Gone => {
+                self.forget_live_connection(peer, conn_id, direction, eff).await;
+                true
+            }
+            TrySend::Queued if forget_when_queued => {
+                self.forget_live_connection(peer, conn_id, direction, eff).await;
+                true
+            }
+            TrySend::Queued => false,
+        }
+    }
+
+    /// The connection is finished. Tell peer selection once and drop the manager entry.
+    async fn forget_live_connection(
+        &mut self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        direction: ConnectionDirection,
+        eff: &Effects<ManagerMessage>,
+    ) {
+        if self.connections.remove(&conn_id).is_none() {
+            return;
+        }
+        let drop_peer = if let Some(state) = self.peers.get_mut(&peer) {
+            match direction {
+                ConnectionDirection::Inbound => {
+                    if state.inbound == Some(conn_id) {
+                        state.inbound = None;
+                    }
+                }
+                ConnectionDirection::Outbound => {
+                    if state.outbound == (OutboundState::Connected { conn_id }) {
+                        state.outbound = OutboundState::None;
+                    }
+                }
+            }
+            state.inbound.is_none() && matches!(state.outbound, OutboundState::None)
+        } else {
+            false
+        };
+        if drop_peer {
+            self.peers.remove(&peer);
+        }
+        eff.send(&self.peer_selection, PeerSelectionNotify::Disconnected { peer, conn_id, direction }).await;
     }
 
     async fn connection_died(&mut self, peer: Peer, conn_id: ConnectionId, role: Role, eff: &Effects<ManagerMessage>) {
@@ -581,14 +676,18 @@ impl Manager {
             }
             eff.send(&self.peer_selection, PeerSelectionNotify::Disconnected { peer, conn_id, direction }).await;
         } else {
-            // pre-handshake death (no entry was inserted to connections, and no Connected notify was sent)
+            // No `connections` entry: either the handshake had not finished, or `RemovePeer` /
+            // a `Gone` disconnect already notified peer selection. Only a still-scheduled dial
+            // is a connect failure. A handshake that already completed must not be reported twice.
             debug!(
                 protocols::manager::peer::DISCONNECT_IGNORED,
                 peer,
                 reason = "before_handshake",
                 conn_id = conn_id.as_u64()
             );
-            if role == Role::Initiator {
+            if role == Role::Initiator
+                && matches!(self.peers.get(&peer).map(|state| &state.outbound), Some(OutboundState::Scheduled))
+            {
                 if let Some(state) = self.peers.get_mut(&peer) {
                     state.outbound = OutboundState::None;
                     if state.inbound.is_none() {
@@ -665,12 +764,26 @@ impl Manager {
         reply_to: StageRef<ShareResult>,
         eff: &Effects<ManagerMessage>,
     ) {
-        let Some(conn) = self.connections.values().find(|c| c.may_initiate && c.peer == peer) else {
+        let Some(stage) =
+            self.connections.values().find(|c| c.may_initiate && c.peer == peer).map(|conn| conn.stage.clone())
+        else {
             debug!(protocols::manager::sharing::REQUEST_NO_CONNECTION, peer);
             eff.send(&reply_to, ShareResult { peer, peers: Vec::new() }).await;
             return;
         };
-        eff.send(&conn.stage, ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to }).await;
+        // `Full` and `Gone` never started the initiator. The empty result is the same
+        // "not asked" reply as a missing connection, so `reply_to` is not left waiting.
+        // The manager entry stays; `ConnectionDied` drops a stage that is already gone.
+        if eff
+            .try_send(
+                &stage,
+                ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to: reply_to.clone() },
+            )
+            .await
+            != TrySend::Queued
+        {
+            eff.send(&reply_to, ShareResult { peer, peers: Vec::new() }).await;
+        }
     }
 }
 
@@ -678,7 +791,7 @@ impl Manager {
 ///
 /// The semantics of the operations are as follows:
 /// - AddPeer: add a peer to the manager unless that peer is already added
-/// - RemovePeer: remove a peer from the manager, which will terminate a connection if currently connected
+/// - RemovePeer: drop the peer once each live connection accepts Disconnect, or is already gone
 ///
 /// A peer can be added right after being removed even though the socket will be closed asynchronously.
 pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<ManagerMessage>) -> Manager {
@@ -706,8 +819,26 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
                     conn_id = conn_id.as_u64(),
                     direction = "requested"
                 );
-                if let Some(connection) = manager.connections.get(&conn_id) {
-                    eff.send(&connection.stage, ConnectionMessage::Disconnect).await;
+                if let Some((stage, direction)) =
+                    manager.connections.get(&conn_id).map(|connection| (connection.stage.clone(), connection.direction))
+                {
+                    // `Queued` leaves the entry until the connection stops and `ConnectionDied`
+                    // arrives. `Full` leaves it too: the connection is still running. `Gone`
+                    // drops it now, because the stage is already dead.
+                    match eff.try_send(&stage, ConnectionMessage::Disconnect).await {
+                        TrySend::Gone => {
+                            manager.forget_live_connection(peer, conn_id, direction, &eff).await;
+                        }
+                        TrySend::Full => {
+                            debug!(
+                                protocols::manager::peer::DISCONNECT_IGNORED,
+                                peer,
+                                reason = "not_admitted",
+                                conn_id = conn_id.as_u64()
+                            );
+                        }
+                        TrySend::Queued => {}
+                    }
                 } else {
                     debug!(
                         protocols::manager::peer::DISCONNECT_IGNORED,
@@ -770,14 +901,16 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
                 manager.connection_result(peer, conn_id, &eff).await;
             }
             ManagerMessage::SetLocalUse { peer, conn_id, local_use } => {
-                if let Some(connection) = manager.connections.get(&conn_id) {
+                if let Some(stage) = manager.connections.get(&conn_id).map(|connection| connection.stage.clone()) {
                     info!(
                         protocols::manager::peer::SET_LOCAL_USE,
                         peer,
                         conn_id = conn_id.as_u64(),
                         local_use = format!("{local_use:?}")
                     );
-                    eff.send(&connection.stage, ConnectionMessage::SetLocalUse(local_use)).await;
+                    // `may_initiate` changes only when the connection reports `LocalUseApplied`.
+                    // `Full` and `Gone` do not pretend the use was applied, and do not drop the entry.
+                    let _ = eff.try_send(&stage, ConnectionMessage::SetLocalUse(local_use)).await;
                 }
             }
             ManagerMessage::LocalUseApplied { peer, conn_id, local_use } => {
@@ -1174,5 +1307,327 @@ mod tests {
             ],
             &[drop_resume_except_try_send(), drop_other_stages(name)],
         );
+    }
+
+    struct OnePeer {
+        manager: amaru_pure_stage::stage_ref::StageStateRef<ManagerMessage, Manager>,
+        connection: amaru_pure_stage::stage_ref::StageStateRef<ConnectionMessage, ()>,
+        shares: amaru_pure_stage::stage_ref::StageStateRef<ShareResult, Vec<ShareResult>>,
+        shares_ref: StageRef<ShareResult>,
+        peer: Peer,
+        conn_id: ConnectionId,
+        running: SimulationRunning,
+        guards: amaru_pure_stage::DeserializerGuards,
+    }
+
+    fn one_peer(fill: bool) -> OnePeer {
+        let trace_buffer = TraceBuffer::new_shared(100, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace_buffer);
+        let manager = network.stage("manager", stage);
+        let connection = network.stage("peer-open", hold);
+        let shares = network.stage(
+            "shares",
+            async |mut seen: Vec<ShareResult>, msg: ShareResult, _eff: Effects<ShareResult>| {
+                seen.push(msg);
+                seen
+            },
+        );
+        let connection_sender = connection.sender();
+        let shares_ref = shares.sender();
+        let connection = network.wire_up(connection, ());
+        let shares = network.wire_up(shares, Vec::new());
+        let peer = Peer::for_test(3001);
+        let conn_id = ConnectionId::initial();
+        let mut state = Manager::new(
+            NetworkMagic::PREPROD,
+            ManagerConfig::default(),
+            Arc::new(PREPROD_ERA_HISTORY.clone()),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+        );
+        state.connections.insert(
+            conn_id,
+            Connection {
+                peer,
+                stage: connection_sender,
+                direction: ConnectionDirection::Outbound,
+                may_initiate: true,
+                full_duplex_capable: true,
+            },
+        );
+        state.peers.insert(peer, PeerState { outbound: OutboundState::Connected { conn_id }, inbound: None });
+        let manager = network.wire_up(manager, state);
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        let _guards = crate::deserializers::register_deserializers();
+        running.run(Run::default()).assert_idle();
+        park(&mut running, &connection);
+        if fill {
+            stuff(&mut running, &connection);
+        }
+        running.trace_buffer().lock().clear();
+        OnePeer { manager, connection, shares, shares_ref, peer, conn_id, running, guards: _guards }
+    }
+
+    fn tracked(state: &Manager, peer: Peer, conn_id: ConnectionId) -> bool {
+        state.connections.contains_key(&conn_id)
+            && matches!(
+                state.peers.get(&peer).map(|peer_state| &peer_state.outbound),
+                Some(OutboundState::Connected { conn_id: id }) if *id == conn_id
+            )
+    }
+
+    #[test]
+    fn remove_peer_full_keeps_the_connection() {
+        let OnePeer { manager, connection, peer, conn_id, mut running, guards: _guards, .. } = one_peer(true);
+        running.enqueue_msg(&manager, [ManagerMessage::RemovePeer(peer)]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager waited on a full connection");
+        assert!(tracked(state, peer, conn_id), "Full must not mark the peer disconnected");
+        assert_eq!(state.connections.get(&conn_id).map(|conn| conn.may_initiate), Some(true));
+        assert_eq!(running.mailbox_len(&connection), DEFAULT_MAILBOX_SIZE);
+    }
+
+    #[test]
+    fn remove_peer_queued_drops_the_connection() {
+        let OnePeer { manager, connection, peer, conn_id: _, mut running, guards: _guards, .. } = one_peer(false);
+        running.enqueue_msg(&manager, [ManagerMessage::RemovePeer(peer)]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert!(state.connections.is_empty());
+        assert!(!state.peers.contains_key(&peer));
+        assert_eq!(running.mailbox_len(&connection), 1, "Disconnect was admitted");
+    }
+
+    #[test]
+    fn remove_peer_gone_drops_the_connection() {
+        let trace_buffer = TraceBuffer::new_shared(100, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace_buffer);
+        let manager = network.stage("manager", stage);
+        let peer = Peer::for_test(3001);
+        let conn_id = ConnectionId::initial();
+        let mut state = Manager::new(
+            NetworkMagic::PREPROD,
+            ManagerConfig::default(),
+            Arc::new(PREPROD_ERA_HISTORY.clone()),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+        );
+        state.connections.insert(
+            conn_id,
+            Connection {
+                peer,
+                stage: StageRef::named_for_tests("peer-gone"),
+                direction: ConnectionDirection::Outbound,
+                may_initiate: true,
+                full_duplex_capable: true,
+            },
+        );
+        state.peers.insert(peer, PeerState { outbound: OutboundState::Connected { conn_id }, inbound: None });
+        let manager = network.wire_up(manager, state);
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        let _guards = crate::deserializers::register_deserializers();
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
+
+        running.enqueue_msg(&manager, [ManagerMessage::RemovePeer(peer)]);
+        running.run(Run::default()).assert_idle();
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert!(state.connections.is_empty());
+        assert!(!state.peers.contains_key(&peer));
+    }
+
+    #[test]
+    fn disconnect_full_keeps_the_connection() {
+        let OnePeer { manager, connection, peer, conn_id, mut running, guards: _guards, .. } = one_peer(true);
+        running.enqueue_msg(&manager, [ManagerMessage::Disconnect(peer, conn_id)]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager waited on a full connection");
+        assert!(tracked(state, peer, conn_id));
+        assert_eq!(running.mailbox_len(&connection), DEFAULT_MAILBOX_SIZE);
+    }
+
+    #[test]
+    fn disconnect_queued_leaves_the_entry_until_death() {
+        let OnePeer { manager, connection, peer, conn_id, mut running, guards: _guards, .. } = one_peer(false);
+        running.enqueue_msg(&manager, [ManagerMessage::Disconnect(peer, conn_id)]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert!(tracked(state, peer, conn_id), "Queued Disconnect is finished by ConnectionDied");
+        assert_eq!(running.mailbox_len(&connection), 1);
+    }
+
+    #[test]
+    fn disconnect_gone_drops_the_connection() {
+        let trace_buffer = TraceBuffer::new_shared(100, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace_buffer);
+        let manager = network.stage("manager", stage);
+        let peer = Peer::for_test(3001);
+        let conn_id = ConnectionId::initial();
+        let mut state = Manager::new(
+            NetworkMagic::PREPROD,
+            ManagerConfig::default(),
+            Arc::new(PREPROD_ERA_HISTORY.clone()),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+        );
+        state.connections.insert(
+            conn_id,
+            Connection {
+                peer,
+                stage: StageRef::named_for_tests("peer-gone"),
+                direction: ConnectionDirection::Outbound,
+                may_initiate: true,
+                full_duplex_capable: true,
+            },
+        );
+        state.peers.insert(peer, PeerState { outbound: OutboundState::Connected { conn_id }, inbound: None });
+        let manager = network.wire_up(manager, state);
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        let _guards = crate::deserializers::register_deserializers();
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
+
+        running.enqueue_msg(&manager, [ManagerMessage::Disconnect(peer, conn_id)]);
+        running.run(Run::default()).assert_idle();
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert!(state.connections.is_empty());
+        assert!(!state.peers.contains_key(&peer));
+    }
+
+    #[test]
+    fn set_local_use_full_does_not_change_initiation() {
+        let OnePeer { manager, connection, peer, conn_id, mut running, guards: _guards, .. } = one_peer(true);
+        running
+            .enqueue_msg(&manager, [ManagerMessage::SetLocalUse { peer, conn_id, local_use: LocalUse::Maintenance }]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager waited on a full connection");
+        assert_eq!(state.connections.get(&conn_id).map(|conn| conn.may_initiate), Some(true));
+        assert!(tracked(state, peer, conn_id));
+        assert_eq!(running.mailbox_len(&connection), DEFAULT_MAILBOX_SIZE);
+    }
+
+    #[test]
+    fn set_local_use_queued_waits_for_the_connection_to_apply_it() {
+        let OnePeer { manager, connection, peer, conn_id, mut running, guards: _guards, .. } = one_peer(false);
+        running
+            .enqueue_msg(&manager, [ManagerMessage::SetLocalUse { peer, conn_id, local_use: LocalUse::Maintenance }]);
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert_eq!(state.connections.get(&conn_id).map(|conn| conn.may_initiate), Some(true));
+        assert_eq!(running.mailbox_len(&connection), 1);
+    }
+
+    #[test]
+    fn share_request_full_replies_empty_and_keeps_the_connection() {
+        let OnePeer { manager, connection, shares, shares_ref, peer, conn_id, mut running, guards: _guards } =
+            one_peer(true);
+        running.enqueue_msg(
+            &manager,
+            [ManagerMessage::RequestSharePeers {
+                peer,
+                amount: 3,
+                initial_delay: Duration::from_secs(1),
+                interval: Duration::from_secs(60),
+                reply_to: shares_ref,
+            }],
+        );
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager waited on a full connection");
+        assert!(tracked(state, peer, conn_id));
+        assert_eq!(running.mailbox_len(&connection), DEFAULT_MAILBOX_SIZE);
+        assert_eq!(running.get_state(&shares).unwrap().as_slice(), &[ShareResult { peer, peers: Vec::new() }]);
+    }
+
+    #[test]
+    fn share_request_queued_does_not_reply_empty() {
+        let OnePeer { manager, connection, shares, shares_ref, peer, conn_id, mut running, guards: _guards } =
+            one_peer(false);
+        running.enqueue_msg(
+            &manager,
+            [ManagerMessage::RequestSharePeers {
+                peer,
+                amount: 3,
+                initial_delay: Duration::from_secs(1),
+                interval: Duration::from_secs(60),
+                reply_to: shares_ref,
+            }],
+        );
+        running.run(Run::default()).assert_sleeping();
+
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert!(tracked(state, peer, conn_id));
+        assert_eq!(running.mailbox_len(&connection), 1);
+        assert!(running.get_state(&shares).unwrap().is_empty());
+    }
+
+    #[test]
+    fn share_request_gone_replies_empty_and_leaves_cleanup_to_the_tombstone() {
+        let trace_buffer = TraceBuffer::new_shared(100, 1_000_000);
+        let mut network = SimulationBuilder::default().with_trace_buffer(trace_buffer);
+        let manager = network.stage("manager", stage);
+        let shares = network.stage(
+            "shares",
+            async |mut seen: Vec<ShareResult>, msg: ShareResult, _eff: Effects<ShareResult>| {
+                seen.push(msg);
+                seen
+            },
+        );
+        let shares_ref = shares.sender();
+        let shares = network.wire_up(shares, Vec::new());
+        let peer = Peer::for_test(3001);
+        let conn_id = ConnectionId::initial();
+        let mut state = Manager::new(
+            NetworkMagic::PREPROD,
+            ManagerConfig::default(),
+            Arc::new(PREPROD_ERA_HISTORY.clone()),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+            StageRef::blackhole(),
+        );
+        state.connections.insert(
+            conn_id,
+            Connection {
+                peer,
+                stage: StageRef::named_for_tests("peer-gone"),
+                direction: ConnectionDirection::Outbound,
+                may_initiate: true,
+                full_duplex_capable: true,
+            },
+        );
+        state.peers.insert(peer, PeerState { outbound: OutboundState::Connected { conn_id }, inbound: None });
+        let manager = network.wire_up(manager, state);
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        let _guards = crate::deserializers::register_deserializers();
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
+
+        running.enqueue_msg(
+            &manager,
+            [ManagerMessage::RequestSharePeers {
+                peer,
+                amount: 3,
+                initial_delay: Duration::from_secs(1),
+                interval: Duration::from_secs(60),
+                reply_to: shares_ref,
+            }],
+        );
+        running.run(Run::default()).assert_idle();
+        let state = running.get_state(&manager).expect("manager stayed runnable");
+        assert!(tracked(state, peer, conn_id), "ConnectionDied drops a stage that is already gone");
+        assert_eq!(running.get_state(&shares).unwrap().as_slice(), &[ShareResult { peer, peers: Vec::new() }]);
     }
 }

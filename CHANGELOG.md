@@ -53,6 +53,8 @@ Other guiding principles:
 - **amaru**: a peer-sharing start that the child does not accept is offered again on the connection's next message. A full child no longer loses that round for the life of the connection.
 - **amaru**: one peer whose chain-sync handler is not reading no longer stops header processing for the other peers. Requests for the next header that do not fit are offered again together, 100ms later, for as many as that handler will accept. A handler that is gone is not asked again.
 - **amaru-protocols**: a block-fetch range that arrives while every pipeline slot is busy is kept and sent when a slot is idle again, instead of dropping the peer. A newer range replaces the one still waiting. Close waits until the ranges already on the wire have finished, and a range that arrives after that `ClientDone` is not sent.
+- **amaru**: the connection manager no longer waits on a connection to accept a disconnect, a local-use change, a peer-sharing request, or the first message of a new connection. A full mailbox leaves that connection as it is. A connection that is already gone is dropped when the manager was disconnecting it.
+- **amaru**: a tip or peer-sharing request that arrives before the handshake finishes is kept and sent once the connection is up, instead of being parked on the priority mailbox. A block fetch that arrives that early is dropped. A local-use change is still deferred until the handshake finishes.
 
 ## v10.11.20261001 _[unreleased; planned for 2026-10-01]_
 

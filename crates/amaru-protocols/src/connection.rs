@@ -47,6 +47,19 @@ const STOP_TIMEOUT_SLOT: u64 = 1;
 pub struct Connection {
     params: Params,
     state: State,
+    /// Latest tip the chainsync responder did not accept, or that arrived before it existed.
+    ///
+    /// Flushed with `try_send` at the start of the next transition once the connection is
+    /// established. A newer tip replaces the stored one. `Queued` or `Gone` drops it; `Full`
+    /// keeps it. A tip that arrives during handshake stays here and is not rescheduled.
+    pending_tip: Option<(Point, TraceContext)>,
+    /// One `PeerSharingMessage::Start` the peer-sharing child did not accept, or that arrived
+    /// before that child existed.
+    ///
+    /// Flushed with `try_send` at the start of the next transition once the connection is
+    /// established. A newer Start replaces the stored one. `Queued` or `Gone` drops it; `Full`
+    /// keeps it. Cleared when that child is stopped or dies.
+    pending_share: Option<PeerSharingMessage>,
 }
 
 impl Connection {
@@ -65,6 +78,8 @@ impl Connection {
         Self {
             params: Params { peer, conn_id, role, config, magic, pipeline, era_history, mempool_stage, manager },
             state: State::Initial,
+            pending_tip: None,
+            pending_share: None,
         }
     }
 }
@@ -132,17 +147,6 @@ struct Established {
     blockfetch_responder: Option<StageRef<Void>>,
     peer_sharing_responder: Option<StageRef<crate::peer_sharing::ResponderMessage>>,
     stopping: BTreeSet<ChildId>,
-    /// Latest tip the chainsync responder did not accept.
-    ///
-    /// Flushed with `try_send` at the start of the next transition. A newer tip replaces the
-    /// stored one. `Queued` or `Gone` drops it; `Full` keeps it for the transition after that.
-    pending_tip: Option<(Point, TraceContext)>,
-    /// One `PeerSharingMessage::Start` the peer-sharing child did not accept.
-    ///
-    /// Flushed with `try_send` at the start of the next transition. A newer Start replaces the
-    /// stored one. `Queued` or `Gone` drops it; `Full` keeps it. Cleared when that child is
-    /// stopped or dies.
-    pending_share: Option<PeerSharingMessage>,
 }
 
 /// Identity of a supervised child stage of a connection.
@@ -215,7 +219,7 @@ impl ConnectionMessage {
 }
 
 pub async fn stage(
-    Connection { params, state }: Connection,
+    Connection { params, state, mut pending_tip, mut pending_share }: Connection,
     msg: ConnectionMessage,
     eff: Effects<ConnectionMessage>,
 ) -> Connection {
@@ -228,8 +232,8 @@ pub async fn stage(
     };
 
     async move {
-        let state = flush_pending_tip(state, &eff).await;
-        let state = flush_pending_share(state, &eff).await;
+        let state = flush_pending_tip(state, &mut pending_tip, &eff).await;
+        let state = flush_pending_share(state, &mut pending_share, &eff).await;
         let state = match (state, msg) {
             (state, ConnectionMessage::Disconnect) => {
                 return teardown(state, &params, &eff).await;
@@ -241,7 +245,7 @@ pub async fn stage(
                     conn_id = conn_id.as_u64(),
                     child = child.to_string()
                 );
-                State::Established(on_expected_stop(s, child, &params, &eff).await)
+                State::Established(on_expected_stop(s, child, &params, &eff, &mut pending_share).await)
             }
             (state, ConnectionMessage::ChildDied(child)) => {
                 info!(
@@ -250,7 +254,8 @@ pub async fn stage(
                     conn_id = conn_id.as_u64(),
                     child = child.to_string()
                 );
-                return teardown(clear_pending_share(state, child), &params, &eff).await;
+                // The connection is terminating, so the stored share dies with it.
+                return teardown(state, &params, &eff).await;
             }
             (State::Established(s), ConnectionMessage::StopTimeout) => {
                 if s.stopping.is_empty() {
@@ -278,7 +283,7 @@ pub async fn stage(
                 State::Established(s)
             }
             (
-                State::Established(mut s),
+                State::Established(s),
                 ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to },
             ) => {
                 if !s.stopping.contains(&ChildId::PeerSharing)
@@ -286,45 +291,48 @@ pub async fn stage(
                 {
                     let start = PeerSharingMessage::Start { amount, initial_delay, interval, reply_to };
                     match eff.try_send(&ps, start.clone()).await {
-                        TrySend::Full => s.pending_share = Some(start),
-                        TrySend::Queued | TrySend::Gone => s.pending_share = None,
+                        TrySend::Full => pending_share = Some(start),
+                        TrySend::Queued | TrySend::Gone => pending_share = None,
                     }
                 } else {
-                    s.pending_share = None;
+                    pending_share = None;
                 }
                 State::Established(s)
             }
-            (State::Established(mut s), ConnectionMessage::NewTip(tip, trace_context)) => {
+            (State::Established(s), ConnectionMessage::NewTip(tip, trace_context)) => {
                 if let Some(cs) = s.chainsync_responder.clone() {
                     match eff.try_send(&cs, chainsync::ResponderMessage::NewTip(tip, trace_context.clone())).await {
-                        TrySend::Full => s.pending_tip = Some((tip, trace_context)),
-                        TrySend::Queued | TrySend::Gone => s.pending_tip = None,
+                        TrySend::Full => pending_tip = Some((tip, trace_context)),
+                        TrySend::Queued | TrySend::Gone => pending_tip = None,
                     }
                 } else {
-                    s.pending_tip = None;
+                    pending_tip = None;
                 }
                 State::Established(s)
             }
             (State::Established(mut s), ConnectionMessage::SetLocalUse(desired)) => {
                 // Record only; `actual_use` is not reconciled here.
                 s.desired_use = desired;
-                State::Established(converge_use(s, &params, &eff).await)
+                State::Established(converge_use(s, &params, &eff, &mut pending_share).await)
             }
-            (state @ (State::Initial | State::Handshake { .. }), msg @ ConnectionMessage::FetchBlocks { .. }) => {
-                // The peer might still be connecting. Reschedule until the attempt finishes;
-                // if it never does, the caller times out. The delay is the reconnect delay
-                // (2s by default), shorter than the 5s call timeout. The connect attempt
-                // itself fails after 2s.
-                eff.schedule_after(msg, params.config.reconnect_delay).await;
+            (state @ (State::Initial | State::Handshake { .. }), ConnectionMessage::FetchBlocks { .. }) => {
+                // No block-fetch initiator exists yet, and there is no pending slot. Drop the
+                // request. `NoBlocks` would score a peer that was never asked, and `PeersAsked`
+                // would claim a handler admitted it. The caller's timeout covers a request that
+                // was never submitted. The manager only addresses a connection after the handshake.
                 state
             }
-            (state @ (State::Initial | State::Handshake { .. }), msg @ ConnectionMessage::RequestSharePeers { .. }) => {
-                eff.schedule_after(msg, params.config.reconnect_delay).await;
+            (
+                state @ (State::Initial | State::Handshake { .. }),
+                ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to },
+            ) => {
+                // Latest start wins. The next transition after the handshake flushes it.
+                pending_share = Some(PeerSharingMessage::Start { amount, initial_delay, interval, reply_to });
                 state
             }
-            (state @ (State::Initial | State::Handshake { .. }), msg @ ConnectionMessage::NewTip(_, _)) => {
-                // The peer might be still connecting. Reschedule the NewTip message.
-                eff.schedule_after(msg, params.config.reconnect_delay).await;
+            (state @ (State::Initial | State::Handshake { .. }), ConnectionMessage::NewTip(tip, trace_context)) => {
+                // Latest tip wins. The next transition after the handshake flushes it.
+                pending_tip = Some((tip, trace_context));
                 state
             }
             (state @ (State::Initial | State::Handshake { .. }), msg @ ConnectionMessage::SetLocalUse(_)) => {
@@ -334,7 +342,7 @@ pub async fn stage(
             (state @ (State::Initial | State::Handshake { .. }), ConnectionMessage::StopTimeout) => state,
             x => unimplemented!("{x:?}"),
         };
-        Connection { params, state }
+        Connection { params, state, pending_tip, pending_share }
     }
     .instrument(debug_span!(
         protocols::connection::message::PROCESS,
@@ -351,57 +359,54 @@ pub async fn stage(
 
 /// Offer a stored tip to the chainsync responder before this transition handles its message.
 ///
-/// `Queued` and `Gone` drop the stored tip. `Full` keeps it for the following transition.
-async fn flush_pending_tip(state: State, eff: &Effects<ConnectionMessage>) -> State {
-    let State::Established(mut established) = state else {
+/// Before the connection is established the tip stays stored: the responder does not exist yet.
+/// `Queued` and `Gone` drop it. `Full` keeps it. A missing responder drops it.
+async fn flush_pending_tip(
+    state: State,
+    pending_tip: &mut Option<(Point, TraceContext)>,
+    eff: &Effects<ConnectionMessage>,
+) -> State {
+    let Some((tip, trace_context)) = pending_tip.clone() else {
         return state;
     };
-    let Some((tip, trace_context)) = established.pending_tip.clone() else {
-        return State::Established(established);
+    let State::Established(established) = &state else {
+        return state;
     };
     let Some(responder) = established.chainsync_responder.clone() else {
-        established.pending_tip = None;
-        return State::Established(established);
+        *pending_tip = None;
+        return state;
     };
     match eff.try_send(&responder, chainsync::ResponderMessage::NewTip(tip, trace_context)).await {
-        TrySend::Queued | TrySend::Gone => established.pending_tip = None,
+        TrySend::Queued | TrySend::Gone => *pending_tip = None,
         TrySend::Full => {}
     }
-    State::Established(established)
+    state
 }
 
 /// Offer a stored peer-sharing `Start` before this transition handles its message.
 ///
-/// `Queued` and `Gone` drop the stored start. `Full` keeps it for the following transition.
-/// A missing initiator drops it: there is no child left to retry.
-async fn flush_pending_share(state: State, eff: &Effects<ConnectionMessage>) -> State {
-    let State::Established(mut established) = state else {
+/// Before the connection is established the start stays stored. `Queued` and `Gone` drop it.
+/// `Full` keeps it. A missing initiator drops it: there is no child left to retry.
+async fn flush_pending_share(
+    state: State,
+    pending_share: &mut Option<PeerSharingMessage>,
+    eff: &Effects<ConnectionMessage>,
+) -> State {
+    let Some(start) = pending_share.clone() else {
         return state;
     };
-    let Some(start) = established.pending_share.clone() else {
-        return State::Established(established);
+    let State::Established(established) = &state else {
+        return state;
     };
     let Some(initiator) = established.peer_sharing_initiator.clone() else {
-        established.pending_share = None;
-        return State::Established(established);
+        *pending_share = None;
+        return state;
     };
     match eff.try_send(&initiator, start).await {
-        TrySend::Queued | TrySend::Gone => established.pending_share = None,
+        TrySend::Queued | TrySend::Gone => *pending_share = None,
         TrySend::Full => {}
     }
-    State::Established(established)
-}
-
-/// A dead peer-sharing child will not accept the stored `Start`.
-fn clear_pending_share(state: State, child: ChildId) -> State {
-    if child != ChildId::PeerSharing {
-        return state;
-    }
-    let State::Established(mut established) = state else {
-        return state;
-    };
-    established.pending_share = None;
-    State::Established(established)
+    state
 }
 
 /// Notify track_peers that the initiator chainsync session ended, then terminate this connection.
@@ -572,8 +577,6 @@ async fn do_handshake(
         blockfetch_responder: None,
         peer_sharing_responder: None,
         stopping: BTreeSet::new(),
-        pending_tip: None,
-        pending_share: None,
     };
 
     if run_responders {
@@ -635,12 +638,17 @@ async fn register_responders(mut s: Established, params: &Params, eff: &Effects<
     s
 }
 
-async fn converge_use(mut s: Established, params: &Params, eff: &Effects<ConnectionMessage>) -> Established {
+async fn converge_use(
+    mut s: Established,
+    params: &Params,
+    eff: &Effects<ConnectionMessage>,
+    pending_share: &mut Option<PeerSharingMessage>,
+) -> Established {
     if !s.stopping.is_empty() {
         return s;
     }
     if s.desired_use < s.actual_use {
-        begin_stop(s, params, eff).await
+        begin_stop(s, params, eff, pending_share).await
     } else if s.desired_use > s.actual_use && (params.role == Role::Initiator || s.duplex) {
         start_initiators(s, params, eff).await
     } else if s.desired_use != s.actual_use {
@@ -652,7 +660,12 @@ async fn converge_use(mut s: Established, params: &Params, eff: &Effects<Connect
     }
 }
 
-async fn begin_stop(mut s: Established, params: &Params, eff: &Effects<ConnectionMessage>) -> Established {
+async fn begin_stop(
+    mut s: Established,
+    params: &Params,
+    eff: &Effects<ConnectionMessage>,
+    pending_share: &mut Option<PeerSharingMessage>,
+) -> Established {
     let drop_diffusion = s.actual_use >= LocalUse::Diffusion && s.desired_use < LocalUse::Diffusion;
     let drop_maintenance = s.actual_use >= LocalUse::Maintenance && s.desired_use < LocalUse::Maintenance;
 
@@ -677,7 +690,7 @@ async fn begin_stop(mut s: Established, params: &Params, eff: &Effects<Connectio
         }
         if let Some(ps) = &s.peer_sharing_initiator {
             s.stopping.insert(ChildId::PeerSharing);
-            s.pending_share = None;
+            *pending_share = None;
             let _ = eff.try_send(ps, PeerSharingMessage::Close).await;
         }
     }
@@ -699,6 +712,7 @@ async fn on_expected_stop(
     child: ChildId,
     params: &Params,
     eff: &Effects<ConnectionMessage>,
+    pending_share: &mut Option<PeerSharingMessage>,
 ) -> Established {
     s.stopping.remove(&child);
     match child {
@@ -748,7 +762,7 @@ async fn on_expected_stop(
         }
         ChildId::PeerSharing => {
             s.peer_sharing_initiator = None;
-            s.pending_share = None;
+            *pending_share = None;
             mux::install_done_trap(
                 &s.muxer,
                 PROTO_N2N_PEER_SHARE.erase(),
@@ -867,7 +881,7 @@ mod tests {
 
     use amaru_kernel::{BlockHeight, HeaderHash, PREPROD_ERA_HISTORY, Slot};
     use amaru_pure_stage::{
-        DEFAULT_MAILBOX_SIZE, Effect, Name, SendData, StageGraph, StageResponse, TraceMatch,
+        DEFAULT_MAILBOX_SIZE, Effect, Name, PRIORITY_MAILBOX_SIZE, SendData, StageGraph, StageResponse, TraceMatch,
         simulation::{Run, SimulationBuilder, SimulationRunning},
         stage_ref::StageStateRef,
         trace_buffer::{TraceBuffer, TraceEntry},
@@ -909,80 +923,126 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_blocks_in_initial_state_reschedules() {
-        fetch_blocks_in_disconnected_state_reschedules(State::Initial);
+    fn business_messages_during_initial_are_stored_not_rescheduled() {
+        business_messages_during_negotiation_are_stored(State::Initial);
     }
 
     #[test]
-    fn test_fetch_blocks_in_handshake_state_reschedules() {
+    fn business_messages_during_handshake_are_stored_not_rescheduled() {
         let handshake_state = State::Handshake { muxer: StageRef::blackhole(), handshake: StageRef::blackhole() };
-        fetch_blocks_in_disconnected_state_reschedules(handshake_state);
+        business_messages_during_negotiation_are_stored(handshake_state);
     }
 
-    #[test]
-    fn test_new_tip_in_initial_state_reschedules() {
-        new_tip_in_disconnected_state_reschedules(State::Initial);
-    }
-
-    #[test]
-    fn test_new_tip_in_handshake_state_reschedules() {
-        let handshake_state = State::Handshake { muxer: StageRef::blackhole(), handshake: StageRef::blackhole() };
-        new_tip_in_disconnected_state_reschedules(handshake_state);
-    }
-
-    fn fetch_blocks_in_disconnected_state_reschedules(connection_state: State) {
-        assert_message_reschedules_in_disconnected_state(connection_state, |network| {
-            let (blocks_output, _rx) = network.output::<Blocks>("blocks_output", 10);
-            ConnectionMessage::FetchBlocks { from: Point::Origin, through: Point::Origin, id: 0, cr: blocks_output }
-        });
-    }
-
-    fn new_tip_in_disconnected_state_reschedules(connection_state: State) {
-        assert_message_reschedules_in_disconnected_state(connection_state, |_| {
-            ConnectionMessage::new_tip(Point::Origin)
-        });
-    }
-
-    fn assert_message_reschedules_in_disconnected_state(
-        connection_state: State,
-        make_msg: impl FnOnce(&mut SimulationBuilder) -> ConnectionMessage,
-    ) {
-        let mut network = SimulationBuilder::default();
-
-        let connection_stage = network.stage("connection", stage);
-        let connection_stage = network.wire_up(connection_stage, test_connection(connection_state.clone()));
-
-        let msg = make_msg(&mut network);
-        network.preload(&connection_stage, [msg]).unwrap();
+    /// More business messages than the priority mailbox can hold. They must not be rescheduled.
+    /// The latest tip and share stay stored, and the next established transition flushes them.
+    /// A fetch has no pending slot and is dropped. `SetLocalUse` is still rescheduled.
+    fn business_messages_during_negotiation_are_stored(connection_state: State) {
+        let _guards = trace_guards();
+        let mut network = traced();
+        let asked = network.stage("asked", collect_blocks);
+        let asked_sender = asked.sender();
+        let asked = network.wire_up(asked, Vec::new());
+        let connection = network.stage("connection", stage);
+        let connection = network.wire_up(connection, test_connection(connection_state.clone()));
 
         let rt = Runtime::new().unwrap();
         let mut running = network.run(rt.handle());
-        let start_time = running.now();
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
 
-        let stage_name = connection_stage.name().clone();
-        running.breakpoint(
-            "schedule",
-            move |eff| matches!(eff, Effect::Schedule { at_stage, .. } if *at_stage == stage_name),
-        );
-
-        running.run(Run::skip_wakeups()).assert_breakpoint("schedule");
-
-        let reconnect_delay = ManagerConfig::default().reconnect_delay;
-        {
-            let hit = running.breakpoint_effect();
-            let Effect::Schedule { id, .. } = hit.effect() else {
-                panic!("Expected Schedule effect, got {:?}", hit.effect());
-            };
-            let delay = id.time().checked_since(start_time).unwrap();
-            assert!(delay >= reconnect_delay);
+        let storm = PRIORITY_MAILBOX_SIZE + 5;
+        for n in 0..storm {
+            let id = n as u64;
+            running.enqueue_msg(
+                &connection,
+                [
+                    ConnectionMessage::FetchBlocks {
+                        from: Point::Origin,
+                        through: Point::Origin,
+                        id,
+                        cr: asked_sender.clone(),
+                    },
+                    ConnectionMessage::new_tip(tip(id, n as u8)),
+                    share_request(n as u8),
+                ],
+            );
+            running.run(Run::default()).assert_idle();
         }
 
-        running.clear_breakpoint("schedule");
-        running.run(Run::default()).assert_sleeping();
-
-        // Verify state remains the same
-        let state = running.get_state(&connection_stage).unwrap();
+        let latest = tip((storm - 1) as u64, (storm - 1) as u8);
+        let state = running.get_state(&connection).expect("negotiation stayed runnable");
         assert_eq!(state.state, connection_state);
+        assert_eq!(pending_point(state), Some(latest));
+        assert_eq!(pending_share_of(state), Some(share_start((storm - 1) as u8)));
+        assert!(running.get_state(&asked).unwrap().is_empty(), "a fetch before the handshake is not answered");
+
+        running.trace_buffer().lock().clear();
+        running.enqueue_msg(&connection, [ConnectionMessage::SetLocalUse(LocalUse::Maintenance)]);
+        running.run(Run::default()).assert_sleeping();
+        let state = running.get_state(&connection).expect("SetLocalUse stayed runnable");
+        assert_eq!(state.state, connection_state);
+        assert_eq!(pending_point(state), Some(latest));
+        let trace = running.trace_buffer().lock().hydrate_without_timestamps();
+        let schedules =
+            trace.iter().filter(|entry| matches!(entry, TraceEntry::Suspend(Effect::Schedule { .. }))).count();
+        assert_eq!(schedules, 1, "only SetLocalUse is rescheduled");
+
+        let stored_tip = state.pending_tip.clone().expect("tip stored through negotiation");
+        let stored_share = state.pending_share.clone().expect("share stored through negotiation");
+        drop(running);
+        flush_stored_on_next_transition(stored_tip, stored_share);
+    }
+
+    /// The values stored during negotiation are what the first established transition sends.
+    fn flush_stored_on_next_transition(stored_tip: (Point, TraceContext), stored_share: PeerSharingMessage) {
+        let _guards = trace_guards();
+        let mut network = traced();
+        let chainsync = network.stage("chainsync", hold_chainsync);
+        let chainsync_sender = chainsync.sender();
+        let _chainsync = network.wire_up(chainsync, ());
+        let sharing = network.stage("sharing", hold_share);
+        let sharing_sender = sharing.sender();
+        let _sharing = network.wire_up(sharing, ());
+        let mut connection_state =
+            established(None, Some(chainsync_sender.contramap(Inputs::<chainsync::ResponderMessage>::Local)));
+        let State::Established(established) = &mut connection_state.state else {
+            unreachable!("established() builds Established");
+        };
+        established.peer_sharing_initiator = Some(sharing_sender.contramap(Inputs::<PeerSharingMessage>::Local));
+        connection_state.pending_tip = Some(stored_tip.clone());
+        connection_state.pending_share = Some(stored_share.clone());
+        let connection = network.stage("connection", stage);
+        let connection = network.wire_up(connection, connection_state);
+
+        let (point, _) = stored_tip;
+        let PeerSharingMessage::Start { amount, .. } = stored_share else {
+            panic!("stored share is a Start");
+        };
+
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::default()).assert_idle();
+        running.trace_buffer().lock().clear();
+
+        let name = connection.name().clone();
+        running.enqueue_msg(&connection, [ConnectionMessage::StopTimeout]);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(pending_point(running.get_state(&connection).unwrap()), None);
+        assert_eq!(pending_share_of(running.get_state(&connection).unwrap()), None);
+        assert_trace_match_filter(
+            &running,
+            &[
+                connection_input(name.as_str(), |sent| matches!(sent, ConnectionMessage::StopTimeout)),
+                tm_try_send_match(name.as_str(), "chainsync", is_local_tip(point)),
+                tm_resume_try_send(name.as_str(), TrySend::Queued),
+                tm_try_send_match(name.as_str(), "sharing", is_local_start(amount)),
+                tm_resume_try_send(name.as_str(), TrySend::Queued),
+                tm_state_match(name.as_str(), |state: &Connection| {
+                    pending_point(state).is_none() && pending_share_of(state).is_none()
+                }),
+            ],
+            &[drop_resume_except_try_send(), drop_other_stages(name.as_str())],
+        );
     }
 
     #[test]
@@ -1024,6 +1084,8 @@ mod tests {
                 manager: StageRef::blackhole(),
             },
             state,
+            pending_tip: None,
+            pending_share: None,
         }
     }
 
@@ -1052,8 +1114,6 @@ mod tests {
             blockfetch_responder: None,
             peer_sharing_responder: None,
             stopping: BTreeSet::new(),
-            pending_tip: None,
-            pending_share: None,
         }))
     }
 
@@ -1067,8 +1127,8 @@ mod tests {
             unreachable!("established() builds Established");
         };
         established.peer_sharing_initiator = peer_sharing;
-        established.pending_share = pending;
         established.stopping = stopping;
+        connection.pending_share = pending;
         connection
     }
 
@@ -1155,10 +1215,7 @@ mod tests {
     }
 
     fn pending_share_of(connection: &Connection) -> Option<PeerSharingMessage> {
-        let State::Established(established) = &connection.state else {
-            panic!("connection left Established");
-        };
-        established.pending_share.clone()
+        connection.pending_share.clone()
     }
 
     fn share_start(amount: u8) -> PeerSharingMessage {
@@ -1192,10 +1249,7 @@ mod tests {
     }
 
     fn pending_point(connection: &Connection) -> Option<Point> {
-        let State::Established(established) = &connection.state else {
-            panic!("connection left Established");
-        };
-        established.pending_tip.as_ref().map(|(point, _)| *point)
+        connection.pending_tip.as_ref().map(|(point, _)| *point)
     }
 
     fn is_local_tip(point: Point) -> impl Fn(&Inputs<chainsync::ResponderMessage>) -> bool {
@@ -1581,7 +1635,7 @@ mod tests {
         let State::Established(established) = &state.state else {
             panic!("connection left Established");
         };
-        assert_eq!(established.pending_share, None);
+        assert_eq!(state.pending_share, None);
         assert!(established.peer_sharing_initiator.is_none());
         assert!(established.stopping.is_empty());
         assert_eq!(running.mailbox_len(&sharing), DEFAULT_MAILBOX_SIZE);
