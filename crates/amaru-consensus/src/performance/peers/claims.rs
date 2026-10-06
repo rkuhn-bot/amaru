@@ -247,13 +247,7 @@ impl PeerPerformance {
     }
 
     pub fn clear_availability(&mut self, peer: &Peer) {
-        if let Some(state) = self.peers.get_mut(peer) {
-            state.tips.clear();
-        }
-        for claimants in self.direct.values_mut() {
-            claimants.remove(peer);
-        }
-        self.direct.retain(|_, claimants| !claimants.is_empty());
+        self.clear_peer_claims(peer);
     }
 
     fn insert_claim(
@@ -296,6 +290,8 @@ impl PeerPerformance {
             }
         }
 
+        self.claim_index.entry(peer).or_default().insert(hash);
+        self.note_activity(peer, at);
         let state = self.peers.entry(peer).or_default();
         self::dominate_tips(&self.parents, &mut state.tips, hash, meta);
     }
@@ -384,5 +380,9 @@ impl PeerPerformance {
         for state in self.peers.values_mut() {
             state.tips.retain(|hash, meta| meta.height >= min_height && parents.contains_key(hash));
         }
+        self.claim_index.retain(|peer, hashes| {
+            hashes.retain(|hash| self.direct.get(hash).is_some_and(|claimants| claimants.contains_key(peer)));
+            !hashes.is_empty()
+        });
     }
 }

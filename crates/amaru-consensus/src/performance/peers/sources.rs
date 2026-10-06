@@ -18,6 +18,7 @@ use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
 use amaru_kernel::{Peer, PeerCandidate};
 use amaru_observability::{info, warn};
+use amaru_pure_stage::Instant;
 
 use super::{PeerPerformance, peer_mix::PeerSource, reputation::DEFAULT_PEER_MALUS_HALF_LIFE};
 
@@ -25,6 +26,8 @@ use super::{PeerPerformance, peer_mix::PeerSource, reputation::DEFAULT_PEER_MALU
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SharedIngestResult {
     pub added: usize,
+    /// New addresses refused because [`super::SHARED_PEERS_CAP`] was already reached.
+    pub dropped: usize,
     pub total: usize,
 }
 
@@ -44,8 +47,12 @@ impl PeerPerformance {
     }
 
     /// Insert peers learned from a share reply (skips other origins and the donor).
-    pub fn ingest_shared_peers(&mut self, from: &Peer, addrs: &[SocketAddr]) -> SharedIngestResult {
+    ///
+    /// Once [`super::SHARED_PEERS_CAP`] is reached, further newcomers are counted in `dropped`
+    /// and the addresses already learned stay. A repeat does not refresh the learned instant.
+    pub fn ingest_shared_peers(&mut self, from: &Peer, addrs: &[SocketAddr], at: Instant) -> SharedIngestResult {
         let mut added = 0usize;
+        let mut dropped = 0usize;
         for addr in addrs {
             let peer = match Peer::try_from(addr) {
                 Ok(peer) => peer,
@@ -63,12 +70,16 @@ impl PeerPerformance {
                 || self.static_peers.contains(&candidate)
                 || self.snapshot_candidates.contains(&candidate)
                 || self.ledger_candidates.contains(&candidate)
+                || self.shared_peers.contains(&candidate)
             {
                 continue;
             }
-            if self.shared_peers.insert(candidate) {
-                added += 1;
+            if self.shared_peers.len() >= super::SHARED_PEERS_CAP {
+                dropped += 1;
+                continue;
             }
+            self.remember_shared(candidate, at);
+            added += 1;
         }
         let total = self.shared_peers.len();
         if added > 0 {
@@ -76,7 +87,7 @@ impl PeerPerformance {
         }
         let peers_list = addrs.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
         info!(protocols::peer_selection::sharing::RECEIVED, peer = *from, peers = peers_list, added, total,);
-        SharedIngestResult { added, total }
+        SharedIngestResult { added, dropped, total }
     }
 
     pub fn is_static_peer(&self, peer: &Peer) -> bool {
@@ -98,8 +109,20 @@ impl PeerPerformance {
 
     /// Remember a dial so Host/SRV names keep their source half-life and later picks can score
     /// against the last address, without replacing the candidate in its pool.
-    pub fn note_dial(&mut self, origin: PeerSource, candidate: &PeerCandidate, peer: Peer) {
-        self.last_peer.insert(candidate.clone(), peer);
+    pub fn note_dial(&mut self, origin: PeerSource, candidate: &PeerCandidate, peer: Peer, at: Instant) {
+        if let Some(previous) = self.last_peer.insert(candidate.clone(), peer)
+            && previous != peer
+        {
+            let empty = self.last_peer_by_peer.get_mut(&previous).is_some_and(|aliases| {
+                aliases.remove(candidate);
+                aliases.is_empty()
+            });
+            if empty {
+                self.last_peer_by_peer.remove(&previous);
+            }
+        }
+        self.last_peer_by_peer.entry(peer).or_default().insert(candidate.clone());
+        self.note_activity(peer, at);
         match self.peer_origin.get(&peer) {
             Some(existing) if *existing <= origin => {}
             _ => {

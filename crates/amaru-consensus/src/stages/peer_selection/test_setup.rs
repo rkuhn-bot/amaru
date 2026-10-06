@@ -119,7 +119,7 @@ pub fn register_guards() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<crate::effects::ResolvePeerCandidateResult>().boxed(),
         amaru_pure_stage::register_data_deserializer::<PeerCandidate>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::SourceCountsEffect>().boxed(),
-        amaru_pure_stage::register_effect_deserializer::<crate::performance::IngestSharedPeersEffect>().boxed(),
+        amaru_pure_stage::register_effect_deserializer::<crate::performance::EvictRecordsEffect>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::SetLedgerCandidatesEffect>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::SharedContainsEffect>().boxed(),
     ]

@@ -19,7 +19,9 @@ use std::time::Duration;
 use amaru_kernel::Peer;
 use amaru_pure_stage::Instant;
 
-use super::{PeerPerformance, peer_mix::DEFAULT_MALUS_HALF_LIFE, quality::PeerScores, record::PeerState};
+use super::{
+    BAN_STUB_GRACE, PeerPerformance, peer_mix::DEFAULT_MALUS_HALF_LIFE, quality::PeerScores, record::PeerState,
+};
 
 /// Fallback malus half-life when a peer has no known source (same as mix default).
 pub const DEFAULT_PEER_MALUS_HALF_LIFE: Duration = DEFAULT_MALUS_HALF_LIFE;
@@ -97,18 +99,18 @@ impl PeerPerformance {
     /// This is not a generic “forget”: a future erase-without-adversarial path would be a
     /// separate operation.
     pub fn mark_adversarial(&mut self, peer: &Peer, at: Instant) {
-        for claimants in self.direct.values_mut() {
-            claimants.remove(peer);
-        }
-        self.direct.retain(|_, claimants| !claimants.is_empty());
-
+        self.clear_peer_claims(peer);
         self.share_requests.remove(peer);
         let half_life = self.half_life_for(peer);
-        let state = self.peers.entry(*peer).or_default();
-        state.tips.clear();
-        state.scores = PeerScores::default();
-        state.adversarial = true;
-        add_malus_impulse(state, ADVERSARIAL_IMPULSE, at, half_life);
+        {
+            let state = self.peers.entry(*peer).or_default();
+            state.tips.clear();
+            state.scores = PeerScores::default();
+            state.adversarial = true;
+            state.stub_until = Some(at + BAN_STUB_GRACE);
+            add_malus_impulse(state, ADVERSARIAL_IMPULSE, at, half_life);
+        }
+        self.note_activity(*peer, at);
     }
 
     /// Record latest handshake peer-sharing willingness (overwrites prior value).
@@ -116,10 +118,13 @@ impl PeerPerformance {
     /// Marks the peer as ever-connected (successful handshake). Connection-failure upserts do
     /// not set that flag.
     pub fn record_advertisability(&mut self, peer: Peer, advertisable: bool, at: Instant) {
-        let state = self.peers.entry(peer).or_default();
-        state.ever_connected = true;
-        state.advertisable = advertisable;
-        state.scores.last_change = Some(at);
+        {
+            let state = self.peers.entry(peer).or_default();
+            state.ever_connected = true;
+            state.advertisable = advertisable;
+            state.scores.last_change = Some(at);
+        }
+        self.note_activity(peer, at);
     }
 
     /// Increment connection/protocol failure count and raise connection malus.
@@ -127,10 +132,13 @@ impl PeerPerformance {
     /// Upserts a reputation stub when needed, but does **not** set `ever_connected`.
     pub fn record_connection_failure(&mut self, peer: Peer, at: Instant) {
         let half_life = self.half_life_for(&peer);
-        let state = self.peers.entry(peer).or_default();
-        state.failure_count = state.failure_count.saturating_add(1);
-        state.scores.last_change = Some(at);
-        add_malus_impulse(state, CONNECT_FAIL_IMPULSE, at, half_life);
+        {
+            let state = self.peers.entry(peer).or_default();
+            state.failure_count = state.failure_count.saturating_add(1);
+            state.scores.last_change = Some(at);
+            add_malus_impulse(state, CONNECT_FAIL_IMPULSE, at, half_life);
+        }
+        self.note_activity(peer, at);
     }
 
     pub fn share_flags(&self, peer: &Peer) -> Option<PeerShareFlags> {

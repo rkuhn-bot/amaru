@@ -19,7 +19,9 @@
 //! performance resource. A single timeout wakes the stage at the earlier of one second and the
 //! next stored deadline. The wake copies a peer view only when the resource generation has moved,
 //! and runs a full round when that view changed, a deadline is due, or thirty seconds have passed
-//! since the last full round. A mark for a live Using bearer sets Maintenance until its deadline.
+//! since the last full round. An eviction deadline every five minutes enqueues one bounded
+//! retention batch and does not wait for the worker to finish it. A mark for a live Using bearer
+//! sets Maintenance until its deadline.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -62,6 +64,8 @@ const DIAL_HOLDOFF: Duration = Duration::from_secs(2);
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// A full round runs at least this often, even when the view is unchanged.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// How often one bounded retention batch is enqueued.
+const EVICTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Do not repeat `SetLocalUse` for one bearer more often than this.
 const LOCAL_USE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 /// A dial with no outcome after the connect timeout plus this grace is treated as lost.
@@ -186,6 +190,8 @@ pub struct PeerSelection {
     seen_generation: u64,
     /// Next forced full round. `None` until the first full round.
     next_sweep_at: Option<Instant>,
+    /// Next retention batch. `None` until [`PeerSelectionMsg::Initialize`] or the first full round.
+    next_evict_at: Option<Instant>,
 }
 
 impl PartialEq for PeerSelection {
@@ -206,6 +212,7 @@ impl PartialEq for PeerSelection {
             && self.demoted_until == other.demoted_until
             && self.seen_generation == other.seen_generation
             && self.next_sweep_at == other.next_sweep_at
+            && self.next_evict_at == other.next_evict_at
     }
 }
 
@@ -261,6 +268,7 @@ impl PeerSelection {
             demoted_until: BTreeMap::new(),
             seen_generation: 0,
             next_sweep_at: None,
+            next_evict_at: None,
         }
     }
 
@@ -329,7 +337,7 @@ impl PeerSelection {
             return false;
         }
         self.hold_dial(candidate.clone(), peer, now);
-        eff.external(Performance::note_dial(origin, candidate.clone(), peer)).await;
+        eff.external(Performance::note_dial(origin, candidate.clone(), peer, now)).await;
         if candidate.needs_resolution() {
             self.bound.insert(candidate, peer);
         }
@@ -840,6 +848,7 @@ impl PeerSelection {
             || self.demoted_until.values().any(|until| *until <= now)
             || self.next_churn_at.is_some_and(|at| at <= now)
             || self.next_sweep_at.is_some_and(|at| at <= now)
+            || self.next_evict_at.is_some_and(|at| at <= now)
             || self.lost_dial_due(now)
             || self.local_use_due(now)
     }
@@ -887,6 +896,9 @@ impl PeerSelection {
             consider(when);
         }
         if let Some(when) = self.next_sweep_at {
+            consider(when);
+        }
+        if let Some(when) = self.next_evict_at {
             consider(when);
         }
         let lost_after = self.dial_lost_after();
@@ -952,7 +964,44 @@ impl PeerSelection {
         // A mark sets desired use during reconcile. If that round's rate limit held the command,
         // a later round whose deadline is this interval still has to send it.
         self.sync_local_use(now, eff, &mut budget).await;
+        self.schedule_eviction(now, eff).await;
         self.next_sweep_at = Some(now + SWEEP_INTERVAL);
+    }
+
+    async fn schedule_eviction(&mut self, now: Instant, eff: &Effects<PeerSelectionMsg>) {
+        if self.next_evict_at.is_some_and(|at| at > now) {
+            return;
+        }
+        if self.next_evict_at.is_some() {
+            eff.external(Performance::evict_records(
+                now,
+                self.eviction_protected_peers(),
+                self.eviction_protected_candidates(),
+            ))
+            .await;
+        }
+        self.next_evict_at = Some(now + EVICTION_INTERVAL);
+    }
+
+    fn eviction_protected_peers(&self) -> BTreeSet<Peer> {
+        let mut peers = BTreeSet::new();
+        peers.extend(self.cooldowns.cooling_peers());
+        peers.extend(self.inbound_peers.keys().copied());
+        peers.extend(self.outbound_peers.keys().copied());
+        peers.extend(self.bound.values().copied());
+        peers
+    }
+
+    fn eviction_protected_candidates(&self) -> BTreeSet<PeerCandidate> {
+        let mut candidates = BTreeSet::new();
+        candidates.extend(self.pending_resolve.iter().cloned());
+        candidates.extend(self.bound.keys().cloned());
+        for intent in self.outbound_peers.values() {
+            if let OutboundIntent::Dialing { candidate, .. } = intent {
+                candidates.insert(candidate.clone());
+            }
+        }
+        candidates
     }
 }
 
@@ -1000,6 +1049,7 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
             let seed: [u8; 32] = eff.external(GenerateRandomSeed).await;
             state.next_churn_at = Some(now + churn_interval(seed));
             state.next_sweep_at = Some(now + SWEEP_INTERVAL);
+            state.next_evict_at = Some(now + EVICTION_INTERVAL);
             // NOTE: no supervision, failure in ledger-check shall tear down the node.
             let ledger_check = eff
                 .wire_up(eff.stage("peer-selection/ledger-check", get_ledger_candidates).await, LedgerCheck::new())
@@ -1039,7 +1089,8 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
                 return state;
             };
             if state.cooldowns.is_cooling(&peer) || state.outbound_peers.contains_key(&peer) {
-                eff.external(Performance::note_dial(origin, candidate.clone(), peer)).await;
+                let now = eff.clock().await;
+                eff.external(Performance::note_dial(origin, candidate.clone(), peer, now)).await;
                 if candidate.needs_resolution() {
                     state.bound.insert(candidate, peer);
                 }

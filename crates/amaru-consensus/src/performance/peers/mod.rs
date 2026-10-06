@@ -20,6 +20,7 @@ mod peer_mix;
 mod quality;
 mod record;
 mod reputation;
+mod retention;
 mod select_outbound;
 mod select_share;
 mod sources;
@@ -29,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use amaru_kernel::{HeaderHash, Peer, PeerCandidate};
 use amaru_ouroboros::ConnectionId;
+use amaru_pure_stage::Instant;
 pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersParams};
 use claims::{ClaimMeta, ParentInfo};
 pub(crate) use connections::instant_of;
@@ -39,6 +41,9 @@ use record::PeerState;
 pub use reputation::{
     ADVERSARIAL_IMPULSE, CONNECT_FAIL_IMPULSE, DEFAULT_PEER_MALUS_HALF_LIFE, PeerShareFlags, SHARE_MALUS_THRESHOLD,
     malus_at,
+};
+pub use retention::{
+    BAN_STUB_GRACE, EVICTION_BATCH, EvictBatch, PEER_RECORD_CAP, PEER_RECORD_RETENTION, SHARED_PEERS_CAP,
 };
 pub use select_outbound::{
     NEVER_CONNECTED_BONUS, OutboundInputs, OutboundPick, SelectOutboundParams, SelectUsing, select_outbound_from,
@@ -79,6 +84,22 @@ pub struct PeerPerformance {
     share_requests: BTreeMap<Peer, connections::ShareRequests>,
     /// Latest intersection-not-found mark per peer. Dropped when that bearer is gone.
     uninteresting: BTreeMap<Peer, connections::UninterestingRecord>,
+    /// Latest observation instant. It only moves forward. See `retention`.
+    activity: BTreeMap<Peer, Instant>,
+    /// Oldest activity first. Eviction reads a bounded prefix.
+    activity_order: BTreeSet<(Instant, Peer)>,
+    /// Exclusive lower bound of the next record scan. `None` starts at the oldest entry.
+    activity_cursor: Option<(Instant, Peer)>,
+    /// When a shared address was first learned. A repeat ingest does not move it.
+    shared_learned: BTreeMap<PeerCandidate, Instant>,
+    /// Oldest learned instant first.
+    shared_order: BTreeSet<(Instant, PeerCandidate)>,
+    /// Exclusive lower bound of the next shared-candidate scan.
+    shared_cursor: Option<(Instant, PeerCandidate)>,
+    /// Hashes each peer claims, so dropping one peer does not scan every hash.
+    claim_index: BTreeMap<Peer, BTreeSet<HeaderHash>>,
+    /// Candidates whose last resolved address is this peer.
+    last_peer_by_peer: BTreeMap<Peer, BTreeSet<PeerCandidate>>,
     /// Advances when a lifecycle write, a ledger-candidate replacement, a share ingest that adds
     /// candidates, or an intersection-not-found mark changes what selection reads.
     generation: u64,

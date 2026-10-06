@@ -38,6 +38,9 @@ pub(super) struct PeerState {
     pub(super) malus: f64,
     /// Instant when [`Self::malus`] was last evolved for storage.
     pub(super) malus_as_of: Option<Instant>,
+    /// Keep this reputation stub until then. Set by an adversarial mark and extended while the
+    /// peer stays protected.
+    pub(super) stub_until: Option<Instant>,
 }
 
 impl PeerState {
