@@ -35,6 +35,7 @@ pub fn register_deserializers() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<RecordSharedPeersEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordShareRequestServedEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<QuerySharePeersEffect>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<Vec<SocketAddr>>().boxed(),
     ]
 }
 
