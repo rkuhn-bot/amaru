@@ -1,0 +1,84 @@
+// Copyright 2026 PRAGMA
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! [`Performance`] as the peer-tracking resource.
+//!
+//! Each method enqueues one operation on the same worker and the same FIFO as header and pace
+//! updates. A query enqueued after a write observes that write.
+
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+use amaru_kernel::Peer;
+use amaru_ouroboros::{
+    CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, PeerTracking, PeerTrackingFuture,
+    PeerTrackingResource,
+};
+use amaru_pure_stage::Resources;
+use tokio::sync::oneshot;
+
+use super::{Performance, ResourcePerformance, ops::PerformanceOp};
+use crate::performance::ops::PeerOp;
+
+impl Performance {
+    /// Install this worker under both resource names. They share one allocation and one queue.
+    ///
+    /// The returned callback joins the worker. Drop every [`Performance`] handle first.
+    pub fn install(self, resources: &Resources) -> impl FnOnce() -> std::thread::Result<()> + Send + Sync + 'static {
+        let performance = Arc::new(self);
+        let join = performance.shutdown_callback();
+        resources.put::<ResourcePerformance>(Arc::clone(&performance));
+        resources.put::<PeerTrackingResource>(performance);
+        join
+    }
+}
+
+impl PeerTracking for Performance {
+    fn record_connection_established(&self, conn: ConnectionRecord, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordConnectionEstablished { conn, at }));
+    }
+
+    fn record_connection_closed(&self, peer: Peer, conn_id: ConnectionId, reason: CloseReason, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordConnectionClosed { peer, conn_id, reason, at }));
+    }
+
+    fn record_connect_failed(&self, peer: Peer, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordConnectFailed { peer, at }));
+    }
+
+    fn record_local_use_applied(&self, peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordLocalUseApplied { peer, conn_id, local_use, at }));
+    }
+
+    fn record_keepalive_rtt(&self, peer: Peer, rtt: Duration, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordKeepaliveSample { peer, rtt, at }));
+    }
+
+    fn record_shared_peers(&self, from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordSharedPeers { from, addrs, at }));
+    }
+
+    fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordShareRequestServed { requester, amount, at }));
+    }
+
+    fn query_share_peers(&self, requester: Peer, amount: u8, now: ObservedAt) -> PeerTrackingFuture<Vec<SocketAddr>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let (reply, rx) = oneshot::channel();
+            this.submit(PerformanceOp::Peer(PeerOp::QuerySharePeers { requester, amount, now, reply }));
+            #[expect(clippy::expect_used)]
+            rx.await.expect("performance worker dropped share-peer reply")
+        })
+    }
+}

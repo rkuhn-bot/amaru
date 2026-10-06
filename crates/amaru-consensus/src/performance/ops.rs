@@ -18,7 +18,10 @@
 //! so those ops sit with the peer group and the header update stays in the same arm. Prune
 //! updates both maps and sits with the header group. Pace is only the sync-adoption window.
 
+use std::{net::SocketAddr, time::Duration};
+
 use amaru_kernel::Peer;
+use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt};
 use amaru_pure_stage::Instant;
 use tokio::sync::oneshot;
 
@@ -74,6 +77,14 @@ pub(crate) enum PeerOp {
     SharedContains { effect: SharedContainsEffect, reply: oneshot::Sender<bool> },
     SourceCounts { effect: SourceCountsEffect, reply: oneshot::Sender<SourceCounts> },
     RecordRollback { effect: RecordRollbackEffect },
+    RecordConnectionEstablished { conn: ConnectionRecord, at: ObservedAt },
+    RecordConnectionClosed { peer: Peer, conn_id: ConnectionId, reason: CloseReason, at: ObservedAt },
+    RecordConnectFailed { peer: Peer, at: ObservedAt },
+    RecordLocalUseApplied { peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt },
+    RecordKeepaliveSample { peer: Peer, rtt: Duration, at: ObservedAt },
+    RecordSharedPeers { from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt },
+    RecordShareRequestServed { requester: Peer, amount: u8, at: ObservedAt },
+    QuerySharePeers { requester: Peer, amount: u8, now: ObservedAt, reply: oneshot::Sender<Vec<SocketAddr>> },
 }
 
 pub(crate) enum HeaderOp {
@@ -220,6 +231,31 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
         }
         PeerOp::RecordRollback { effect } => {
             peers.record_rollback(effect.peer, effect.point, effect.parent, effect.at);
+        }
+        PeerOp::RecordConnectionEstablished { conn, at } => {
+            peers.record_connection_established(conn, at);
+        }
+        PeerOp::RecordConnectionClosed { peer, conn_id, reason, at } => {
+            peers.record_connection_closed(peer, conn_id, reason, at);
+        }
+        PeerOp::RecordConnectFailed { peer, at } => {
+            peers.record_connect_failed(peer, at);
+        }
+        PeerOp::RecordLocalUseApplied { peer, conn_id, local_use, at } => {
+            peers.record_local_use_applied(peer, conn_id, local_use, at);
+        }
+        PeerOp::RecordKeepaliveSample { peer, rtt, at } => {
+            peers.record_keepalive_sample(peer, rtt, at);
+        }
+        PeerOp::RecordSharedPeers { from, addrs, at } => {
+            peers.record_shared_peers(&from, &addrs, at);
+        }
+        PeerOp::RecordShareRequestServed { requester, amount, at } => {
+            peers.record_share_request_served(requester, amount, at);
+        }
+        PeerOp::QuerySharePeers { requester, amount, now, reply } => {
+            let result = peers.query_share_peers(&requester, amount, now);
+            let _ = reply.send(result);
         }
     }
 }

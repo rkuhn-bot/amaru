@@ -82,28 +82,12 @@ struct Params {
     manager: StageRef<ManagerMessage>,
 }
 
-/// Local use of a bearer: which initiator groups we intend to run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub enum LocalUse {
-    None,
-    Maintenance,
-    Diffusion,
-}
+pub use amaru_ouroboros::LocalUse;
 
-impl LocalUse {
-    fn default_for_role(role: Role) -> Self {
-        match role {
-            Role::Initiator => Self::Diffusion,
-            Role::Responder => Self::None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Maintenance => "maintenance",
-            Self::Diffusion => "diffusion",
-        }
+fn local_use_for_role(role: Role) -> LocalUse {
+    match role {
+        Role::Initiator => LocalUse::Diffusion,
+        Role::Responder => LocalUse::None,
     }
 }
 
@@ -467,7 +451,7 @@ async fn do_handshake(
 
     eff.send(&muxer, mux::MuxMessage::SetSduTimeout(mux::SDU_TIMEOUT_ESTABLISHED)).await;
 
-    let local_use = LocalUse::default_for_role(*role);
+    let local_use = local_use_for_role(*role);
     let run_initiators = *role == Role::Initiator || full_duplex;
     let run_responders = *role == Role::Responder || full_duplex;
     let mut established = Established {

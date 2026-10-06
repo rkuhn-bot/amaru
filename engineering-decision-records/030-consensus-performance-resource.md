@@ -122,6 +122,29 @@ OpenTelemetry export may drop or lag under resource or connectivity pressure. Th
 Spans answer “what path did this header take?”; the resource answers “given everything we have seen so far, whom do we ask next?” and ensures every accepted header is accounted for even when never adopted.
 Probe points should stay aligned: the same stage moments that open/close [EDR-026][edr-tracing] spans are the natural places to record performance events, avoiding divergent instrumentation.
 
+### Message versus resource
+
+The choice is timeliness, not reliability.
+
+A message is required when the receiver must act immediately: which peer to ask for the next header or block, which chain to adopt, or an adversarial disconnect. Those stay stage messages. Population bookkeeping can wait about a second: a connection opened or closed, a dial that failed, the local use applied on a bearer, addresses learned by peer sharing, a share request that was served, and a keep-alive round trip. Those are written to this resource. The consumer reads them on its own schedule.
+
+An observation that can change the next header or block request, or which chain is adopted, still has to reach that consumer within about 10 ms. A resource read is acceptable for that work only when the consumer is woken on change or ticks at about that rate. A one-second tick is not.
+
+| Class | Observation | Budget |
+| --- | --- | --- |
+| C1 | Chain-sync roll forward or backward, through header validation, chain selection, and the block-fetch decision | immediate, at most 10 ms per hop |
+| C2 | Block-fetch completion, through adoption and the next fetch decision | immediate |
+| C3 | Fetch failure, timeout, or loss of a peer that holds in-flight requests | immediate |
+| C4 | Local adoption, through roll-forward to waiting followers | immediate |
+| C5 | Invalid header or block, through disconnect | immediate |
+| C6 | Genesis density verdicts and the resulting disconnect. No instance in this node today | about 1 s |
+| C7 | Round-trip and slowness samples, read as a smoothed value at the next fetch choice | seconds |
+| C8 | Peer lost, through churn and refill | seconds or longer |
+| C9 | Peer-sharing results | minutes |
+| C10 | Transaction-submission statistics. No instance in this node today | seconds or longer |
+
+Protocols reach the population half through the `PeerTracking` trait (`amaru-ouroboros-traits`). `Performance` implements that trait by enqueueing on this same worker, and the node registers that one handle under both resource names. Consensus stages keep using the existing `Performance` effects. The trait methods are the protocols-facing names; stage call sites are added separately, so both paths exist until each old message is removed.
+
 ## Consequences
 
 - Consensus stages depend on `ResourcePerformance` being installed in pure-stage `Resources` (production and stage tests).
