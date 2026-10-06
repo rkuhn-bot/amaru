@@ -340,6 +340,40 @@ fn initiator_death_before_handshake_is_recorded_once() {
 }
 
 #[test]
+fn rejected_outbound_duplicate_death_does_not_fail_the_live_connection() {
+    let mut sim = harness();
+    let peer = Peer::for_test(4110);
+    let (live, extra_id) = ids();
+    sim.running.enqueue_msg(
+        &sim.manager,
+        [
+            handshake(peer, sim.connection.clone(), live, Role::Initiator, true),
+            handshake(peer, sim.extra.clone(), extra_id, Role::Initiator, true),
+            ManagerMessage::ConnectionDied(peer, extra_id, Role::Initiator),
+            ManagerMessage::ConnectionDied(peer, live, Role::Initiator),
+        ],
+    );
+    sim.running.run(Run::skip_and_resolve()).assert_idle();
+
+    assert!(sim.recorder.connect_failures().is_empty(), "duplicate death is not a failed dial");
+    let at = observed_at(sim.running.now());
+    assert_eq!(sim.recorder.established().len(), 1);
+    assert_eq!(sim.recorder.established()[0].0.conn_id, live);
+    assert_eq!(sim.recorder.closed(), vec![(peer, live, CloseReason::BearerEnded, at)]);
+    let notes: Vec<_> = sim.notify.drain().collect();
+    assert!(!notes.iter().any(|note| matches!(note, PeerSelectionNotify::ConnectFailed { .. })));
+    assert!(!notes.iter().any(|note| matches!(
+        note,
+        PeerSelectionNotify::Disconnected { conn_id, .. } if *conn_id == extra_id
+    )));
+    assert!(notes.iter().any(|note| matches!(
+        note,
+        PeerSelectionNotify::Disconnected { conn_id, direction, .. }
+            if *conn_id == live && *direction == ConnectionDirection::Outbound
+    )));
+}
+
+#[test]
 fn inbound_death_before_handshake_writes_nothing() {
     let mut sim = harness();
     let peer = Peer::for_test(4109);
