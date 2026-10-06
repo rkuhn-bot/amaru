@@ -176,10 +176,11 @@ fn churn_interval(seed: [u8; 32]) -> Duration {
 ///     id (`Connecting` is ignored); then clears availability and `regulate_peers`.
 ///     (Share-request timers die with the connection's peer-sharing stage.)
 ///
-/// - **ConnectFailed**: Records a connection failure on Performance, removes the peer from
-///   `outbound_peers` (any `PeerState`), holds the peer off the dial pool for `DIAL_HOLDOFF`,
-///   then calls `regulate_peers`. Malus makes the peer less preferred; it is still dialled when
-///   no healthier candidate fills the open slots, once the hold-off has elapsed.
+/// - **ConnectFailed**: Removes the peer from `outbound_peers` (any `PeerState`), holds the peer
+///   off the dial pool for `DIAL_HOLDOFF`, then calls `regulate_peers`. The manager already
+///   recorded the connection-failure malus when it reported the attempt, so this handler does
+///   not record it again. Malus makes the peer less preferred; it is still dialled when no
+///   healthier candidate fills the open slots, once the hold-off has elapsed.
 ///
 /// - **SharePeersResult**: Inserts learned addresses into `shared_peers`, then
 ///   `regulate_peers` (no reschedule — initiator keeps the cadence).
@@ -1174,7 +1175,6 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
         }
         PeerSelectionMsg::ConnectFailed(peer) => {
             let now = eff.clock().await;
-            eff.external(Performance::record_connection_failure(peer, now)).await;
             let names = state.related_candidates(peer);
             state.hold_dial_many(peer, names, now);
             state.outbound_peers.remove(&peer);

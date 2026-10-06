@@ -57,12 +57,12 @@
 //! | `prune_below` | adopt_chain | claims and header lifecycles | horizon | awaited |
 //! | `peer_adversarial` | peer selection | sharing filters, outbound ranking | C5 | recorded immediately |
 //! | `record_keepalive_rtt` | not called yet | fetch ranking, churn | C7 | recorded immediately; read on demand |
-//! | `record_connection_established` | not called yet | peer selection | C8 | recorded immediately |
-//! | `record_connection_closed` | not called yet | peer selection | C8 | recorded immediately |
-//! | `record_connect_failed` | not called yet | malus, sharing filters | C8 | recorded immediately |
-//! | `record_local_use_applied` | not called yet | peer selection | C8 | recorded immediately |
-//! | `record_advertisability` | peer selection | sharing filters | C8 | recorded immediately |
-//! | `record_connection_failure` | peer selection | malus, sharing filters | C8 | recorded immediately |
+//! | `record_connection_established` | manager | peer selection | C8 | recorded immediately |
+//! | `record_connection_closed` | manager | peer selection | C8 | recorded immediately |
+//! | `record_connect_failed` | manager | malus, sharing filters | C8 | recorded immediately |
+//! | `record_local_use_applied` | manager | peer selection | C8 | recorded immediately |
+//! | `record_advertisability` | manager (inside established) and peer selection | sharing filters | C8 | recorded immediately |
+//! | `record_connection_failure` | manager (inside connect-failed) | malus, sharing filters | C8 | recorded immediately |
 //! | `clear_peer_availability` | peer selection, track_peers | fetch selection | C8 | recorded immediately |
 //! | `select_outbound` | peer selection | peer selection | C8 | on demand |
 //! | `rank_peers_for_churn` | peer selection | peer selection | C8 | on demand |

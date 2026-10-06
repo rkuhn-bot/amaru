@@ -15,7 +15,9 @@
 //! External effects for the peer-tracking resource.
 //!
 //! Stages pass the stage clock. The effect converts it with [`observed_at`] and calls
-//! [`amaru_ouroboros::PeerTracking`]. Nothing in the running node calls these yet.
+//! [`amaru_ouroboros::PeerTracking`]. The manager records a handshake, a close, a failed
+//! outbound attempt, and applied local use. Keep-alive, sharing, and the share query are
+//! not called yet.
 
 use std::{net::SocketAddr, time::Duration};
 
