@@ -17,7 +17,7 @@
 use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
 use amaru_kernel::{Peer, PeerCandidate};
-use amaru_observability::warn;
+use amaru_observability::{info, warn};
 
 use super::{PeerPerformance, peer_mix::PeerSource, reputation::DEFAULT_PEER_MALUS_HALF_LIFE};
 
@@ -70,7 +70,13 @@ impl PeerPerformance {
                 added += 1;
             }
         }
-        SharedIngestResult { added, total: self.shared_peers.len() }
+        let total = self.shared_peers.len();
+        if added > 0 {
+            self.bump_generation();
+        }
+        let peers_list = addrs.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+        info!(protocols::peer_selection::sharing::RECEIVED, peer = *from, peers = peers_list, added, total,);
+        SharedIngestResult { added, total }
     }
 
     pub fn is_static_peer(&self, peer: &Peer) -> bool {

@@ -93,8 +93,7 @@ pub fn build_stage_graph(
             config.target_upstream_peers,
             config.target_downstream_peers,
             config.peer_removal_cooldown_secs,
-        )
-        .with_share_request_delays(config.share_request_initial_delay, config.share_request_interval),
+        ),
     );
 
     let track_peers = stage_graph.stage("track_peers", track_peers::stage);
@@ -227,7 +226,8 @@ pub fn build_stage_graph(
                 ManagerConfig::default()
                     .with_tx_submission_params(config.tx_submission_responder_params)
                     .with_blockfetch_pipeline_n(config.blockfetch_pipeline_n)
-                    .with_max_inbound(config.target_downstream_peers),
+                    .with_max_inbound(config.target_downstream_peers)
+                    .with_share_request_delays(config.share_request_initial_delay, config.share_request_interval),
                 Arc::new(era_history.clone()),
                 track_peers_input,
                 mempool_stage.clone(),

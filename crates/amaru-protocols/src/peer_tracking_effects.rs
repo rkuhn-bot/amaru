@@ -17,8 +17,8 @@
 //! Stages pass the stage clock. The effect converts it with [`observed_at`] and calls
 //! [`amaru_ouroboros::PeerTracking`]. The manager records a handshake, a close, a failed
 //! outbound attempt, and applied local use. The peer-sharing responder queries a reply and
-//! records that it served the request. Keep-alive samples and learned addresses are not
-//! called yet.
+//! records that it served the request. The initiator records addresses learned from a reply.
+//! Keep-alive samples are not called yet.
 
 use std::{net::SocketAddr, time::Duration};
 

@@ -28,7 +28,7 @@ use crate::{
     keepalive::{self, register_keepalive},
     manager::{ManagerConfig, ManagerMessage},
     mux::{self, MuxMessage},
-    peer_sharing::{PeerSharingMessage, ShareResult, register_peer_sharing_initiator, register_peer_sharing_responder},
+    peer_sharing::{PeerSharingMessage, register_peer_sharing_initiator, register_peer_sharing_responder},
     protocol::{
         Erased, Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
         PROTO_N2N_PEER_SHARE, PROTO_N2N_TX_SUB, ProtocolId, Role, ingress_limit,
@@ -149,13 +149,6 @@ pub enum ConnectionMessage {
         id: u64,
         cr: StageRef<Blocks>,
     },
-    /// Start periodic peer-sharing requests on this connection's initiator.
-    RequestSharePeers {
-        amount: u8,
-        initial_delay: std::time::Duration,
-        interval: std::time::Duration,
-        reply_to: StageRef<ShareResult>,
-    },
     NewTip(Point, TraceContext),
     /// A supervised mini-protocol or mux stage terminated.
     ChildDied(ChildId),
@@ -174,7 +167,6 @@ impl ConnectionMessage {
             ConnectionMessage::Disconnect => "Disconnect",
             ConnectionMessage::Handshake(_) => "Handshake",
             ConnectionMessage::FetchBlocks { .. } => "FetchBlocks",
-            ConnectionMessage::RequestSharePeers { .. } => "RequestSharePeers",
             ConnectionMessage::NewTip(_, _) => "NewTip",
             ConnectionMessage::ChildDied(_) => "ChildDied",
             ConnectionMessage::SetLocalUse(_) => "SetLocalUse",
@@ -242,17 +234,6 @@ pub async fn stage(
                 }
                 State::Established(s)
             }
-            (
-                State::Established(s),
-                ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to },
-            ) => {
-                if !s.stopping.contains(&ChildId::PeerSharing)
-                    && let Some(ps) = &s.peer_sharing_initiator
-                {
-                    eff.send(ps, PeerSharingMessage::Start { amount, initial_delay, interval, reply_to }).await;
-                }
-                State::Established(s)
-            }
             (State::Established(s), ConnectionMessage::NewTip(tip, trace_context)) => {
                 if let Some(cs) = &s.chainsync_responder {
                     eff.send(cs, chainsync::ResponderMessage::NewTip(tip, trace_context)).await;
@@ -269,10 +250,6 @@ pub async fn stage(
                 // if it never does, the caller times out. The delay is the reconnect delay
                 // (2s by default), shorter than the 5s call timeout. The connect attempt
                 // itself fails after 2s.
-                eff.schedule_after(msg, params.config.reconnect_delay).await;
-                state
-            }
-            (state @ (State::Initial | State::Handshake { .. }), msg @ ConnectionMessage::RequestSharePeers { .. }) => {
                 eff.schedule_after(msg, params.config.reconnect_delay).await;
                 state
             }
@@ -662,7 +639,7 @@ async fn on_expected_stop(
 }
 
 async fn start_initiators(mut s: Established, params: &Params, eff: &Effects<ConnectionMessage>) -> Established {
-    let Params { peer, conn_id, config, pipeline, mempool_stage, era_history, .. } = params;
+    let Params { peer, conn_id, role, config, pipeline, mempool_stage, era_history, .. } = params;
     if s.desired_use >= LocalUse::Maintenance {
         if s.keepalive_initiator.is_none() {
             s.keepalive_initiator = register_keepalive(
@@ -675,12 +652,15 @@ async fn start_initiators(mut s: Established, params: &Params, eff: &Effects<Con
             )
             .await;
         }
-        if s.peer_sharing_initiator.is_none() {
+        if s.peer_sharing_initiator.is_none() && *role == Role::Initiator && s.version_data.is_advertisable() {
             s.peer_sharing_initiator = Some(
                 register_peer_sharing_initiator(
                     &s.muxer,
                     *peer,
                     *conn_id,
+                    config.share_request_amount,
+                    config.share_request_initial_delay,
+                    config.share_request_interval,
                     eff,
                     ConnectionMessage::ChildDied(ChildId::PeerSharing),
                 )

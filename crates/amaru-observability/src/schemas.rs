@@ -2165,12 +2165,6 @@ define_schemas! {
                         required id: u64
                     }
                 }
-                sharing {
-                    /// No initiating connection was available to request shared peers from
-                    REQUEST_NO_CONNECTION {
-                        required peer: %amaru_kernel::Peer
-                    }
-                }
             }
             peer_selection {
                 peer {

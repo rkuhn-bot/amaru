@@ -76,7 +76,8 @@ pub struct PeerPerformance {
     last_shared_at: BTreeMap<Peer, amaru_ouroboros::ObservedAt>,
     /// Share requests this node has answered.
     share_requests: BTreeMap<Peer, connections::ShareRequests>,
-    /// Advances when a lifecycle write or a ledger-candidate replacement changes what selection reads.
+    /// Advances when a lifecycle write, a ledger-candidate replacement, or a share ingest that
+    /// adds candidates changes what selection reads.
     generation: u64,
 }
 
