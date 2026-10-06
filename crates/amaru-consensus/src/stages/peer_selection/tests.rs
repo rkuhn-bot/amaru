@@ -19,13 +19,13 @@ use std::{
 
 use amaru_kernel::PeerCandidate;
 use amaru_observability::tracing::Level;
-use amaru_ouroboros::{ConnectionDirection, ConnectionId, ObservedAt, PeerTracking};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking};
 use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{Effect, simulation::SimulationRunning, trace_buffer::TraceEntry};
 
 use super::*;
 use crate::{
-    performance::{PeerView, ResourcePerformance, ViewConnection},
+    performance::{DialOutcome, PeerPerformance, PeerView, ResourcePerformance, ViewConnection},
     stages::{
         peer_selection::test_setup::{SIM_INITIAL_CLOCK_SECS, TestPrep, setup, sim_t0, test_prep},
         test_utils::start_in_era,
@@ -37,7 +37,7 @@ fn peer_view(
     connections: Vec<ViewConnection>,
     connect_failures: BTreeMap<Peer, ObservedAt>,
 ) -> PeerView {
-    PeerView { generation, connections, connect_failures, uninteresting: Vec::new() }
+    PeerView { generation, connections, connect_failures, closes: BTreeMap::new(), uninteresting: Vec::new() }
 }
 
 fn view_conn(peer: Peer, conn_id: ConnectionId, direction: ConnectionDirection, local_use: LocalUse) -> ViewConnection {
@@ -137,6 +137,51 @@ fn refill_after_a_close_dials_the_next_static_peer() {
     let sends = manager_sends(&running);
     assert_eq!(sends, vec![ManagerMessage::AddPeer(next)]);
     assert!(!ps_state(&running).outbound_peers.contains_key(&gone));
+}
+
+#[test]
+fn connect_and_close_between_ticks_resolves_on_the_next_round() {
+    let gone = TestPrep::peer("1.1.1.1:1");
+    let next = TestPrep::peer("2.2.2.2:2");
+    let at = ObservedAt::new(
+        Duration::from_secs(crate::stages::peer_selection::test_setup::SIM_INITIAL_CLOCK_SECS),
+        start_in_era().relative_time,
+    );
+    let conn_id = ConnectionId::initial();
+    let mut peers = PeerPerformance::new();
+    peers.record_connection_established(
+        ConnectionRecord {
+            peer: gone,
+            conn_id,
+            direction: ConnectionDirection::Outbound,
+            full_duplex_capable: true,
+            full_duplex: false,
+            advertisable: false,
+            local_use: LocalUse::None,
+            established_at: at,
+        },
+        at,
+    );
+    peers.record_connection_closed(gone, conn_id, CloseReason::BearerEnded, at);
+    let view = peers.query_peer_view(0).expect("establish and close move the generation");
+    assert!(view.connections.is_empty(), "the bearer is already gone");
+    assert_eq!(view.closes.get(&gone).copied(), Some(DialOutcome::Closed { at, reason: CloseReason::BearerEnded }));
+
+    let mut prep = test_prep(&["2.2.2.2:2"]);
+    prep.state.target_upstream_peers = 1;
+    // The clock is still the dial start, ten seconds short of the lost-dial deadline.
+    prep.state
+        .outbound_peers
+        .insert(gone, OutboundIntent::Dialing { since: sim_t0(), candidate: PeerCandidate::from(gone) });
+    far_deadlines(&mut prep.state);
+    prep.scripted_view = Some(view);
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let state = ps_state(&running);
+    assert!(!state.outbound_peers.contains_key(&gone), "the dial is still in flight");
+    assert!(!state.dial_holdoff.contains_key(&PeerCandidate::from(gone)), "a close is not a connect failure");
+    assert_eq!(manager_sends(&running), vec![ManagerMessage::AddPeer(next)]);
+    assert!(matches!(state.outbound_peers.get(&next), Some(OutboundIntent::Dialing { .. })));
 }
 
 #[test]
@@ -431,7 +476,7 @@ fn an_uninteresting_mark_for_a_gone_peer_does_nothing() {
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let state = ps_state(&running);
-    assert!(state.seen_generation > 0);
+    assert_eq!(state.seen_generation, 0, "a mark with no bearer does not move the generation");
     assert!(!state.demoted_until.contains_key(&peer));
     assert!(!state.outbound_peers.contains_key(&peer));
     assert!(set_local_uses(&running).is_empty());

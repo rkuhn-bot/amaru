@@ -141,13 +141,24 @@ impl PeerPerformance {
         self.record_keepalive_rtt(peer, rtt, instant_of(at));
     }
 
-    pub fn record_shared_peers(&mut self, from: &Peer, addrs: &[SocketAddr], at: ObservedAt) {
+    pub fn record_shared_peers(
+        &mut self,
+        from: &Peer,
+        addrs: &[SocketAddr],
+        at: ObservedAt,
+    ) -> super::SharedIngestResult {
         self.last_shared_at.insert(*from, at);
-        self.ingest_shared_peers(from, addrs);
+        self.ingest_shared_peers(from, addrs)
     }
 
     /// Keep one mark per peer, at the generation this write just advanced.
+    ///
+    /// A mark whose bearer is already gone is not stored and does not move the generation.
     pub fn record_uninteresting(&mut self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, _at: ObservedAt) {
+        let live = self.connections.values().any(|live| live.record.peer == peer && live.record.conn_id == conn_id);
+        if !live {
+            return;
+        }
         self.bump_generation();
         self.uninteresting.insert(peer, UninterestingRecord { conn_id, after_rollback, generation: self.generation });
     }

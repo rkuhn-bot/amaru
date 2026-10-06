@@ -68,8 +68,20 @@ impl PeerTracking for Performance {
         self.submit(PerformanceOp::Peer(PeerOp::RecordKeepaliveSample { peer, rtt, at }));
     }
 
-    fn record_shared_peers(&self, from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt) {
-        self.submit(PerformanceOp::Peer(PeerOp::RecordSharedPeers { from, addrs, at }));
+    fn record_shared_peers(
+        &self,
+        from: Peer,
+        addrs: Vec<SocketAddr>,
+        at: ObservedAt,
+    ) -> PeerTrackingFuture<amaru_ouroboros::SharedPeersRecorded> {
+        let this = self.clone();
+        Box::pin(async move {
+            let (reply, rx) = oneshot::channel();
+            this.submit(PerformanceOp::Peer(PeerOp::RecordSharedPeers { from, addrs, at, reply }));
+            #[expect(clippy::expect_used)]
+            let result = rx.await.expect("performance worker dropped shared-peer ingest");
+            amaru_ouroboros::SharedPeersRecorded { added: result.added, total: result.total }
+        })
     }
 
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt) {

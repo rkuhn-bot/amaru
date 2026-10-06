@@ -2397,6 +2397,11 @@ define_schemas! {
                     PEER_SHARING_INITIATOR_PROTOCOL {
                         required message_type: String
                     }
+                    /// `MsgSharePeers` did not arrive before the share-request timeout.
+                    REQUEST_TIMEOUT {
+                        required peer: %amaru_kernel::Peer
+                        required conn_id: u64
+                    }
                     /// The peer broke the peer-sharing protocol and the connection is terminated.
                     /// Reason ∈ {no_request_in_flight, too_many_addresses}.
                     public PROTOCOL_VIOLATION {
