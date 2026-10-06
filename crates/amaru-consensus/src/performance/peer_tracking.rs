@@ -15,7 +15,8 @@
 //! [`Performance`] as the peer-tracking resource.
 //!
 //! Each method enqueues one operation on the same worker and the same FIFO as header and pace
-//! updates. A query enqueued after a write observes that write.
+//! updates. A query enqueued after a write observes that write. A share reply copies candidate
+//! fields on that worker; the sample is drawn here, after the copy returns.
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -28,7 +29,10 @@ use amaru_pure_stage::Resources;
 use tokio::sync::oneshot;
 
 use super::{Performance, ResourcePerformance, ops::PerformanceOp};
-use crate::performance::ops::PeerOp;
+use crate::performance::{
+    ops::PeerOp,
+    peers::{instant_of, sample_share_peers, share_reply_seed},
+};
 
 impl Performance {
     /// Install this worker under both resource names. They share one allocation and one queue.
@@ -76,9 +80,11 @@ impl PeerTracking for Performance {
         let this = self.clone();
         Box::pin(async move {
             let (reply, rx) = oneshot::channel();
-            this.submit(PerformanceOp::Peer(PeerOp::QuerySharePeers { requester, amount, now, reply }));
+            let now = instant_of(now);
+            this.submit(PerformanceOp::Peer(PeerOp::ShareReplyCandidates { now, reply }));
             #[expect(clippy::expect_used)]
-            rx.await.expect("performance worker dropped share-peer reply")
+            let candidates = rx.await.expect("performance worker dropped share-peer reply");
+            sample_share_peers(&requester, amount, &candidates, share_reply_seed(&requester))
         })
     }
 }

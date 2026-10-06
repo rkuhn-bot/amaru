@@ -30,6 +30,7 @@ use amaru_kernel::{HeaderHash, Peer, PeerCandidate};
 use amaru_ouroboros::ConnectionId;
 pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersParams};
 use claims::{ClaimMeta, ParentInfo};
+pub(crate) use connections::instant_of;
 pub use peer_mix::{DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, MixEntry, PeerMix, PeerMixParseError, PeerSource};
 pub use quality::PeerScores;
 use record::PeerState;
@@ -39,6 +40,7 @@ pub use reputation::{
 };
 pub use select_outbound::{NEVER_CONNECTED_BONUS, OutboundPick, SelectOutboundParams, SelectUsing};
 pub use select_share::SHARE_POLICY_MAX;
+pub(crate) use select_share::{ShareCandidate, sample_share_peers, share_reply_seed};
 pub use sources::{SharedIngestResult, SourceCounts};
 
 /// Peer performance map (availability + scores + source pools). Owned by the performance worker.

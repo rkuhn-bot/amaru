@@ -95,8 +95,8 @@ pub type PeerTrackingFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static
 /// Peer-population resource.
 ///
 /// Each method is one in-memory update, or a copy of a small result, on the single worker that
-/// owns the performance maps. Share-reply sampling stays on that worker. Ranking for peer
-/// selection is not done here.
+/// owns the performance maps. A share reply copies the candidate fields; the caller samples.
+/// Ranking for peer selection is not done here.
 pub trait PeerTracking: Send + Sync + 'static {
     /// Handshake succeeded. Also marks the peer ever-connected and records `advertisable`.
     fn record_connection_established(&self, conn: ConnectionRecord, at: ObservedAt);
@@ -122,7 +122,9 @@ pub trait PeerTracking: Send + Sync + 'static {
     /// A share request was answered for `requester`.
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt);
 
-    /// Addresses to send in a share reply. The sample is drawn on the worker.
+    /// Addresses to send in a share reply.
+    ///
+    /// The worker copies the candidates. The caller draws the sample from the requester seed.
     fn query_share_peers(&self, requester: Peer, amount: u8, now: ObservedAt) -> PeerTrackingFuture<Vec<SocketAddr>>;
 }
 

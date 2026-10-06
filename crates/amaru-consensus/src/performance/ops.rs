@@ -36,11 +36,11 @@ use super::{
         RecordFetchFailureEffect, RecordForkStartedEffect, RecordHeaderAbandonedEffect, RecordHeaderAnnouncementEffect,
         RecordIntersectionEffect, RecordKeepaliveRttEffect, RecordPeersAskedEffect, RecordRollbackEffect,
         RecordSyncAdoptionEffect, ScoresEffect, SelectOutboundEffect, SelectPeersForFetchEffect,
-        SelectSharePeersEffect, SetLedgerCandidatesEffect, ShareFlagsEffect, SharedContainsEffect, SnapshotEffect,
-        SourceCountsEffect, SyncAdoptionPaceEffect,
+        SetLedgerCandidatesEffect, ShareFlagsEffect, SharedContainsEffect, SnapshotEffect, SourceCountsEffect,
+        SyncAdoptionPaceEffect,
     },
     header::{HeaderPerformance, HeaderTelemetry},
-    peers::PeerPerformance,
+    peers::{PeerPerformance, ShareCandidate},
 };
 
 pub(crate) enum PerformanceOp {
@@ -71,7 +71,7 @@ pub(crate) enum PeerOp {
     SetLedgerCandidates { effect: SetLedgerCandidatesEffect },
     IngestSharedPeers { effect: IngestSharedPeersEffect, reply: oneshot::Sender<SharedIngestResult> },
     SelectOutbound { effect: SelectOutboundEffect, reply: oneshot::Sender<SelectUsing> },
-    SelectSharePeers { effect: SelectSharePeersEffect, reply: oneshot::Sender<Vec<std::net::SocketAddr>> },
+    ShareReplyCandidates { now: Instant, reply: oneshot::Sender<Vec<ShareCandidate>> },
     IsStaticPeer { effect: IsStaticPeerEffect, reply: oneshot::Sender<bool> },
     NoteDial { effect: NoteDialEffect },
     SharedContains { effect: SharedContainsEffect, reply: oneshot::Sender<bool> },
@@ -84,7 +84,6 @@ pub(crate) enum PeerOp {
     RecordKeepaliveSample { peer: Peer, rtt: Duration, at: ObservedAt },
     RecordSharedPeers { from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt },
     RecordShareRequestServed { requester: Peer, amount: u8, at: ObservedAt },
-    QuerySharePeers { requester: Peer, amount: u8, now: ObservedAt, reply: oneshot::Sender<Vec<SocketAddr>> },
 }
 
 pub(crate) enum HeaderOp {
@@ -210,8 +209,8 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
             let result = peers.select_outbound(effect.params);
             let _ = reply.send(result);
         }
-        PeerOp::SelectSharePeers { effect, reply } => {
-            let result = peers.select_share_peers(&effect.requester, effect.amount, effect.now);
+        PeerOp::ShareReplyCandidates { now, reply } => {
+            let result = peers.share_reply_candidates(now);
             let _ = reply.send(result);
         }
         PeerOp::IsStaticPeer { effect, reply } => {
@@ -252,10 +251,6 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
         }
         PeerOp::RecordShareRequestServed { requester, amount, at } => {
             peers.record_share_request_served(requester, amount, at);
-        }
-        PeerOp::QuerySharePeers { requester, amount, now, reply } => {
-            let result = peers.query_share_peers(&requester, amount, now);
-            let _ = reply.send(result);
         }
     }
 }
