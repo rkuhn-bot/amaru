@@ -16,13 +16,13 @@ use std::{collections::BTreeMap, time::Duration};
 
 use amaru_kernel::PeerCandidate;
 use amaru_observability::tracing::Level;
-use amaru_ouroboros::{ConnectionDirection, ConnectionId, ObservedAt};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt};
 use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{Effect, simulation::SimulationRunning, trace_buffer::TraceEntry};
 
 use super::*;
 use crate::{
-    performance::{PeerView, ViewConnection},
+    performance::{DialOutcome, PeerPerformance, PeerView, ViewConnection},
     stages::{
         peer_selection::test_setup::{TestPrep, setup, sim_t0, test_prep},
         test_utils::start_in_era,
@@ -120,12 +120,62 @@ fn refill_after_a_close_dials_the_next_static_peer() {
         .outbound_peers
         .insert(gone, connected(gone, ConnectionId::initial(), LocalUse::Diffusion, LocalUse::Diffusion));
     far_deadlines(&mut prep.state);
-    prep.scripted_view = Some(PeerView { generation: 1, connections: Vec::new(), connect_failures: BTreeMap::new() });
+    prep.scripted_view = Some(PeerView {
+        generation: 1,
+        connections: Vec::new(),
+        connect_failures: BTreeMap::new(),
+        closes: BTreeMap::new(),
+    });
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let sends = manager_sends(&running);
     assert_eq!(sends, vec![ManagerMessage::AddPeer(next)]);
     assert!(!ps_state(&running).outbound_peers.contains_key(&gone));
+}
+
+#[test]
+fn connect_and_close_between_ticks_resolves_on_the_next_round() {
+    let gone = TestPrep::peer("1.1.1.1:1");
+    let next = TestPrep::peer("2.2.2.2:2");
+    let at = ObservedAt::new(
+        Duration::from_secs(crate::stages::peer_selection::test_setup::SIM_INITIAL_CLOCK_SECS),
+        start_in_era().relative_time,
+    );
+    let conn_id = ConnectionId::initial();
+    let mut peers = PeerPerformance::new();
+    peers.record_connection_established(
+        ConnectionRecord {
+            peer: gone,
+            conn_id,
+            direction: ConnectionDirection::Outbound,
+            full_duplex_capable: true,
+            full_duplex: false,
+            advertisable: false,
+            local_use: LocalUse::None,
+            established_at: at,
+        },
+        at,
+    );
+    peers.record_connection_closed(gone, conn_id, CloseReason::BearerEnded, at);
+    let view = peers.query_peer_view(0).expect("establish and close move the generation");
+    assert!(view.connections.is_empty(), "the bearer is already gone");
+    assert_eq!(view.closes.get(&gone).copied(), Some(DialOutcome::Closed { at, reason: CloseReason::BearerEnded }));
+
+    let mut prep = test_prep(&["2.2.2.2:2"]);
+    prep.state.target_upstream_peers = 1;
+    // The clock is still the dial start, ten seconds short of the lost-dial deadline.
+    prep.state
+        .outbound_peers
+        .insert(gone, OutboundIntent::Dialing { since: sim_t0(), candidate: PeerCandidate::from(gone) });
+    far_deadlines(&mut prep.state);
+    prep.scripted_view = Some(view);
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let state = ps_state(&running);
+    assert!(!state.outbound_peers.contains_key(&gone), "the dial is still in flight");
+    assert!(!state.dial_holdoff.contains_key(&PeerCandidate::from(gone)), "a close is not a connect failure");
+    assert_eq!(manager_sends(&running), vec![ManagerMessage::AddPeer(next)]);
+    assert!(matches!(state.outbound_peers.get(&next), Some(OutboundIntent::Dialing { .. })));
 }
 
 #[test]
@@ -156,6 +206,7 @@ fn banned_inbound_reconnect_is_disconnected() {
         generation: 1,
         connections: vec![view_conn(peer, conn_id, ConnectionDirection::Inbound, LocalUse::None)],
         connect_failures: BTreeMap::new(),
+        closes: BTreeMap::new(),
     });
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
@@ -200,7 +251,8 @@ fn a_round_sends_at_most_upstream_plus_downstream_commands() {
         prep.state.cooldowns.cooldown_until.insert(peer, sim_t0() + Duration::from_secs(60));
         connections.push(view_conn(peer, conn_id, ConnectionDirection::Inbound, LocalUse::None));
     }
-    prep.scripted_view = Some(PeerView { generation: 1, connections, connect_failures: BTreeMap::new() });
+    prep.scripted_view =
+        Some(PeerView { generation: 1, connections, connect_failures: BTreeMap::new(), closes: BTreeMap::new() });
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let disconnects =
@@ -258,6 +310,7 @@ fn a_failure_next_to_a_live_outbound_keeps_that_connection() {
         generation: 1,
         connections: vec![view_conn(peer, conn_id, ConnectionDirection::Outbound, LocalUse::Diffusion)],
         connect_failures,
+        closes: BTreeMap::new(),
     });
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
@@ -286,7 +339,8 @@ fn churn_demotes_the_worst_non_static_peer_without_asking_per_peer() {
         prep.state.outbound_peers.insert(peer, connected(peer, conn_id, LocalUse::Diffusion, LocalUse::Diffusion));
         connections.push(view_conn(peer, conn_id, ConnectionDirection::Outbound, LocalUse::Diffusion));
     }
-    prep.scripted_view = Some(PeerView { generation: 1, connections, connect_failures: BTreeMap::new() });
+    prep.scripted_view =
+        Some(PeerView { generation: 1, connections, connect_failures: BTreeMap::new(), closes: BTreeMap::new() });
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let demoted: Vec<_> = manager_sends(&running)
