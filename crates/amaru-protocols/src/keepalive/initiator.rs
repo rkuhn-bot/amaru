@@ -25,6 +25,7 @@ use crate::{
         messages::{Cookie, Message},
     },
     mux::MuxMessage,
+    peer_tracking_effects::PeerTrack,
     protocol::{
         Initiator, Inputs, Miniprotocol, Outcome, PROTO_N2N_KEEP_ALIVE, ProtocolState, StageState, miniprotocol,
         outcome,
@@ -50,7 +51,7 @@ pub enum InitiatorMessage {
     Close,
 }
 
-/// Message sent from the handler (for future use, e.g., RTT reporting)
+/// Cookie echoed by the remote keep-alive response.
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InitiatorResult {
     pub cookie: Cookie,
@@ -112,13 +113,15 @@ impl StageState<State, Initiator> for KeepAliveInitiator {
             if let Some((sent_cookie, sent_at)) = self.sent_at.take()
                 && sent_cookie == input.cookie
             {
-                let round_trip_micros = received_at.saturating_since(sent_at).as_micros() as u64;
+                let round_trip = received_at.saturating_since(sent_at);
+                let round_trip_micros = round_trip.as_micros() as u64;
                 debug!(
                     protocols::keepalive::peer::ROUND_TRIP,
                     peer = &self.peer,
                     conn_id = self.conn_id.as_u64(),
                     round_trip_micros
                 );
+                PeerTrack::new(eff).record_keepalive_rtt(self.peer, round_trip, received_at).await;
             }
             self.cookie = input.cookie.next();
             if self.pending_close {

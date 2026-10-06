@@ -32,6 +32,7 @@ use amaru_ouroboros::ConnectionId;
 pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersParams};
 use claims::{ClaimMeta, ParentInfo};
 pub(crate) use connections::instant_of;
+pub use connections::{SHARE_REQUEST_WINDOW, ShareRequestRecord};
 pub use peer_mix::{DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, MixEntry, PeerMix, PeerMixParseError, PeerSource};
 pub use quality::{ChurnInput, ChurnRank, PeerScores, rank_churn};
 use record::PeerState;
@@ -74,7 +75,7 @@ pub struct PeerPerformance {
     last_connect_failure: BTreeMap<Peer, amaru_ouroboros::ObservedAt>,
     /// Latest share-reply ingest, including a repeat that added nothing.
     last_shared_at: BTreeMap<Peer, amaru_ouroboros::ObservedAt>,
-    /// Share requests this node has answered.
+    /// Share requests this node has answered. One bounded row per peer.
     share_requests: BTreeMap<Peer, connections::ShareRequests>,
     /// Latest intersection-not-found mark per peer. Dropped when that bearer is gone.
     uninteresting: BTreeMap<Peer, connections::UninterestingRecord>,

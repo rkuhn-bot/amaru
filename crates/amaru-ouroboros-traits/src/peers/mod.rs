@@ -119,7 +119,7 @@ pub trait PeerTracking: Send + Sync + 'static {
     /// Addresses learned from `from`.
     fn record_shared_peers(&self, from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt);
 
-    /// A share request was answered for `requester`.
+    /// An inbound share request from `requester` was answered.
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt);
 
     /// ChainSync found no usable intersection on this bearer.

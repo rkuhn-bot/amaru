@@ -88,7 +88,7 @@ fn add_malus_impulse(state: &mut PeerState, impulse: f64, at: Instant, half_life
 }
 
 impl PeerPerformance {
-    /// Mark peer adversarial: clear claims and scores, keep a durable reputation stub.
+    /// Mark peer adversarial: clear claims, scores, and the share-request row; keep a durable reputation stub.
     ///
     /// Retains `ever_connected`, `failure_count`, and last `advertisable`; sets `adversarial = true`
     /// (sharing only). Adds [`ADVERSARIAL_IMPULSE`] to connection malus. Cool-down remains
@@ -102,6 +102,7 @@ impl PeerPerformance {
         }
         self.direct.retain(|_, claimants| !claimants.is_empty());
 
+        self.share_requests.remove(peer);
         let half_life = self.half_life_for(peer);
         let state = self.peers.entry(*peer).or_default();
         state.tips.clear();

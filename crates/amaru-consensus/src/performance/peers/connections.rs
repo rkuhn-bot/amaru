@@ -14,8 +14,9 @@
 
 //! Live bearers and the other population facts the peer-tracking methods record.
 //!
-//! Claim clearing on the last close uses the existing availability clear: scores and reputation
-//! stay, tips go.
+//! Claim clearing on the last close uses the existing availability clear: scores (including the
+//! keep-alive summary), reputation, and the share-request row stay; tips go. An adversarial mark
+//! clears scores and that share-request row.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -38,11 +39,28 @@ pub(super) struct CloseRecord {
     pub(super) at: ObservedAt,
 }
 
+/// Width of one share-request rate window. Two windows are kept: the current one and the previous.
+pub const SHARE_REQUEST_WINDOW: Duration = Duration::from_secs(60);
+
 #[derive(Debug)]
 pub(super) struct ShareRequests {
     pub(super) count: u32,
     pub(super) last_amount: u8,
     pub(super) last_at: ObservedAt,
+    pub(super) window_start: ObservedAt,
+    pub(super) current_window: u32,
+    pub(super) previous_window: u32,
+}
+
+/// Copy of one peer's served share requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShareRequestRecord {
+    pub count: u32,
+    pub last_amount: u8,
+    pub last_at: ObservedAt,
+    pub window_start: ObservedAt,
+    pub current_window: u32,
+    pub previous_window: u32,
 }
 
 /// Latest intersection-not-found mark for one peer.
@@ -55,6 +73,20 @@ pub(super) struct UninterestingRecord {
 
 pub(crate) fn instant_of(at: ObservedAt) -> Instant {
     Instant::at_offset(at.elapsed, at.global_epoch_offset)
+}
+
+fn roll_share_window(entry: &mut ShareRequests, at: ObservedAt) {
+    let elapsed = at.elapsed.saturating_sub(entry.window_start.elapsed);
+    if elapsed < SHARE_REQUEST_WINDOW {
+        entry.current_window = entry.current_window.saturating_add(1);
+        return;
+    }
+    let windows = u32::try_from(elapsed.as_nanos() / SHARE_REQUEST_WINDOW.as_nanos()).unwrap_or(u32::MAX);
+    entry.previous_window = if windows == 1 { entry.current_window } else { 0 };
+    entry.current_window = 1;
+    let advance = SHARE_REQUEST_WINDOW.saturating_mul(windows);
+    entry.window_start =
+        ObservedAt::new(entry.window_start.elapsed.saturating_add(advance), entry.window_start.global_epoch_offset);
 }
 
 impl PeerPerformance {
@@ -136,10 +168,14 @@ impl PeerPerformance {
             count: 0,
             last_amount: amount,
             last_at: at,
+            window_start: at,
+            current_window: 0,
+            previous_window: 0,
         });
         entry.count = entry.count.saturating_add(1);
         entry.last_amount = amount;
         entry.last_at = at;
+        roll_share_window(entry, at);
     }
 
     pub fn connection(&self, conn_id: ConnectionId) -> Option<&ConnectionRecord> {
@@ -162,8 +198,15 @@ impl PeerPerformance {
         self.last_shared_at.get(peer).copied()
     }
 
-    pub fn share_requests(&self, peer: &Peer) -> Option<(u32, u8, ObservedAt)> {
-        self.share_requests.get(peer).map(|row| (row.count, row.last_amount, row.last_at))
+    pub fn share_requests(&self, peer: &Peer) -> Option<ShareRequestRecord> {
+        self.share_requests.get(peer).map(|row| ShareRequestRecord {
+            count: row.count,
+            last_amount: row.last_amount,
+            last_at: row.last_at,
+            window_start: row.window_start,
+            current_window: row.current_window,
+            previous_window: row.previous_window,
+        })
     }
 
     pub fn query_share_peers(&self, requester: &Peer, amount: u8, now: ObservedAt) -> Vec<SocketAddr> {
