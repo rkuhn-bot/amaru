@@ -120,7 +120,13 @@ impl PeerPerformance {
     }
 
     /// Keep one mark per peer, at the generation this write just advanced.
+    ///
+    /// A mark whose bearer is already gone is not stored and does not move the generation.
     pub fn record_uninteresting(&mut self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, _at: ObservedAt) {
+        let live = self.connections.values().any(|live| live.record.peer == peer && live.record.conn_id == conn_id);
+        if !live {
+            return;
+        }
         self.bump_generation();
         self.uninteresting.insert(peer, UninterestingRecord { conn_id, after_rollback, generation: self.generation });
     }

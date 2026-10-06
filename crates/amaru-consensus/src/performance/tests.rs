@@ -1309,6 +1309,25 @@ fn uninteresting_marks_are_the_latest_per_peer_and_only_those_since_the_query() 
 }
 
 #[test]
+fn a_mark_without_a_live_bearer_is_not_stored() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let (alice_id, other_id) = conn_ids();
+    let at = observed(1, 0);
+
+    peers.record_uninteresting(alice, alice_id, false, at);
+    assert_eq!(peers.generation(), 0);
+    assert!(peers.query_peer_view(0).is_none(), "nothing was stored");
+
+    peers.record_connection_established(connection_record(alice, alice_id, at, false), at);
+    let generation = peers.generation();
+    peers.record_uninteresting(alice, other_id, true, observed(2, 0));
+    assert_eq!(peers.generation(), generation, "a different connection is not this bearer");
+    let view = peers.query_peer_view(0).expect("the establish moved the generation");
+    assert!(view.uninteresting.is_empty());
+}
+
+#[test]
 fn select_outbound_is_stable_for_a_fixed_seed() {
     use std::collections::BTreeSet;
 

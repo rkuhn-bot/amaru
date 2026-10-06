@@ -476,7 +476,7 @@ fn an_uninteresting_mark_for_a_gone_peer_does_nothing() {
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let state = ps_state(&running);
-    assert!(state.seen_generation > 0);
+    assert_eq!(state.seen_generation, 0, "a mark with no bearer does not move the generation");
     assert!(!state.demoted_until.contains_key(&peer));
     assert!(!state.outbound_peers.contains_key(&peer));
     assert!(set_local_uses(&running).is_empty());
