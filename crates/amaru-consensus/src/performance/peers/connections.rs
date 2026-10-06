@@ -55,6 +55,7 @@ impl PeerPerformance {
         let advertisable = conn.advertisable;
         self.connections.insert(conn.conn_id, LiveConnection { record: conn, use_applied_at: None });
         self.record_advertisability(peer, advertisable, instant_of(at));
+        self.bump_generation();
     }
 
     /// Forget a bearer this map recorded for `peer`.
@@ -74,11 +75,13 @@ impl PeerPerformance {
         if !still_live {
             self.clear_availability(&peer);
         }
+        self.bump_generation();
     }
 
     pub fn record_connect_failed(&mut self, peer: Peer, at: ObservedAt) {
         self.last_connect_failure.insert(peer, at);
         self.record_connection_failure(peer, instant_of(at));
+        self.bump_generation();
     }
 
     pub fn record_local_use_applied(&mut self, peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt) {
@@ -90,6 +93,7 @@ impl PeerPerformance {
         }
         live.record.local_use = local_use;
         live.use_applied_at = Some(at);
+        self.bump_generation();
     }
 
     pub fn record_keepalive_sample(&mut self, peer: Peer, rtt: Duration, at: ObservedAt) {

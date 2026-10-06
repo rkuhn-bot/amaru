@@ -18,15 +18,16 @@
 //! so those ops sit with the peer group and the header update stays in the same arm. Prune
 //! updates both maps and sits with the header group. Pace is only the sync-adoption window.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
-use amaru_kernel::Peer;
+use amaru_kernel::{Peer, PeerCandidate};
 use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt};
 use amaru_pure_stage::Instant;
 use tokio::sync::oneshot;
 
 use super::{
-    ClaimKind, FetchPeerSet, PeerScores, PeerShareFlags, PeerSnapshot, SelectUsing, SharedIngestResult, SourceCounts,
+    ChurnInput, ClaimKind, FetchPeerSet, OutboundInputs, PeerScores, PeerShareFlags, PeerSnapshot, PeerView,
+    SharedIngestResult, SourceCounts,
     adoption::SyncAdoptionPace,
     effects::{
         ClearPeerAvailabilityEffect, DirectClaimantsEffect, FirstAnnouncedAtEffect, IngestSharedPeersEffect,
@@ -35,13 +36,17 @@ use super::{
         RecordBlockPrunedEffect, RecordBlockValidEffect, RecordBlocksRequestedEffect, RecordConnectionFailureEffect,
         RecordFetchFailureEffect, RecordForkStartedEffect, RecordHeaderAbandonedEffect, RecordHeaderAnnouncementEffect,
         RecordIntersectionEffect, RecordKeepaliveRttEffect, RecordPeersAskedEffect, RecordRollbackEffect,
-        RecordSyncAdoptionEffect, ScoresEffect, SelectOutboundEffect, SelectPeersForFetchEffect,
-        SetLedgerCandidatesEffect, ShareFlagsEffect, SharedContainsEffect, SnapshotEffect, SourceCountsEffect,
-        SyncAdoptionPaceEffect,
+        RecordSyncAdoptionEffect, ScoresEffect, SelectPeersForFetchEffect, SetLedgerCandidatesEffect, ShareFlagsEffect,
+        SharedContainsEffect, SnapshotEffect, SourceCountsEffect, SyncAdoptionPaceEffect,
     },
     header::{HeaderPerformance, HeaderTelemetry},
     peers::{PeerPerformance, ShareCandidate},
 };
+
+#[cfg(test)]
+pub(crate) fn is_urgent_op(op: &PerformanceOp) -> bool {
+    matches!(op, PerformanceOp::Peer(PeerOp::RecordHeaderAnnouncement { .. } | PeerOp::SelectPeersForFetch { .. }))
+}
 
 pub(crate) enum PerformanceOp {
     Peer(PeerOp),
@@ -63,14 +68,15 @@ pub(crate) enum PeerOp {
     PeerCoversFragment { effect: PeerCoversFragmentEffect, reply: oneshot::Sender<bool> },
     DirectClaimants { effect: DirectClaimantsEffect, reply: oneshot::Sender<Vec<(Peer, Instant, ClaimKind)>> },
     FirstAnnouncedAt { effect: FirstAnnouncedAtEffect, reply: oneshot::Sender<Option<(Peer, Instant)>> },
-    RankPeersForChurn { effect: RankPeersForChurnEffect, reply: oneshot::Sender<Vec<(Peer, PeerScores)>> },
+    RankPeersForChurn { effect: RankPeersForChurnEffect, reply: oneshot::Sender<Vec<ChurnInput>> },
     Scores { effect: ScoresEffect, reply: oneshot::Sender<PeerScores> },
     ShareFlags { effect: ShareFlagsEffect, reply: oneshot::Sender<Option<PeerShareFlags>> },
     Snapshot { effect: SnapshotEffect, reply: oneshot::Sender<Option<PeerSnapshot>> },
     OkForSharing { effect: OkForSharingEffect, reply: oneshot::Sender<bool> },
     SetLedgerCandidates { effect: SetLedgerCandidatesEffect },
     IngestSharedPeers { effect: IngestSharedPeersEffect, reply: oneshot::Sender<SharedIngestResult> },
-    SelectOutbound { effect: SelectOutboundEffect, reply: oneshot::Sender<SelectUsing> },
+    OutboundInputs { excluded: BTreeSet<PeerCandidate>, reply: oneshot::Sender<OutboundInputs> },
+    QueryPeerView { since_generation: u64, reply: oneshot::Sender<Option<PeerView>> },
     ShareReplyCandidates { now: Instant, reply: oneshot::Sender<Vec<ShareCandidate>> },
     IsStaticPeer { effect: IsStaticPeerEffect, reply: oneshot::Sender<bool> },
     NoteDial { effect: NoteDialEffect },
@@ -179,7 +185,7 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
             let _ = reply.send(result);
         }
         PeerOp::RankPeersForChurn { effect, reply } => {
-            let result = peers.rank_peers_for_churn(&effect.candidates, effect.now);
+            let result = peers.churn_inputs(&effect.candidates);
             let _ = reply.send(result);
         }
         PeerOp::Scores { effect, reply } => {
@@ -205,8 +211,12 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
             let result = peers.ingest_shared_peers(&effect.from, &effect.peers);
             let _ = reply.send(result);
         }
-        PeerOp::SelectOutbound { effect, reply } => {
-            let result = peers.select_outbound(effect.params);
+        PeerOp::OutboundInputs { excluded, reply } => {
+            let result = peers.outbound_inputs(&excluded);
+            let _ = reply.send(result);
+        }
+        PeerOp::QueryPeerView { since_generation, reply } => {
+            let result = peers.query_peer_view(since_generation);
             let _ = reply.send(result);
         }
         PeerOp::ShareReplyCandidates { now, reply } => {

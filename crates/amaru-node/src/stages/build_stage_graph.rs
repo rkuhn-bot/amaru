@@ -98,18 +98,6 @@ pub fn build_stage_graph(
     );
 
     let peer_selection_notify = peer_selection_ref.contramap(|n: PeerSelectionNotify| match n {
-        PeerSelectionNotify::Connected { peer, conn_id, direction, full_duplex_capable, full_duplex, advertisable } => {
-            PeerSelectionMsg::Connected(
-                peer,
-                peer_selection::Connection::new(conn_id, full_duplex_capable, full_duplex),
-                direction,
-                advertisable,
-            )
-        }
-        PeerSelectionNotify::Disconnected { peer, conn_id, direction } => {
-            PeerSelectionMsg::Disconnected(peer, conn_id, direction)
-        }
-        PeerSelectionNotify::ConnectFailed { peer } => PeerSelectionMsg::ConnectFailed(peer),
         PeerSelectionNotify::ShareRequest { peer, amount, reply_to } => {
             PeerSelectionMsg::ShareRequest { peer, amount, reply_to }
         }
@@ -244,7 +232,8 @@ pub fn build_stage_graph(
                 config.network_magic,
                 ManagerConfig::default()
                     .with_tx_submission_params(config.tx_submission_responder_params)
-                    .with_blockfetch_pipeline_n(config.blockfetch_pipeline_n),
+                    .with_blockfetch_pipeline_n(config.blockfetch_pipeline_n)
+                    .with_max_inbound(config.target_downstream_peers),
                 Arc::new(era_history.clone()),
                 track_peers_input,
                 mempool_stage.clone(),

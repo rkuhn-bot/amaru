@@ -21,8 +21,9 @@ use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendDat
 
 use super::{enqueue, enqueue_query, require_perf};
 use crate::performance::{
-    PeerScores, Performance, SelectOutboundParams, SelectUsing,
+    PeerScores, PeerView, Performance, SelectOutboundParams, SelectUsing,
     ops::{PeerOp, PerformanceOp},
+    peers::{rank_churn, select_outbound_from},
 };
 
 impl Performance {
@@ -40,6 +41,10 @@ impl Performance {
 
     pub fn select_outbound(params: crate::performance::SelectOutboundParams) -> SelectOutboundEffect {
         SelectOutboundEffect { params }
+    }
+
+    pub fn query_peer_view(since_generation: u64) -> QueryPeerViewEffect {
+        QueryPeerViewEffect { since_generation }
     }
 
     pub fn is_static_peer(peer: Peer) -> IsStaticPeerEffect {
@@ -66,12 +71,15 @@ pub struct RankPeersForChurnEffect {
 }
 
 impl ExternalEffectAPI for RankPeersForChurnEffect {
-    type Response = Vec<(Peer, PeerScores)>;
+    type Response = Vec<crate::performance::ChurnRank>;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
         self.wrap(|this| async move {
-            enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::RankPeersForChurn { effect: this, reply })).await
+            let inputs =
+                enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::RankPeersForChurn { effect: this, reply }))
+                    .await;
+            rank_churn(inputs)
         })
     }
 }
@@ -119,7 +127,29 @@ impl ExternalEffectAPI for SelectOutboundEffect {
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
         self.wrap(|this| async move {
-            enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::SelectOutbound { effect: this, reply })).await
+            let excluded = this.params.excluded.clone();
+            let inputs =
+                enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::OutboundInputs { excluded, reply })).await;
+            select_outbound_from(&inputs, &this.params)
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct QueryPeerViewEffect {
+    pub(crate) since_generation: u64,
+}
+
+impl ExternalEffectAPI for QueryPeerViewEffect {
+    type Response = Option<PeerView>;
+
+    fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
+        let perf = require_perf(&resources);
+        self.wrap(|this| async move {
+            enqueue_query(&perf, |reply| {
+                PerformanceOp::Peer(PeerOp::QueryPeerView { since_generation: this.since_generation, reply })
+            })
+            .await
         })
     }
 }

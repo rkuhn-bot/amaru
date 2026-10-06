@@ -40,6 +40,7 @@ pub struct SourceCounts {
 impl PeerPerformance {
     pub fn set_ledger_candidates(&mut self, candidates: BTreeSet<PeerCandidate>) {
         self.ledger_candidates = candidates;
+        self.bump_generation();
     }
 
     /// Insert peers learned from a share reply (skips other origins and the donor).

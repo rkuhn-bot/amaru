@@ -23,6 +23,7 @@ mod reputation;
 mod select_outbound;
 mod select_share;
 mod sources;
+mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,16 +33,19 @@ pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersP
 use claims::{ClaimMeta, ParentInfo};
 pub(crate) use connections::instant_of;
 pub use peer_mix::{DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, MixEntry, PeerMix, PeerMixParseError, PeerSource};
-pub use quality::PeerScores;
+pub use quality::{ChurnInput, ChurnRank, PeerScores, rank_churn};
 use record::PeerState;
 pub use reputation::{
     ADVERSARIAL_IMPULSE, CONNECT_FAIL_IMPULSE, DEFAULT_PEER_MALUS_HALF_LIFE, PeerShareFlags, SHARE_MALUS_THRESHOLD,
     malus_at,
 };
-pub use select_outbound::{NEVER_CONNECTED_BONUS, OutboundPick, SelectOutboundParams, SelectUsing};
+pub use select_outbound::{
+    NEVER_CONNECTED_BONUS, OutboundInputs, OutboundPick, SelectOutboundParams, SelectUsing, select_outbound_from,
+};
 pub use select_share::SHARE_POLICY_MAX;
 pub(crate) use select_share::{ShareCandidate, sample_share_peers, share_reply_seed};
 pub use sources::{SharedIngestResult, SourceCounts};
+pub use view::{PeerView, ViewConnection};
 
 /// Peer performance map (availability + scores + source pools). Owned by the performance worker.
 #[derive(Debug, Default)]
@@ -72,9 +76,19 @@ pub struct PeerPerformance {
     last_shared_at: BTreeMap<Peer, amaru_ouroboros::ObservedAt>,
     /// Share requests this node has answered.
     share_requests: BTreeMap<Peer, connections::ShareRequests>,
+    /// Advances when a lifecycle write or a ledger-candidate replacement changes what selection reads.
+    generation: u64,
 }
 
 impl PeerPerformance {
+    pub(super) fn bump_generation(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
