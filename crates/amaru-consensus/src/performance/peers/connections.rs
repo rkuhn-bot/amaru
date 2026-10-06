@@ -100,9 +100,14 @@ impl PeerPerformance {
         self.record_keepalive_rtt(peer, rtt, instant_of(at));
     }
 
-    pub fn record_shared_peers(&mut self, from: &Peer, addrs: &[SocketAddr], at: ObservedAt) {
+    pub fn record_shared_peers(
+        &mut self,
+        from: &Peer,
+        addrs: &[SocketAddr],
+        at: ObservedAt,
+    ) -> super::SharedIngestResult {
         self.last_shared_at.insert(*from, at);
-        self.ingest_shared_peers(from, addrs);
+        self.ingest_shared_peers(from, addrs)
     }
 
     pub fn record_share_request_served(&mut self, requester: Peer, amount: u8, at: ObservedAt) {

@@ -35,9 +35,7 @@ use amaru_pure_stage::{Effects, Instant, StageRef};
 pub use crate::performance::{DEFAULT_PEER_MIX, PeerMix, PeerMixParseError};
 use crate::{
     effects::{GenerateRandomSeed, Ledger, LedgerOps, ResolvePeerCandidate, ResolvePeerCandidateResult},
-    performance::{
-        ChurnRank, DialOutcome, PeerView, Performance, SelectOutboundParams, SelectUsing, ViewConnection,
-    },
+    performance::{ChurnRank, DialOutcome, PeerView, Performance, SelectOutboundParams, SelectUsing, ViewConnection},
 };
 
 const STATIC_PEER_BAN_PERIOD: Duration = Duration::from_secs(10);

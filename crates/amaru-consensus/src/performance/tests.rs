@@ -1237,9 +1237,8 @@ fn install_shares_one_worker_and_a_later_query_sees_the_write() {
     let donor = Peer::for_test(4101);
     let other = Peer::for_test(4102);
     let asker = Peer::for_test(4103);
-    tracking.record_shared_peers(donor, vec![SocketAddr::from(other)], at);
-
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    rt.block_on(tracking.record_shared_peers(donor, vec![SocketAddr::from(other)], at));
     let flags_response = rt.block_on(Box::new(Performance::share_flags(alice)).run(resources));
     let flags = *flags_response.cast::<Option<PeerShareFlags>>().expect("share flags");
     assert_eq!(

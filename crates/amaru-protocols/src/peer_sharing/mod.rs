@@ -37,6 +37,11 @@ pub use initiator::{PeerSharingInitiator, PeerSharingMessage, initiator};
 pub const SHARE_REQUEST_INITIAL_DELAY: Duration = Duration::from_secs(300);
 /// Interval between a share reply and the next request.
 pub const SHARE_REQUEST_INTERVAL: Duration = Duration::from_secs(900);
+/// How long to wait for `MsgSharePeers` before giving up on that request.
+///
+/// The previous cadence had no reply timer. Sixty seconds is long enough for a maintenance
+/// round trip and short enough that a silent peer does not stay busy until the connection ends.
+pub const SHARE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// How many peers to request per share call (network-spec amount is `Word8`).
 pub const SHARE_REQUEST_AMOUNT: u8 = 20;
 pub use messages::{MAX_MESSAGE_BYTES, Message};

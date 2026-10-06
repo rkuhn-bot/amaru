@@ -123,8 +123,15 @@ impl PeerTracking for InMemoryPeerTracking {
         self.lock().keepalives.push((peer, rtt, at));
     }
 
-    fn record_shared_peers(&self, from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt) {
+    fn record_shared_peers(
+        &self,
+        from: Peer,
+        addrs: Vec<SocketAddr>,
+        at: ObservedAt,
+    ) -> PeerTrackingFuture<amaru_ouroboros::SharedPeersRecorded> {
+        let added = addrs.len();
         self.lock().shared.push((from, addrs, at));
+        Box::pin(async move { amaru_ouroboros::SharedPeersRecorded { added, total: added } })
     }
 
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt) {

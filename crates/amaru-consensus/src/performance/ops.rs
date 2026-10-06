@@ -88,7 +88,7 @@ pub(crate) enum PeerOp {
     RecordConnectFailed { peer: Peer, at: ObservedAt },
     RecordLocalUseApplied { peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt },
     RecordKeepaliveSample { peer: Peer, rtt: Duration, at: ObservedAt },
-    RecordSharedPeers { from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt },
+    RecordSharedPeers { from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt, reply: oneshot::Sender<SharedIngestResult> },
     RecordShareRequestServed { requester: Peer, amount: u8, at: ObservedAt },
 }
 
@@ -256,8 +256,9 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
         PeerOp::RecordKeepaliveSample { peer, rtt, at } => {
             peers.record_keepalive_sample(peer, rtt, at);
         }
-        PeerOp::RecordSharedPeers { from, addrs, at } => {
-            peers.record_shared_peers(&from, &addrs, at);
+        PeerOp::RecordSharedPeers { from, addrs, at, reply } => {
+            let result = peers.record_shared_peers(&from, &addrs, at);
+            let _ = reply.send(result);
         }
         PeerOp::RecordShareRequestServed { requester, amount, at } => {
             peers.record_share_request_served(requester, amount, at);

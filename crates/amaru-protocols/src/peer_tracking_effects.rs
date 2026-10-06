@@ -36,6 +36,7 @@ pub fn register_deserializers() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<RecordLocalUseAppliedEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordKeepaliveRttEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordSharedPeersEffect>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<amaru_ouroboros::SharedPeersRecorded>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordShareRequestServedEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<QuerySharePeersEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<Vec<SocketAddr>>().boxed(),
@@ -89,7 +90,12 @@ impl<T> PeerTrack<'_, T> {
         self.0.external(RecordKeepaliveRttEffect { peer, rtt, at })
     }
 
-    pub fn record_shared_peers(&self, from: Peer, addrs: Vec<SocketAddr>, at: Instant) -> BoxFuture<'static, ()> {
+    pub fn record_shared_peers(
+        &self,
+        from: Peer,
+        addrs: Vec<SocketAddr>,
+        at: Instant,
+    ) -> BoxFuture<'static, amaru_ouroboros::SharedPeersRecorded> {
         self.0.external(RecordSharedPeersEffect { from, addrs, at })
     }
 
@@ -200,13 +206,13 @@ pub struct RecordSharedPeersEffect {
 }
 
 impl ExternalEffectAPI for RecordSharedPeersEffect {
-    type Response = ();
+    type Response = amaru_ouroboros::SharedPeersRecorded;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let tracking = require_tracking(&resources);
-        self.wrap(move |this| async move {
-            tracking.record_shared_peers(this.from, this.addrs, observed_at(this.at));
-        })
+        self.wrap(
+            move |this| async move { tracking.record_shared_peers(this.from, this.addrs, observed_at(this.at)).await },
+        )
     }
 }
 

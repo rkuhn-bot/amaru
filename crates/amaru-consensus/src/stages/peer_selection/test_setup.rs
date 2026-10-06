@@ -165,7 +165,11 @@ fn setup_preload_with_mode(
                 prep.peer_mix.clone(),
             );
             if let Some((donor, addr)) = prep.learned_share {
-                performance.record_shared_peers(donor, vec![addr], ObservedAt::new(Duration::ZERO, Duration::ZERO));
+                prep.rt.block_on(performance.record_shared_peers(
+                    donor,
+                    vec![addr],
+                    ObservedAt::new(Duration::ZERO, Duration::ZERO),
+                ));
             }
             resources.put::<crate::performance::ResourcePerformance>(std::sync::Arc::new(performance));
         },
