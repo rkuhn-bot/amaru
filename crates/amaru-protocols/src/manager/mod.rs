@@ -80,8 +80,8 @@ pub enum ManagerMessage {
     ConnectionDied(Peer, ConnectionId, Role),
     /// INTERNAL message sent by the accept stage after accepting a new connection.
     Accepted(Peer, ConnectionId),
-    /// INTERNAL Sent by the connection stage after successful handshake.
-    /// This allows the manager to notify peer_selection with accurate full_duplex status.
+    /// INTERNAL Sent by the connection stage after a successful handshake.
+    /// The manager records the bearer, including full-duplex status, on the performance resource.
     HandshakeComplete {
         peer: Peer,
         stage: StageRef<ConnectionMessage>,
