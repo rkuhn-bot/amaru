@@ -108,10 +108,10 @@ use ops::PerformanceOp;
 use parking_lot::Mutex;
 pub use peers::{
     ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
-    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS, OutboundInputs,
-    OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot, PeerSource,
-    PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams, SelectPeersParams, SelectUsing,
-    SharedIngestResult, SourceCounts, ViewConnection, malus_at,
+    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS,
+    OutboundInputs, OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags,
+    PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams,
+    SelectPeersParams, SelectUsing, SharedIngestResult, SourceCounts, ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},

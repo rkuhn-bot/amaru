@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use amaru_kernel::Peer;
-use amaru_ouroboros::{ConnectionDirection, ConnectionId, LocalUse, ObservedAt};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, LocalUse, ObservedAt};
 
 use super::PeerPerformance;
 
@@ -33,18 +33,27 @@ pub struct ViewConnection {
     pub local_use: LocalUse,
 }
 
+/// Latest close of one peer. A closed connection is not a connect failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DialOutcome {
+    Closed { at: ObservedAt, reason: CloseReason },
+}
+
 /// Population snapshot. `None` from a query means the generation has not moved.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PeerView {
     pub generation: u64,
     pub connections: Vec<ViewConnection>,
     pub connect_failures: BTreeMap<Peer, ObservedAt>,
+    /// Latest close of each peer. The caller applies a close only when it is at or after the dial.
+    pub closes: BTreeMap<Peer, DialOutcome>,
 }
 
 impl PeerPerformance {
-    /// Copy live bearers and dial failures when `since_generation` is behind.
+    /// Copy live bearers, dial failures, and the latest close of each peer when `since_generation` is behind.
     ///
     /// Returns `None` when nothing this view carries has changed, so the caller can skip a round.
+    /// Bearers are already ordered by [`ConnectionId`].
     pub fn query_peer_view(&self, since_generation: u64) -> Option<PeerView> {
         if since_generation >= self.generation {
             return None;
@@ -62,7 +71,16 @@ impl PeerPerformance {
                 local_use: record.local_use,
             });
         }
-        connections.sort_by(|left, right| left.conn_id.cmp(&right.conn_id).then(left.peer.cmp(&right.peer)));
-        Some(PeerView { generation: self.generation, connections, connect_failures: self.last_connect_failure.clone() })
+        let closes = self
+            .last_close
+            .iter()
+            .map(|(peer, close)| (*peer, DialOutcome::Closed { at: close.at, reason: close.reason }))
+            .collect();
+        Some(PeerView {
+            generation: self.generation,
+            connections,
+            connect_failures: self.last_connect_failure.clone(),
+            closes,
+        })
     }
 }
