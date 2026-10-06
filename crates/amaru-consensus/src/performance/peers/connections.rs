@@ -109,9 +109,14 @@ impl PeerPerformance {
         self.record_keepalive_rtt(peer, rtt, instant_of(at));
     }
 
-    pub fn record_shared_peers(&mut self, from: &Peer, addrs: &[SocketAddr], at: ObservedAt) {
+    pub fn record_shared_peers(
+        &mut self,
+        from: &Peer,
+        addrs: &[SocketAddr],
+        at: ObservedAt,
+    ) -> super::SharedIngestResult {
         self.last_shared_at.insert(*from, at);
-        self.ingest_shared_peers(from, addrs);
+        self.ingest_shared_peers(from, addrs)
     }
 
     /// Keep one mark per peer, at the generation this write just advanced.

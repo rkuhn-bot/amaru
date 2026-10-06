@@ -37,7 +37,8 @@ pub use crate::performance::{DEFAULT_PEER_MIX, PeerMix, PeerMixParseError};
 use crate::{
     effects::{GenerateRandomSeed, Ledger, LedgerOps, ResolvePeerCandidate, ResolvePeerCandidateResult},
     performance::{
-        ChurnRank, PeerView, Performance, SelectOutboundParams, SelectUsing, UninterestingMark, ViewConnection,
+        ChurnRank, DialOutcome, PeerView, Performance, SelectOutboundParams, SelectUsing, UninterestingMark,
+        ViewConnection,
     },
 };
 
@@ -657,6 +658,20 @@ impl PeerSelection {
                 self.outbound_peers.remove(&peer);
                 self.unbind_peer(&peer);
                 self.hold_dial_many(peer, names, now);
+                continue;
+            }
+            // A close at or after the dial is the bearer ending, not a failed connect.
+            // Drop the dial and refill. Do not start a new hold-off: the outbound
+            // disconnect path only did that for a connect failure.
+            let closed = view.is_some_and(|view| {
+                view.closes.get(&peer).is_some_and(|outcome| match outcome {
+                    DialOutcome::Closed { at, .. } => observed_instant(*at) >= since,
+                })
+            });
+            if closed {
+                self.outbound_peers.remove(&peer);
+                self.unbind_peer(&peer);
+                self.demoted_until.remove(&peer);
                 continue;
             }
             let failed = view

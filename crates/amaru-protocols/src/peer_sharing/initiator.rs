@@ -15,20 +15,21 @@
 //! Peer-sharing initiator (client): non-pipelined request/response with its own cadence.
 //!
 //! The connection starts this stage with the maintenance group when the remote side is
-//! advertisable. One timer waits `initial_delay` before the first request, then `interval`
-//! after each reply. A reply is a class C9 write, so this stage awaits the resource. The timer
-//! dies with the stage when the connection or the maintenance group stops.
+//! advertisable. One timer waits `initial_delay` before the first request. After the request it
+//! waits [`SHARE_REQUEST_TIMEOUT`] for the reply, then `interval` before the next request. A
+//! missing reply is not a failure: the stage logs it and asks again after the interval. A reply
+//! is a class C9 write, so this stage awaits the resource. An idle close cancels the timer.
 
 use std::{net::SocketAddr, time::Duration};
 
 use amaru_kernel::Peer;
-use amaru_observability::{Instrument, debug_span, warn};
+use amaru_observability::{Instrument, debug, debug_span, info, warn};
 use amaru_ouroboros::ConnectionId;
 use amaru_pure_stage::{DeserializerGuards, Effects, ScheduleId, StageRef, Void};
 
 use crate::{
     mux::MuxMessage,
-    peer_sharing::{State, messages::Message},
+    peer_sharing::{SHARE_REQUEST_TIMEOUT, State, messages::Message},
     peer_tracking_effects::PeerTrack,
     protocol::{
         Initiator, Inputs, Miniprotocol, Outcome, PROTO_N2N_PEER_SHARE, ProtocolState, StageState, miniprotocol,
@@ -41,6 +42,7 @@ pub fn register_deserializers() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<PeerSharingInitiator>().boxed(),
         amaru_pure_stage::register_data_deserializer::<(State, PeerSharingInitiator)>().boxed(),
         amaru_pure_stage::register_data_deserializer::<PeerSharingMessage>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<Inputs<PeerSharingMessage>>().boxed(),
     ]
 }
 
@@ -117,7 +119,7 @@ impl StageState<State, Initiator> for PeerSharingInitiator {
         mut self,
         proto: &State,
         input: Self::LocalIn,
-        _eff: &Effects<Inputs<Self::LocalIn>>,
+        eff: &Effects<Inputs<Self::LocalIn>>,
     ) -> anyhow::Result<(Option<InitiatorAction>, Self)> {
         match input {
             PeerSharingMessage::Tick => {
@@ -125,21 +127,35 @@ impl StageState<State, Initiator> for PeerSharingInitiator {
                 if self.closing {
                     return Ok((None, self));
                 }
+                if self.in_flight {
+                    // The reply never arrived. Ask again after the repeat interval.
+                    debug!(
+                        protocols::peer_sharing::initiator::REQUEST_TIMEOUT,
+                        peer = self.peer,
+                        conn_id = self.conn_id.as_u64()
+                    );
+                    self.in_flight = false;
+                    self.arm_timer(self.interval, eff).await?;
+                    let action = if *proto == State::Busy { Some(InitiatorAction::GiveUp) } else { None };
+                    return Ok((action, self));
+                }
                 match proto {
-                    State::Idle if !self.in_flight => {
+                    State::Idle => {
                         self.in_flight = true;
                         let amount = self.amount;
+                        self.arm_timer(SHARE_REQUEST_TIMEOUT, eff).await?;
                         Ok((Some(InitiatorAction::ShareRequest { amount }), self))
                     }
-                    State::Busy | State::Idle => {
-                        // Still waiting for a reply (or already in flight); do not pipeline.
-                        Ok((None, self))
-                    }
-                    State::Done => Ok((None, self)),
+                    State::Busy | State::Done => Ok((None, self)),
                 }
             }
             PeerSharingMessage::Close => match proto {
-                State::Idle if !self.in_flight => Ok((Some(InitiatorAction::Done), self)),
+                State::Idle if !self.in_flight => {
+                    if let Some(id) = self.timer.take() {
+                        eff.cancel_schedule(id).await;
+                    }
+                    Ok((Some(InitiatorAction::Done), self))
+                }
                 State::Busy | State::Idle => {
                     self.closing = true;
                     Ok((None, self))
@@ -186,8 +202,16 @@ impl StageState<State, Initiator> for PeerSharingInitiator {
                     }
                     self.in_flight = false;
                     let now = eff.clock().await;
-                    PeerTrack::new(eff).record_shared_peers(self.peer, peers, now).await;
-                    // Next request after the configured interval.
+                    let peers_list = peers.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+                    let recorded = PeerTrack::new(eff).record_shared_peers(self.peer, peers, now).await;
+                    info!(
+                        protocols::peer_selection::sharing::RECEIVED,
+                        peer = self.peer,
+                        peers = peers_list,
+                        added = recorded.added,
+                        total = recorded.total,
+                    );
+                    // Next request after the configured interval. Replaces the reply timeout.
                     self.arm_timer(self.interval, eff).await?;
                     Ok((None, self))
                 }
@@ -235,6 +259,7 @@ impl ProtocolState<Initiator> for State {
                 (outcome().send(Message::ShareRequest { amount }).want_next(), Busy)
             }
             (Idle, InitiatorAction::Done) => (outcome().send(Message::Done).finish(), Done),
+            (Busy, InitiatorAction::GiveUp) => (outcome(), Idle),
             (this, input) => anyhow::bail!("invalid state: {:?} <- {:?}", this, input),
         })
     }
@@ -242,7 +267,11 @@ impl ProtocolState<Initiator> for State {
 
 #[derive(Debug)]
 pub enum InitiatorAction {
-    ShareRequest { amount: u8 },
+    ShareRequest {
+        amount: u8,
+    },
+    /// The reply timed out. Leave `Busy` without a wire message.
+    GiveUp,
     Done,
 }
 
@@ -257,8 +286,27 @@ pub enum InitiatorResult {
 
 #[cfg(test)]
 pub mod tests {
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex, OnceLock},
+    };
+
+    use amaru_kernel::cbor;
+    use amaru_ouroboros::ConnectionId;
+    use amaru_pure_stage::{
+        Effect, StageGraph,
+        simulation::{Run, SimulationBuilder, SimulationRunning},
+        trace_buffer::{TraceBuffer, TraceEntry},
+    };
+    use tokio::runtime::{Builder, Runtime};
+    use tracing_subscriber::util::SubscriberInitExt;
+
     use super::*;
-    use crate::protocol::Initiator;
+    use crate::{
+        mux::{HandlerMessage, MuxMessage, Sent},
+        peer_sharing::SHARE_REQUEST_INTERVAL,
+        protocol::Initiator,
+    };
 
     #[test]
     fn test_initiator_protocol() {
@@ -267,5 +315,147 @@ pub mod tests {
             Message::Done => Some(InitiatorAction::Done),
             Message::SharePeers { .. } => None,
         });
+    }
+
+    #[derive(Clone)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_runtime() -> &'static tokio::runtime::Handle {
+        static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+        RUNTIME.get_or_init(|| Builder::new_current_thread().enable_all().build().expect("runtime")).handle()
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+    struct MuxLog {
+        sends: Vec<String>,
+    }
+
+    async fn mux_step(mut log: MuxLog, msg: MuxMessage, eff: Effects<MuxMessage>) -> MuxLog {
+        match msg {
+            MuxMessage::Send(_, bytes, cr) => {
+                let decoded: Message = cbor::decode(bytes.as_ref()).expect("cbor");
+                log.sends.push(decoded.message_type().to_string());
+                eff.send(&cr, Sent).await;
+            }
+            MuxMessage::WantNext(_)
+            | MuxMessage::Register { .. }
+            | MuxMessage::Buffer(..)
+            | MuxMessage::FromNetwork(..)
+            | MuxMessage::Written
+            | MuxMessage::Terminate
+            | MuxMessage::SetSduTimeout(_) => {}
+        }
+        log
+    }
+
+    fn suspends(running: &SimulationRunning) -> Vec<Effect> {
+        running
+            .trace_buffer()
+            .lock()
+            .iter_entries()
+            .filter_map(|(_, entry)| if let TraceEntry::Suspend(effect) = entry { Some(effect) } else { None })
+            .collect()
+    }
+
+    fn schedule_deadlines(running: &SimulationRunning) -> Vec<amaru_pure_stage::Instant> {
+        suspends(running)
+            .into_iter()
+            .filter_map(|effect| if let Effect::Schedule { id, .. } = effect { Some(id.time()) } else { None })
+            .collect()
+    }
+
+    fn initiator_state(running: &SimulationRunning) -> (State, PeerSharingInitiator) {
+        let mut found = None;
+        for (_, entry) in running.trace_buffer().lock().iter_entries() {
+            if let TraceEntry::State { stage, state } = entry
+                && stage.as_str().starts_with("peer_sharing")
+                && let Ok(state) = state.cast::<(State, PeerSharingInitiator)>()
+            {
+                found = Some(*state);
+            }
+        }
+        found.expect("peer-sharing initiator state")
+    }
+
+    fn start_initiator(
+        initial_delay: Duration,
+        interval: Duration,
+    ) -> (SimulationRunning, amaru_pure_stage::StageRef<Inputs<PeerSharingMessage>>) {
+        let peer = Peer::for_test(3001);
+        let mut network = SimulationBuilder::default().with_trace_buffer(TraceBuffer::new_shared(10_000, 8_000_000));
+        let mux = network.stage("mux", mux_step);
+        let mux_ref = mux.sender();
+        let _mux = network.wire_up(mux, MuxLog::default());
+        let (proto, stage) =
+            PeerSharingInitiator::new(mux_ref, peer, ConnectionId::initial(), 20, initial_delay, interval);
+        let built = network.stage("peer_sharing", initiator());
+        let ps = network.wire_up(built, (proto, stage));
+        network
+            .preload(&ps, [Inputs::Network(HandlerMessage::Registered(PROTO_N2N_PEER_SHARE.erase()))])
+            .expect("preload");
+        (network.run(test_runtime()), ps.without_state())
+    }
+
+    #[test]
+    fn a_missing_share_reply_rearms_the_repeat_interval() {
+        let logs = LogBuf(Arc::new(Mutex::new(Vec::new())));
+        let _guard = tracing_subscriber::fmt()
+            .with_max_level(amaru_observability::tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .set_default();
+
+        let _guards = register_deserializers();
+        let (mut running, _ps) = start_initiator(Duration::from_secs(1), SHARE_REQUEST_INTERVAL);
+        running.run(Run::default()).assert_sleeping();
+        let started = running.now();
+        running.run(Run::until(started + Duration::from_secs(1))).assert_sleeping();
+        let asked_at = started + Duration::from_secs(1);
+        assert_eq!(
+            schedule_deadlines(&running),
+            vec![asked_at, asked_at + SHARE_REQUEST_TIMEOUT],
+            "the request arms one reply timeout"
+        );
+        let (proto, stage) = initiator_state(&running);
+        assert_eq!(proto, State::Busy);
+        assert!(stage.in_flight);
+
+        running.run(Run::until(asked_at + SHARE_REQUEST_TIMEOUT)).assert_sleeping();
+        let (proto, stage) = initiator_state(&running);
+        assert_eq!(proto, State::Idle, "the timed-out request is no longer in flight");
+        assert!(!stage.in_flight);
+        let deadlines = schedule_deadlines(&running);
+        assert_eq!(deadlines.last().copied(), Some(asked_at + SHARE_REQUEST_TIMEOUT + SHARE_REQUEST_INTERVAL));
+        assert_eq!(deadlines.len(), 3, "the timeout is replaced by one repeat timer");
+        let text = String::from_utf8(logs.0.lock().expect("log lock").clone()).expect("utf-8");
+        assert!(text.contains("request_timeout"), "{text}");
+    }
+
+    #[test]
+    fn an_idle_close_cancels_the_share_timer() {
+        let _guards = register_deserializers();
+        let (mut running, ps) = start_initiator(Duration::from_secs(300), SHARE_REQUEST_INTERVAL);
+        running.run(Run::default()).assert_sleeping();
+        assert_eq!(schedule_deadlines(&running).len(), 1);
+        running.enqueue_msg(&ps, [Inputs::Local(PeerSharingMessage::Close)]);
+        let _ = running.run(Run::default());
+        let cancels =
+            suspends(&running).into_iter().filter(|effect| matches!(effect, Effect::CancelSchedule { .. })).count();
+        // Close terminates the stage before another state snapshot, so the cancel in the trace is the record.
+        assert_eq!(cancels, 1, "the idle close drops the outstanding timer");
     }
 }

@@ -74,7 +74,7 @@
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
 //! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
-//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | recorded immediately; new candidates bump generation |
+//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest |
 //! | `record_share_request_served` | peer-sharing responder | not read yet | C9 | recorded immediately |
 //! | `ingest_shared_peers` | `record_shared_peers` | outbound pools | C9 | same ingest; new candidates bump generation |
 //! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
@@ -109,10 +109,10 @@ use ops::PerformanceOp;
 use parking_lot::Mutex;
 pub use peers::{
     ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
-    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS, OutboundInputs,
-    OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot, PeerSource,
-    PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams, SelectPeersParams, SelectUsing,
-    SharedIngestResult, SourceCounts, UninterestingMark, ViewConnection, malus_at,
+    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS,
+    OutboundInputs, OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags,
+    PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams,
+    SelectPeersParams, SelectUsing, SharedIngestResult, SourceCounts, UninterestingMark, ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},
