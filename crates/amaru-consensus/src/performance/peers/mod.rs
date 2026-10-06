@@ -45,7 +45,7 @@ pub use select_outbound::{
 pub use select_share::SHARE_POLICY_MAX;
 pub(crate) use select_share::{ShareCandidate, sample_share_peers, share_reply_seed};
 pub use sources::{SharedIngestResult, SourceCounts};
-pub use view::{PeerView, ViewConnection};
+pub use view::{DialOutcome, PeerView, ViewConnection};
 
 /// Peer performance map (availability + scores + source pools). Owned by the performance worker.
 #[derive(Debug, Default)]
