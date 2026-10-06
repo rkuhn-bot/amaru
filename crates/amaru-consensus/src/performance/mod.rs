@@ -26,6 +26,50 @@
 //! Channel depth is monitored: WARN (rate-limited) when the queue exceeds normally expected
 //! depth, ERROR + panic when it grows beyond reasonable bounds.
 //!
+//!
+//! Stage-facing operations, who writes them, who reads them, and how urgent that read is.
+//! Timeliness classes: C1 header propagation, C2 block fetch, C3 fetch when a peer is lost,
+//! C4 chain selection, C5 adversarial disconnect, C7 keep-alive RTT, C8 peer-population
+//! maintenance, C9 peer sharing. "Recorded immediately" means the stage enqueues and continues;
+//! "awaited" means the stage waits for the worker before it continues; "on demand" means the
+//! reader queries at its own decision.
+//!
+//! | Operation | Writer | Reader | Class | Cadence |
+//! | --- | --- | --- | --- | --- |
+//! | `record_intersection` | track_peers | fetch selection | C1 | recorded immediately; read on demand |
+//! | `record_header_announcement` | track_peers | fetch selection, header lifecycle | C1 | awaited |
+//! | `record_rollback` | track_peers | fetch selection | C1 | recorded immediately |
+//! | `record_header_rejected` | track_peers | header telemetry | C1 | emitted on the effect path |
+//! | `first_announced_at` | query | caller | C1 | on demand |
+//! | `record_blocks_requested` | fetch_blocks | header lifecycle | C2 | recorded immediately |
+//! | `record_peers_asked` | fetch_blocks | header lifecycle | C2 | awaited |
+//! | `record_block_delivery` | fetch_blocks | peer scores, header lifecycle | C2 | awaited |
+//! | `record_fetch_failure` | fetch_blocks | peer scores | C2 | recorded immediately |
+//! | `select_peers_for_fetch` | fetch_blocks | fetch_blocks | C2 | on demand |
+//! | `peer_covers_fragment` | query | caller | C2 | on demand |
+//! | `direct_claimants` | query | caller | C2 | on demand |
+//! | `record_block_valid` | select_chain | header telemetry | C4 | awaited |
+//! | `record_block_pruned` | select_chain | header telemetry | C4 | awaited |
+//! | `record_header_abandoned` | select_chain | header telemetry | C4 | awaited |
+//! | `record_fork_started` | select_chain | header telemetry | C4 | awaited |
+//! | `record_sync_adoption` | adopt_chain | track_peers via `sync_adoption_is_fast` | C4 | recorded immediately |
+//! | `sync_adoption_is_fast` | track_peers | track_peers | C4 | on demand |
+//! | `prune_below` | adopt_chain | claims and header lifecycles | horizon | awaited |
+//! | `peer_adversarial` | peer selection | sharing filters, outbound ranking | C5 | recorded immediately |
+//! | `record_keepalive_rtt` | not called yet | fetch ranking, churn | C7 | recorded immediately; read on demand |
+//! | `record_advertisability` | peer selection | sharing filters | C8 | recorded immediately |
+//! | `record_connection_failure` | peer selection | malus, sharing filters | C8 | recorded immediately |
+//! | `clear_peer_availability` | peer selection, track_peers | fetch selection | C8 | recorded immediately |
+//! | `select_outbound` | peer selection | peer selection | C8 | on demand |
+//! | `rank_peers_for_churn` | peer selection | peer selection | C8 | on demand |
+//! | `set_ledger_candidates` | peer selection | outbound pools | C8 | recorded immediately |
+//! | `note_dial` | peer selection | malus half-life | C8 | recorded immediately |
+//! | `is_static_peer` | peer selection | churn | C8 | on demand |
+//! | `source_counts` | peer selection | peer selection | C8 | on demand |
+//! | `select_share_peers` | peer selection | peer-sharing reply | C9 | on demand |
+//! | `ingest_shared_peers` | peer selection | outbound pools | C9 | on demand |
+//! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
+//!
 //! Terminal header/fork transitions produce [`HeaderTelemetry`] on the worker; OpenTelemetry
 //! events and metrics are emitted only on the external-effect path so export drops or lag cannot
 //! stall or couple to performance state updates.
@@ -33,8 +77,8 @@
 mod adoption;
 mod effects;
 mod header;
-mod peer;
-mod peer_mix;
+mod ops;
+mod peers;
 
 use std::{
     fmt,
@@ -47,24 +91,21 @@ use std::{
 };
 
 use adoption::SyncAdoptionPace;
-use amaru_kernel::{Peer, PeerCandidate};
+use amaru_kernel::PeerCandidate;
 use amaru_observability::{error, warn};
-use amaru_pure_stage::Instant;
 pub use effects::*;
 pub use header::{ForkSwitchOutcome, HeaderLifecycleOutcome, HeaderPerformance, HeaderTelemetry};
+use ops::PerformanceOp;
 use parking_lot::Mutex;
-pub use peer::{
-    ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ClaimKind, DEFAULT_PEER_MALUS_HALF_LIFE, FetchPeerSet,
-    NEVER_CONNECTED_BONUS, OutboundPick, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot,
+pub use peers::{
+    ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
+    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS, OutboundPick,
+    PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot, PeerSource,
     SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams, SelectPeersParams, SelectUsing, SharedIngestResult,
     SourceCounts, malus_at,
 };
-pub use peer_mix::{DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, MixEntry, PeerMix, PeerMixParseError, PeerSource};
 use tokio::{
-    sync::{
-        mpsc::{UnboundedSender, unbounded_channel},
-        oneshot,
-    },
+    sync::mpsc::{UnboundedSender, unbounded_channel},
     time::Instant as TokioInstant,
 };
 
@@ -146,48 +187,6 @@ impl fmt::Debug for Performance {
     }
 }
 
-/// All operations accepted by the performance worker, wrapping the corresponding effect payloads.
-///
-/// Ops that close header/fork state reply with [`HeaderTelemetry`] for emission off this thread.
-pub(crate) enum PerformanceOp {
-    RecordIntersection { effect: RecordIntersectionEffect },
-    RecordHeaderAnnouncement { effect: RecordHeaderAnnouncementEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordBlocksRequested { effect: RecordBlocksRequestedEffect },
-    RecordPeersAsked { effect: RecordPeersAskedEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordBlockDelivery { effect: RecordBlockDeliveryEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordFetchFailure { effect: RecordFetchFailureEffect },
-    RecordKeepaliveRtt { effect: RecordKeepaliveRttEffect },
-    RecordAdvertisability { effect: RecordAdvertisabilityEffect },
-    RecordConnectionFailure { effect: RecordConnectionFailureEffect },
-    ClearPeerAvailability { effect: ClearPeerAvailabilityEffect },
-    PeerAdversarial { effect: PeerAdversarialEffect },
-    PruneBelow { effect: PruneBelowEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    SelectPeersForFetch { effect: SelectPeersForFetchEffect, reply: oneshot::Sender<FetchPeerSet> },
-    PeerCoversFragment { effect: PeerCoversFragmentEffect, reply: oneshot::Sender<bool> },
-    DirectClaimants { effect: DirectClaimantsEffect, reply: oneshot::Sender<Vec<(Peer, Instant, ClaimKind)>> },
-    FirstAnnouncedAt { effect: FirstAnnouncedAtEffect, reply: oneshot::Sender<Option<(Peer, Instant)>> },
-    RankPeersForChurn { effect: RankPeersForChurnEffect, reply: oneshot::Sender<Vec<(Peer, PeerScores)>> },
-    Scores { effect: ScoresEffect, reply: oneshot::Sender<PeerScores> },
-    ShareFlags { effect: ShareFlagsEffect, reply: oneshot::Sender<Option<PeerShareFlags>> },
-    Snapshot { effect: SnapshotEffect, reply: oneshot::Sender<Option<PeerSnapshot>> },
-    OkForSharing { effect: OkForSharingEffect, reply: oneshot::Sender<bool> },
-    SetLedgerCandidates { effect: SetLedgerCandidatesEffect },
-    IngestSharedPeers { effect: IngestSharedPeersEffect, reply: oneshot::Sender<SharedIngestResult> },
-    SelectOutbound { effect: SelectOutboundEffect, reply: oneshot::Sender<SelectUsing> },
-    SelectSharePeers { effect: SelectSharePeersEffect, reply: oneshot::Sender<Vec<std::net::SocketAddr>> },
-    IsStaticPeer { effect: IsStaticPeerEffect, reply: oneshot::Sender<bool> },
-    NoteDial { effect: NoteDialEffect },
-    SharedContains { effect: SharedContainsEffect, reply: oneshot::Sender<bool> },
-    SourceCounts { effect: SourceCountsEffect, reply: oneshot::Sender<SourceCounts> },
-    RecordRollback { effect: RecordRollbackEffect },
-    RecordHeaderAbandoned { effect: RecordHeaderAbandonedEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordForkStarted { effect: RecordForkStartedEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordBlockValid { effect: RecordBlockValidEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordBlockPruned { effect: RecordBlockPrunedEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordSyncAdoption { effect: RecordSyncAdoptionEffect },
-    SyncAdoptionPace { effect: SyncAdoptionPaceEffect, reply: oneshot::Sender<bool> },
-}
-
 impl Performance {
     /// Start the performance worker thread and return a handle to enqueue operations.
     ///
@@ -229,7 +228,7 @@ impl Performance {
                     let mut pace = SyncAdoptionPace::default();
                     while let Some(op) = rx.recv().await {
                         pending_worker.fetch_sub(1, Ordering::Relaxed);
-                        dispatch(&mut peers, &mut headers, &mut pace, op);
+                        ops::dispatch(&mut peers, &mut headers, &mut pace, op);
                     }
                 });
             })
@@ -300,165 +299,6 @@ impl Performance {
 impl Default for Performance {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn dispatch(
-    peers: &mut PeerPerformance,
-    headers: &mut HeaderPerformance,
-    pace: &mut SyncAdoptionPace,
-    op: PerformanceOp,
-) {
-    match op {
-        PerformanceOp::RecordIntersection { effect } => {
-            peers.apply_intersection(effect.peer, effect.current, effect.parent, effect.at);
-        }
-        PerformanceOp::RecordHeaderAnnouncement { effect, reply } => {
-            peers.apply_header_announcement(effect.peer, effect.header, effect.parent, effect.at);
-            let telemetry = headers.apply_header_received(
-                effect.peer,
-                effect.header,
-                effect.at,
-                effect.slot_start_to_header_micros,
-                effect.slot_onset,
-                effect.already_stored,
-            );
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordBlocksRequested { effect } => {
-            headers.apply_blocks_requested(&effect.hashes, effect.requested_at);
-        }
-        PerformanceOp::RecordPeersAsked { effect, reply } => {
-            let telemetry = headers.apply_peers_asked(&effect.hashes, &effect.peers, effect.at);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordBlockDelivery { effect, reply } => {
-            peers.apply_block_delivery(
-                effect.peer,
-                effect.hash,
-                effect.height,
-                effect.parent,
-                effect.at,
-                effect.response,
-                effect.bytes,
-            );
-            let telemetry = headers.apply_block_downloaded(effect.peer, &effect.hash, effect.height, effect.at);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordFetchFailure { effect } => {
-            peers.apply_fetch_failure(&effect.peers, effect.at);
-        }
-        PerformanceOp::RecordKeepaliveRtt { effect } => {
-            peers.apply_keepalive_rtt(effect.peer, effect.rtt, effect.at);
-        }
-        PerformanceOp::RecordAdvertisability { effect } => {
-            peers.apply_advertisability(effect.peer, effect.advertisable, effect.at);
-        }
-        PerformanceOp::RecordConnectionFailure { effect } => {
-            peers.apply_connection_failure(effect.peer, effect.at);
-        }
-        PerformanceOp::ClearPeerAvailability { effect } => {
-            peers.apply_clear_peer_availability(&effect.peer);
-        }
-        PerformanceOp::PeerAdversarial { effect } => {
-            peers.apply_peer_adversarial(&effect.peer, effect.at);
-        }
-        PerformanceOp::PruneBelow { effect, reply } => {
-            peers.apply_prune_below(effect.min_height);
-            let telemetry = headers.apply_prune_below(effect.min_height, effect.now);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::SelectPeersForFetch { effect, reply } => {
-            let result = peers.apply_select_peers_for_fetch(effect.params);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::PeerCoversFragment { effect, reply } => {
-            let result = peers.apply_peer_covers_fragment(&effect.peer, &effect.need);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::DirectClaimants { effect, reply } => {
-            let result = peers.apply_direct_claimants(&effect.hash);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::FirstAnnouncedAt { effect, reply } => {
-            let result = peers.apply_first_announced_at(&effect.hash);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::RankPeersForChurn { effect, reply } => {
-            let result = peers.apply_rank_peers_for_churn(&effect.candidates, effect.now);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::Scores { effect, reply } => {
-            let result = peers.apply_scores(&effect.peer);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::ShareFlags { effect, reply } => {
-            let result = peers.apply_share_flags(&effect.peer);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::Snapshot { effect, reply } => {
-            let result = peers.apply_snapshot(&effect.peer);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::OkForSharing { effect, reply } => {
-            let result = peers.apply_ok_for_sharing(&effect.peer, effect.now);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::SetLedgerCandidates { effect } => {
-            peers.apply_set_ledger_candidates(effect.candidates);
-        }
-        PerformanceOp::IngestSharedPeers { effect, reply } => {
-            let result = peers.apply_ingest_shared_peers(&effect.from, &effect.peers);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::SelectOutbound { effect, reply } => {
-            let result = peers.apply_select_outbound(effect.params);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::SelectSharePeers { effect, reply } => {
-            let result = peers.apply_select_share_peers(&effect.requester, effect.amount, effect.now);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::IsStaticPeer { effect, reply } => {
-            let result = peers.apply_is_static_peer(&effect.peer);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::NoteDial { effect } => {
-            peers.apply_note_dial(effect.origin, &effect.candidate, effect.peer);
-        }
-        PerformanceOp::SharedContains { effect, reply } => {
-            let result = peers.apply_shared_contains(&effect.peer);
-            let _ = reply.send(result);
-        }
-        PerformanceOp::SourceCounts { effect: SourceCountsEffect, reply } => {
-            let result = peers.apply_source_counts();
-            let _ = reply.send(result);
-        }
-        PerformanceOp::RecordRollback { effect } => {
-            peers.apply_rollback(effect.peer, effect.point, effect.parent, effect.at);
-        }
-        PerformanceOp::RecordHeaderAbandoned { effect, reply } => {
-            let telemetry = headers.apply_header_abandoned(&effect.hash, effect.now);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordForkStarted { effect, reply } => {
-            let telemetry = headers.apply_fork_started(effect.tip, effect.started_at);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordBlockValid { effect, reply } => {
-            let telemetry = headers.apply_block_valid(&effect.hash, effect.now, effect.syncing);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordBlockPruned { effect, reply } => {
-            let telemetry = headers.apply_block_pruned(&effect.hash, effect.invalid, effect.now, effect.syncing);
-            let _ = reply.send(telemetry);
-        }
-        PerformanceOp::RecordSyncAdoption { effect } => {
-            pace.record(effect.at, effect.live);
-        }
-        PerformanceOp::SyncAdoptionPace { effect, reply } => {
-            let _ = reply.send(pace.is_catching_up_fast(effect.now));
-        }
     }
 }
 

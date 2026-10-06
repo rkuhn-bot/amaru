@@ -47,14 +47,15 @@ Splitting queues or stages would force dual instrumentation for the same domain 
 
 | Component | Role |
 | --- | --- |
-| `PeerPerformance` | Per-peer **claims** (intersection / header / block delivery on the parent chain), **scores** (EWMAs of header lag, block response time, bandwidth; counters for fetch success/timeout; keepalive RTT), and **share-relevant reputation** (`ever_connected`, latest handshake advertisability, connection failure count, sticky adversarial flag). |
+| `PeerPerformance` | Per-peer **claims** (intersection / header / block delivery on the parent chain), **scores** (EWMAs of header lag, block response time, bandwidth; counters for fetch success/timeout; keepalive RTT), **share-relevant reputation** (`ever_connected`, latest handshake advertisability, connection failure count, sticky adversarial flag), and the **outbound candidate pools** (static, shared, snapshot, ledger) with the admin peer-mix. |
 | `HeaderPerformance` | Open **header lifecycles** (received / requested / downloaded) until a terminal outcome; optional in-progress **fork switch**. |
 
 Unit tests exercise these types directly without spawning the worker.
 Integration and stage tests install `ResourcePerformance` and assert effect traces.
 
 Performance is **cross-stage memory** for observations that many stages produce and few consumers need (fetch ranking, churn, peer-sharing filters).
-It does **not** own peer origin (static / snapshot / ledger), cool-downs, or listen-address policy — those remain in peer selection.
+It owns the outbound candidate pools (static, shared, snapshot, and ledger) and the admin peer-mix, so connection malus decays with that source’s half-life ([EDR-031](./031-peer-source-mix.md)).
+Cool-downs and listen-address policy remain in peer selection.
 Successful connection is tracked by an explicit sticky `ever_connected` flag set on handshake; map presence alone is not sufficient (connection failures also upsert a reputation stub).
 
 ### Event-oriented API
@@ -93,7 +94,7 @@ Adversarial ban uses `peer_adversarial`, which clears claims and scores but **re
 ### Peer-sharing reputation (Performance half)
 
 Peer-sharing reply filters need observations that span handshake, connection attempts, and bans.
-Performance stores only the reputation half; peer selection applies origin and address rules.
+Performance stores the reputation half and the origin pools. Share selection in this resource excludes ledger and snapshot peers and draws the sticky sample. Peer selection still applies listen-address rules.
 Connection quality for dial and share rehab uses lazy-decay **malus** ([EDR-031](./031-peer-source-mix.md)).
 
 | Flag / rule | Owner | Notes |
@@ -103,7 +104,7 @@ Connection quality for dial and share rehab uses lazy-decay **malus** ([EDR-031]
 | `failure_count` | Performance | Lifetime connect-failure counter (telemetry); soft policy uses malus |
 | connection malus | Performance | Lazy half-life decay; sharing requires evolved malus below threshold (see EDR-031) |
 | `adversarial` | Performance | Set sticky by `peer_adversarial`; sharing requires false (outbound may dial after cool-down) |
-| Not ledger / not snapshot (big-ledger) | Peer selection | Origin pools live there; snapshot peers are excluded from sharing |
+| Not ledger / not snapshot (big-ledger) | Performance | Origin pools live in `PeerPerformance`; share selection excludes ledger and snapshot peers |
 | Known listen address (not pure inbound) | Peer selection | Inbound remote port is not a listen advertisement; optional outbound probe (~3000) may promote a peer later |
 
 `ok_for_sharing(now)` / `share_flags` / `outbound_weights` expose the Performance half so peer selection can compose share filters and mix sampling without duplicating counters.
@@ -129,7 +130,7 @@ Probe points should stay aligned: the same stage moments that open/close [EDR-02
 - Dropping the last `Performance` handle joins the worker after the channel closes; teardown should avoid doing that join on a multi-thread Tokio worker under a deep queue.
 - Ranking and churn algorithms can evolve inside `PeerPerformance` without reshaping the stage graph, as long as the event/query API remains stable.
 - Until keepalive RTT and churn ranking are wired (below), peer quality is incomplete relative to the network-spec intent described in [EDR-024][edr-peer-handling] (latency + bandwidth-based selection).
-- Peer-sharing reply construction composes Performance reputation (`ok_for_sharing`) with peer-selection origin and listen-address policy; Performance alone is not a complete share filter.
+- Peer-sharing reply construction uses Performance for reputation (`ok_for_sharing`), origin (exclude ledger and snapshot), and the sticky sample. Listen-address policy remains in peer selection, so Performance alone is not a complete share filter.
 
 ## Future work
 
@@ -138,7 +139,7 @@ Probe points should stay aligned: the same stage moments that open/close [EDR-02
 3. **Scoring policy** — replace provisional EWMA heuristics with an explicit, testable policy (document knobs; avoid silent retunes).
 4. **Horizon / dual-connection edge cases** — keep pruning and clear/forget rules aligned with multi-connection peers (inbound+outbound) so availability is cleared only when no usable connection remains.
 5. **Failure-count decay** — superseded by connection **malus** with lazy half-life decay ([EDR-031](./031-peer-source-mix.md)); telemetry may still keep a raw failure counter.
-6. **Peer-sharing consumer** — peer selection / peer-sharing responder composes Performance `ok_for_sharing` with origin (exclude ledger and big-ledger snapshot) and listen-address rules; sticky sampling lives there, not in this resource.
+6. **Peer-sharing consumer** — the responder still applies listen-address rules on top of Performance. Reputation, origin exclusion (ledger and big-ledger snapshot), and sticky sampling already live in this resource.
 
 ## Discussion points
 
