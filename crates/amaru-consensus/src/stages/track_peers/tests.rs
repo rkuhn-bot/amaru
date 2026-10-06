@@ -40,7 +40,7 @@ use crate::{
                 height_recheck_schedule_id, make_block_header, new_tip, schedule_id_at, setup, setup_base,
                 setup_with_ledger_tip_until_sleeping, slot_start_to_header_micros, te_clear_peer_availability,
                 te_clock, te_clock_suspend, te_get_best_chain_tip, te_get_nonces, te_header_rejected, te_load_header,
-                te_load_point, te_record_header_announcement, te_record_rollback, te_schedule,
+                te_load_point, te_record_header_announcement, te_record_rollback, te_record_uninteresting, te_schedule,
                 te_store_validated_header, te_sync_adoption_is_fast, te_validate_header, test_prep,
                 test_prep_with_max_peer_lead, tm_volatile_tip,
             },
@@ -339,14 +339,16 @@ fn test_intersect_not_found_untracked_notifies_uninteresting() {
         msg: chainsync::InitiatorResult::IntersectNotFound(Point::Origin),
     });
 
+    let now = Instant::at_offset(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            te_send("tp-1", "peer_selection", PeerSelectionMsg::Uninteresting { peer, conn_id, after_rollback: false })
-                .into(),
+            te_clock_suspend("tp-1").into(),
+            te_record_uninteresting("tp-1", peer, conn_id, false, now).into(),
+            te_clear_peer_availability("tp-1", peer).into(),
             te_state("tp-1", &state).into(),
         ],
     );
@@ -372,18 +374,16 @@ fn test_intersect_not_found_removes_peer() {
         msg: chainsync::InitiatorResult::IntersectNotFound(Point::Origin),
     });
 
+    let now = Instant::at_offset(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
     let (running, _guards, mut logs) = setup(&prep.rt_handle(), state.clone(), msg.clone(), build_store(&[]));
     assert_trace_contains(
         &running,
         &[
             te_state("tp-1", &state).into(),
             te_input("tp-1", &msg).into(),
-            te_send(
-                "tp-1",
-                "peer_selection",
-                PeerSelectionMsg::Uninteresting { peer, conn_id: prep.conn_id, after_rollback: false },
-            )
-            .into(),
+            te_clock_suspend("tp-1").into(),
+            te_record_uninteresting("tp-1", peer, prep.conn_id, false, now).into(),
+            te_clear_peer_availability("tp-1", peer).into(),
             te_state("tp-1", &expected).into(),
         ],
     );

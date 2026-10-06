@@ -45,6 +45,7 @@ struct Log {
     keepalives: Vec<(Peer, Duration, ObservedAt)>,
     shared: Vec<(Peer, Vec<SocketAddr>, ObservedAt)>,
     share_requests: Vec<(Peer, u8, ObservedAt)>,
+    uninteresting: Vec<(Peer, ConnectionId, bool, ObservedAt)>,
     queries: Vec<(Peer, u8, ObservedAt)>,
     share_reply: Vec<SocketAddr>,
 }
@@ -92,6 +93,10 @@ impl InMemoryPeerTracking {
         self.lock().share_requests.clone()
     }
 
+    pub fn uninteresting(&self) -> Vec<(Peer, ConnectionId, bool, ObservedAt)> {
+        self.lock().uninteresting.clone()
+    }
+
     pub fn share_queries(&self) -> Vec<(Peer, u8, ObservedAt)> {
         self.lock().queries.clone()
     }
@@ -129,6 +134,10 @@ impl PeerTracking for InMemoryPeerTracking {
 
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt) {
         self.lock().share_requests.push((requester, amount, at));
+    }
+
+    fn record_uninteresting(&self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, at: ObservedAt) {
+        self.lock().uninteresting.push((peer, conn_id, after_rollback, at));
     }
 
     fn query_share_peers(&self, requester: Peer, amount: u8, now: ObservedAt) -> PeerTrackingFuture<Vec<SocketAddr>> {

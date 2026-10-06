@@ -18,7 +18,7 @@
 //! [`amaru_ouroboros::PeerTracking`]. The manager records a handshake, a close, a failed
 //! outbound attempt, and applied local use. The peer-sharing responder queries a reply and
 //! records that it served the request. The initiator records addresses learned from a reply.
-//! Keep-alive samples are not called yet.
+//! track_peers records an intersection miss. Keep-alive samples are not called yet.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -37,6 +37,7 @@ pub fn register_deserializers() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<RecordKeepaliveRttEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordSharedPeersEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordShareRequestServedEffect>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<RecordUninterestingEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<QuerySharePeersEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<Vec<SocketAddr>>().boxed(),
     ]
@@ -95,6 +96,16 @@ impl<T> PeerTrack<'_, T> {
 
     pub fn record_share_request_served(&self, requester: Peer, amount: u8, at: Instant) -> BoxFuture<'static, ()> {
         self.0.external(RecordShareRequestServedEffect { requester, amount, at })
+    }
+
+    pub fn record_uninteresting(
+        &self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        after_rollback: bool,
+        at: Instant,
+    ) -> BoxFuture<'static, ()> {
+        self.0.external(RecordUninterestingEffect { peer, conn_id, after_rollback, at })
     }
 
     pub fn query_share_peers(&self, requester: Peer, amount: u8, now: Instant) -> BoxFuture<'static, Vec<SocketAddr>> {
@@ -229,6 +240,25 @@ impl ExternalEffectAPI for RecordShareRequestServedEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordUninterestingEffect {
+    pub peer: Peer,
+    pub conn_id: ConnectionId,
+    pub after_rollback: bool,
+    pub at: Instant,
+}
+
+impl ExternalEffectAPI for RecordUninterestingEffect {
+    type Response = ();
+
+    fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
+        let tracking = require_tracking(&resources);
+        self.wrap(move |this| async move {
+            tracking.record_uninteresting(this.peer, this.conn_id, this.after_rollback, observed_at(this.at));
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QuerySharePeersEffect {
     pub requester: Peer,
     pub amount: u8,
@@ -313,6 +343,7 @@ mod tests {
         drive(Box::new(RecordKeepaliveRttEffect { peer: alice, rtt: Duration::from_millis(15), at }));
         drive(Box::new(RecordSharedPeersEffect { from: alice, addrs: vec![addr], at }));
         drive(Box::new(RecordShareRequestServedEffect { requester: alice, amount: 4, at }));
+        drive(Box::new(RecordUninterestingEffect { peer: alice, conn_id: conn.conn_id, after_rollback: false, at }));
         let response = rt.block_on(
             (Box::new(QuerySharePeersEffect { requester: alice, amount: 4, now: at }) as Box<dyn ExternalEffect>)
                 .run(resources.clone()),
@@ -326,6 +357,7 @@ mod tests {
         assert_eq!(recorder.keepalives(), vec![(alice, Duration::from_millis(15), seen)]);
         assert_eq!(recorder.shared_peers(), vec![(alice, vec![addr], seen)]);
         assert_eq!(recorder.share_requests(), vec![(alice, 4, seen)]);
+        assert_eq!(recorder.uninteresting(), vec![(alice, conn.conn_id, false, seen)]);
         assert_eq!(recorder.share_queries(), vec![(alice, 4, seen)]);
         assert_eq!(addrs, vec![reply]);
     }

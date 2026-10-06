@@ -90,6 +90,7 @@ pub(crate) enum PeerOp {
     RecordKeepaliveSample { peer: Peer, rtt: Duration, at: ObservedAt },
     RecordSharedPeers { from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt },
     RecordShareRequestServed { requester: Peer, amount: u8, at: ObservedAt },
+    RecordUninteresting { peer: Peer, conn_id: ConnectionId, after_rollback: bool, at: ObservedAt },
 }
 
 pub(crate) enum HeaderOp {
@@ -261,6 +262,9 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
         }
         PeerOp::RecordShareRequestServed { requester, amount, at } => {
             peers.record_share_request_served(requester, amount, at);
+        }
+        PeerOp::RecordUninteresting { peer, conn_id, after_rollback, at } => {
+            peers.record_uninteresting(peer, conn_id, after_rollback, at);
         }
     }
 }

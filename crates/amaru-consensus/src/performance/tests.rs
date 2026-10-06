@@ -1276,6 +1276,40 @@ fn lifecycle_writes_bump_generation() {
 }
 
 #[test]
+fn uninteresting_marks_are_the_latest_per_peer_and_only_those_since_the_query() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let bob = peer("bob");
+    let (alice_id, bob_id) = conn_ids();
+    let at = observed(1, 0);
+    peers.record_connection_established(connection_record(alice, alice_id, at, false), at);
+    peers.record_connection_established(connection_record(bob, bob_id, at, false), at);
+
+    peers.record_uninteresting(alice, alice_id, false, at);
+    let first = peers.generation();
+    let view = peers.query_peer_view(0).expect("generation moved");
+    assert_eq!(view.uninteresting.len(), 1);
+    assert_eq!(view.uninteresting[0].peer, alice);
+    assert!(!view.uninteresting[0].after_rollback);
+
+    peers.record_uninteresting(alice, alice_id, true, observed(2, 0));
+    let view = peers.query_peer_view(first).expect("repeated mark moves the generation");
+    assert_eq!(view.uninteresting.len(), 1);
+    assert!(view.uninteresting[0].after_rollback, "the latest mark replaces the earlier one");
+
+    let seen = peers.generation();
+    peers.set_ledger_candidates(Default::default());
+    let view = peers.query_peer_view(seen).expect("ledger replacement moves the generation");
+    assert!(view.uninteresting.is_empty(), "an older mark is not delivered again");
+
+    peers.record_uninteresting(bob, bob_id, false, observed(3, 0));
+    peers.record_connection_closed(bob, bob_id, CloseReason::BearerEnded, observed(4, 0));
+    let view = peers.query_peer_view(seen).expect("close moves the generation");
+    assert!(view.uninteresting.iter().all(|mark| mark.peer != bob), "a closed bearer drops its mark");
+    assert!(view.uninteresting.iter().all(|mark| mark.peer != alice));
+}
+
+#[test]
 fn select_outbound_is_stable_for_a_fixed_seed() {
     use std::collections::BTreeSet;
 

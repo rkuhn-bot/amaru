@@ -33,16 +33,26 @@ pub struct ViewConnection {
     pub local_use: LocalUse,
 }
 
+/// One intersection-not-found mark recorded after `since`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UninterestingMark {
+    pub peer: Peer,
+    pub conn_id: ConnectionId,
+    pub after_rollback: bool,
+}
+
 /// Population snapshot. `None` from a query means the generation has not moved.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PeerView {
     pub generation: u64,
     pub connections: Vec<ViewConnection>,
     pub connect_failures: BTreeMap<Peer, ObservedAt>,
+    /// Marks whose generation is newer than the `since` the caller passed.
+    pub uninteresting: Vec<UninterestingMark>,
 }
 
 impl PeerPerformance {
-    /// Copy live bearers and dial failures when `since_generation` is behind.
+    /// Copy live bearers, dial failures, and intersection-not-found marks newer than `since_generation`.
     ///
     /// Returns `None` when nothing this view carries has changed, so the caller can skip a round.
     pub fn query_peer_view(&self, since_generation: u64) -> Option<PeerView> {
@@ -63,6 +73,21 @@ impl PeerPerformance {
             });
         }
         connections.sort_by(|left, right| left.conn_id.cmp(&right.conn_id).then(left.peer.cmp(&right.peer)));
-        Some(PeerView { generation: self.generation, connections, connect_failures: self.last_connect_failure.clone() })
+        let mut uninteresting = Vec::new();
+        for (peer, mark) in &self.uninteresting {
+            if mark.generation > since_generation {
+                uninteresting.push(UninterestingMark {
+                    peer: *peer,
+                    conn_id: mark.conn_id,
+                    after_rollback: mark.after_rollback,
+                });
+            }
+        }
+        Some(PeerView {
+            generation: self.generation,
+            connections,
+            connect_failures: self.last_connect_failure.clone(),
+            uninteresting,
+        })
     }
 }

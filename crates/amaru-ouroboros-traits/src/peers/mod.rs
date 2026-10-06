@@ -122,6 +122,12 @@ pub trait PeerTracking: Send + Sync + 'static {
     /// A share request was answered for `requester`.
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt);
 
+    /// ChainSync found no usable intersection on this bearer.
+    ///
+    /// The latest mark for `peer` replaces any earlier one. The write bumps the generation peer
+    /// selection watches. It does not choose the next header or block.
+    fn record_uninteresting(&self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, at: ObservedAt);
+
     /// Addresses to send in a share reply.
     ///
     /// The worker copies the candidates. The caller draws the sample from the requester seed.

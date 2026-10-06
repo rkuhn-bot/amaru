@@ -76,6 +76,10 @@ impl PeerTracking for Performance {
         self.submit(PerformanceOp::Peer(PeerOp::RecordShareRequestServed { requester, amount, at }));
     }
 
+    fn record_uninteresting(&self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, at: ObservedAt) {
+        self.submit(PerformanceOp::Peer(PeerOp::RecordUninteresting { peer, conn_id, after_rollback, at }));
+    }
+
     fn query_share_peers(&self, requester: Peer, amount: u8, now: ObservedAt) -> PeerTrackingFuture<Vec<SocketAddr>> {
         let this = self.clone();
         Box::pin(async move {

@@ -15,10 +15,11 @@
 //! Outbound peer selection.
 //!
 //! This stage keeps intent (whom we want, at what local use, and which deadlines are pending).
-//! Live bearers, applied local use, and dial failures live in the performance resource. A single
-//! timeout wakes the stage at the earlier of one second and the next stored deadline. The wake
-//! copies a peer view only when the resource generation has moved, and runs a full round when
-//! that view changed, a deadline is due, or thirty seconds have passed since the last full round.
+//! Live bearers, applied local use, dial failures, and intersection-not-found marks live in the
+//! performance resource. A single timeout wakes the stage at the earlier of one second and the
+//! next stored deadline. The wake copies a peer view only when the resource generation has moved,
+//! and runs a full round when that view changed, a deadline is due, or thirty seconds have passed
+//! since the last full round. A mark for a live Using bearer sets Maintenance until its deadline.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,7 +36,9 @@ use amaru_pure_stage::{Effects, Instant, StageRef};
 pub use crate::performance::{DEFAULT_PEER_MIX, PeerMix, PeerMixParseError};
 use crate::{
     effects::{GenerateRandomSeed, Ledger, LedgerOps, ResolvePeerCandidate, ResolvePeerCandidateResult},
-    performance::{ChurnRank, PeerView, Performance, SelectOutboundParams, SelectUsing, ViewConnection},
+    performance::{
+        ChurnRank, PeerView, Performance, SelectOutboundParams, SelectUsing, UninterestingMark, ViewConnection,
+    },
 };
 
 const STATIC_PEER_BAN_PERIOD: Duration = Duration::from_secs(10);
@@ -217,13 +220,6 @@ pub enum PeerSelectionMsg {
     Adversarial(Peer, TraceContext),
     /// Manually add a peer, mostly for testing.
     AddPeer(Peer),
-    /// Ask the stage to refill outbound slots (no payload).
-    ///
-    /// The ledger-check child no longer sends this. A generation bump on the candidate write is
-    /// enough for the next tick. The variant remains a safe refill trigger.
-    Regulate,
-    /// ChainSync found no usable intersection (or rolled back past it). Stop diffusion, keep the bearer.
-    Uninteresting { peer: Peer, conn_id: ConnectionId, after_rollback: bool },
     /// DNS result for a selected bootstrap [`amaru_kernel::PeerCandidate`] (at most one [`Peer`]).
     Resolved(ResolvePeerCandidateResult),
     /// Wake from the single timeout.
@@ -733,7 +729,29 @@ impl PeerSelection {
                 ConnectionDirection::Outbound => self.adopt_outbound(conn),
             }
         }
+        self.apply_uninteresting(&view.uninteresting, now);
         self.sync_local_use(now, eff, budget).await;
+    }
+
+    /// Demote a live bearer named by a mark. A missing bearer, or one already in Maintenance, is ignored.
+    fn apply_uninteresting(&mut self, marks: &[UninterestingMark], now: Instant) {
+        for mark in marks {
+            let delay = if mark.after_rollback { UNINTERESTING_RETRY_AFTER_ROLLBACK } else { UNINTERESTING_RETRY };
+            {
+                let Some(bearer) = self.bearer_mut(mark.peer, mark.conn_id) else {
+                    continue;
+                };
+                if bearer.wanted != LocalUse::Diffusion {
+                    continue;
+                }
+                bearer.wanted = LocalUse::Maintenance;
+            }
+            let peer = mark.peer;
+            let conn_id = mark.conn_id;
+            self.demoted_until.insert(peer, now + delay);
+            let reason = "uninteresting";
+            info!(protocols::peer_selection::peer::DEMOTED, peer, conn_id = conn_id.as_u64(), reason);
+        }
     }
 
     fn drop_bearer(&mut self, peer: Peer, conn_id: ConnectionId) {
@@ -931,6 +949,9 @@ impl PeerSelection {
             self.next_churn_at = Some(now + churn_interval(seed));
         }
         self.regulate_peers(now, eff, &mut budget).await;
+        // A mark sets desired use during reconcile. If that round's rate limit held the command,
+        // a later round whose deadline is this interval still has to send it.
+        self.sync_local_use(now, eff, &mut budget).await;
         self.next_sweep_at = Some(now + SWEEP_INTERVAL);
     }
 }
@@ -1007,11 +1028,6 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
                 info!(protocols::peer_selection::peer::ADD_SKIPPED, peer, reason = "already_added");
             }
         }
-        PeerSelectionMsg::Regulate => {
-            let now = eff.clock().await;
-            let mut budget = state.budget();
-            state.regulate_peers(now, &eff, &mut budget).await;
-        }
         PeerSelectionMsg::Resolved(ResolvePeerCandidateResult { candidate, origin, peer }) => {
             state.pending_resolve.remove(&candidate);
             let Some(peer) = peer else {
@@ -1037,14 +1053,6 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
                 let now = eff.clock().await;
                 let mut budget = state.budget();
                 state.start_dial(candidate, origin, peer, now, &eff, &mut budget).await;
-                state.regulate_peers(now, &eff, &mut budget).await;
-            }
-        }
-        PeerSelectionMsg::Uninteresting { peer, conn_id, after_rollback } => {
-            let now = eff.clock().await;
-            let delay = if after_rollback { UNINTERESTING_RETRY_AFTER_ROLLBACK } else { UNINTERESTING_RETRY };
-            let mut budget = state.budget();
-            if state.demote_to_maintenance(peer, conn_id, "uninteresting", now + delay, now, &eff, &mut budget).await {
                 state.regulate_peers(now, &eff, &mut budget).await;
             }
         }
