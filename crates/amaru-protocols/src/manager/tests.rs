@@ -24,7 +24,7 @@ use amaru_pure_stage::{
 };
 use tokio::runtime::Runtime;
 
-use super::{Manager, ManagerConfig, ManagerMessage, PeerSelectionNotify, stage};
+use super::{Manager, ManagerConfig, ManagerMessage, stage};
 use crate::{
     connection::ConnectionMessage,
     network_effects::{CloseEffect, ConnectEffect, ConnectError},
@@ -36,7 +36,6 @@ struct Harness {
     _rt: Runtime,
     manager: amaru_pure_stage::stage_ref::StageStateRef<ManagerMessage, Manager>,
     running: amaru_pure_stage::simulation::SimulationRunning,
-    notify: amaru_pure_stage::Receiver<PeerSelectionNotify>,
     connection: StageRef<ConnectionMessage>,
     connection_rx: amaru_pure_stage::Receiver<ConnectionMessage>,
     extra: StageRef<ConnectionMessage>,
@@ -59,7 +58,6 @@ fn harness_with(config: ManagerConfig) -> Harness {
     let recorder = Arc::new(InMemoryPeerTracking::new());
     let mut network = SimulationBuilder::default().with_mailbox_size(32);
     network.resources().put::<PeerTrackingResource>(recorder.clone());
-    let (notify_stage, notify) = network.output("peer-selection", 8);
     let (connection, connection_rx) = network.output("connection", 8);
     let (extra, extra_rx) = network.output("extra-connection", 8);
     let manager = network.stage("manager", stage);
@@ -71,13 +69,12 @@ fn harness_with(config: ManagerConfig) -> Harness {
             Arc::new(PREPROD_ERA_HISTORY.clone()),
             StageRef::blackhole(),
             StageRef::blackhole(),
-            notify_stage,
         ),
     );
     let rt = Runtime::new().expect("runtime");
     let mut running = network.run(rt.handle());
     running.override_external_effect::<CloseEffect>(usize::MAX, |_| OverrideResult::handled(Ok(())));
-    Harness { _rt: rt, manager, running, notify, connection, connection_rx, extra, extra_rx, recorder, _guards }
+    Harness { _rt: rt, manager, running, connection, connection_rx, extra, extra_rx, recorder, _guards }
 }
 
 fn handshake(
@@ -139,7 +136,6 @@ fn outbound_handshake_is_recorded_and_still_notified() {
     );
     assert!(sim.recorder.closed().is_empty());
     assert!(sim.recorder.connect_failures().is_empty());
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -155,7 +151,6 @@ fn inbound_handshake_starts_at_no_local_use() {
         sim.recorder.established(),
         vec![(record_for(peer, conn_id, ConnectionDirection::Inbound, false, LocalUse::None, at), at)]
     );
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -175,7 +170,6 @@ fn duplicate_handshake_writes_nothing_and_disconnects_the_extra() {
     assert_eq!(sim.recorder.established().len(), 1);
     assert_eq!(sim.recorder.established()[0].0.conn_id, conn_id);
     assert!(sim.recorder.closed().is_empty());
-    assert!(sim.notify.drain().next().is_none());
     assert!(sim.connection_rx.drain().next().is_none());
     let extra: Vec<_> = sim.extra_rx.drain().collect();
     assert_eq!(extra, vec![ConnectionMessage::Disconnect]);
@@ -221,7 +215,6 @@ fn remove_peer_closes_each_bearer_and_still_notifies() {
         sim.recorder.closed(),
         vec![(peer, inbound, CloseReason::LocalDisconnect, at), (peer, outbound, CloseReason::LocalDisconnect, at),]
     );
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -242,7 +235,6 @@ fn bearer_death_closes_with_bearer_ended_and_a_later_death_does_not_write_again(
     let at = observed_at(sim.running.now());
     assert_eq!(sim.recorder.closed(), vec![(peer, conn_id, CloseReason::BearerEnded, at)]);
     assert!(sim.recorder.connect_failures().is_empty());
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -258,7 +250,6 @@ fn failed_attempt_is_recorded_once_and_still_notified() {
     let at = observed_at(sim.running.now());
     assert_eq!(sim.recorder.connect_failures(), vec![(peer, at)]);
     assert!(sim.recorder.established().is_empty());
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -278,7 +269,6 @@ fn initiator_death_before_handshake_is_recorded_once() {
     assert_eq!(sim.recorder.connect_failures()[0].0, peer);
     assert!(sim.recorder.established().is_empty());
     assert!(sim.recorder.closed().is_empty());
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -302,7 +292,6 @@ fn rejected_outbound_duplicate_death_does_not_fail_the_live_connection() {
     assert_eq!(sim.recorder.established().len(), 1);
     assert_eq!(sim.recorder.established()[0].0.conn_id, live);
     assert_eq!(sim.recorder.closed(), vec![(peer, live, CloseReason::BearerEnded, at)]);
-    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -340,5 +329,4 @@ fn inbound_death_before_handshake_writes_nothing() {
     assert!(sim.recorder.established().is_empty());
     assert!(sim.recorder.closed().is_empty());
     assert!(sim.recorder.connect_failures().is_empty());
-    assert!(sim.notify.drain().next().is_none());
 }

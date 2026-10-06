@@ -145,7 +145,7 @@ An observation that can change the next header or block request, or which chain 
 
 Protocols reach the population half through the `PeerTracking` trait (`amaru-ouroboros-traits`). `Performance` implements that trait by enqueueing on this same worker, and the node registers that one handle under both resource names. Consensus stages keep using the existing `Performance` effects. The trait methods are the protocols-facing names.
 
-The manager writes connection established, closed, connect-failed, and local-use-applied, one worker operation per event. Connection-failure malus is applied only inside the manager's connect-failed write. Peer selection does not receive connection lifecycle messages. It keeps one timeout, armed for the earlier of one second and the next stored deadline, and re-arms that timeout at the end of every turn. On each wake it asks the resource for a peer view since the generation it last saw. The resource generation advances on each lifecycle write and when ledger candidates are replaced. An unchanged generation returns no view. A full round runs when the view changed, a stored deadline is due, or thirty seconds have passed since the last full round. The round reconciles desired use with the view, then refills outbound slots. Repeated adversarial reports while a ban is active are ignored apart from a debug log. The first report records the ban, writes the adversarial mark, and removes the peer; the refill waits for the next round. The remaining trait methods have no stage call site yet.
+The manager writes connection established, closed, connect-failed, and local-use-applied, one worker operation per event. Connection-failure malus is applied only inside the manager's connect-failed write. Peer selection does not receive connection lifecycle messages. It keeps one timeout, armed for the earlier of one second and the next stored deadline, and re-arms that timeout at the end of every turn. On each wake it asks the resource for a peer view since the generation it last saw. The resource generation advances on each lifecycle write and when ledger candidates are replaced. An unchanged generation returns no view. A full round runs when the view changed, a stored deadline is due, or thirty seconds have passed since the last full round. The round reconciles desired use with the view, then refills outbound slots. Repeated adversarial reports while a ban is active are ignored apart from a debug log. The first report records the ban, writes the adversarial mark, and removes the peer; the refill waits for the next round. The peer-sharing responder serves a request with `query_share_peers` and records it with `record_share_request_served`. Keep-alive samples and learned share addresses still have no stage call site.
 
 ## Consequences
 
@@ -155,7 +155,7 @@ The manager writes connection established, closed, connect-failed, and local-use
 - Dropping the last `Performance` handle joins the worker after the channel closes; teardown should avoid doing that join on a multi-thread Tokio worker under a deep queue.
 - Ranking and churn algorithms can evolve inside `PeerPerformance` without reshaping the stage graph, as long as the event/query API remains stable.
 - Until keepalive RTT and churn ranking are wired (below), peer quality is incomplete relative to the network-spec intent described in [EDR-024][edr-peer-handling] (latency + bandwidth-based selection).
-- Peer-sharing reply construction uses Performance for reputation (`ok_for_sharing`), origin (exclude ledger and snapshot), and the sticky sample. Listen-address policy remains in peer selection, so Performance alone is not a complete share filter.
+- A peer-sharing reply is the resource sample. The responder calls `query_share_peers` and sends that list. The amount cap and the requester seed stay in the sample. Learned addresses from the initiator still arrive at peer selection.
 
 ## Future work
 
@@ -164,7 +164,7 @@ The manager writes connection established, closed, connect-failed, and local-use
 3. **Scoring policy** — replace provisional EWMA heuristics with an explicit, testable policy (document knobs; avoid silent retunes).
 4. **Horizon / dual-connection edge cases** — keep pruning and clear/forget rules aligned with multi-connection peers (inbound+outbound) so availability is cleared only when no usable connection remains.
 5. **Failure-count decay** — superseded by connection **malus** with lazy half-life decay ([EDR-031](./031-peer-source-mix.md)); telemetry may still keep a raw failure counter.
-6. **Peer-sharing consumer** — the responder still applies listen-address rules on top of Performance. Reputation, origin exclusion (ledger and big-ledger snapshot), and sticky sampling already live in this resource.
+6. **Peer-sharing ingest** — the initiator's learned addresses still arrive at peer selection, which writes them into the shared pool. The responder no longer asks peer selection for a reply.
 
 ## Discussion points
 

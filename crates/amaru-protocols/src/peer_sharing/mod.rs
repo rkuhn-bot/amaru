@@ -19,31 +19,23 @@
 //! - server: wait → `MsgShareRequest` → `MsgSharePeers`
 //!
 //! The initiator is registered on outbound connections; the responder on inbound ones.
-//! Server-side candidate selection is performed by peer selection (via the manager).
+//! The responder reads the reply from the peer-tracking resource.
 
 mod initiator;
 mod messages;
 mod responder;
-
-use std::net::SocketAddr;
 
 use amaru_kernel::Peer;
 use amaru_ouroboros::ConnectionId;
 use amaru_pure_stage::{DeserializerGuards, Effects, StageRef};
 pub use initiator::{PeerSharingInitiator, PeerSharingMessage, ShareResult, initiator};
 pub use messages::{MAX_MESSAGE_BYTES, Message};
-pub use responder::{PeerSharingResponder, ResponderMessage, register_peer_sharing_responder, responder};
+pub use responder::{PeerSharingResponder, register_peer_sharing_responder, responder};
 
 use crate::{
     mux::{Frame, MuxMessage},
     protocol::{PROTO_N2N_PEER_SHARE, ProtoSpec, ProtocolState, RoleT, ingress_limit},
 };
-
-/// Reply from peer selection with addresses to advertise in `MsgSharePeers`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SharePeersReply {
-    pub peers: Vec<SocketAddr>,
-}
 
 pub fn register_deserializers() -> DeserializerGuards {
     vec![initiator::register_deserializers(), responder::register_deserializers()].into_iter().flatten().collect()

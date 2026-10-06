@@ -40,7 +40,6 @@ pub async fn slow_manager_stage(manager: Manager, msg: ManagerMessage, eff: Effe
         ManagerMessage::NewTip(_, _) => {}
         ManagerMessage::FetchBlocks { .. } => {}
         ManagerMessage::RequestSharePeers { .. } => {}
-        ManagerMessage::ShareRequest { .. } => {}
         ManagerMessage::ConnectionResult(..) => {}
         ManagerMessage::SetLocalUse { .. } => {}
         ManagerMessage::LocalUseApplied { .. } => {}

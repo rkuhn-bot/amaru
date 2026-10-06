@@ -1360,3 +1360,60 @@ fn instrumented_worker_queue_wait() {
     assert!(!waited.is_zero(), "urgent ops were not timed");
     assert!(waited <= Duration::from_millis(1), "urgent queue wait {waited:?}");
 }
+
+#[test]
+fn a_remote_share_request_keeps_the_same_addresses() {
+    use std::collections::BTreeSet;
+
+    use amaru_kernel::PeerCandidate;
+
+    use crate::performance::PeerMix;
+
+    let requester = Peer::for_test(5000);
+    let failed = Peer::for_test(5012);
+    let ledger = Peer::for_test(5013);
+    let mut static_peers = BTreeSet::from([PeerCandidate::from(requester), PeerCandidate::from(failed)]);
+    for port in 5001..=5011 {
+        static_peers.insert(PeerCandidate::from(Peer::for_test(port)));
+    }
+    let ledger_candidates = BTreeSet::from([PeerCandidate::from(ledger)]);
+    let mix = PeerMix::default();
+    let at = observed(2, 0);
+    let now = t(2);
+
+    let mut direct =
+        PeerPerformance::with_sources(static_peers.clone(), BTreeSet::new(), ledger_candidates.clone(), mix.clone());
+    direct.record_connect_failed(failed, at);
+    let before = direct.select_share_peers(&requester, 20, now);
+
+    let resources = Resources::default();
+    let _join =
+        Performance::with_peer_sources(static_peers, BTreeSet::new(), ledger_candidates, mix).install(&resources);
+    let tracking = resources.get::<PeerTrackingResource>().expect("peer tracking").clone();
+    tracking.record_connect_failed(failed, at);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let after = rt.block_on(tracking.query_share_peers(requester, 20, at));
+    let again = rt.block_on(tracking.query_share_peers(requester, 20, at));
+
+    assert_eq!(after, before, "the resource reply diverged from the previous share sample");
+    assert_eq!(again, after);
+    assert_eq!(after.len(), 10);
+    assert!(!after.iter().any(|addr| {
+        *addr == SocketAddr::from(requester) || *addr == SocketAddr::from(failed) || *addr == SocketAddr::from(ledger)
+    }));
+    assert_eq!(
+        after,
+        vec![
+            SocketAddr::from(Peer::for_test(5003)),
+            SocketAddr::from(Peer::for_test(5001)),
+            SocketAddr::from(Peer::for_test(5006)),
+            SocketAddr::from(Peer::for_test(5005)),
+            SocketAddr::from(Peer::for_test(5002)),
+            SocketAddr::from(Peer::for_test(5010)),
+            SocketAddr::from(Peer::for_test(5009)),
+            SocketAddr::from(Peer::for_test(5011)),
+            SocketAddr::from(Peer::for_test(5004)),
+            SocketAddr::from(Peer::for_test(5007)),
+        ],
+    );
+}
