@@ -151,11 +151,7 @@ fn setup_preload_with_mode(
     run_simulation_with(
         prep.rt.handle(),
         guards,
-        |network| {
-            // Larger bulk mailbox so tests can preload many adversarial messages without
-            // hitting the default size of 10 (the cool-down fix is about the *priority*
-            // mailbox, not bulk preload).
-            let mut network = network.with_mailbox_size(64);
+        |mut network| {
             let ps = network.stage("ps", stage);
             let ps = network.wire_up(ps, prep.state.clone());
             network.preload(&ps, messages).unwrap();
