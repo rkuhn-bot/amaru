@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use amaru_kernel::Peer;
-use amaru_ouroboros::{ConnectionDirection, ConnectionId, LocalUse, ObservedAt};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, LocalUse, ObservedAt};
 
 use super::PeerPerformance;
 
@@ -41,20 +41,30 @@ pub struct UninterestingMark {
     pub after_rollback: bool,
 }
 
+/// Latest close of one peer. A closed connection is not a connect failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DialOutcome {
+    Closed { at: ObservedAt, reason: CloseReason },
+}
+
 /// Population snapshot. `None` from a query means the generation has not moved.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PeerView {
     pub generation: u64,
     pub connections: Vec<ViewConnection>,
     pub connect_failures: BTreeMap<Peer, ObservedAt>,
+    /// Latest close of each peer. The caller applies a close only when it is at or after the dial.
+    pub closes: BTreeMap<Peer, DialOutcome>,
     /// Marks whose generation is newer than the `since` the caller passed.
     pub uninteresting: Vec<UninterestingMark>,
 }
 
 impl PeerPerformance {
-    /// Copy live bearers, dial failures, and intersection-not-found marks newer than `since_generation`.
+    /// Copy live bearers, dial failures, the latest close of each peer, and intersection-not-found
+    /// marks newer than `since_generation`.
     ///
     /// Returns `None` when nothing this view carries has changed, so the caller can skip a round.
+    /// Bearers are already ordered by [`ConnectionId`].
     pub fn query_peer_view(&self, since_generation: u64) -> Option<PeerView> {
         if since_generation >= self.generation {
             return None;
@@ -72,7 +82,11 @@ impl PeerPerformance {
                 local_use: record.local_use,
             });
         }
-        connections.sort_by(|left, right| left.conn_id.cmp(&right.conn_id).then(left.peer.cmp(&right.peer)));
+        let closes = self
+            .last_close
+            .iter()
+            .map(|(peer, close)| (*peer, DialOutcome::Closed { at: close.at, reason: close.reason }))
+            .collect();
         let mut uninteresting = Vec::new();
         for (peer, mark) in &self.uninteresting {
             if mark.generation > since_generation {
@@ -87,6 +101,7 @@ impl PeerPerformance {
             generation: self.generation,
             connections,
             connect_failures: self.last_connect_failure.clone(),
+            closes,
             uninteresting,
         })
     }

@@ -1288,6 +1288,23 @@ fn share_request_window_rolls_current_into_previous() {
 }
 
 #[test]
+fn share_request_window_stays_on_the_boundary_when_the_sample_is_off_grid() {
+    let mut peers = PeerPerformance::new();
+    let asker = Peer::for_test(4004);
+    let start = observed(100, 2);
+    let at = |extra: Duration| ObservedAt::new(start.elapsed + extra, start.global_epoch_offset);
+
+    peers.record_share_request_served(asker, 3, start);
+    peers.record_share_request_served(asker, 4, at(Duration::from_secs(90)));
+    let rolled = peers.share_requests(&asker).expect("row");
+    assert_eq!(rolled.count, 2);
+    assert_eq!(rolled.current_window, 1);
+    assert_eq!(rolled.previous_window, 1, "one whole window rolls the current count forward");
+    assert_eq!(rolled.window_start, at(SHARE_REQUEST_WINDOW), "the window stays on the 60s boundary");
+    assert_eq!(peers.generation(), 0);
+}
+
+#[test]
 fn observations_do_not_change_fetch_or_share_replies() {
     let mut peers = PeerPerformance::new();
     let alice = peer("alice");
@@ -1367,9 +1384,8 @@ fn install_shares_one_worker_and_a_later_query_sees_the_write() {
     let donor = Peer::for_test(4101);
     let other = Peer::for_test(4102);
     let asker = Peer::for_test(4103);
-    tracking.record_shared_peers(donor, vec![SocketAddr::from(other)], at);
-
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    rt.block_on(tracking.record_shared_peers(donor, vec![SocketAddr::from(other)], at));
     let flags_response = rt.block_on(Box::new(Performance::share_flags(alice)).run(resources));
     let flags = *flags_response.cast::<Option<PeerShareFlags>>().expect("share flags");
     assert_eq!(
@@ -1437,6 +1453,25 @@ fn uninteresting_marks_are_the_latest_per_peer_and_only_those_since_the_query() 
     let view = peers.query_peer_view(seen).expect("close moves the generation");
     assert!(view.uninteresting.iter().all(|mark| mark.peer != bob), "a closed bearer drops its mark");
     assert!(view.uninteresting.iter().all(|mark| mark.peer != alice));
+}
+
+#[test]
+fn a_mark_without_a_live_bearer_is_not_stored() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let (alice_id, other_id) = conn_ids();
+    let at = observed(1, 0);
+
+    peers.record_uninteresting(alice, alice_id, false, at);
+    assert_eq!(peers.generation(), 0);
+    assert!(peers.query_peer_view(0).is_none(), "nothing was stored");
+
+    peers.record_connection_established(connection_record(alice, alice_id, at, false), at);
+    let generation = peers.generation();
+    peers.record_uninteresting(alice, other_id, true, observed(2, 0));
+    assert_eq!(peers.generation(), generation, "a different connection is not this bearer");
+    let view = peers.query_peer_view(0).expect("the establish moved the generation");
+    assert!(view.uninteresting.is_empty());
 }
 
 #[test]

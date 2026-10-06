@@ -89,7 +89,14 @@ pub struct ConnectionRecord {
     pub established_at: ObservedAt,
 }
 
-/// Future returned by [`PeerTracking::query_share_peers`].
+/// How many shared addresses were new, and the pool size after the ingest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SharedPeersRecorded {
+    pub added: usize,
+    pub total: usize,
+}
+
+/// Future returned by [`PeerTracking`] methods that wait for the worker.
 pub type PeerTrackingFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 /// Peer-population resource.
@@ -117,7 +124,15 @@ pub trait PeerTracking: Send + Sync + 'static {
     fn record_keepalive_rtt(&self, peer: Peer, rtt: Duration, at: ObservedAt);
 
     /// Addresses learned from `from`.
-    fn record_shared_peers(&self, from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt);
+    ///
+    /// The worker applies the ingest and returns how many addresses were new and how large the
+    /// shared pool is afterwards. The caller logs that result.
+    fn record_shared_peers(
+        &self,
+        from: Peer,
+        addrs: Vec<SocketAddr>,
+        at: ObservedAt,
+    ) -> PeerTrackingFuture<SharedPeersRecorded>;
 
     /// An inbound share request from `requester` was answered.
     fn record_share_request_served(&self, requester: Peer, amount: u8, at: ObservedAt);
