@@ -2100,7 +2100,7 @@ define_schemas! {
                     }
                     /// A disconnect request could not be carried out.
                     /// Reason ∈ {not_connected, connection_not_found, peer_already_removed,
-                    /// before_handshake}.
+                    /// before_handshake, rejected_duplicate}.
                     public DISCONNECT_IGNORED {
                         required peer: %amaru_kernel::Peer
                         required reason: String

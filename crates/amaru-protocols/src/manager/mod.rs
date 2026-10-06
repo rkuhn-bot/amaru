@@ -198,6 +198,10 @@ impl ManagerMessage {
 /// - Sending [`ManagerMessage::AddPeer`] will generate [`PeerSelectionNotify::ConnectFailed`]
 ///   if that attempt fails before [`ManagerMessage::RemovePeer`] is received.
 ///
+///   A second outbound handshake that is rejected because this peer is already connected does not
+///   write a bearer. When that extra bearer later dies, the manager does not record a connect
+///   failure and does not send [`PeerSelectionNotify::ConnectFailed`]. The live connection stays.
+///
 /// The same facts are written to the peer-tracking resource, one update per event:
 /// handshake (`record_connection_established`), applied local use, a close, and a failed
 /// outbound attempt. The notifications above are still sent. Outbound local use at handshake
@@ -562,6 +566,20 @@ impl Manager {
             debug!(protocols::manager::peer::DISCONNECT_IGNORED, peer, reason = "peer_already_removed");
             return;
         };
+        // A handshake that lost the duplicate check never entered `connections`. Its later death
+        // is not the live dial: the peer already has an outbound bearer.
+        if role == Role::Initiator
+            && matches!(peer_state.outbound, OutboundState::Connected { .. })
+            && !self.connections.contains_key(&conn_id)
+        {
+            debug!(
+                protocols::manager::peer::DISCONNECT_IGNORED,
+                peer,
+                reason = "rejected_duplicate",
+                conn_id = conn_id.as_u64()
+            );
+            return;
+        }
         if let Some(Connection { direction, .. }) = self.connections.remove(&conn_id) {
             match direction {
                 ConnectionDirection::Inbound => {
