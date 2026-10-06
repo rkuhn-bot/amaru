@@ -1288,6 +1288,23 @@ fn share_request_window_rolls_current_into_previous() {
 }
 
 #[test]
+fn share_request_window_stays_on_the_boundary_when_the_sample_is_off_grid() {
+    let mut peers = PeerPerformance::new();
+    let asker = Peer::for_test(4004);
+    let start = observed(100, 2);
+    let at = |extra: Duration| ObservedAt::new(start.elapsed + extra, start.global_epoch_offset);
+
+    peers.record_share_request_served(asker, 3, start);
+    peers.record_share_request_served(asker, 4, at(Duration::from_secs(90)));
+    let rolled = peers.share_requests(&asker).expect("row");
+    assert_eq!(rolled.count, 2);
+    assert_eq!(rolled.current_window, 1);
+    assert_eq!(rolled.previous_window, 1, "one whole window rolls the current count forward");
+    assert_eq!(rolled.window_start, at(SHARE_REQUEST_WINDOW), "the window stays on the 60s boundary");
+    assert_eq!(peers.generation(), 0);
+}
+
+#[test]
 fn observations_do_not_change_fetch_or_share_replies() {
     let mut peers = PeerPerformance::new();
     let alice = peer("alice");
