@@ -30,6 +30,7 @@ use amaru_kernel::{HeaderHash, Peer, PeerCandidate};
 use amaru_ouroboros::ConnectionId;
 pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersParams};
 use claims::{ClaimMeta, ParentInfo};
+pub(crate) use connections::instant_of;
 pub use peer_mix::{DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, MixEntry, PeerMix, PeerMixParseError, PeerSource};
 pub use quality::PeerScores;
 use record::PeerState;
@@ -39,6 +40,7 @@ pub use reputation::{
 };
 pub use select_outbound::{NEVER_CONNECTED_BONUS, OutboundPick, SelectOutboundParams, SelectUsing};
 pub use select_share::SHARE_POLICY_MAX;
+pub(crate) use select_share::{ShareCandidate, sample_share_peers, share_reply_seed};
 pub use sources::{SharedIngestResult, SourceCounts};
 
 /// Peer performance map (availability + scores + source pools). Owned by the performance worker.
@@ -62,7 +64,7 @@ pub struct PeerPerformance {
     last_peer: BTreeMap<PeerCandidate, Peer>,
     /// Established bearers. Absent after close.
     connections: BTreeMap<ConnectionId, connections::LiveConnection>,
-    /// Latest close of a bearer this map had recorded.
+    /// Only the latest close for each peer is kept; an earlier close is replaced.
     last_close: BTreeMap<Peer, connections::CloseRecord>,
     /// Latest outbound dial that failed before handshake.
     last_connect_failure: BTreeMap<Peer, amaru_ouroboros::ObservedAt>,

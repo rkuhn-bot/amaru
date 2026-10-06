@@ -126,7 +126,7 @@ Probe points should stay aligned: the same stage moments that open/close [EDR-02
 
 The choice is timeliness, not reliability.
 
-A message is required when the receiver must act immediately: which peer to ask for the next header or block, which chain to adopt, or an adversarial disconnect. Those stay stage messages. Population bookkeeping can wait about a second: a connection opened or closed, a dial that failed, the local use applied on a bearer, addresses learned by peer sharing, a share request that was served, and a keep-alive round trip. Those are written to this resource. The consumer reads them on its own schedule.
+A message is required when the receiver must act immediately: which peer to ask for the next header or block, which chain to adopt, or an adversarial disconnect. Those stay stage messages. Population bookkeeping can wait about a second: a connection opened, a dial that failed, the local use applied on a bearer, addresses learned by peer sharing, a share request that was served, and a keep-alive round trip. Those are written to this resource. The consumer reads them on its own schedule. Closing a bearer is written the same way. When that bearer was the peer's last one, the write clears the peer's claims immediately; only the later refill of outbound slots waits for the consumer.
 
 An observation that can change the next header or block request, or which chain is adopted, still has to reach that consumer within about 10 ms. A resource read is acceptable for that work only when the consumer is woken on change or ticks at about that rate. A one-second tick is not.
 

@@ -45,7 +45,7 @@ pub(super) struct ShareRequests {
     pub(super) last_at: ObservedAt,
 }
 
-pub(super) fn instant_of(at: ObservedAt) -> Instant {
+pub(crate) fn instant_of(at: ObservedAt) -> Instant {
     Instant::at_offset(at.elapsed, at.global_epoch_offset)
 }
 

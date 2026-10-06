@@ -21,6 +21,7 @@ use super::{enqueue_query, require_perf};
 use crate::performance::{
     PeerShareFlags, PeerSnapshot, Performance, SharedIngestResult,
     ops::{PeerOp, PerformanceOp},
+    peers::{sample_share_peers, share_reply_seed},
 };
 
 impl Performance {
@@ -124,7 +125,10 @@ impl ExternalEffectAPI for SelectSharePeersEffect {
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
         self.wrap(|this| async move {
-            enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::SelectSharePeers { effect: this, reply })).await
+            let now = this.now;
+            let candidates =
+                enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::ShareReplyCandidates { now, reply })).await;
+            sample_share_peers(&this.requester, this.amount, &candidates, share_reply_seed(&this.requester))
         })
     }
 }

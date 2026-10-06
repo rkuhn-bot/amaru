@@ -167,6 +167,7 @@ pub fn register_guards() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<crate::performance::SelectUsing>().boxed(),
         amaru_pure_stage::register_data_deserializer::<crate::performance::OutboundPick>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::SelectSharePeersEffect>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<Vec<std::net::SocketAddr>>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::IsStaticPeerEffect>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::NoteDialEffect>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::effects::ResolvePeerCandidate>().boxed(),
