@@ -252,10 +252,15 @@ impl SimulationRunning {
     /// Treat a sampled external `δ` of at most `bound` as zero.
     ///
     /// The sample is still drawn. No wakeup is scheduled, so the stage continues at the same
-    /// instant. Stage tests that snapshot traces use this for performance bookkeeping. The world
-    /// deadlock repro does not: those durations are what keep `manager` parked.
+    /// instant. Stage tests and world graphs that are not studying the manager stall use this
+    /// for performance bookkeeping. [`Self::keep_external_durations`] turns it off.
     pub fn collapse_external_within(&mut self, bound: Duration) {
         self.external_collapse = Some(bound);
+    }
+
+    /// Leave sampled external durations in place. Undoes [`Self::collapse_external_within`].
+    pub fn keep_external_durations(&mut self) {
+        self.external_collapse = None;
     }
 
     /// Get the resources collection for the network.

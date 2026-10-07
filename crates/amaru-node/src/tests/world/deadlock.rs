@@ -167,6 +167,8 @@ fn run_once(
         .with_trace_buffer(TraceBuffer::new_shared(4_000, 2_000_000))
         .with_validated_blocks(vec![header]);
     let mut node_sim = build_world_node(&node, connections, handle).expect("node");
+    // Other world graphs collapse bookkeeping of at most 1ms. This repro needs those durations.
+    node_sim.keep_external_durations();
     stub_peer_selection_seed(&mut node_sim, derive_seed(seed, 200));
     node_sim.set_eval_strategy(LifecycleOrder { provider: provider.clone(), manager_first_at });
     graphs.push(node_sim);

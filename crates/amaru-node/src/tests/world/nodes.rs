@@ -61,5 +61,10 @@ pub fn build_world_node(
         stage_graph.resources().put(crate::tests::configuration::DummyLedgerDir(tmp));
     }
 
-    Ok(stage_graph.run(tokio_handle))
+    let mut running = stage_graph.run(tokio_handle);
+    // Performance effects are uniform over `[0, 1ms]`. World tests that measure chain progress
+    // treat that bookkeeping as free. The manager/peer-selection repro calls
+    // `keep_external_durations` so the stall stays visible.
+    running.collapse_external_within(std::time::Duration::from_millis(1));
+    Ok(running)
 }
