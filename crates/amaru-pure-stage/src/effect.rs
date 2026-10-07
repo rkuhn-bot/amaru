@@ -30,6 +30,7 @@ use parking_lot::Mutex;
 #[cfg(target_arch = "riscv32")]
 use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
+use tracing::Instrument;
 
 use crate::{
     BLACKHOLE_NAME, BoxFuture, DurationDist, Instant, Name, Resources, ScheduleId, SendData, StageBuildRef, StageRef,
@@ -704,6 +705,11 @@ pub trait ExternalEffect: SendData {
         DurationDist::ZERO
     }
 
+    /// Concrete Rust type name (`std::any::type_name`), for the effect-duration span.
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Run the effect in production mode.
     ///
     /// Implementations typically retrieve shared services via typed lookups
@@ -793,6 +799,29 @@ impl<T: ExternalEffectAPI> ExternalEffect for T {
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         ExternalEffectAPI::run(self, resources)
     }
+}
+
+/// Tracing target for the span around [`ExternalEffect::run`].
+///
+/// `pure_stage=debug` selects these spans and not the `amaru_pure_stage` logs.
+pub const EFFECT_SPAN_TARGET: &str = "pure_stage::effect";
+
+/// Run `effect`, entering a debug span for its wall-clock duration when that span is enabled.
+///
+/// The disabled path returns `effect.run` unchanged: one callsite check, no type-name lookup,
+/// no span, and no extra future wrapper. Tokio and the simulator both use this. The span records
+/// wall time only; it does not write the simulation trace or advance simulated time.
+pub(crate) fn run_external_effect(
+    effect: Box<dyn ExternalEffect>,
+    resources: Resources,
+    stage: &Name,
+) -> BoxFuture<'static, Box<dyn SendData>> {
+    if !tracing::span_enabled!(target: EFFECT_SPAN_TARGET, tracing::Level::DEBUG) {
+        return effect.run(resources);
+    }
+    let type_name = effect.type_name();
+    let span = tracing::debug_span!(target: EFFECT_SPAN_TARGET, "effect", type_name, stage = %stage);
+    Box::pin(effect.run(resources).instrument(span))
 }
 
 fn assert_simulated_duration<E: ExternalEffectAPI>(effect: &E) {

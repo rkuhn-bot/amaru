@@ -20,6 +20,7 @@
 const _: () = amaru_deps::AMARU_DEPS_USED;
 
 pub mod drop_guard;
+pub use effect::EFFECT_SPAN_TARGET;
 mod duration_dist;
 mod effect;
 mod effect_box;

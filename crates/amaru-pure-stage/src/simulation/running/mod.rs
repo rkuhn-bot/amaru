@@ -635,7 +635,8 @@ impl SimulationRunning {
         match self.apply_external_overrides(effect) {
             Err(msg) => self.provide_detach_result(id, msg),
             Ok(effect) => {
-                self.pending_detach_computations.insert(id, effect.run(self.resources.clone()));
+                self.pending_detach_computations
+                    .insert(id, crate::effect::run_external_effect(effect, self.resources.clone(), &at_stage));
                 self.try_deliver_detach(id);
             }
         }
@@ -1305,7 +1306,10 @@ impl SimulationRunning {
                 }
                 Ok(effect) => {
                     let name = at_stage.clone();
-                    self.pending_computations.insert(name.clone(), effect.run(self.resources.clone()));
+                    self.pending_computations.insert(
+                        name.clone(),
+                        crate::effect::run_external_effect(effect, self.resources.clone(), &name),
+                    );
                     self.try_deliver_external(&name);
                 }
             },

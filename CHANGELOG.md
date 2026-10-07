@@ -38,6 +38,8 @@ Other guiding principles:
 
 ### Added
 
+- **amaru**: `--log-output PATH:FILTER` (or `AMARU_LOG_OUTPUT`) writes an extra log file without replacing the terminal, the TUI, or OpenTelemetry. Repeat the flag for more files. The value is split at the first colon. A path ending in `.ndjson` is JSON, one object per line; any other path is text. Span close lines include busy and idle time. `amaru --log-output effects.ndjson:pure_stage=debug node run` records how long each external effect runs.
+  `try_setup_observability` and `setup_observability` take those file specs as an extra argument.
 - **amaru-pure-stage**: a stage can try to send without waiting (`Queued`, `Full`, or `Gone`), and each stage can set its own mailbox size. The default stays 10. A call reports `NotAdmitted` when the deadline fired before the request was queued, and `TimedOut` when the request was queued and no reply came before the deadline.
 
 ### Changed
