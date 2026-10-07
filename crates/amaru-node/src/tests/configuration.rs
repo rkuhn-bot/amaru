@@ -86,6 +86,8 @@ pub struct NodeTestConfig {
     pub blockfetch_pipeline_n: NonZeroU8,
     /// When set, overrides [`Config::share_request_initial_delay`] (production default 300s).
     pub share_request_initial_delay: Option<Duration>,
+    /// When set, manager and peer selection use this bulk mailbox instead of the sized formula.
+    pub peer_bulk_mailbox: Option<usize>,
     /// When set, replaces the network profile's global parameters.
     pub global_parameters: Option<GlobalParameters>,
     /// When set, replaces the network profile's era history.
@@ -123,6 +125,7 @@ impl Debug for NodeTestConfig {
             .field("peer_mix", &self.peer_mix)
             .field("blockfetch_pipeline_n", &self.blockfetch_pipeline_n)
             .field("share_request_initial_delay", &self.share_request_initial_delay)
+            .field("peer_bulk_mailbox", &self.peer_bulk_mailbox)
             .field("forging_credentials", &self.forging_credentials.is_some())
             .field("global_parameters", &self.global_parameters)
             .field("era_history_override", &self.era_history_override.is_some())
@@ -160,6 +163,7 @@ impl Default for NodeTestConfig {
             peer_mix: None,
             blockfetch_pipeline_n: NonZeroU8::MIN,
             share_request_initial_delay: None,
+            peer_bulk_mailbox: None,
             forging_credentials: None,
             global_parameters: None,
             era_history_override: None,
@@ -261,6 +265,11 @@ impl NodeTestConfig {
 
     pub fn with_mailbox_size(mut self, size: usize) -> Self {
         self.mailbox_size = size;
+        self
+    }
+
+    pub fn with_peer_bulk_mailbox(mut self, size: usize) -> Self {
+        self.peer_bulk_mailbox = Some(size);
         self
     }
 
@@ -425,6 +434,7 @@ impl NodeTestConfig {
         if let Some(delay) = self.share_request_initial_delay {
             config.share_request_initial_delay = delay;
         }
+        config.peer_bulk_mailbox = self.peer_bulk_mailbox;
 
         if let Some(ledger_dir) = &self.ledger_dir {
             config.ledger_config.ledger_store = RocksDbConfig::new(ledger_dir.clone());

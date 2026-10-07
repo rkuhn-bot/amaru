@@ -23,9 +23,9 @@ pub mod running;
 pub mod simulation_builder;
 mod state;
 
-pub use blocked::{Blocked, SendBlock};
+pub use blocked::{Blocked, SendBlock, SuspendedSend};
 pub use random::{EvalStrategy, Fifo, RandStdRng};
 pub use run::{Externals, Run, TimeAdvance};
-pub use running::{Breakpoint, SimulationRunning};
+pub use running::{Breakpoint, ParkedSend, SimulationRunning};
 pub use simulation_builder::SimulationBuilder;
 pub use state::Transition;

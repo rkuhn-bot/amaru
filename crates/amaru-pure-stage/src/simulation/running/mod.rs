@@ -37,7 +37,7 @@ use crate::{
     serde::{SendDataValue, to_cbor},
     simulation::{
         Externals, Run, TimeAdvance,
-        blocked::{Blocked, SendBlock},
+        blocked::{Blocked, SendBlock, SuspendedSend},
         inputs::Inputs,
         random::EvalStrategy,
         running::{
@@ -114,6 +114,21 @@ pub struct SimulationRunning {
     /// Keyed by the call's [`ScheduleId`]. The wakeup consumes the id and reports `TimedOut`.
     /// A reply that arrives first removes it so the id does not stay behind.
     admitted_calls: BTreeSet<ScheduleId>,
+    /// Bulk sends that found a full mailbox. Later admission does not remove the row.
+    parked_sends: Vec<ParkedSend>,
+    /// Sampled external `δ` at or below this bound occupies no simulated time.
+    ///
+    /// Stage tests that snapshot traces set it so performance bookkeeping does not insert clock
+    /// entries or shift later schedule ids. The world deadlock repro leaves it unset.
+    external_collapse: Option<Duration>,
+}
+
+/// A bulk send that could not enter the destination mailbox.
+#[derive(Debug, Clone)]
+pub struct ParkedSend {
+    pub from: Name,
+    pub to: Name,
+    pub message: String,
 }
 
 /// Borrow of the effect that hit a breakpoint. Must be dropped before the next [`SimulationRunning::run`].
@@ -208,7 +223,44 @@ impl SimulationRunning {
             virtual_child_stages: false,
             pending_breakpoint: None,
             admitted_calls: BTreeSet::new(),
+            parked_sends: Vec::new(),
+            external_collapse: None,
         }
+    }
+
+    /// Bulk sends that waited because the destination mailbox was full.
+    pub fn parked_sends(&self) -> &[ParkedSend] {
+        &self.parked_sends
+    }
+
+    /// `(queued, capacity, parked senders)` for the stage's bulk mailbox.
+    pub fn bulk_ingress(&self, name: &str) -> Option<(usize, usize, usize)> {
+        let data = self.stages.get(name)?;
+        Some((data.mailbox.len(), data.mailbox_size, data.senders.len()))
+    }
+
+    /// Stage names in this simulation.
+    pub fn stage_names(&self) -> Vec<Name> {
+        self.stages.keys().cloned().collect()
+    }
+
+    /// Replace the runnable-queue policy. The world loop has not driven the graph yet.
+    pub fn set_eval_strategy(&mut self, strategy: impl EvalStrategy + 'static) {
+        self.eval_strategy = Box::new(strategy);
+    }
+
+    /// Treat a sampled external `δ` of at most `bound` as zero.
+    ///
+    /// The sample is still drawn. No wakeup is scheduled, so the stage continues at the same
+    /// instant. Stage tests and world graphs that are not studying the manager stall use this
+    /// for performance bookkeeping. [`Self::keep_external_durations`] turns it off.
+    pub fn collapse_external_within(&mut self, bound: Duration) {
+        self.external_collapse = Some(bound);
+    }
+
+    /// Leave sampled external durations in place. Undoes [`Self::collapse_external_within`].
+    pub fn keep_external_durations(&mut self) {
+        self.external_collapse = None;
     }
 
     /// Get the resources collection for the network.
@@ -382,7 +434,12 @@ impl SimulationRunning {
         if self.external_inflight.contains_key(&at_stage) {
             return;
         }
-        let delta = dist.sample(&mut self.duration_rng);
+        let mut delta = dist.sample(&mut self.duration_rng);
+        if let (Some(d), Some(bound)) = (delta, self.external_collapse)
+            && d <= bound
+        {
+            delta = Some(Duration::ZERO);
+        }
         // UntilResolved has no δ: the world runner completes the Future. Sampled δ
         // (including zero) means the computation is scheduled and must be forced when due.
         let force_on_ready = delta.is_some();
@@ -705,6 +762,48 @@ impl SimulationRunning {
         self.mailbox_size
     }
 
+    /// Stages suspended on a bulk send or a call.
+    ///
+    /// Unlike [`Blocked::Deadlock`], this includes sends that are still outstanding while
+    /// other stages are on a timer or an external effect. The parked payload is the message
+    /// the sender could not enqueue.
+    pub fn suspended_sends(&self) -> Vec<SuspendedSend> {
+        let waiting = self
+            .stages
+            .iter()
+            .filter_map(|(from, data)| {
+                let waiting = data.waiting.as_ref()?;
+                match waiting {
+                    StageEffect::Send(to, call, ()) => Some((from.clone(), to.clone(), call.is_some())),
+                    StageEffect::Call(to, _, _) => Some((from.clone(), to.clone(), true)),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>();
+        waiting
+            .into_iter()
+            .filter_map(|(from, to, is_call)| {
+                let dest = self.stages.get(&to)?;
+                let message = dest
+                    .senders
+                    .iter()
+                    .filter(|(name, _)| name == &from)
+                    .map(|(_, msg)| format!("{msg:?}"))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Some(SuspendedSend {
+                    from,
+                    to,
+                    is_call,
+                    dest_len: dest.mailbox.len(),
+                    dest_capacity: dest.mailbox_size,
+                    dest_parked: dest.senders.len(),
+                    message,
+                })
+            })
+            .collect()
+    }
+
     /// Obtain a reference to the current state of the given stage.
     /// This only works while the stage is suspended on an [`Effect::Receive`]
     /// because otherwise the state is captured by the opaque `Future` returned
@@ -751,9 +850,12 @@ impl SimulationRunning {
             self.trace_buffer.lock().push_suspend(&effect);
         }
 
-        if let Effect::External { at_stage, effect } = &effect {
-            let at_stage = at_stage.clone();
-            let dist = effect.simulated_duration_dist();
+        let delayed = if let Effect::External { at_stage, effect } = &effect {
+            Some((at_stage.clone(), effect.simulated_duration_dist()))
+        } else {
+            None
+        };
+        if let Some((at_stage, dist)) = delayed {
             self.begin_external(at_stage, dist);
         }
 
@@ -1167,6 +1269,7 @@ impl SimulationRunning {
                         .ok();
                     }
                 } else {
+                    let mut parked = None;
                     let resume = match deliver_message(&mut self.stages, to.clone(), msg) {
                         DeliverMessageResult::Delivered(data_to) => {
                             // `to` may not be suspended on receive, so failure to resume is okay
@@ -1180,6 +1283,8 @@ impl SimulationRunning {
                             Some(from)
                         }
                         DeliverMessageResult::Full(data_to, send_data) => {
+                            let message = format!("{send_data:?}");
+                            parked = Some((from.clone(), to.clone(), message));
                             data_to.senders.push_back((from, send_data));
                             None
                         }
@@ -1188,6 +1293,9 @@ impl SimulationRunning {
                             Some(from)
                         }
                     };
+                    if let Some((from, to, message)) = parked {
+                        self.parked_sends.push(ParkedSend { from, to, message });
+                    }
                     if let Some(from) = resume {
                         let data_from = skip_if_terminated(self.stages.get_mut(&from), &from)?;
                         resume_send_internal(
