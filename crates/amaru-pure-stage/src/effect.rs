@@ -737,7 +737,8 @@ pub trait ExternalEffectAPI: SendData {
     ///
     /// A blanket [`ExternalEffect`] impl reports this as
     /// [`ExternalEffect::simulated_duration_dist`]. Use [`DurationDist::UntilResolved`] when
-    /// the simulation (not a sampled `δ`) decides when the effect Future completes.
+    /// the simulation (not a sampled `δ`) decides when the effect Future completes. Assign a
+    /// [`DurationDist::cdf`] constant for measured local work.
     const SIMULATED_DURATION: DurationDist = DurationDist::ZERO;
 
     /// Instance view of [`Self::SIMULATED_DURATION`]. Override only if the distribution
