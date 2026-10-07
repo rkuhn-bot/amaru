@@ -69,6 +69,10 @@ pub fn create_nodes(
         let test_node_stages = create_node(&config, &mut stage_graph)?;
 
         let mut running = stage_graph.run(tokio_handle);
+        // Each performance effect is a uniform `[0, 1ms]`. This runner counts one stop as a step,
+        // so those delays exhaust the step budget before the protocols settle. Collapse them.
+        // The world deadlock repro does not: that stall is the duration.
+        running.collapse_external_within(std::time::Duration::from_millis(1));
         // Don't validate the generated headers, we just want to check the mini-protocols communication.
         running.override_external_effect::<ValidateHeaderEffect>(usize::MAX, |_| {
             OverrideResult::handled(Ok(Nonces::for_tests()))

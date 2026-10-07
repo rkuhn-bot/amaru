@@ -335,6 +335,9 @@ where
 
     let mut running = network.run(rt);
     running.use_virtual_child_stages(true);
+    // Performance bookkeeping is uniform over `[0, 1ms]`. Collapsing that band keeps trace
+    // snapshots on the pre-effect instant. The world deadlock repro does not collapse it.
+    running.collapse_external_within(Duration::from_millis(1));
     setup_overrides(&mut running);
 
     match mode {

@@ -17,9 +17,9 @@
 #![expect(clippy::unit_arg)]
 
 use amaru_kernel::{HeaderHash, Peer};
-use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
+use amaru_pure_stage::{BoxFuture, DurationDist, ExternalEffectAPI, Instant, Resources, SendData};
 
-use super::{enqueue, enqueue_and_emit_telemetry, enqueue_query, require_perf};
+use super::{SIMULATED_BOOKKEEPING, enqueue, enqueue_and_emit_telemetry, enqueue_query, require_perf};
 use crate::performance::{
     ClaimKind, FetchPeerSet, Performance, SelectPeersParams,
     ops::{HeaderOp, PeerOp, PerformanceOp},
@@ -68,6 +68,7 @@ pub struct RecordPeersAskedEffect {
 
 impl ExternalEffectAPI for RecordPeersAskedEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -89,6 +90,7 @@ pub struct RecordBlocksRequestedEffect {
 
 impl ExternalEffectAPI for RecordBlocksRequestedEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -106,6 +108,7 @@ pub struct RecordFetchFailureEffect {
 
 impl ExternalEffectAPI for RecordFetchFailureEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -122,6 +125,7 @@ pub struct SelectPeersForFetchEffect {
 
 impl ExternalEffectAPI for SelectPeersForFetchEffect {
     type Response = FetchPeerSet;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -139,6 +143,7 @@ pub struct PeerCoversFragmentEffect {
 
 impl ExternalEffectAPI for PeerCoversFragmentEffect {
     type Response = bool;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -155,6 +160,7 @@ pub struct DirectClaimantsEffect {
 
 impl ExternalEffectAPI for DirectClaimantsEffect {
     type Response = Vec<(Peer, Instant, ClaimKind)>;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -171,6 +177,7 @@ pub struct FirstAnnouncedAtEffect {
 
 impl ExternalEffectAPI for FirstAnnouncedAtEffect {
     type Response = Option<(Peer, Instant)>;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);

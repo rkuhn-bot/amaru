@@ -200,6 +200,7 @@ pub fn setup(prep: &TestPrep, msg: AdoptChainMsg) -> (SimulationRunning, Deseria
     network.preload(&ac, [msg]).unwrap();
 
     let mut running = network.run(prep.rt.handle());
+    running.collapse_external_within(std::time::Duration::from_millis(1));
     running.run(Run::skip_and_resolve());
 
     (running, guards, logs.logs())

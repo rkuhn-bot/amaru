@@ -13,22 +13,23 @@
 // limitations under the License.
 
 //! Same stimulus as the pre-#1475 repro: one node, many injector upstreams, mailboxes of
-//! [`DEFAULT_MAILBOX_SIZE`], fixed wire delay, same-timestamp hops, and the same few
-//! milliseconds of simulated time on the advertisability record.
+//! [`DEFAULT_MAILBOX_SIZE`], fixed wire delay, same-timestamp hops, and uniform `[0, 1ms]`
+//! performance-effect durations.
 //!
-//! The manager no longer sends lifecycle messages to peer selection, so that send cannot
-//! stay suspended. The run dials the upstreams and does not leave `manager` parked.
+//! The manager no longer sends lifecycle messages to peer selection, so that send cannot stay
+//! suspended. Both the `Connected` dial burst and the later `Disconnected` close storm run, and
+//! neither leaves `manager` parked.
 
 use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
 
-use amaru_consensus::{effects::GenerateRandomSeed, performance::RecordAdvertisabilityEffect};
+use amaru_consensus::effects::GenerateRandomSeed;
 use amaru_kernel::{
     BlockHeight, Hash, Header, NetworkPoint, Peer, Slot, any_headers_chain_with_root,
     utils::tests::run_strategy_with_seed,
 };
 use amaru_ouroboros::{BaseReadChainStore, ConnectionsResource, in_memory_chain_store::InMemoryChainStore};
 use amaru_pure_stage::{
-    DEFAULT_MAILBOX_SIZE, DurationDist, Name, StageResponse,
+    DEFAULT_MAILBOX_SIZE, Name, StageResponse,
     simulation::{EvalStrategy, SimulationRunning, running::OverrideResult},
     trace_buffer::TraceBuffer,
 };
@@ -44,14 +45,25 @@ const UPSTREAMS: usize = 24;
 const BASE_PORT: u16 = 18_000;
 /// Past the first keepalive (1s) and dial hold-off (2s). The accept stage is still on its
 /// initial accept, so those timers are the later wakes that must observe the same send.
-const HORIZON_NANOS: u64 = 2_500_000_000;
+const CONNECTED_HORIZON_NANOS: u64 = 2_500_000_000;
+/// First keepalive is +1s, the next is +30s. The close storm is after dial hold-off (2s),
+/// and that second keepalive is the later wake that must still see the send.
+const DISCONNECT_HORIZON_NANOS: u64 = 35_000_000_000;
 const SHARE_DELAY: Duration = Duration::from_millis(20);
-/// One delay for every handshake hop and payload deliver, so a burst shares a timestamp.
-const FIXED_DELAY_NANOS: u64 = 1_000_000;
-/// Long enough for several wire ticks to reach `manager` while `peer_selection` is inside
-/// `Connected`, before it sends `SetLocalUse`.
-const ADVERTISABILITY_NANOS: u64 = 8_000_000;
+/// Hop used by the `Connected` repro. Short enough that handshakes finish during the dial loop.
+const CONNECTED_DELAY_NANOS: u64 = 1_000_000;
+/// Hop used by the `Disconnected` repro. Longer than the dial loop, so each `Connected` is
+/// drained before the next handshake, and the later close burst is the fill.
+const DISCONNECT_DELAY_NANOS: u64 = 20_000_000;
 const SEED: u64 = 0xA11CE;
+/// After dial hold-off (2s), so `peer_selection` may dial again.
+///
+/// `manager` consumes about one mailbox (10) of `Disconnected` before it parks on the next.
+/// The remainder has to leave `manager`'s own mailbox full, or the refill `AddPeer` is admitted
+/// and `peer_selection` receives, which clears the park. 22 closes leave that remainder and
+/// keep two connections up so their later keepalive still runs.
+const DISCONNECT_AT: u64 = 3_000_000_000;
+const DISCONNECT_COUNT: u32 = 22;
 
 fn is_manager(name: &str) -> bool {
     name == "manager" || name.starts_with("manager-")
@@ -75,14 +87,17 @@ fn one_header(seed: u64) -> Header {
     headers.into_iter().next().expect("one header")
 }
 
-/// Connection stages first, so a handshake burst is queued on `manager`.
+/// Connection stages first. `manager` and `peer_selection` swap order at `manager_first_at`.
 ///
-/// `manager` then runs before `peer_selection`. It fills that mailbox and parks on the next
-/// `Connected` while `peer_selection` is still sitting on the first delivery. `peer_selection`
-/// runs only once `manager` cannot.
-struct ConnectionStagesThenManager;
+/// Before that instant, `peer_selection` runs first and drains a single lifecycle message.
+/// At and after it, `manager` runs first, fills the mailbox, and parks on the next send
+/// while `peer_selection` has not received yet.
+struct LifecycleOrder {
+    provider: Arc<WorldConnectionProvider>,
+    manager_first_at: u64,
+}
 
-impl EvalStrategy for ConnectionStagesThenManager {
+impl EvalStrategy for LifecycleOrder {
     fn pick_runnable(&mut self, runnable: &mut VecDeque<(Name, StageResponse)>) -> (Name, StageResponse) {
         let other = runnable.iter().position(|(name, _)| {
             let name = name.as_str();
@@ -91,8 +106,10 @@ impl EvalStrategy for ConnectionStagesThenManager {
         if let Some(idx) = other {
             return runnable.remove(idx).expect("index in range");
         }
-        let manager = runnable.iter().position(|(name, _)| is_manager(name.as_str()));
-        if let Some(idx) = manager {
+        let manager_first = self.provider.current_time_nanos() >= self.manager_first_at;
+        let preferred = if manager_first { is_manager } else { is_peer_selection };
+        let pick = runnable.iter().position(|(name, _)| preferred(name.as_str()));
+        if let Some(idx) = pick {
             return runnable.remove(idx).expect("index in range");
         }
         runnable.pop_front().expect("runnable queue is non-empty")
@@ -104,8 +121,18 @@ fn stub_peer_selection_seed(sim: &mut SimulationRunning, seed: u64) {
     sim.override_external_effect::<GenerateRandomSeed>(usize::MAX, move |_| OverrideResult::handled(bytes));
 }
 
-fn run_once(seed: u64, handle: &Handle) -> WorldLoop {
-    let provider = Arc::new(WorldConnectionProvider::with_fixed_delay(seed, FIXED_DELAY_NANOS));
+fn run_once(
+    seed: u64,
+    handle: &Handle,
+    wire_delay_nanos: u64,
+    manager_first_at: u64,
+    disconnect_at: Option<u64>,
+    horizon_nanos: u64,
+) -> WorldLoop {
+    let provider = Arc::new(WorldConnectionProvider::with_fixed_delay(seed, wire_delay_nanos));
+    if let Some(at) = disconnect_at {
+        provider.schedule_peer_disconnects(DISCONNECT_COUNT, at, at, None);
+    }
     let connections: ConnectionsResource = provider.clone();
     let header = one_header(seed);
     let store = Arc::new(InMemoryChainStore::new());
@@ -135,40 +162,83 @@ fn run_once(seed: u64, handle: &Handle) -> WorldLoop {
         .with_validated_blocks(vec![header]);
     let mut node_sim = build_world_node(&node, connections, handle).expect("node");
     stub_peer_selection_seed(&mut node_sim, derive_seed(seed, 200));
-    node_sim.set_eval_strategy(ConnectionStagesThenManager);
-    node_sim.delay_external_effect::<RecordAdvertisabilityEffect>(DurationDist::Constant(Duration::from_nanos(
-        ADVERTISABILITY_NANOS,
-    )));
+    node_sim.set_eval_strategy(LifecycleOrder { provider: provider.clone(), manager_first_at });
     graphs.push(node_sim);
 
     let mut world = WorldLoop::new(provider, graphs);
     world.inspect_deadlock();
     world.coalesce_same_timestamp();
-    world.run_until_horizon(HORIZON_NANOS);
+    world.run_until_horizon(horizon_nanos);
     world
+}
+
+fn describe_stuck(world: &WorldLoop) -> String {
+    let node = world.graph(UPSTREAMS);
+    let parked: Vec<_> = node
+        .parked_sends()
+        .iter()
+        .map(|send| format!("{} -> {} {}", send.from, send.to, send.message.chars().take(64).collect::<String>()))
+        .collect();
+    let suspended: Vec<_> = node
+        .suspended_sends()
+        .into_iter()
+        .map(|send| format!("{} -> {} {}", send.from, send.to, send.message.chars().take(64).collect::<String>()))
+        .collect();
+    let connects =
+        world.heap_log().iter().filter(|entry| matches!(entry.kind, HeapLogKind::ConnectAttempt { .. })).count();
+    let disconnects = world.heap_log().iter().filter(|entry| matches!(entry.kind, HeapLogKind::PeerDisconnect)).count();
+    format!(
+        "samples={} parked={} connects={connects} disconnects={disconnects} now={}ns deadlock={:?}\nparked={parked:?}\nsuspended={suspended:?}",
+        world.manager_to_peer_selection().len(),
+        node.parked_sends().len(),
+        world.now_nanos(),
+        world.deadlock(),
+    )
+}
+
+fn assert_manager_not_parked(world: &WorldLoop) {
+    let samples = world.manager_to_peer_selection();
+    assert!(
+        !world.manager_send_to_peer_selection_stuck(),
+        "manager stayed suspended sending to peer_selection; {}",
+        describe_stuck(world),
+    );
+    assert!(samples.is_empty(), "manager parked a send to peer_selection; {}", describe_stuck(world));
+    let node = world.graph(UPSTREAMS);
+    let still = node
+        .suspended_sends()
+        .into_iter()
+        .any(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()));
+    assert!(!still, "manager still suspended on a send to peer_selection; {}", describe_stuck(world));
+    assert!(world.deadlock().is_none(), "graph deadlock: {:?}", world.deadlock());
 }
 
 #[test]
 fn many_injectors_do_not_leave_manager_blocked_sending_to_peer_selection() {
     let _guards = fragment_trace_guards();
     let runtime = Runtime::new().unwrap();
-    let world = run_once(SEED, runtime.handle());
-    let samples = world.manager_to_peer_selection();
-    assert!(
-        !world.manager_send_to_peer_selection_stuck(),
-        "manager stayed suspended sending to peer_selection across {} samples",
-        samples.len(),
-    );
-    assert!(samples.is_empty(), "manager parked a send to peer_selection {} time(s)", samples.len());
-    let node = world.graph(UPSTREAMS);
-    let still = node
-        .suspended_sends()
-        .into_iter()
-        .any(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()));
-    assert!(!still, "manager still suspended on a send to peer_selection");
+    let world = run_once(SEED, runtime.handle(), CONNECTED_DELAY_NANOS, 0, None, CONNECTED_HORIZON_NANOS);
     let connects =
         world.heap_log().iter().filter(|entry| matches!(entry.kind, HeapLogKind::ConnectAttempt { .. })).count();
+    assert_manager_not_parked(&world);
     assert!(connects >= UPSTREAMS, "connects={connects}");
-    assert!(world.deadlock().is_none(), "graph deadlock: {:?}", world.deadlock());
+    world.stop();
+}
+
+#[test]
+fn many_injectors_do_not_leave_manager_blocked_sending_disconnected() {
+    let _guards = fragment_trace_guards();
+    let runtime = Runtime::new().unwrap();
+    let world = run_once(
+        SEED,
+        runtime.handle(),
+        DISCONNECT_DELAY_NANOS,
+        DISCONNECT_AT,
+        Some(DISCONNECT_AT),
+        DISCONNECT_HORIZON_NANOS,
+    );
+    let disconnects = world.heap_log().iter().filter(|entry| matches!(entry.kind, HeapLogKind::PeerDisconnect)).count();
+    assert!(disconnects >= 11, "disconnects={disconnects} {}", describe_stuck(&world));
+    assert_manager_not_parked(&world);
     world.stop();
 }

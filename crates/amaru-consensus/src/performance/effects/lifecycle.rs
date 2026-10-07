@@ -19,9 +19,9 @@
 use std::time::Duration;
 
 use amaru_kernel::Peer;
-use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
+use amaru_pure_stage::{BoxFuture, DurationDist, ExternalEffectAPI, Instant, Resources, SendData};
 
-use super::{enqueue, require_perf};
+use super::{SIMULATED_BOOKKEEPING, enqueue, require_perf};
 use crate::performance::{
     Performance,
     ops::{PeerOp, PerformanceOp},
@@ -62,6 +62,7 @@ pub struct RecordKeepaliveRttEffect {
 
 impl ExternalEffectAPI for RecordKeepaliveRttEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -80,6 +81,7 @@ pub struct RecordAdvertisabilityEffect {
 
 impl ExternalEffectAPI for RecordAdvertisabilityEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -97,6 +99,7 @@ pub struct RecordConnectionFailureEffect {
 
 impl ExternalEffectAPI for RecordConnectionFailureEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -113,6 +116,7 @@ pub struct ClearPeerAvailabilityEffect {
 
 impl ExternalEffectAPI for ClearPeerAvailabilityEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -130,6 +134,7 @@ pub struct PeerAdversarialEffect {
 
 impl ExternalEffectAPI for PeerAdversarialEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({

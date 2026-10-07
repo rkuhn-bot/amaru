@@ -28,10 +28,17 @@ mod lifecycle;
 mod selection;
 mod sharing;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use amaru_protocols::metrics_effects::ResourceMeter;
-use amaru_pure_stage::Resources;
+use amaru_pure_stage::{DurationDist, Resources};
+
+/// Simulated time for every performance-worker effect.
+///
+/// Uniform over `[0, 1ms]`. A fixed zero lets the stage return to receive before the rest of a
+/// burst can park on it, which hides the manager/peer-selection stall.
+pub(super) const SIMULATED_BOOKKEEPING: DurationDist =
+    DurationDist::Uniform { min: Duration::ZERO, max: Duration::from_millis(1) };
 pub use chain::*;
 pub use fetch::*;
 pub use header::*;

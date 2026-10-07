@@ -116,11 +116,11 @@ pub struct SimulationRunning {
     admitted_calls: BTreeSet<ScheduleId>,
     /// Bulk sends that found a full mailbox. Later admission does not remove the row.
     parked_sends: Vec<ParkedSend>,
-    /// When set, matching external effects take this distribution instead of their own.
+    /// Sampled external `δ` at or below this bound occupies no simulated time.
     ///
-    /// Sampled at issue time, so the stage stays off its mailbox until `δ` elapses and the
-    /// result is ready. Later stages still run. This does not freeze the scheduler.
-    delayed_external: Option<(Box<dyn Fn(&dyn ExternalEffect) -> bool + Send>, DurationDist)>,
+    /// Stage tests that snapshot traces set it so performance bookkeeping does not insert clock
+    /// entries or shift later schedule ids. The world deadlock repro leaves it unset.
+    external_collapse: Option<Duration>,
 }
 
 /// A bulk send that could not enter the destination mailbox.
@@ -224,7 +224,7 @@ impl SimulationRunning {
             pending_breakpoint: None,
             admitted_calls: BTreeSet::new(),
             parked_sends: Vec::new(),
-            delayed_external: None,
+            external_collapse: None,
         }
     }
 
@@ -249,12 +249,13 @@ impl SimulationRunning {
         self.eval_strategy = Box::new(strategy);
     }
 
-    /// Sample `dist` for every later external effect of type `T`, instead of that effect's own.
+    /// Treat a sampled external `δ` of at most `bound` as zero.
     ///
-    /// The stage stays suspended until `δ` has elapsed and the result is ready. Other stages
-    /// still run, and the effect does complete.
-    pub fn delay_external_effect<T: ExternalEffect>(&mut self, dist: DurationDist) {
-        self.delayed_external = Some((Box::new(|effect| effect.is::<T>()), dist));
+    /// The sample is still drawn. No wakeup is scheduled, so the stage continues at the same
+    /// instant. Stage tests that snapshot traces use this for performance bookkeeping. The world
+    /// deadlock repro does not: those durations are what keep `manager` parked.
+    pub fn collapse_external_within(&mut self, bound: Duration) {
+        self.external_collapse = Some(bound);
     }
 
     /// Get the resources collection for the network.
@@ -428,7 +429,12 @@ impl SimulationRunning {
         if self.external_inflight.contains_key(&at_stage) {
             return;
         }
-        let delta = dist.sample(&mut self.duration_rng);
+        let mut delta = dist.sample(&mut self.duration_rng);
+        if let (Some(d), Some(bound)) = (delta, self.external_collapse)
+            && d <= bound
+        {
+            delta = Some(Duration::ZERO);
+        }
         // UntilResolved has no δ: the world runner completes the Future. Sampled δ
         // (including zero) means the computation is scheduled and must be forced when due.
         let force_on_ready = delta.is_some();
@@ -840,13 +846,7 @@ impl SimulationRunning {
         }
 
         let delayed = if let Effect::External { at_stage, effect } = &effect {
-            let mut dist = effect.simulated_duration_dist();
-            if let Some((pred, override_dist)) = &self.delayed_external
-                && pred(effect.as_ref())
-            {
-                dist = *override_dist;
-            }
-            Some((at_stage.clone(), dist))
+            Some((at_stage.clone(), effect.simulated_duration_dist()))
         } else {
             None
         };

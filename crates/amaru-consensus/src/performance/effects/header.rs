@@ -17,9 +17,9 @@
 #![expect(clippy::unit_arg)]
 
 use amaru_kernel::{BlockHeight, HeaderHash, Point};
-use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
+use amaru_pure_stage::{BoxFuture, DurationDist, ExternalEffectAPI, Instant, Resources, SendData};
 
-use super::{enqueue, enqueue_and_emit_telemetry, enqueue_query, optional_meter, require_perf};
+use super::{SIMULATED_BOOKKEEPING, enqueue, enqueue_and_emit_telemetry, enqueue_query, optional_meter, require_perf};
 use crate::performance::{
     HeaderLifecycleOutcome, HeaderPerformance, Performance,
     ops::{HeaderOp, PaceOp, PerformanceOp},
@@ -74,6 +74,7 @@ pub struct PruneBelowEffect {
 
 impl ExternalEffectAPI for PruneBelowEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -94,6 +95,7 @@ pub struct RecordHeaderRejectedEffect {
 
 impl ExternalEffectAPI for RecordHeaderRejectedEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -112,6 +114,7 @@ pub struct RecordHeaderAbandonedEffect {
 
 impl ExternalEffectAPI for RecordHeaderAbandonedEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -133,6 +136,7 @@ pub struct RecordForkStartedEffect {
 
 impl ExternalEffectAPI for RecordForkStartedEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -156,6 +160,7 @@ pub struct RecordBlockValidEffect {
 
 impl ExternalEffectAPI for RecordBlockValidEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -180,6 +185,7 @@ pub struct RecordBlockPrunedEffect {
 
 impl ExternalEffectAPI for RecordBlockPrunedEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -201,6 +207,7 @@ pub struct RecordSyncAdoptionEffect {
 
 impl ExternalEffectAPI for RecordSyncAdoptionEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -217,6 +224,7 @@ pub struct SyncAdoptionPaceEffect {
 
 impl ExternalEffectAPI for SyncAdoptionPaceEffect {
     type Response = bool;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);

@@ -19,9 +19,9 @@
 use std::collections::BTreeSet;
 
 use amaru_kernel::{Peer, PeerCandidate};
-use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
+use amaru_pure_stage::{BoxFuture, DurationDist, ExternalEffectAPI, Instant, Resources, SendData};
 
-use super::{enqueue, enqueue_query, require_perf};
+use super::{SIMULATED_BOOKKEEPING, enqueue, enqueue_query, require_perf};
 use crate::performance::{
     PeerScores, PeerView, Performance, SelectOutboundParams, SelectUsing,
     ops::{PeerOp, PerformanceOp},
@@ -88,6 +88,7 @@ pub struct RankPeersForChurnEffect {
 
 impl ExternalEffectAPI for RankPeersForChurnEffect {
     type Response = Vec<crate::performance::ChurnRank>;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -107,6 +108,7 @@ pub struct ScoresEffect {
 
 impl ExternalEffectAPI for ScoresEffect {
     type Response = PeerScores;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -123,6 +125,7 @@ pub struct SetLedgerCandidatesEffect {
 
 impl ExternalEffectAPI for SetLedgerCandidatesEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -139,6 +142,7 @@ pub struct SelectOutboundEffect {
 
 impl ExternalEffectAPI for SelectOutboundEffect {
     type Response = SelectUsing;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -158,6 +162,7 @@ pub struct QueryPeerViewEffect {
 
 impl ExternalEffectAPI for QueryPeerViewEffect {
     type Response = Option<PeerView>;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -177,6 +182,7 @@ pub struct IsStaticPeerEffect {
 
 impl ExternalEffectAPI for IsStaticPeerEffect {
     type Response = bool;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -196,6 +202,7 @@ pub struct NoteDialEffect {
 
 impl ExternalEffectAPI for NoteDialEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -212,6 +219,7 @@ pub struct SharedContainsEffect {
 
 impl ExternalEffectAPI for SharedContainsEffect {
     type Response = bool;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -233,6 +241,7 @@ pub struct EvictRecordsEffect {
 
 impl ExternalEffectAPI for EvictRecordsEffect {
     type Response = ();
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap_sync({
@@ -244,6 +253,7 @@ impl ExternalEffectAPI for EvictRecordsEffect {
 
 impl ExternalEffectAPI for SourceCountsEffect {
     type Response = crate::performance::SourceCounts;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);

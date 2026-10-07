@@ -361,7 +361,7 @@ impl WorldConnectionProvider {
     }
 
     /// Get current simulated time in nanoseconds.
-    pub(super) fn current_time_nanos(&self) -> u64 {
+    pub(crate) fn current_time_nanos(&self) -> u64 {
         self.inner.lock().current_time_nanos
     }
 

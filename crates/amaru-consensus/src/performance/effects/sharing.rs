@@ -15,9 +15,9 @@
 //! Reputation queries the peer-sharing filters use.
 
 use amaru_kernel::Peer;
-use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
+use amaru_pure_stage::{BoxFuture, DurationDist, ExternalEffectAPI, Instant, Resources, SendData};
 
-use super::{enqueue_query, require_perf};
+use super::{SIMULATED_BOOKKEEPING, enqueue_query, require_perf};
 use crate::performance::{
     PeerShareFlags, PeerSnapshot, Performance,
     ops::{PeerOp, PerformanceOp},
@@ -44,6 +44,7 @@ pub struct ShareFlagsEffect {
 
 impl ExternalEffectAPI for ShareFlagsEffect {
     type Response = Option<PeerShareFlags>;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -60,6 +61,7 @@ pub struct SnapshotEffect {
 
 impl ExternalEffectAPI for SnapshotEffect {
     type Response = Option<PeerSnapshot>;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);
@@ -77,6 +79,7 @@ pub struct OkForSharingEffect {
 
 impl ExternalEffectAPI for OkForSharingEffect {
     type Response = bool;
+    const SIMULATED_DURATION: DurationDist = SIMULATED_BOOKKEEPING;
 
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         let perf = require_perf(&resources);

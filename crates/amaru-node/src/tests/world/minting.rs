@@ -464,9 +464,12 @@ fn spawn_node(world: &SyncWorld, network: &MintNetwork, fixture: &MintFixture, n
         .with_era_history(network.era_history.clone())
         .with_global_epoch_offset(Duration::from_secs(4 * network.global_parameters.epoch_length()))
         .with_forging_credentials(credentials);
-    let running = tracing::dispatcher::with_default(&dispatch, || {
+    let mut running = tracing::dispatcher::with_default(&dispatch, || {
         build_world_node(&config, world.provider.clone(), &world.handle).expect("node")
     });
+    // The horizon is chain slots. Performance bookkeeping is uniform `[0, 1ms]`; leaving it
+    // in place spends that horizon before the forged chain arrives. The deadlock repro keeps it.
+    running.collapse_external_within(Duration::from_millis(1));
     std::mem::forget(node_root);
     running
 }
