@@ -84,6 +84,7 @@ pub fn setup(prep: &TestPrep) -> (SimulationRunning, DeserializerGuards, Logs) {
     network.preload(&mempool, [prep.msg.clone()]).unwrap();
 
     let mut running = network.run(prep.rt.handle());
+    running.collapse_external_within(std::time::Duration::from_millis(1));
     running.run(Run::skip_and_resolve());
 
     (running, guards, logs.logs())
