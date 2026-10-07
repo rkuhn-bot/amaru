@@ -46,6 +46,25 @@ pub struct SendBlock {
     pub is_call: bool,
 }
 
+/// A stage suspended on [`crate::Effect::Send`] or [`crate::Effect::Call`].
+///
+/// [`Blocked::Deadlock`] reports these only when every stage is on receive or send.
+/// A stage can stay on this send while other stages are still waiting on a timer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuspendedSend {
+    pub from: Name,
+    pub to: Name,
+    pub is_call: bool,
+    /// Bulk messages stored at `to`.
+    pub dest_len: usize,
+    /// Bulk capacity of `to`.
+    pub dest_capacity: usize,
+    /// Senders parked on `to`, including this one when the bulk mailbox is full.
+    pub dest_parked: usize,
+    /// Debug of this sender's payload if it is parked on `to`.
+    pub message: String,
+}
+
 impl Blocked {
     /// Assert that the blocking reason is `Idle`.
     #[track_caller]

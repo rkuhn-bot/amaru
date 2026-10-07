@@ -105,6 +105,12 @@ pub struct Config {
     /// Block-producer secrets. `None` leaves the node a follower.
     /// When `Some`, `build_node` checks the operational certificate and wires the forge stage.
     pub forging_credentials: Option<Arc<dyn ForgingCredentials>>,
+
+    /// Bulk mailbox for the manager and peer selection.
+    ///
+    /// `None` keeps the sized formula in the stage graph. Simulation tests set this when
+    /// they need that pair on a fixed small mailbox.
+    pub peer_bulk_mailbox: Option<usize>,
 }
 
 impl Config {
@@ -179,6 +185,7 @@ impl Default for Config {
             meter: None,
             realign_chain_store: true,
             forging_credentials: None,
+            peer_bulk_mailbox: None,
         }
     }
 }
