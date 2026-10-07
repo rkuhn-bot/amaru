@@ -116,10 +116,11 @@ pub struct SimulationRunning {
     admitted_calls: BTreeSet<ScheduleId>,
     /// Bulk sends that found a full mailbox. Later admission does not remove the row.
     parked_sends: Vec<ParkedSend>,
-    /// When this matches a parked bulk send, [`Self::run`] stops and later runs stay stopped
-    /// so the sender remains suspended. The receiver is not scheduled in that same turn.
-    stop_on_park: Option<Box<dyn Fn(&Name, &Name) -> bool + Send>>,
-    park_hold: bool,
+    /// When set, matching external effects take this distribution instead of their own.
+    ///
+    /// Sampled at issue time, so the stage stays off its mailbox until `δ` elapses and the
+    /// result is ready. Later stages still run. This does not freeze the scheduler.
+    delayed_external: Option<(Box<dyn Fn(&dyn ExternalEffect) -> bool + Send>, DurationDist)>,
 }
 
 /// A bulk send that could not enter the destination mailbox.
@@ -223,15 +224,8 @@ impl SimulationRunning {
             pending_breakpoint: None,
             admitted_calls: BTreeSet::new(),
             parked_sends: Vec::new(),
-            stop_on_park: None,
-            park_hold: false,
+            delayed_external: None,
         }
-    }
-
-    /// Stop [`Self::run`] when a bulk send between these stages parks, and do not resume
-    /// the receiver on later runs. The sender stays suspended on that send.
-    pub fn stop_after_parked_send(&mut self, pred: impl Fn(&Name, &Name) -> bool + Send + 'static) {
-        self.stop_on_park = Some(Box::new(pred));
     }
 
     /// Bulk sends that waited because the destination mailbox was full.
@@ -253,6 +247,14 @@ impl SimulationRunning {
     /// Replace the runnable-queue policy. The world loop has not driven the graph yet.
     pub fn set_eval_strategy(&mut self, strategy: impl EvalStrategy + 'static) {
         self.eval_strategy = Box::new(strategy);
+    }
+
+    /// Sample `dist` for every later external effect of type `T`, instead of that effect's own.
+    ///
+    /// The stage stays suspended until `δ` has elapsed and the result is ready. Other stages
+    /// still run, and the effect does complete.
+    pub fn delay_external_effect<T: ExternalEffect>(&mut self, dist: DurationDist) {
+        self.delayed_external = Some((Box::new(|effect| effect.is::<T>()), dist));
     }
 
     /// Get the resources collection for the network.
@@ -837,9 +839,18 @@ impl SimulationRunning {
             self.trace_buffer.lock().push_suspend(&effect);
         }
 
-        if let Effect::External { at_stage, effect } = &effect {
-            let at_stage = at_stage.clone();
-            let dist = effect.simulated_duration_dist();
+        let delayed = if let Effect::External { at_stage, effect } = &effect {
+            let mut dist = effect.simulated_duration_dist();
+            if let Some((pred, override_dist)) = &self.delayed_external
+                && pred(effect.as_ref())
+            {
+                dist = *override_dist;
+            }
+            Some((at_stage.clone(), dist))
+        } else {
+            None
+        };
+        if let Some((at_stage, dist)) = delayed {
             self.begin_external(at_stage, dist);
         }
 
@@ -955,9 +966,6 @@ impl SimulationRunning {
     /// Default [`Run`] stops at the next wakeup and leaves unresolved externals as Busy.
     /// If a breakpoint is pending from a previous stop, it is interpreted first.
     pub fn run(&mut self, spec: Run) -> Blocked {
-        if self.park_hold {
-            return Blocked::Busy { stages: Vec::new(), external_effects: 0 };
-        }
         self.receive_inputs();
         if let Some((_, effect)) = self.pending_breakpoint.take()
             && let Some(blocked) = self.handle_effect(effect)
@@ -1281,12 +1289,7 @@ impl SimulationRunning {
                         }
                     };
                     if let Some((from, to, message)) = parked {
-                        let stop = self.stop_on_park.as_ref().is_some_and(|pred| pred(&from, &to));
-                        self.parked_sends.push(ParkedSend { from: from.clone(), to, message });
-                        if stop {
-                            self.park_hold = true;
-                            return Some(Blocked::Busy { stages: vec![from], external_effects: 0 });
-                        }
+                        self.parked_sends.push(ParkedSend { from, to, message });
                     }
                     if let Some(from) = resume {
                         let data_from = skip_if_terminated(self.stages.get_mut(&from), &from)?;
