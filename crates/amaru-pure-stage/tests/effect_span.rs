@@ -109,19 +109,18 @@ fn run_once(filter: &str) -> String {
 
 #[test]
 fn tokio_effect_span_is_a_json_close_with_the_type_name() {
-    let text = run_once("pure_stage=debug");
+    let text = run_once("amaru_pure_stage::effect=debug");
     let line = text.lines().find(|line| line.contains("MeasuredEffect")).expect(&text);
     let value: serde_json::Value = serde_json::from_str(line).expect(line);
     let fields = value.get("fields").expect(line);
-    assert_eq!(fields.get("message").and_then(serde_json::Value::as_str), Some("close"));
-    assert!(fields.get("time.busy").is_some(), "{line}");
-    assert!(fields.get("time.idle").is_some(), "{line}");
-    assert!(line.contains(EFFECT_SPAN_TARGET), "{line}");
+    assert_eq!(fields.get("message").and_then(serde_json::Value::as_str), Some("close"), "{text}");
+    assert!(fields.get("time.busy").is_some(), "{text}");
+    assert!(fields.get("time.idle").is_some(), "{text}");
+    assert!(line.contains(EFFECT_SPAN_TARGET), "{text}");
 }
 
 #[test]
 fn disabled_effect_span_writes_nothing() {
-    let text = run_once("error");
-    assert!(!text.contains("MeasuredEffect"), "{text}");
-    assert!(!text.contains("time.busy"), "{text}");
+    let text = run_once("warn");
+    assert!(text.is_empty(), "{text}");
 }

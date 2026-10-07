@@ -224,9 +224,6 @@ pub(crate) struct Cli {
     /// The file is created or truncated.
     /// Span close lines include busy and idle time. This does not replace the terminal, the
     /// TUI, or OpenTelemetry.
-    ///
-    /// Effect durations use the target `pure_stage::effect`. Example:
-    /// `--log-output effects.ndjson:pure_stage=debug`
     #[clap(long, global = true, env = "AMARU_LOG_OUTPUT", action = clap::ArgAction::Append, value_name = "PATH:FILTER")]
     pub(crate) log_output: Vec<TraceOutputSpec>,
 

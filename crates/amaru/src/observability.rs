@@ -202,7 +202,7 @@ impl TracingSubscriber<Registry> {
                                 .with_writer(io::stderr as fn() -> io::Stderr)
                                 .with_ansi(color)
                                 .fmt_fields(console_field_formatter())
-                                .with_span_events(FmtSpan::CLOSE)
+                                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
                                 .event_format(CborConsoleEventFormat::new().with_ansi(color))
                                 .with_filter(default_filter),
                         )
@@ -219,7 +219,7 @@ impl TracingSubscriber<Registry> {
                                 .with_writer(io::stderr as fn() -> io::Stderr)
                                 .with_ansi(color)
                                 .fmt_fields(console_field_formatter())
-                                .with_span_events(FmtSpan::CLOSE)
+                                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
                                 .event_format(CborConsoleEventFormat::new().with_ansi(color))
                                 .with_filter(default_filter),
                         )
@@ -260,12 +260,11 @@ impl TracingSubscriber<Registry> {
 // ---------------------------------------------------------------------------------
 
 pub fn setup_json_traces(subscriber: &mut TracingSubscriber<Registry>) -> DelayedWarning {
-    let events = || FmtSpan::ENTER | FmtSpan::EXIT;
-    let filter = || new_trace_filter();
+    let events = || FmtSpan::ACTIVE | FmtSpan::CLOSE;
 
     subscriber.with_json(
         || {
-            let (default_filter, warning) = filter();
+            let (default_filter, warning) = new_trace_filter();
             (
                 tracing_subscriber::fmt::layer()
                     .with_span_events(events())
@@ -276,7 +275,7 @@ pub fn setup_json_traces(subscriber: &mut TracingSubscriber<Registry>) -> Delaye
             )
         },
         || {
-            let (default_filter, warning) = filter();
+            let (default_filter, warning) = new_trace_filter();
             (
                 tracing_subscriber::fmt::layer()
                     .with_span_events(events())

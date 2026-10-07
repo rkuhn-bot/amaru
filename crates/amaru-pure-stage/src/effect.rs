@@ -705,11 +705,6 @@ pub trait ExternalEffect: SendData {
         DurationDist::ZERO
     }
 
-    /// Concrete Rust type name (`std::any::type_name`), for the effect-duration span.
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<Self>()
-    }
-
     /// Run the effect in production mode.
     ///
     /// Implementations typically retrieve shared services via typed lookups
@@ -804,7 +799,7 @@ impl<T: ExternalEffectAPI> ExternalEffect for T {
 /// Tracing target for the span around [`ExternalEffect::run`].
 ///
 /// `pure_stage=debug` selects these spans and not the `amaru_pure_stage` logs.
-pub const EFFECT_SPAN_TARGET: &str = "pure_stage::effect";
+pub const EFFECT_SPAN_TARGET: &str = module_path!();
 
 /// Run `effect`, entering a debug span for its wall-clock duration when that span is enabled.
 ///
@@ -819,7 +814,7 @@ pub(crate) fn run_external_effect(
     if !tracing::span_enabled!(target: EFFECT_SPAN_TARGET, tracing::Level::DEBUG) {
         return effect.run(resources);
     }
-    let type_name = effect.type_name();
+    let type_name = effect.typetag_name();
     let span = tracing::debug_span!(target: EFFECT_SPAN_TARGET, "effect", type_name, stage = %stage);
     Box::pin(effect.run(resources).instrument(span))
 }
