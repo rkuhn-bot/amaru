@@ -12,13 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One production node dials many serve-only injectors.
+//! Same stimulus as the pre-#1475 repro: one node, many injector upstreams, mailboxes of
+//! [`DEFAULT_MAILBOX_SIZE`], fixed wire delay, same-timestamp hops.
 //!
-//! The manager and peer-selection bulk mailboxes are [`DEFAULT_MAILBOX_SIZE`]. Wire delay
-//! is fixed and same-timestamp hops land together, so a burst of outbound `Connected`
-//! notifies fills `peer_selection` and leaves `manager` suspended on the next send.
-//! The world does not schedule `peer_selection` in that same turn: the pure-stage loop
-//! would otherwise pop one message and admit the parked sender before the stall is visible.
+//! The manager no longer sends lifecycle to peer selection, so that send cannot stay
+//! suspended. The run finishes inside the horizon and dials the upstreams.
 
 use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
 
@@ -143,35 +141,32 @@ fn run_once(seed: u64, handle: &Handle) -> WorldLoop {
 }
 
 #[test]
-fn many_injectors_leave_manager_blocked_sending_to_peer_selection() {
+fn many_injectors_do_not_leave_manager_blocked_sending_to_peer_selection() {
     let _guards = fragment_trace_guards();
     let runtime = Runtime::new().unwrap();
     let world = run_once(SEED, runtime.handle());
     let samples = world.manager_to_peer_selection();
     assert!(
-        world.manager_send_to_peer_selection_stuck(),
-        "manager did not stay suspended sending to peer_selection; samples={}",
-        samples.len(),
+        !world.manager_send_to_peer_selection_stuck(),
+        "manager stayed suspended sending to peer_selection: {}",
+        samples.first().map(|sample| sample.send.message.as_str()).unwrap_or(""),
     );
-    let first = samples.first().expect("stuck implies a sample");
-    let later =
-        samples.iter().find(|sample| sample.time_nanos > first.time_nanos).expect("stuck implies a later sample");
-    for sample in [first, later] {
-        assert!(!sample.send.is_call);
-        assert!(is_manager(sample.send.from.as_str()), "{}", sample.send.from);
-        assert!(is_peer_selection(sample.send.to.as_str()), "{}", sample.send.to);
-        assert_eq!(sample.send.dest_capacity, DEFAULT_MAILBOX_SIZE);
-        assert_eq!(sample.send.dest_len, DEFAULT_MAILBOX_SIZE);
-        assert!(sample.send.dest_parked >= 1, "parked={}", sample.send.dest_parked);
-        assert!(sample.send.message.starts_with("Connected("), "suspended message was {}", sample.send.message);
-    }
+    assert!(samples.is_empty(), "unexpected manager send samples: {}", samples.len());
     let node = world.graph(UPSTREAMS);
     let still = node
         .suspended_sends()
         .into_iter()
-        .find(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()));
-    let still = still.expect("manager still suspended after the horizon");
-    assert_eq!(still.dest_len, DEFAULT_MAILBOX_SIZE);
-    assert!(still.message.starts_with("Connected("), "{}", still.message);
+        .any(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()));
+    assert!(!still, "manager still suspended on a send to peer_selection");
+    let connects = world
+        .heap_log_ref()
+        .iter()
+        .filter(|entry| matches!(entry.kind, super::HeapLogKind::ConnectAttempt { .. }))
+        .count();
+    assert!(connects >= UPSTREAMS, "expected the upstreams to be dialed, connects={connects}");
+    assert!(world.deadlock().is_none(), "graph deadlock: {:?}", world.deadlock());
+    // A suspended manager→peer-selection send is re-armed every millisecond until the
+    // horizon. Quiescence before that means the send never parked.
+    assert!(world.now_nanos() < HORIZON_NANOS, "run was still scheduled at the horizon ({}ns)", world.now_nanos(),);
     world.stop();
 }
