@@ -101,9 +101,6 @@ pub struct WorldLoop {
     /// graphs run. Default is one event, then the graph, which drains a mailbox before the
     /// next handshake completion arrives.
     coalesce_same_timestamp: bool,
-    /// When set, a graph whose `manager` is suspended sending to `peer_selection` is woken
-    /// later instead of running the receiver in the same instant.
-    keep_manager_send: bool,
 }
 
 /// One observation that `manager` is suspended while sending to `peer_selection`.
@@ -173,7 +170,6 @@ impl WorldLoop {
             manager_to_peer_selection: Vec::new(),
             deadlock: None,
             coalesce_same_timestamp: false,
-            keep_manager_send: false,
         };
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
@@ -301,14 +297,6 @@ impl WorldLoop {
     /// fills. Batching the hop is what leaves `manager` suspended on its send.
     pub fn coalesce_same_timestamp(&mut self) {
         self.coalesce_same_timestamp = true;
-    }
-
-    /// Keep a suspended `manager` → `peer_selection` send outstanding across later sim time.
-    ///
-    /// The pure-stage run would otherwise pick `peer_selection` in the same turn, pop one
-    /// message, and admit the parked sender before the world records the stall.
-    pub fn keep_manager_send_suspended(&mut self) {
-        self.keep_manager_send = true;
     }
 
     /// Manager→peer-selection sends that were still suspended when a graph run stopped.
@@ -460,11 +448,6 @@ impl WorldLoop {
     }
 
     fn schedule_graph_if_needed(&mut self, index: usize) {
-        if self.keep_manager_send && self.manager_send_outstanding(index) {
-            let later = self.provider.current_time_nanos().saturating_add(1_000_000);
-            self.schedule_graph(index, later, GraphWakeReason::Sleeping);
-            return;
-        }
         let graph = &mut self.graphs[index];
         graph.receive_inputs();
         let now = self.provider.current_time_nanos();
@@ -515,13 +498,6 @@ impl WorldLoop {
             graph.skip_to_next_wakeup(Some(world_now));
         }
         self.run_graph_until_clock(index);
-    }
-
-    fn manager_send_outstanding(&self, index: usize) -> bool {
-        self.graphs[index]
-            .suspended_sends()
-            .iter()
-            .any(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()))
     }
 
     fn capture_manager_send(&mut self, index: usize) {
