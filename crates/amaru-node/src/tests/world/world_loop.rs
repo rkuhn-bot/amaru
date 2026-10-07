@@ -39,13 +39,13 @@ use amaru_protocols::{
 };
 use amaru_pure_stage::{
     Effect, Instant, Name, SendData,
-    simulation::{Blocked, Run, SimulationRunning},
+    simulation::{Blocked, Run, SimulationRunning, SuspendedSend},
     trace_buffer::TraceEntry,
 };
 
 use super::{
     GraphWakeReason, HeapLogEntry, InjectorShared, NetworkEvent, WorldConnectionProvider,
-    world_connection_provider::WorldHeapItem,
+    world_connection_provider::{WorldHeapEntry, WorldHeapItem},
 };
 use crate::tests::configuration::DummyLedgerDir;
 
@@ -90,10 +90,42 @@ pub struct WorldLoop {
     subscribers: Vec<Option<tracing::Dispatch>>,
     /// Set by [`Self::halt`] to leave the current `run_until_horizon*` loop.
     halt: AtomicBool,
+    /// When set, a whole-graph [`Blocked::Deadlock`] is recorded and the loop stops
+    /// instead of panicking, so a test can assert which send is stuck.
+    inspect_deadlock: bool,
+    /// Manager sends to `peer_selection` that were still suspended when a graph run stopped.
+    manager_to_peer_selection: Vec<ManagerSendSample>,
+    /// Whole-graph deadlock text, when [`Self::inspect_deadlock`] is set.
+    deadlock: Option<String>,
+    /// When set, every heap event that shares a timestamp is applied before any of those
+    /// graphs run. Default is one event, then the graph, which drains a mailbox before the
+    /// next handshake completion arrives.
+    coalesce_same_timestamp: bool,
+    /// When set, a graph whose `manager` is suspended sending to `peer_selection` is woken
+    /// later instead of running the receiver in the same instant.
+    keep_manager_send: bool,
+}
+
+/// One observation that `manager` is suspended while sending to `peer_selection`.
+#[derive(Debug, Clone)]
+pub struct ManagerSendSample {
+    pub graph: usize,
+    pub time_nanos: u64,
+    pub send: SuspendedSend,
+    /// `peer_selection` is itself suspended on a send to `manager`.
+    pub peer_selection_sending_to_manager: bool,
 }
 
 /// Same-timestamp heap pops before we treat the world as livelocked.
 const SAME_TIME_POP_LIMIT: u32 = 50_000;
+
+fn is_manager(name: &str) -> bool {
+    name == "manager" || name.starts_with("manager-")
+}
+
+fn is_peer_selection(name: &str) -> bool {
+    name == "peer_selection" || name.starts_with("peer_selection-")
+}
 
 type Completion = (usize, Name, Box<dyn SendData>);
 
@@ -137,6 +169,11 @@ impl WorldLoop {
             best_chain_tip_updated: false,
             subscribers: vec![None; graph_count],
             halt: AtomicBool::new(false),
+            inspect_deadlock: false,
+            manager_to_peer_selection: Vec::new(),
+            deadlock: None,
+            coalesce_same_timestamp: false,
+            keep_manager_send: false,
         };
         for index in 0..world.graphs.len() {
             world.schedule_graph_if_needed(index);
@@ -252,6 +289,57 @@ impl WorldLoop {
         self.halt.store(true, Ordering::Relaxed);
     }
 
+    /// Record send stalls instead of panicking on a whole-graph deadlock.
+    pub fn inspect_deadlock(&mut self) {
+        self.inspect_deadlock = true;
+    }
+
+    /// Resume every network completion that shares a timestamp before running those graphs.
+    ///
+    /// One hop at a time lets peer selection drain each lifecycle message before the next
+    /// handshake arrives, so a mailbox of [`amaru_pure_stage::DEFAULT_MAILBOX_SIZE`] never
+    /// fills. Batching the hop is what leaves `manager` suspended on its send.
+    pub fn coalesce_same_timestamp(&mut self) {
+        self.coalesce_same_timestamp = true;
+    }
+
+    /// Keep a suspended `manager` → `peer_selection` send outstanding across later sim time.
+    ///
+    /// The pure-stage run would otherwise pick `peer_selection` in the same turn, pop one
+    /// message, and admit the parked sender before the world records the stall.
+    pub fn keep_manager_send_suspended(&mut self) {
+        self.keep_manager_send = true;
+    }
+
+    /// Manager→peer-selection sends that were still suspended when a graph run stopped.
+    pub fn manager_to_peer_selection(&self) -> &[ManagerSendSample] {
+        &self.manager_to_peer_selection
+    }
+
+    /// Whole-graph deadlock description, if one stopped the loop under [`Self::inspect_deadlock`].
+    pub fn deadlock(&self) -> Option<&str> {
+        self.deadlock.as_deref()
+    }
+
+    /// True when `manager` stayed suspended on its send to `peer_selection` across sim time,
+    /// or a whole-graph deadlock includes that send.
+    pub fn manager_send_to_peer_selection_stuck(&self) -> bool {
+        if self.deadlock.as_ref().is_some_and(|text| text.contains("manager") && text.contains("peer_selection")) {
+            return true;
+        }
+        let mut previous = None;
+        for sample in &self.manager_to_peer_selection {
+            if let Some((graph, time)) = previous
+                && sample.graph == graph
+                && sample.time_nanos > time
+            {
+                return true;
+            }
+            previous = Some((sample.graph, sample.time_nanos));
+        }
+        false
+    }
+
     fn drive_until_horizon(&mut self, horizon_nanos: u64, mut after_event: impl FnMut(&mut Self)) {
         let mut last_pop_time = None;
         let mut same_time_pops = 0u32;
@@ -261,47 +349,122 @@ impl WorldLoop {
             if self.cancelled.remove(&entry.sequence) {
                 continue;
             }
+            self.note_same_time_pop(&mut last_pop_time, &mut same_time_pops, entry.time_nanos);
 
-            if last_pop_time == Some(entry.time_nanos) {
-                same_time_pops += 1;
-                assert!(
-                    same_time_pops < SAME_TIME_POP_LIMIT,
-                    "world livelock: {same_time_pops} events at t={}ns (graph/network not making progress)",
-                    entry.time_nanos
-                );
+            if self.coalesce_same_timestamp {
+                self.drive_timestamp_batch(entry, horizon_nanos, &mut last_pop_time, &mut same_time_pops);
             } else {
-                last_pop_time = Some(entry.time_nanos);
-                same_time_pops = 0;
-            }
-
-            self.provider.set_time(entry.time_nanos);
-            self.heap_log.push(HeapLogEntry::from(&entry));
-
-            match entry.item {
-                WorldHeapItem::Network(event) => {
-                    let completions = self.completions_for_event(&event);
-                    for completion in completions {
-                        let graph_idx = completion.0;
-                        self.resume(completion);
-                        self.schedule_graph_if_needed(graph_idx);
-                    }
-                }
-                WorldHeapItem::Graph { index, reason: _ } => {
-                    self.graph_on_heap[index] = None;
-                    self.wake_and_run_graph(index);
-                    self.schedule_graph_if_needed(index);
-                }
-                WorldHeapItem::Reveal { hash } => {
-                    self.reveal_scheduled = false;
-                    self.reveal(hash).unwrap_or_else(|e| panic!("scheduled reveal {hash}: {e}"));
-                }
+                self.drive_one(entry);
             }
             self.kick_pending_reveal();
             after_event(self);
         }
     }
 
+    fn note_same_time_pop(&self, last_pop_time: &mut Option<u64>, same_time_pops: &mut u32, time_nanos: u64) {
+        if *last_pop_time == Some(time_nanos) {
+            *same_time_pops += 1;
+            assert!(
+                *same_time_pops < SAME_TIME_POP_LIMIT,
+                "world livelock: {same_time_pops} events at t={time_nanos}ns (graph/network not making progress)",
+            );
+        } else {
+            *last_pop_time = Some(time_nanos);
+            *same_time_pops = 0;
+        }
+    }
+
+    fn drive_one(&mut self, entry: WorldHeapEntry) {
+        self.provider.set_time(entry.time_nanos);
+        self.heap_log.push(HeapLogEntry::from(&entry));
+
+        match entry.item {
+            WorldHeapItem::Network(event) => {
+                let completions = self.completions_for_event(&event);
+                for completion in completions {
+                    let graph_idx = completion.0;
+                    self.resume(completion);
+                    self.schedule_graph_if_needed(graph_idx);
+                }
+            }
+            WorldHeapItem::Graph { index, reason: _ } => {
+                self.graph_on_heap[index] = None;
+                self.wake_and_run_graph(index);
+                self.schedule_graph_if_needed(index);
+            }
+            WorldHeapItem::Reveal { hash } => {
+                self.reveal_scheduled = false;
+                self.reveal(hash).unwrap_or_else(|e| panic!("scheduled reveal {hash}: {e}"));
+            }
+        }
+    }
+
+    /// Apply every already-queued event at `entry`'s timestamp, then run each affected graph once.
+    ///
+    /// Network completions only resume stages. The graph runs after the whole timestamp, so
+    /// every handshake that landed together is queued before peer selection can drain it.
+    fn drive_timestamp_batch(
+        &mut self,
+        first: WorldHeapEntry,
+        horizon_nanos: u64,
+        last_pop_time: &mut Option<u64>,
+        same_time_pops: &mut u32,
+    ) {
+        let time_nanos = first.time_nanos;
+        self.provider.set_time(time_nanos);
+        let mut graphs = BTreeSet::new();
+        let mut reveals = Vec::new();
+        self.absorb_timestamp_entry(first, &mut graphs, &mut reveals);
+        while self.provider.peek_next_event_time().is_some_and(|next| next == time_nanos && next <= horizon_nanos) {
+            let Some(next) = self.provider.pop_at_or_before(horizon_nanos) else {
+                break;
+            };
+            self.note_same_time_pop(last_pop_time, same_time_pops, next.time_nanos);
+            if self.cancelled.remove(&next.sequence) {
+                continue;
+            }
+            self.absorb_timestamp_entry(next, &mut graphs, &mut reveals);
+        }
+        for index in graphs {
+            self.wake_and_run_graph(index);
+            self.schedule_graph_if_needed(index);
+        }
+        for hash in reveals {
+            self.reveal(hash).unwrap_or_else(|e| panic!("scheduled reveal {hash}: {e}"));
+        }
+    }
+
+    fn absorb_timestamp_entry(
+        &mut self,
+        entry: WorldHeapEntry,
+        graphs: &mut BTreeSet<usize>,
+        reveals: &mut Vec<HeaderHash>,
+    ) {
+        self.heap_log.push(HeapLogEntry::from(&entry));
+        match entry.item {
+            WorldHeapItem::Network(event) => {
+                for completion in self.completions_for_event(&event) {
+                    graphs.insert(completion.0);
+                    self.resume(completion);
+                }
+            }
+            WorldHeapItem::Graph { index, reason: _ } => {
+                self.graph_on_heap[index] = None;
+                graphs.insert(index);
+            }
+            WorldHeapItem::Reveal { hash } => {
+                self.reveal_scheduled = false;
+                reveals.push(hash);
+            }
+        }
+    }
+
     fn schedule_graph_if_needed(&mut self, index: usize) {
+        if self.keep_manager_send && self.manager_send_outstanding(index) {
+            let later = self.provider.current_time_nanos().saturating_add(1_000_000);
+            self.schedule_graph(index, later, GraphWakeReason::Sleeping);
+            return;
+        }
         let graph = &mut self.graphs[index];
         graph.receive_inputs();
         let now = self.provider.current_time_nanos();
@@ -354,6 +517,32 @@ impl WorldLoop {
         self.run_graph_until_clock(index);
     }
 
+    fn manager_send_outstanding(&self, index: usize) -> bool {
+        self.graphs[index]
+            .suspended_sends()
+            .iter()
+            .any(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()))
+    }
+
+    fn capture_manager_send(&mut self, index: usize) {
+        let sends = self.graphs[index].suspended_sends();
+        let Some(send) = sends
+            .iter()
+            .find(|send| !send.is_call && is_manager(send.from.as_str()) && is_peer_selection(send.to.as_str()))
+        else {
+            return;
+        };
+        let peer_selection_sending_to_manager = sends
+            .iter()
+            .any(|send| !send.is_call && is_peer_selection(send.from.as_str()) && is_manager(send.to.as_str()));
+        self.manager_to_peer_selection.push(ManagerSendSample {
+            graph: index,
+            time_nanos: self.provider.current_time_nanos(),
+            send: send.clone(),
+            peer_selection_sending_to_manager,
+        });
+    }
+
     /// Run until the graph wants to advance the clock. External effects fall out via the breakpoint.
     fn run_graph_until_clock(&mut self, index: usize) {
         loop {
@@ -362,6 +551,12 @@ impl WorldLoop {
                     self.on_external(index);
                 }
                 Blocked::Deadlock(deadlock) => {
+                    self.capture_manager_send(index);
+                    if self.inspect_deadlock {
+                        self.deadlock = Some(format!("{deadlock:?}"));
+                        self.halt.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     panic!("graph {index} deadlock: {deadlock:?}");
                 }
                 Blocked::Terminated(name) => {
@@ -369,6 +564,7 @@ impl WorldLoop {
                     break;
                 }
                 Blocked::Idle | Blocked::Sleeping { .. } | Blocked::Busy { .. } => {
+                    self.capture_manager_send(index);
                     break;
                 }
             }

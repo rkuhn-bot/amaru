@@ -22,6 +22,8 @@
 //! trees, `real_data` for live-network fragments, and `minting` for chains the nodes forge.
 
 #[cfg(test)]
+mod deadlock;
+#[cfg(test)]
 mod fragment;
 #[cfg(test)]
 mod generated;

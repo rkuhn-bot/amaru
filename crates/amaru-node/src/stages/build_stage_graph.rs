@@ -79,7 +79,9 @@ pub fn build_stage_graph(
     let protocol_version = opened.protocol_version;
     let span = debug_span!(consensus::node::INITIALIZE);
     let trace_context = (&span).into();
-    let peer_mailbox = peer_mailbox_size(config.target_upstream_peers, config.target_downstream_peers);
+    let peer_mailbox = config
+        .peer_bulk_mailbox
+        .unwrap_or_else(|| peer_mailbox_size(config.target_upstream_peers, config.target_downstream_peers));
     let manager = stage_graph.stage_with_mailbox_size("manager", manager::stage, peer_mailbox);
     let peer_selection = stage_graph.stage_with_mailbox_size("peer_selection", peer_selection::stage, peer_mailbox);
     let peer_selection_ref = peer_selection.sender();

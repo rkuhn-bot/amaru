@@ -265,6 +265,10 @@ struct WorldInner {
     seed: u64,
     latency_samples: u64,
     payload_delay: PayloadDelay,
+    /// Handshake hops (`ConnectAttempt`, `Accepted`, peer `Close`). Payload `Deliver` uses
+    /// [`Self::payload_delay`].
+    wire_delay_min_nanos: u64,
+    wire_delay_max_nanos: u64,
     listeners: BTreeMap<SocketAddr, Listener>,
     endpoints: BTreeMap<ConnectionId, ConnectionEndpoint>,
     /// Last scheduled `Deliver` arrival on each destination. One connection is FIFO:
@@ -312,6 +316,20 @@ impl WorldConnectionProvider {
         Self::with_delay(seed, PayloadDelay::LongTail)
     }
 
+    /// Pin every handshake hop and every payload `Deliver` to `nanos`.
+    ///
+    /// Completions that were scheduled together then share a timestamp, so a world that
+    /// coalesces same-timestamp events can resume them in one batch.
+    pub fn with_fixed_delay(seed: u64, nanos: u64) -> Self {
+        let provider = Self::with_payload_delay(seed, nanos, nanos);
+        {
+            let mut inner = provider.inner.lock();
+            inner.wire_delay_min_nanos = nanos;
+            inner.wire_delay_max_nanos = nanos;
+        }
+        provider
+    }
+
     fn with_delay(seed: u64, payload_delay: PayloadDelay) -> Self {
         Self {
             inner: Mutex::new(WorldInner {
@@ -321,6 +339,8 @@ impl WorldConnectionProvider {
                 seed,
                 latency_samples: 0,
                 payload_delay,
+                wire_delay_min_nanos: WIRE_DELAY_MIN_NANOS,
+                wire_delay_max_nanos: WIRE_DELAY_MAX_NANOS,
                 listeners: BTreeMap::new(),
                 endpoints: BTreeMap::new(),
                 last_deliver_at: BTreeMap::new(),
@@ -529,7 +549,7 @@ fn schedule_delayed_locked(inner: &mut WorldInner, min_nanos: u64, max_nanos: u6
 }
 
 fn schedule_wire_locked(inner: &mut WorldInner, event: NetworkEvent) -> u64 {
-    schedule_delayed_locked(inner, WIRE_DELAY_MIN_NANOS, WIRE_DELAY_MAX_NANOS, event)
+    schedule_delayed_locked(inner, inner.wire_delay_min_nanos, inner.wire_delay_max_nanos, event)
 }
 
 fn schedule_payload_locked(inner: &mut WorldInner, event: NetworkEvent) {
