@@ -19,7 +19,7 @@ empty list or an unknown signal causes startup to fail instead of silently enabl
 
 ## Extra log files
 
-`--log-output PATH:FILTER` (or `AMARU_LOG_OUTPUT`) adds a file. Repeat the flag for one file per occurrence. The value is split at the first colon, so a filter may contain `::`. A path ending in `.ndjson` is JSON, one object per line; any other path is the usual text log. The file is created or truncated. Span close lines include `time.busy` and `time.idle`. The terminal, TUI, and OpenTelemetry output are unchanged.
+`--log-output PATH:FILTER` (or `AMARU_LOG_OUTPUT`) adds a file. Repeat the flag for one file per occurrence. The value is split at the first colon, so a filter may contain `::`. A path ending in `.ndjson` uses the same JSON format as `--with-json-traces`, one object per line; any other path is the usual text log. The file is created or truncated. Span close lines include `time.busy` and `time.idle`. The terminal, TUI, and OpenTelemetry output are unchanged.
 
 External effects record a debug span on the target `pure_stage::effect` (span name `effect`, field `type_name`). That target is not `amaru_pure_stage`, so the filter below does not turn on the rest of the pure-stage logs:
 

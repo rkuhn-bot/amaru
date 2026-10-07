@@ -219,8 +219,9 @@ pub(crate) struct Cli {
     /// Also write traces to a file. Repeat for one file per occurrence.
     ///
     /// The value is `PATH:FILTER`, split at the first colon so a filter may contain `::`.
-    /// `FILTER` uses the same directives as `AMARU_LOG`. A path ending in `.ndjson` is JSON,
-    /// one object per line; any other path is text. The file is created or truncated.
+    /// `FILTER` uses the same directives as `AMARU_LOG`. A path ending in `.ndjson` uses the
+    /// same JSON format as `--with-json-traces`, one object per line; any other path is text.
+    /// The file is created or truncated.
     /// Span close lines include busy and idle time. This does not replace the terminal, the
     /// TUI, or OpenTelemetry.
     ///

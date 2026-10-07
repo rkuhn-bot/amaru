@@ -14,10 +14,10 @@
 
 //! Extra trace files requested on the command line.
 //!
-//! Each spec is `PATH:FILTER`, split at the first colon. A path ending in `.ndjson` is JSON,
-//! one object per line; any other path is the console text format. Span close lines include
-//! busy and idle time. These layers are added beside the terminal, TUI, and OpenTelemetry
-//! outputs, each with its own filter.
+//! Each spec is `PATH:FILTER`, split at the first colon. A path ending in `.ndjson` uses the
+//! same JSON event format as `--with-json-traces`, one object per line; any other path is the
+//! console text format. Span close lines include busy and idle time. These layers are added
+//! beside the terminal, TUI, and OpenTelemetry outputs, each with its own filter.
 
 use std::{
     fs::File,
@@ -28,7 +28,7 @@ use std::{
 };
 
 use amaru_observability::{
-    CborConsoleEventFormat, console_field_formatter,
+    CborConsoleEventFormat, CborJsonEventFormat, CborJsonFields, console_field_formatter,
     tracing::Subscriber,
     tracing_subscriber::{
         EnvFilter, Layer,
@@ -114,9 +114,9 @@ impl TraceOutputSpec {
         if self.json {
             Ok(fmt::layer()
                 .with_writer(writer)
-                .with_ansi(false)
-                .json()
                 .with_span_events(FmtSpan::CLOSE)
+                .event_format(CborJsonEventFormat::new())
+                .fmt_fields(CborJsonFields::new())
                 .with_filter(filter)
                 .boxed())
         } else {
@@ -132,16 +132,22 @@ impl TraceOutputSpec {
     }
 }
 
-#[derive(Clone)]
-struct TraceFileWriter {
-    file: Arc<Mutex<File>>,
+struct TraceFileWriter<W> {
+    file: Arc<Mutex<W>>,
 }
 
-impl Write for TraceFileWriter {
+impl<W> Clone for TraceFileWriter<W> {
+    fn clone(&self) -> Self {
+        Self { file: Arc::clone(&self.file) }
+    }
+}
+
+impl<W: Write> Write for TraceFileWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut file = self.file.lock().map_err(|err| io::Error::other(err.to_string()))?;
         let written = file.write(buf)?;
-        if buf.contains(&b'\n') {
+        // `write` may accept only a prefix. A newline past that prefix is not in the file yet.
+        if buf[..written].contains(&b'\n') {
             file.flush()?;
         }
         Ok(written)
@@ -152,8 +158,11 @@ impl Write for TraceFileWriter {
     }
 }
 
-impl<'a> MakeWriter<'a> for TraceFileWriter {
-    type Writer = TraceFileWriter;
+impl<'a, W> MakeWriter<'a> for TraceFileWriter<W>
+where
+    W: Write + Send + 'static,
+{
+    type Writer = TraceFileWriter<W>;
 
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
@@ -235,9 +244,55 @@ mod tests {
         assert_eq!(fields.get("message").and_then(Value::as_str), Some("close"));
         assert!(fields.get("time.busy").is_some(), "{value}");
         assert!(fields.get("time.idle").is_some(), "{value}");
-        let rendered = value.to_string();
-        assert!(rendered.contains("demo::MeasuredEffect"), "{rendered}");
-        assert!(rendered.contains("worker-1"), "{rendered}");
+        // Same envelope as `--with-json-traces`: span fields are inlined, and `span` is only name and target.
+        assert_eq!(fields.get("type_name").and_then(Value::as_str), Some("demo::MeasuredEffect"));
+        assert_eq!(fields.get("stage").and_then(Value::as_str), Some("worker-1"));
+        assert_eq!(value["span"]["name"], "effect");
+        assert_eq!(value["span"]["target"], EFFECT_SPAN_TARGET);
+        assert!(value["span"].get("type_name").is_none(), "{value}");
+        assert_eq!(value["parents"], serde_json::json!([]));
+        assert!(value.get("spans").is_none(), "{value}");
+    }
+
+    #[test]
+    fn flush_follows_only_the_bytes_actually_written() {
+        #[derive(Default)]
+        struct LimitedWriter {
+            buf: Vec<u8>,
+            limit: usize,
+            flushes: u32,
+        }
+
+        impl Write for LimitedWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let n = buf.len().min(self.limit);
+                self.buf.extend_from_slice(&buf[..n]);
+                Ok(n)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+
+        let mut writer =
+            TraceFileWriter { file: Arc::new(Mutex::new(LimitedWriter { limit: 4, ..LimitedWriter::default() })) };
+        // The newline sits past the four bytes this writer accepts.
+        let n = writer.write(b"abcd\n").expect("write");
+        assert_eq!(n, 4);
+        {
+            let guard = writer.file.lock().expect("lock");
+            assert_eq!(guard.flushes, 0, "a newline that was not written must not flush");
+            assert_eq!(guard.buf, b"abcd");
+        }
+
+        writer.file.lock().expect("lock").limit = 2;
+        let n = writer.write(b"\n!").expect("write");
+        assert_eq!(n, 2);
+        let guard = writer.file.lock().expect("lock");
+        assert_eq!(guard.flushes, 1, "a newline inside the accepted prefix must flush");
+        assert_eq!(guard.buf, b"abcd\n!");
     }
 
     #[test]
