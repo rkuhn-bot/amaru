@@ -1,0 +1,80 @@
+// Copyright 2026 PRAGMA
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Peer map owned by the performance worker: claims, quality, reputation, and source pools.
+
+mod claims;
+mod peer_mix;
+mod quality;
+mod record;
+mod reputation;
+mod select_outbound;
+mod select_share;
+mod sources;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use amaru_kernel::{HeaderHash, Peer, PeerCandidate};
+pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersParams};
+use claims::{ClaimMeta, ParentInfo};
+pub use peer_mix::{DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, MixEntry, PeerMix, PeerMixParseError, PeerSource};
+pub use quality::PeerScores;
+use record::PeerState;
+pub use reputation::{
+    ADVERSARIAL_IMPULSE, CONNECT_FAIL_IMPULSE, DEFAULT_PEER_MALUS_HALF_LIFE, PeerShareFlags, SHARE_MALUS_THRESHOLD,
+    malus_at,
+};
+pub use select_outbound::{NEVER_CONNECTED_BONUS, OutboundPick, SelectOutboundParams, SelectUsing};
+pub use select_share::SHARE_POLICY_MAX;
+pub use sources::{SharedIngestResult, SourceCounts};
+
+/// Peer performance map (availability + scores + source pools). Owned by the performance worker.
+#[derive(Debug, Default)]
+pub struct PeerPerformance {
+    /// header tree link edges
+    parents: BTreeMap<HeaderHash, ParentInfo>,
+    /// announcements and deliveries by peer, per hash
+    direct: BTreeMap<HeaderHash, BTreeMap<Peer, ClaimMeta>>,
+    /// announcements by peer, with EWMA scores and tip claims
+    peers: BTreeMap<Peer, PeerState>,
+    /// Admin mix formula (floors, weights, per-source malus half-lives).
+    peer_mix: PeerMix,
+    static_peers: BTreeSet<PeerCandidate>,
+    shared_peers: BTreeSet<PeerCandidate>,
+    snapshot_candidates: BTreeSet<PeerCandidate>,
+    ledger_candidates: BTreeSet<PeerCandidate>,
+    /// Origin of a dialed [`Peer`], for malus half-life after Host/SRV resolution.
+    peer_origin: BTreeMap<Peer, PeerSource>,
+    /// Last address obtained for a candidate; used only to score Host/SRV on later picks.
+    last_peer: BTreeMap<PeerCandidate, Peer>,
+}
+
+impl PeerPerformance {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bootstrap candidate pools and the admin mix (typically once at node start).
+    ///
+    /// All four sources are [`PeerCandidate`] sets. Host/SRV names stay in the pool and are
+    /// resolved again each time they are selected (DNS can change).
+    pub fn with_sources(
+        static_peers: BTreeSet<PeerCandidate>,
+        snapshot_candidates: BTreeSet<PeerCandidate>,
+        ledger_candidates: BTreeSet<PeerCandidate>,
+        peer_mix: PeerMix,
+    ) -> Self {
+        Self { static_peers, snapshot_candidates, ledger_candidates, peer_mix, ..Self::default() }
+    }
+}

@@ -1425,12 +1425,12 @@ fn test_share_candidate_pool_excludes_ledger_and_snapshot() {
         BTreeSet::from([ledger]).into_iter().map(amaru_kernel::PeerCandidate::from).collect(),
         crate::performance::PeerMix::default(),
     );
-    peers.apply_ingest_shared_peers(&static_p, &["10.0.0.4:3001".parse().unwrap()]);
+    peers.ingest_shared_peers(&static_p, &["10.0.0.4:3001".parse().unwrap()]);
     // select_share uses pool of static+shared only (not ledger/snapshot).
     // Without advertisability records, ok_for_sharing is false — force via advertisability
-    peers.apply_advertisability(static_p, true, sim_t0());
-    peers.apply_advertisability(shared, true, sim_t0());
-    let addrs = peers.apply_select_share_peers(&TestPrep::peer("9.9.9.9:1"), 10, sim_t0());
+    peers.record_advertisability(static_p, true, sim_t0());
+    peers.record_advertisability(shared, true, sim_t0());
+    let addrs = peers.select_share_peers(&TestPrep::peer("9.9.9.9:1"), 10, sim_t0());
     let set: BTreeSet<_> = addrs.iter().map(|a| a.to_string()).collect();
     assert!(set.contains("10.0.0.1:3001"));
     assert!(set.contains("10.0.0.4:3001"));
