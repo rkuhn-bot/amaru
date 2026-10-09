@@ -56,13 +56,20 @@ pub struct OpenedLedger {
 /// Bulk mailbox for the connection manager and peer selection.
 ///
 /// [`DEFAULT_MAILBOX_SIZE`] plus one slot for each allowed upstream and downstream peer.
-/// Either stage can be inside a send to the other, and that extra room keeps the send from
-/// waiting on a full mailbox.
+/// At the production targets (3 upstream, 10 downstream) that is 23.
 ///
-/// Due to congestion that is not yet well-understood, we multiply the total by 20 to avoid
-/// deadlocks due to full mailboxes.
+/// Peer selection's bulk inbound is one `Adversarial` per offending peer (from
+/// track-peers, fetch-blocks, and block-source), one `Resolved` per in-flight upstream
+/// dial, and a single `Initialize` or `AddPeer`. `Tick` uses the priority mailbox.
+/// That burst is on the order of the allowed population, which the per-peer slots cover.
+///
+/// One selection round sends at most `upstream + downstream` manager commands. Those
+/// slots hold that round. The [`DEFAULT_MAILBOX_SIZE`] headroom holds lifecycle from
+/// live connections (`HandshakeComplete`, `Accepted`, `ConnectionResult`,
+/// `ConnectionDied`, `LocalUseApplied`) and `FetchBlocks`, `NewTip`, and `Listen`
+/// arriving in the same burst.
 fn peer_mailbox_size(upstream: usize, downstream: usize) -> usize {
-    DEFAULT_MAILBOX_SIZE.saturating_add(upstream).saturating_add(downstream).saturating_mul(20)
+    DEFAULT_MAILBOX_SIZE.saturating_add(upstream).saturating_add(downstream)
 }
 
 pub fn build_stage_graph(
@@ -272,7 +279,7 @@ mod tests {
 
     #[test]
     fn peer_mailbox_holds_one_message_per_allowed_peer() {
-        assert_eq!(peer_mailbox_size(40, 10), (DEFAULT_MAILBOX_SIZE + 50) * 20);
-        assert_eq!(peer_mailbox_size(0, 0), DEFAULT_MAILBOX_SIZE * 20);
+        assert_eq!(peer_mailbox_size(40, 10), DEFAULT_MAILBOX_SIZE + 50);
+        assert_eq!(peer_mailbox_size(0, 0), DEFAULT_MAILBOX_SIZE);
     }
 }
