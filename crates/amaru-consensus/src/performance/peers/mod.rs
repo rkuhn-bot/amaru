@@ -85,8 +85,9 @@ pub struct PeerPerformance {
 }
 
 impl PeerPerformance {
+    #[expect(clippy::expect_used)]
     pub(super) fn bump_generation(&mut self) {
-        self.generation = self.generation.saturating_add(1);
+        self.generation = self.generation.checked_add(1).expect("peer performance generation overflow");
     }
 
     pub fn generation(&self) -> u64 {
