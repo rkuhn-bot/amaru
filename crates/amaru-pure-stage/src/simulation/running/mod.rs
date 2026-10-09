@@ -83,6 +83,8 @@ pub struct SimulationRunning {
     overrides: Vec<OverrideExternalEffect>,
     breakpoints: Vec<(Name, Box<dyn Fn(&Effect) -> bool + Send + 'static>)>,
     schedule_ids: ScheduleIds,
+    /// Wakeups for sampled effect durations. Not the counter stages observe via `schedule_at`.
+    effect_schedule_ids: ScheduleIds,
     trace_buffer: Arc<Mutex<TraceBuffer>>,
     eval_strategy: Box<dyn EvalStrategy>,
     duration_rng: StdRng,
@@ -193,6 +195,7 @@ impl SimulationRunning {
             overrides: Vec::new(),
             breakpoints: Vec::new(),
             schedule_ids,
+            effect_schedule_ids: ScheduleIds::internal(),
             trace_buffer,
             eval_strategy,
             duration_rng,
@@ -359,6 +362,11 @@ impl SimulationRunning {
         self.scheduled.next_wakeup_time()
     }
 
+    /// Next wakeup armed for a sampled effect duration, not a stage `schedule_at`.
+    pub fn next_effect_wakeup(&self) -> Option<Instant> {
+        self.scheduled.next_id().filter(|id| id.is_internal()).map(|id| id.time())
+    }
+
     fn schedule_wakeup(&mut self, id: ScheduleId, wakeup: impl FnOnce(&mut SimulationRunning) + Send + 'static) {
         self.scheduled.schedule(id, Box::new(wakeup));
     }
@@ -391,7 +399,7 @@ impl SimulationRunning {
             Some(d) if d.is_zero() => true,
             Some(delta) => {
                 let now = self.clock.now(self.global_epoch_offset);
-                let id = self.schedule_ids.next_at(now + delta);
+                let id = self.effect_schedule_ids.next_at(now + delta);
                 let name = at_stage.clone();
                 self.schedule_wakeup(id, move |sim| {
                     if let Some(pending) = sim.external_inflight.get_mut(&name) {
@@ -416,7 +424,7 @@ impl SimulationRunning {
             Some(d) if d.is_zero() => true,
             Some(delta) => {
                 let now = self.clock.now(self.global_epoch_offset);
-                let schedule_id = self.schedule_ids.next_at(now + delta);
+                let schedule_id = self.effect_schedule_ids.next_at(now + delta);
                 self.schedule_wakeup(schedule_id, move |sim| {
                     if let Some(pending) = sim.detach_inflight.get_mut(&id) {
                         pending.time_ready = true;

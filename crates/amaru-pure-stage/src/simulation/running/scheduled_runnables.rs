@@ -71,7 +71,11 @@ impl ScheduledRunnables {
 
     /// Return the next wakeup time of the scheduled runnables.
     pub fn next_wakeup_time(&self) -> Option<Instant> {
-        self.by_id.first_key_value().map(|(k, _)| k.time())
+        self.next_id().map(|id| id.time())
+    }
+
+    pub(crate) fn next_id(&self) -> Option<ScheduleId> {
+        self.by_id.first_key_value().map(|(id, _)| *id)
     }
 
     /// Remove a scheduled runnable by its ScheduleId.

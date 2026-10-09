@@ -24,8 +24,8 @@ use std::{
 
 use amaru_pure_stage::{
     DeserializerGuards, DurationDist, ExternalEffect, ExternalEffectAPI, Resources, StageGraph, assert_trace_contains,
-    assert_trace_does_not_contain, assert_trace_match, assert_trace_match_filter, register_data_deserializer,
-    register_effect_deserializer,
+    assert_trace_does_not_contain, assert_trace_match, assert_trace_match_filter, assert_trace_no_clock,
+    register_data_deserializer, register_effect_deserializer,
     simulation::{Run, SimulationBuilder},
     tm_clock, tm_clock_between, tm_effect, tm_external_effect, tm_external_effect_any, tm_input, tm_resume,
     tm_resume_external, tm_resume_unit, tm_state,
@@ -189,6 +189,20 @@ fn assert_trace_match_filter_drops_matched_actuals() {
             tm_state("work-1", &()),
             tm_input("work-1", &1u32),
             tm_external_effect::<ZeroWork>("work-1"),
+            tm_state("work-1", &()),
+        ],
+    );
+}
+
+#[test]
+fn assert_trace_no_clock_ignores_the_sampled_advance() {
+    let (running, _guards) = run_once::<ConstWork>(1);
+    assert_trace_no_clock(
+        &running,
+        &[
+            tm_state("work-1", &()),
+            tm_input("work-1", &1u32),
+            tm_external_effect::<ConstWork>("work-1"),
             tm_state("work-1", &()),
         ],
     );

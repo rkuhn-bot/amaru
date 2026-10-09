@@ -221,7 +221,7 @@ mod tests {
     fn ndjson_file_records_an_effect_span_close() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("effects.ndjson");
-        let spec = format!("{}:pure_stage=debug", path.display()).parse::<TraceOutputSpec>().expect("spec");
+        let spec = format!("{}:amaru_pure_stage=debug", path.display()).parse::<TraceOutputSpec>().expect("spec");
         assert!(spec.is_json());
 
         let subscriber = attach(tracing_subscriber::registry(), &[spec]).expect("layer");
@@ -299,7 +299,7 @@ mod tests {
     fn text_file_records_busy_time() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("effects.log");
-        let spec = format!("{}:pure_stage=debug", path.display()).parse::<TraceOutputSpec>().expect("spec");
+        let spec = format!("{}:amaru_pure_stage=debug", path.display()).parse::<TraceOutputSpec>().expect("spec");
         assert!(!spec.is_json());
 
         let subscriber = attach(tracing_subscriber::registry(), &[spec]).expect("layer");

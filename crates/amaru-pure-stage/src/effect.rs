@@ -147,11 +147,23 @@ impl Default for ScheduleIds {
 
 impl ScheduleIds {
     pub fn new() -> Self {
+        Self::starting_at(0)
+    }
+
+    /// Ids for simulator bookkeeping that stages never observe.
+    ///
+    /// The counter starts in the high half of `u64` so these ids cannot collide
+    /// with ids handed out by [`Self::new`].
+    pub(crate) fn internal() -> Self {
+        Self::starting_at(1_u64 << 63)
+    }
+
+    fn starting_at(start: u64) -> Self {
         Self {
             #[cfg(not(target_arch = "riscv32"))]
-            counter: Arc::new(AtomicU64::new(0)),
+            counter: Arc::new(AtomicU64::new(start)),
             #[cfg(target_arch = "riscv32")]
-            counter: Arc::new(parking_lot::Mutex::new(0)),
+            counter: Arc::new(parking_lot::Mutex::new(start)),
         }
     }
 
