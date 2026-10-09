@@ -794,14 +794,8 @@ fn test_connect_failed_records_failure() {
     };
     let msg = PeerSelectionMsg::ConnectFailed(p);
     let (running, _guards, mut logs) = setup(&prep, msg.clone());
-    let failure = te_record_connection_failure("ps-1", p, sim_t0());
-    {
-        let trace = running.trace_buffer().lock();
-        assert!(
-            trace.iter_entries().all(|(_, entry)| entry != failure),
-            "connect-failed must not record the connection-failure malus; the manager write does that"
-        );
-    }
+    // The manager records the connection-failure malus; this stage must not.
+    assert_trace_does_not_contain(&running, &[te_record_connection_failure("ps-1", p, sim_t0()).into()]);
     assert_trace_contains(
         &running,
         &[
