@@ -30,7 +30,7 @@ use super::{
     SharedIngestResult, SourceCounts,
     adoption::SyncAdoptionPace,
     effects::{
-        ClearPeerAvailabilityEffect, DirectClaimantsEffect, FirstAnnouncedAtEffect, IngestSharedPeersEffect,
+        ClearPeerAvailabilityEffect, DirectClaimantsEffect, EvictRecordsEffect, FirstAnnouncedAtEffect,
         IsStaticPeerEffect, NoteDialEffect, OkForSharingEffect, PeerAdversarialEffect, PeerCoversFragmentEffect,
         PruneBelowEffect, RankPeersForChurnEffect, RecordAdvertisabilityEffect, RecordBlockDeliveryEffect,
         RecordBlockPrunedEffect, RecordBlockValidEffect, RecordBlocksRequestedEffect, RecordConnectionFailureEffect,
@@ -74,7 +74,7 @@ pub(crate) enum PeerOp {
     Snapshot { effect: SnapshotEffect, reply: oneshot::Sender<Option<PeerSnapshot>> },
     OkForSharing { effect: OkForSharingEffect, reply: oneshot::Sender<bool> },
     SetLedgerCandidates { effect: SetLedgerCandidatesEffect },
-    IngestSharedPeers { effect: IngestSharedPeersEffect, reply: oneshot::Sender<SharedIngestResult> },
+    EvictRecords { effect: EvictRecordsEffect },
     OutboundInputs { excluded: BTreeSet<PeerCandidate>, reply: oneshot::Sender<OutboundInputs> },
     QueryPeerView { since_generation: u64, reply: oneshot::Sender<Option<PeerView>> },
     ShareReplyCandidates { now: Instant, reply: oneshot::Sender<Vec<ShareCandidate>> },
@@ -208,9 +208,8 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
         PeerOp::SetLedgerCandidates { effect } => {
             peers.set_ledger_candidates(effect.candidates);
         }
-        PeerOp::IngestSharedPeers { effect, reply } => {
-            let result = peers.ingest_shared_peers(&effect.from, &effect.peers);
-            let _ = reply.send(result);
+        PeerOp::EvictRecords { effect } => {
+            peers.sweep(effect.now, &effect.protected_peers, &effect.protected_candidates);
         }
         PeerOp::OutboundInputs { excluded, reply } => {
             let result = peers.outbound_inputs(&excluded);
@@ -229,7 +228,7 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
             let _ = reply.send(result);
         }
         PeerOp::NoteDial { effect } => {
-            peers.note_dial(effect.origin, &effect.candidate, effect.peer);
+            peers.note_dial(effect.origin, &effect.candidate, effect.peer, effect.at);
         }
         PeerOp::SharedContains { effect, reply } => {
             let result = peers.shared_contains(&effect.peer);

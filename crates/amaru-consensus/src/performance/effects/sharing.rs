@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Peer-sharing ingest, reply selection, and the reputation queries those use.
+//! Reputation queries the peer-sharing filters use.
 
 use amaru_kernel::Peer;
 use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
 
 use super::{enqueue_query, require_perf};
 use crate::performance::{
-    PeerShareFlags, PeerSnapshot, Performance, SharedIngestResult,
+    PeerShareFlags, PeerSnapshot, Performance,
     ops::{PeerOp, PerformanceOp},
-    peers::{sample_share_peers, share_reply_seed},
 };
 
 impl Performance {
@@ -35,14 +34,6 @@ impl Performance {
 
     pub fn ok_for_sharing(peer: Peer, now: Instant) -> OkForSharingEffect {
         OkForSharingEffect { peer, now }
-    }
-
-    pub fn ingest_shared_peers(from: Peer, peers: Vec<std::net::SocketAddr>) -> IngestSharedPeersEffect {
-        IngestSharedPeersEffect { from, peers }
-    }
-
-    pub fn select_share_peers(requester: Peer, amount: u8, now: Instant) -> SelectSharePeersEffect {
-        SelectSharePeersEffect { requester, amount, now }
     }
 }
 
@@ -91,44 +82,6 @@ impl ExternalEffectAPI for OkForSharingEffect {
         let perf = require_perf(&resources);
         self.wrap(|this| async move {
             enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::OkForSharing { effect: this, reply })).await
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct IngestSharedPeersEffect {
-    pub(crate) from: Peer,
-    pub(crate) peers: Vec<std::net::SocketAddr>,
-}
-
-impl ExternalEffectAPI for IngestSharedPeersEffect {
-    type Response = SharedIngestResult;
-
-    fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
-        let perf = require_perf(&resources);
-        self.wrap(|this| async move {
-            enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::IngestSharedPeers { effect: this, reply })).await
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct SelectSharePeersEffect {
-    pub(crate) requester: Peer,
-    pub(crate) amount: u8,
-    pub(crate) now: Instant,
-}
-
-impl ExternalEffectAPI for SelectSharePeersEffect {
-    type Response = Vec<std::net::SocketAddr>;
-
-    fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
-        let perf = require_perf(&resources);
-        self.wrap(|this| async move {
-            let now = this.now;
-            let candidates =
-                enqueue_query(&perf, |reply| PerformanceOp::Peer(PeerOp::ShareReplyCandidates { now, reply })).await;
-            sample_share_peers(&this.requester, this.amount, &candidates, share_reply_seed(&this.requester))
         })
     }
 }

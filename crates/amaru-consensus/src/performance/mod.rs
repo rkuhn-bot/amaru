@@ -72,11 +72,12 @@
 //! | `note_dial` | peer selection | malus half-life | C8 | recorded immediately |
 //! | `is_static_peer` | peer selection | churn | C8 | on demand |
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
+//! | `evict_records` | peer selection | retention | C8 | recorded immediately, every five minutes; pops the dead sets only; does not bump generation |
 //! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
-//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest; new candidates bump generation |
-//! | `record_share_request_served` | peer-sharing responder | `share_requests` | C9 | recorded immediately; count, last answer, current and previous window; not enforced |
-//! | `ingest_shared_peers` | `record_shared_peers` | outbound pools | C9 | same ingest; new candidates bump generation |
+//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest; newcomers past the learned-address cap are dropped; new candidates bump generation |
+//! | `record_share_request_served` | peer-sharing responder | `share_requests` | C9 | recorded immediately; count, last answer, current and previous window; a new row is dropped at the record cap; not enforced |
+//! | `ingest_shared_peers` | `record_shared_peers` | outbound pools | C9 | drops newcomers at the learned-address cap; a repeat does not refresh the learned instant |
 //! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
 //!
 //! Terminal header/fork transitions produce [`HeaderTelemetry`] on the worker; OpenTelemetry
@@ -108,12 +109,13 @@ pub use header::{ForkSwitchOutcome, HeaderLifecycleOutcome, HeaderPerformance, H
 use ops::PerformanceOp;
 use parking_lot::Mutex;
 pub use peers::{
-    ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
-    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS,
-    OutboundInputs, OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags,
-    PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SHARE_REQUEST_WINDOW,
-    SelectOutboundParams, SelectPeersParams, SelectUsing, ShareRequestRecord, SharedIngestResult, SourceCounts,
-    UninterestingMark, ViewConnection, malus_at,
+    ADVERSARIAL_IMPULSE, BAN_STUB_GRACE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind,
+    DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry,
+    NEVER_CONNECTED_BONUS, OutboundInputs, OutboundPick, PEER_RECORD_CAP, PEER_RECORD_RETENTION, PeerMix,
+    PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot, PeerSource, PeerView,
+    SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SHARE_REQUEST_WINDOW, SHARED_PEERS_CAP, SelectOutboundParams,
+    SelectPeersParams, SelectUsing, ShareRequestRecord, SharedIngestResult, SourceCounts, Sweep, UninterestingMark,
+    ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},
@@ -337,6 +339,12 @@ impl Performance {
     /// Urgent-op wait is [`QueueProbe::max_urgent_wait`]. Named `instrumented-worker-queue-wait`.
     #[cfg(test)]
     pub fn paused() -> (Self, std::sync::mpsc::Sender<()>, Arc<QueueProbe>) {
+        Self::paused_with(PeerPerformance::new())
+    }
+
+    /// Same as [`Self::paused`], starting from `initial` so a cap-sized map is already in place.
+    #[cfg(test)]
+    pub fn paused_with(initial: PeerPerformance) -> (Self, std::sync::mpsc::Sender<()>, Arc<QueueProbe>) {
         let (tx, rx) = unbounded_channel::<Job>();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let probe = Arc::new(QueueProbe {
@@ -345,7 +353,7 @@ impl Performance {
             max_urgent_ns: AtomicU64::new(0),
         });
         let pending = Arc::new(AtomicUsize::new(0));
-        let join = spawn_worker(rx, Arc::clone(&pending), PeerPerformance::new(), Probe::hold(Arc::clone(&probe)));
+        let join = spawn_worker(rx, Arc::clone(&pending), initial, Probe::hold(Arc::clone(&probe)));
         (
             Self {
                 tx,

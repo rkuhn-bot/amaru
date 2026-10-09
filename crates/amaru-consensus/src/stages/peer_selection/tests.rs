@@ -282,6 +282,38 @@ fn a_due_sweep_runs_a_round_without_a_new_view() {
     prep.state.next_sweep_at = Some(sim_t0());
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     assert_eq!(counted_external::<crate::performance::SelectOutboundEffect>(&running), 1);
+    assert_eq!(counted_external::<crate::performance::EvictRecordsEffect>(&running), 0);
+    assert_eq!(ps_state(&running).next_evict_at, Some(sim_t0() + EVICTION_INTERVAL));
+}
+
+#[test]
+fn a_due_eviction_deadline_enqueues_one_batch() {
+    let banned = TestPrep::peer("1.2.3.4:1");
+    let dialing = TestPrep::peer("1.2.3.5:2");
+    let mut prep = test_prep(&[]);
+    prep.state.next_churn_at = Some(sim_t0() + Duration::from_secs(3600));
+    prep.state.next_sweep_at = Some(sim_t0() + Duration::from_secs(30));
+    prep.state.next_evict_at = Some(sim_t0());
+    prep.state.cooldowns.cooldown_until.insert(banned, sim_t0() + Duration::from_secs(60));
+    prep.state
+        .outbound_peers
+        .insert(dialing, OutboundIntent::Dialing { since: sim_t0(), candidate: PeerCandidate::from(dialing) });
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let effects = suspends(&running)
+        .into_iter()
+        .filter_map(|effect| {
+            let Effect::External { effect, .. } = effect else {
+                return None;
+            };
+            effect.cast::<crate::performance::EvictRecordsEffect>().ok().map(|effect| *effect)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(effects.len(), 1);
+    assert!(effects[0].protected_peers.contains(&banned));
+    assert!(effects[0].protected_peers.contains(&dialing));
+    assert!(effects[0].protected_candidates.contains(&PeerCandidate::from(dialing)));
+    assert_eq!(ps_state(&running).next_evict_at, Some(sim_t0() + EVICTION_INTERVAL));
 }
 
 #[test]

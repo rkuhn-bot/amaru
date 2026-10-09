@@ -20,6 +20,7 @@ mod peer_mix;
 mod quality;
 mod record;
 mod reputation;
+mod retention;
 mod select_outbound;
 mod select_share;
 mod sources;
@@ -29,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use amaru_kernel::{HeaderHash, Peer, PeerCandidate};
 use amaru_ouroboros::ConnectionId;
+use amaru_pure_stage::Instant;
 pub use claims::{BlockClaim, ClaimKind, FetchPeerSet, PeerSnapshot, SelectPeersParams};
 use claims::{ClaimMeta, ParentInfo};
 pub(crate) use connections::instant_of;
@@ -40,6 +42,7 @@ pub use reputation::{
     ADVERSARIAL_IMPULSE, CONNECT_FAIL_IMPULSE, DEFAULT_PEER_MALUS_HALF_LIFE, PeerShareFlags, SHARE_MALUS_THRESHOLD,
     malus_at,
 };
+pub use retention::{BAN_STUB_GRACE, PEER_RECORD_CAP, PEER_RECORD_RETENTION, SHARED_PEERS_CAP, Sweep};
 pub use select_outbound::{
     NEVER_CONNECTED_BONUS, OutboundInputs, OutboundPick, SelectOutboundParams, SelectUsing, select_outbound_from,
 };
@@ -79,6 +82,28 @@ pub struct PeerPerformance {
     share_requests: BTreeMap<Peer, connections::ShareRequests>,
     /// Latest intersection-not-found mark per peer. Dropped when that bearer is gone.
     uninteresting: BTreeMap<Peer, connections::UninterestingRecord>,
+    /// Latest observation instant. It only moves forward. See `retention`.
+    activity: BTreeMap<Peer, Instant>,
+    /// Unverified peers with no live protection, oldest activity first.
+    dead_unverified: BTreeSet<(Instant, Peer)>,
+    /// Established peers with no live protection, oldest activity first. Retention only.
+    dead_established: BTreeSet<(Instant, Peer)>,
+    /// Ban stubs keyed by the instant the grace ends.
+    stubs: BTreeSet<(Instant, Peer)>,
+    /// Pulled out of the dead sets while peer selection still protects them.
+    held_external: BTreeSet<Peer>,
+    /// When a shared address was first learned. A repeat ingest does not move it.
+    shared_learned: BTreeMap<PeerCandidate, Instant>,
+    /// Unverified shared addresses the sweep may drop, oldest useful instant first.
+    shared_dead_unverified: BTreeSet<(Instant, PeerCandidate)>,
+    /// Established peers' shared addresses. Dropped only past retention.
+    shared_dead_established: BTreeSet<(Instant, PeerCandidate)>,
+    /// Shared addresses held because the peer is live or the candidate is protected.
+    shared_held: BTreeSet<PeerCandidate>,
+    /// Hashes each peer claims, so dropping one peer does not scan every hash.
+    claim_index: BTreeMap<Peer, BTreeSet<HeaderHash>>,
+    /// Candidates whose last resolved address is this peer.
+    last_peer_by_peer: BTreeMap<Peer, BTreeSet<PeerCandidate>>,
     /// Advances when a lifecycle write, a ledger-candidate replacement, a share ingest that adds
     /// candidates, or an intersection-not-found mark changes what selection reads.
     generation: u64,

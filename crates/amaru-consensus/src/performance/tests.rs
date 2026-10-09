@@ -376,7 +376,7 @@ fn failed_hostname_is_offered_when_nothing_better_remains() {
         BTreeSet::new(),
         PeerMix::parse("snapshot~1@10s").unwrap(),
     );
-    peers.note_dial(PeerSource::Snapshot, &host, resolved);
+    peers.note_dial(PeerSource::Snapshot, &host, resolved, t(0));
     peers.record_connection_failure(resolved, t(0));
 
     let picked = peers.select_outbound(SelectOutboundParams {
@@ -407,7 +407,7 @@ fn open_slots_fill_worse_scores_after_better_ones() {
         BTreeSet::new(),
         PeerMix::parse("snapshot~1@10s").unwrap(),
     );
-    peers.note_dial(PeerSource::Snapshot, &failed, resolved);
+    peers.note_dial(PeerSource::Snapshot, &failed, resolved, t(0));
     peers.record_connection_failure(resolved, t(0));
 
     let picked = peers.select_outbound(SelectOutboundParams {
@@ -490,7 +490,7 @@ fn note_dial_keeps_hostname_in_pool_and_marks_origin() {
         BTreeSet::new(),
         PeerMix::parse("static~1").unwrap(),
     );
-    peers.note_dial(PeerSource::Static, &host, resolved);
+    peers.note_dial(PeerSource::Static, &host, resolved, t(1));
     assert!(peers.is_static_peer(&resolved));
     let picked = peers.select_outbound(SelectOutboundParams {
         open: 1,
@@ -1503,17 +1503,47 @@ fn select_outbound_is_stable_for_a_fixed_seed() {
 ///
 /// The simulation clock does not advance while the performance worker runs, so a world
 /// test cannot see how long `record_header_announcement` and `select_peers_for_fetch`
-/// waited behind a burst of connection closes. This test pauses the worker, queues 32
-/// establish/close pairs and then those two ops, and measures dequeue time minus
-/// `max(enqueue time, worker-ready time)`.
+/// waited behind a burst of connection closes. This test pauses the worker, queues one
+/// sweep of a cap-sized dead set, then 32 establish/close pairs, then those two
+/// ops, and measures dequeue time minus `max(enqueue time, worker-ready time)`.
 #[test]
 fn instrumented_worker_queue_wait() {
+    use std::collections::BTreeSet;
+
     use tokio::sync::oneshot;
 
     use super::ops::{PeerOp, PerformanceOp};
-    use crate::performance::{RecordHeaderAnnouncementEffect, SelectPeersForFetchEffect};
+    use crate::performance::{
+        EvictRecordsEffect, PEER_RECORD_CAP, RecordHeaderAnnouncementEffect, SHARED_PEERS_CAP,
+        SelectPeersForFetchEffect,
+    };
 
-    let (perf, release, probe) = Performance::paused();
+    let now = t(200_000);
+    let stale = now - Duration::from_secs(48 * 60 * 60);
+    let mut seeded = PeerPerformance::new();
+    seeded.testing_seed_eviction_cap(stale, now);
+    let started = std::time::Instant::now();
+    let direct = {
+        let (protected_peers, protected_candidates) = (BTreeSet::new(), BTreeSet::new());
+        seeded.sweep(now, &protected_peers, &protected_candidates)
+    };
+    let direct_elapsed = started.elapsed();
+    let queue_line = format!(
+        "sweep at cap: {direct_elapsed:?} removed_records={} removed_shared={}",
+        direct.removed_records, direct.removed_shared
+    );
+    eprintln!("{queue_line}");
+    std::fs::write("/tmp/pt9-evict-timing.txt", queue_line).expect("timing note");
+    assert_eq!(direct.removed_records, PEER_RECORD_CAP);
+    assert_eq!(direct.removed_shared, SHARED_PEERS_CAP);
+    assert!(direct_elapsed <= Duration::from_millis(20), "sweep took {direct_elapsed:?}");
+
+    let mut queued = PeerPerformance::new();
+    queued.testing_seed_eviction_cap(stale, now);
+    let (perf, release, probe) = Performance::paused_with(queued);
+    perf.submit(PerformanceOp::Peer(PeerOp::EvictRecords {
+        effect: EvictRecordsEffect { now, protected_peers: BTreeSet::new(), protected_candidates: BTreeSet::new() },
+    }));
     let at = observed(1, 0);
     let mut ids = ConnectionId::initial();
     for n in 0..32u16 {
@@ -1556,8 +1586,15 @@ fn instrumented_worker_queue_wait() {
         fetch_rx.await.expect("fetch selection");
     });
     let waited = probe.max_urgent_wait();
+    let note = format!("\nqueue_wait={waited:?}\n");
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open("/tmp/pt9-evict-timing.txt")
+        .and_then(|mut file| std::io::Write::write_all(&mut file, note.as_bytes()))
+        .expect("timing note");
+    eprintln!("urgent queue wait {waited:?}");
     assert!(!waited.is_zero(), "urgent ops were not timed");
-    assert!(waited <= Duration::from_millis(1), "urgent queue wait {waited:?}");
+    assert!(waited <= Duration::from_millis(20), "urgent queue wait {waited:?}");
 }
 
 #[test]

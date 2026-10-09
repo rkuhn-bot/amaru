@@ -16,6 +16,8 @@
 
 #![expect(clippy::unit_arg)]
 
+use std::collections::BTreeSet;
+
 use amaru_kernel::{Peer, PeerCandidate};
 use amaru_pure_stage::{BoxFuture, ExternalEffectAPI, Instant, Resources, SendData};
 
@@ -51,8 +53,22 @@ impl Performance {
         IsStaticPeerEffect { peer }
     }
 
-    pub fn note_dial(origin: crate::performance::PeerSource, candidate: PeerCandidate, peer: Peer) -> NoteDialEffect {
-        NoteDialEffect { origin, candidate, peer }
+    pub fn note_dial(
+        origin: crate::performance::PeerSource,
+        candidate: PeerCandidate,
+        peer: Peer,
+        at: Instant,
+    ) -> NoteDialEffect {
+        NoteDialEffect { origin, candidate, peer, at }
+    }
+
+    /// Enqueue one sweep of the dead sets. The caller does not wait for the worker to finish it.
+    pub fn evict_records(
+        now: Instant,
+        protected_peers: BTreeSet<Peer>,
+        protected_candidates: BTreeSet<PeerCandidate>,
+    ) -> EvictRecordsEffect {
+        EvictRecordsEffect { now, protected_peers, protected_candidates }
     }
 
     pub fn shared_contains(peer: Peer) -> SharedContainsEffect {
@@ -175,6 +191,7 @@ pub struct NoteDialEffect {
     pub(crate) origin: crate::performance::PeerSource,
     pub(crate) candidate: PeerCandidate,
     pub(crate) peer: Peer,
+    pub(crate) at: Instant,
 }
 
 impl ExternalEffectAPI for NoteDialEffect {
@@ -206,6 +223,24 @@ impl ExternalEffectAPI for SharedContainsEffect {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceCountsEffect;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EvictRecordsEffect {
+    pub(crate) now: Instant,
+    pub(crate) protected_peers: BTreeSet<Peer>,
+    pub(crate) protected_candidates: BTreeSet<PeerCandidate>,
+}
+
+impl ExternalEffectAPI for EvictRecordsEffect {
+    type Response = ();
+
+    fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
+        self.wrap_sync({
+            let perf = require_perf(&resources);
+            enqueue(&perf, PerformanceOp::Peer(PeerOp::EvictRecords { effect: self.as_ref().clone() }));
+        })
+    }
+}
 
 impl ExternalEffectAPI for SourceCountsEffect {
     type Response = crate::performance::SourceCounts;
