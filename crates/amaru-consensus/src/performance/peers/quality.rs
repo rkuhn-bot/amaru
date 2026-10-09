@@ -109,23 +109,19 @@ fn churn_badness(scores: &PeerScores) -> f64 {
 impl PeerPerformance {
     pub fn record_fetch_failure(&mut self, peers: &[Peer], at: Instant) {
         for &peer in peers {
-            {
-                let state = self.peers.entry(peer).or_default();
+            self.write_peer(peer, at, |state| {
                 state.scores.fetch_timeouts = state.scores.fetch_timeouts.saturating_add(1);
                 state.scores.last_change = Some(at);
-            }
-            self.note_activity(peer, at);
+            });
         }
     }
 
     pub fn record_keepalive_rtt(&mut self, peer: Peer, rtt: Duration, at: Instant) {
-        {
-            let state = self.peers.entry(peer).or_default();
+        self.write_peer(peer, at, |state| {
             state.scores.keepalive_rtt_latest = Some(rtt);
             state.scores.keepalive_rtt_ewma = Some(ewma_duration(state.scores.keepalive_rtt_ewma, rtt));
             state.scores.last_change = Some(at);
-        }
-        self.note_activity(peer, at);
+        });
     }
 
     /// Copy the rows churn ranking needs. Ordering is the caller's.
@@ -146,25 +142,21 @@ impl PeerPerformance {
     }
 
     pub(super) fn update_header_lag(&mut self, peer: &Peer, lag: Duration, at: Instant) {
-        {
-            let state = self.peers.entry(*peer).or_default();
+        self.write_peer(*peer, at, |state| {
             state.scores.header_lag_ewma = Some(ewma_duration(state.scores.header_lag_ewma, lag));
             state.scores.last_change = Some(at);
-        }
-        self.note_activity(*peer, at);
+        });
     }
 
     pub(super) fn update_block_delivery(&mut self, peer: &Peer, response: Duration, bytes: u64, at: Instant) {
-        {
-            let state = self.peers.entry(*peer).or_default();
+        self.write_peer(*peer, at, |state| {
             state.scores.block_response_ewma = Some(ewma_duration(state.scores.block_response_ewma, response));
             let secs = response.as_secs_f64().max(1e-6);
             let bps = bytes as f64 / secs;
             state.scores.bandwidth_ewma_bps = Some(ewma_f64(state.scores.bandwidth_ewma_bps, bps));
             state.scores.fetch_successes = state.scores.fetch_successes.saturating_add(1);
             state.scores.last_change = Some(at);
-        }
-        self.note_activity(*peer, at);
+        });
     }
 }
 

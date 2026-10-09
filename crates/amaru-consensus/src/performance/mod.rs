@@ -72,7 +72,7 @@
 //! | `note_dial` | peer selection | malus half-life | C8 | recorded immediately |
 //! | `is_static_peer` | peer selection | churn | C8 | on demand |
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
-//! | `evict_records` | peer selection | retention | C8 | recorded immediately, every five minutes; at most 256 entries; does not bump generation |
+//! | `evict_records` | peer selection | retention | C8 | recorded immediately, every five minutes; pops the dead sets only; does not bump generation |
 //! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest; newcomers past the learned-address cap are dropped; new candidates bump generation |
@@ -110,12 +110,12 @@ use ops::PerformanceOp;
 use parking_lot::Mutex;
 pub use peers::{
     ADVERSARIAL_IMPULSE, BAN_STUB_GRACE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind,
-    DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, EVICTION_BATCH, EvictBatch,
-    FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS, OutboundInputs, OutboundPick, PEER_RECORD_CAP,
-    PEER_RECORD_RETENTION, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot,
-    PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SHARE_REQUEST_WINDOW, SHARED_PEERS_CAP,
-    SelectOutboundParams, SelectPeersParams, SelectUsing, ShareRequestRecord, SharedIngestResult, SourceCounts,
-    UninterestingMark, ViewConnection, malus_at,
+    DEFAULT_MALUS_HALF_LIFE, DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry,
+    NEVER_CONNECTED_BONUS, OutboundInputs, OutboundPick, PEER_RECORD_CAP, PEER_RECORD_RETENTION, PeerMix,
+    PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot, PeerSource, PeerView,
+    SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SHARE_REQUEST_WINDOW, SHARED_PEERS_CAP, SelectOutboundParams,
+    SelectPeersParams, SelectUsing, ShareRequestRecord, SharedIngestResult, SourceCounts, Sweep, UninterestingMark,
+    ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},

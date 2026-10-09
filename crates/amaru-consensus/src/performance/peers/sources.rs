@@ -42,7 +42,8 @@ pub struct SourceCounts {
 
 impl PeerPerformance {
     pub fn set_ledger_candidates(&mut self, candidates: BTreeSet<PeerCandidate>) {
-        self.ledger_candidates = candidates;
+        let previous = std::mem::replace(&mut self.ledger_candidates, candidates);
+        self.reclassify_source_members(&previous);
         self.bump_generation();
     }
 
@@ -120,7 +121,7 @@ impl PeerPerformance {
             }
         }
         self.last_peer_by_peer.entry(peer).or_default().insert(candidate.clone());
-        self.note_activity(peer, at);
+        self.touch(peer, at);
         match self.peer_origin.get(&peer) {
             Some(existing) if *existing <= origin => {}
             _ => {

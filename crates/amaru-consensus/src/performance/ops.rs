@@ -209,7 +209,7 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
             peers.set_ledger_candidates(effect.candidates);
         }
         PeerOp::EvictRecords { effect } => {
-            peers.evict_batch(effect.now, &effect.protected_peers, &effect.protected_candidates);
+            peers.sweep(effect.now, &effect.protected_peers, &effect.protected_candidates);
         }
         PeerOp::OutboundInputs { excluded, reply } => {
             let result = peers.outbound_inputs(&excluded);

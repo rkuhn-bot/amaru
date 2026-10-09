@@ -102,15 +102,13 @@ impl PeerPerformance {
         self.clear_peer_claims(peer);
         self.share_requests.remove(peer);
         let half_life = self.half_life_for(peer);
-        {
-            let state = self.peers.entry(*peer).or_default();
+        self.write_peer(*peer, at, |state| {
             state.tips.clear();
             state.scores = PeerScores::default();
             state.adversarial = true;
             state.stub_until = Some(at + BAN_STUB_GRACE);
             add_malus_impulse(state, ADVERSARIAL_IMPULSE, at, half_life);
-        }
-        self.note_activity(*peer, at);
+        });
     }
 
     /// Record latest handshake peer-sharing willingness (overwrites prior value).
@@ -118,13 +116,11 @@ impl PeerPerformance {
     /// Marks the peer as ever-connected (successful handshake). Connection-failure upserts do
     /// not set that flag.
     pub fn record_advertisability(&mut self, peer: Peer, advertisable: bool, at: Instant) {
-        {
-            let state = self.peers.entry(peer).or_default();
+        self.write_peer(peer, at, |state| {
             state.ever_connected = true;
             state.advertisable = advertisable;
             state.scores.last_change = Some(at);
-        }
-        self.note_activity(peer, at);
+        });
     }
 
     /// Increment connection/protocol failure count and raise connection malus.
@@ -132,13 +128,11 @@ impl PeerPerformance {
     /// Upserts a reputation stub when needed, but does **not** set `ever_connected`.
     pub fn record_connection_failure(&mut self, peer: Peer, at: Instant) {
         let half_life = self.half_life_for(&peer);
-        {
-            let state = self.peers.entry(peer).or_default();
+        self.write_peer(peer, at, |state| {
             state.failure_count = state.failure_count.saturating_add(1);
             state.scores.last_change = Some(at);
             add_malus_impulse(state, CONNECT_FAIL_IMPULSE, at, half_life);
-        }
-        self.note_activity(peer, at);
+        });
     }
 
     pub fn share_flags(&self, peer: &Peer) -> Option<PeerShareFlags> {

@@ -62,7 +62,7 @@ impl Performance {
         NoteDialEffect { origin, candidate, peer, at }
     }
 
-    /// Enqueue one retention batch. The caller does not wait for the worker to finish it.
+    /// Enqueue one sweep of the dead sets. The caller does not wait for the worker to finish it.
     pub fn evict_records(
         now: Instant,
         protected_peers: BTreeSet<Peer>,
