@@ -114,7 +114,7 @@ struct Established {
     peer_sharing_initiator: Option<StageRef<PeerSharingMessage>>,
     chainsync_responder: Option<StageRef<chainsync::ResponderMessage>>,
     blockfetch_responder: Option<StageRef<Void>>,
-    peer_sharing_responder: Option<StageRef<crate::peer_sharing::ResponderMessage>>,
+    peer_sharing_responder: Option<StageRef<amaru_pure_stage::Void>>,
     stopping: BTreeSet<ChildId>,
 }
 
@@ -486,7 +486,7 @@ async fn do_handshake(
 }
 
 async fn register_responders(mut s: Established, params: &Params, eff: &Effects<ConnectionMessage>) -> Established {
-    let Params { peer, conn_id, manager, era_history, mempool_stage, config, .. } = params;
+    let Params { peer, conn_id, era_history, mempool_stage, config, .. } = params;
     let died = ConnectionMessage::ChildDied(ChildId::Responder);
     let _ = register_keepalive(Role::Responder, *peer, *conn_id, s.muxer.clone(), eff, died).await;
     let _ = register_tx_submission(
@@ -519,14 +519,8 @@ async fn register_responders(mut s: Established, params: &Params, eff: &Effects<
     );
     if s.version_data.is_advertisable() {
         s.peer_sharing_responder = Some(
-            register_peer_sharing_responder(
-                &s.muxer,
-                *peer,
-                manager.clone(),
-                eff,
-                ConnectionMessage::ChildDied(ChildId::Responder),
-            )
-            .await,
+            register_peer_sharing_responder(&s.muxer, *peer, eff, ConnectionMessage::ChildDied(ChildId::Responder))
+                .await,
         );
     }
     s

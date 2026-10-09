@@ -30,7 +30,7 @@ use amaru_observability::debug_span;
 use amaru_ouroboros::MempoolMsg;
 use amaru_protocols::{
     manager,
-    manager::{Manager, ManagerConfig, ManagerMessage, PeerSelectionNotify},
+    manager::{Manager, ManagerConfig, ManagerMessage},
 };
 use amaru_pure_stage::{DEFAULT_MAILBOX_SIZE, Sender, StageGraph, StageRef};
 
@@ -101,12 +101,6 @@ pub fn build_stage_graph(
         .with_share_request_delays(config.share_request_initial_delay, config.share_request_interval)
         .with_connection_timeout(manager_config.connection_timeout),
     );
-
-    let peer_selection_notify = peer_selection_ref.contramap(|n: PeerSelectionNotify| match n {
-        PeerSelectionNotify::ShareRequest { peer, amount, reply_to } => {
-            PeerSelectionMsg::ShareRequest { peer, amount, reply_to }
-        }
-    });
 
     let track_peers = stage_graph.stage("track_peers", track_peers::stage);
     let select_chain = stage_graph.stage("select_chain", select_chain::stage);
@@ -239,7 +233,6 @@ pub fn build_stage_graph(
                 Arc::new(era_history.clone()),
                 track_peers_input,
                 mempool_stage.clone(),
-                peer_selection_notify,
             ),
         )
         .without_state();

@@ -25,7 +25,7 @@ use crate::{
     chainsync::ChainSyncInitiatorMsg,
     connection::{self, ConnectionMessage, LocalUse},
     network_effects::{ConnectError, Network, NetworkOps},
-    peer_sharing::{SharePeersReply, ShareResult},
+    peer_sharing::ShareResult,
     peer_tracking::observed_at,
     peer_tracking_effects::PeerTrack,
     protocol::Role,
@@ -37,16 +37,6 @@ pub mod connector;
 
 #[cfg(test)]
 mod tests;
-
-/// Messages the [`Manager`] sends to the consensus `peer_selection` stage.
-///
-/// Connection lifecycle is written to the peer-tracking resource. Peer selection reads that
-/// resource on its own tick. It is not told about handshakes, closes, or failed dials.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum PeerSelectionNotify {
-    /// Inbound peer-sharing request: select addresses to advertise and reply on `reply_to`.
-    ShareRequest { peer: Peer, amount: u8, reply_to: StageRef<SharePeersReply> },
-}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ManagerMessage {
@@ -78,8 +68,6 @@ pub enum ManagerMessage {
         interval: std::time::Duration,
         reply_to: StageRef<ShareResult>,
     },
-    /// Server-side peer-sharing: ask peer selection for addresses to return to `peer`.
-    ShareRequest { peer: Peer, amount: u8, reply_to: StageRef<SharePeersReply> },
     /// Advertise this new tip to all downstream peers.
     NewTip(Point, TraceContext),
     /// INTERNAL message sent by the connector stage after a connection attempt completes.
@@ -92,8 +80,8 @@ pub enum ManagerMessage {
     ConnectionDied(Peer, ConnectionId, Role),
     /// INTERNAL message sent by the accept stage after accepting a new connection.
     Accepted(Peer, ConnectionId),
-    /// INTERNAL Sent by the connection stage after successful handshake.
-    /// This allows the manager to notify peer_selection with accurate full_duplex status.
+    /// INTERNAL Sent by the connection stage after a successful handshake.
+    /// The manager records the bearer, including full-duplex status, on the performance resource.
     HandshakeComplete {
         peer: Peer,
         stage: StageRef<ConnectionMessage>,
@@ -118,7 +106,6 @@ impl ManagerMessage {
             ManagerMessage::Listen(_) => "Listen",
             ManagerMessage::FetchBlocks { .. } => "FetchBlocks",
             ManagerMessage::RequestSharePeers { .. } => "RequestSharePeers",
-            ManagerMessage::ShareRequest { .. } => "ShareRequest",
             ManagerMessage::NewTip(_, _) => "NewTip",
             ManagerMessage::ConnectionResult(..) => "ConnectionResult",
             ManagerMessage::ConnectionDied(..) => "ConnectionDied",
@@ -182,7 +169,6 @@ pub struct Manager {
     era_history: Arc<EraHistory>,
     chain_sync: StageRef<ChainSyncInitiatorMsg>,
     mempool: StageRef<MempoolMsg>,
-    peer_selection: StageRef<PeerSelectionNotify>,
 }
 
 #[derive(Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -222,7 +208,6 @@ impl Manager {
         era_history: Arc<EraHistory>,
         chain_sync: StageRef<ChainSyncInitiatorMsg>,
         mempool: StageRef<MempoolMsg>,
-        peer_selection: StageRef<PeerSelectionNotify>,
     ) -> Self {
         Self {
             peers: BTreeMap::new(),
@@ -233,7 +218,6 @@ impl Manager {
             era_history,
             chain_sync,
             mempool,
-            peer_selection,
         }
     }
 
@@ -742,9 +726,6 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
             ManagerMessage::RequestSharePeers { peer, amount, initial_delay, interval, reply_to } => {
                 manager.request_share_peers(peer, amount, initial_delay, interval, reply_to, &eff).await;
             }
-            ManagerMessage::ShareRequest { peer, amount, reply_to } => {
-                eff.send(&manager.peer_selection, PeerSelectionNotify::ShareRequest { peer, amount, reply_to }).await;
-            }
             ManagerMessage::ConnectionResult(peer, conn_id) => {
                 manager.connection_result(peer, conn_id, &eff).await;
             }
@@ -840,7 +821,6 @@ pub fn register_deserializers() -> DeserializerGuards {
     let mut guards = vec![
         register_data_deserializer::<Manager>().boxed(),
         register_data_deserializer::<ManagerMessage>().boxed(),
-        register_data_deserializer::<PeerSelectionNotify>().boxed(),
         register_data_deserializer::<Instant>().boxed(),
     ];
     guards.extend(connector::register_deserializers());

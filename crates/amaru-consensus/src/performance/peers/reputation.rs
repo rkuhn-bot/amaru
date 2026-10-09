@@ -140,8 +140,8 @@ impl PeerPerformance {
     ///
     /// Requires a successful handshake (`ever_connected`), advertisable willingness, not
     /// sticky-adversarial, and connection malus below [`SHARE_MALUS_THRESHOLD`] after decay with
-    /// the peer’s source half-life. Peer selection still excludes ledger/snapshot origins and pure
-    /// inbound addresses.
+    /// the peer’s source half-life. The share pool excludes ledger and snapshot origins, and peers
+    /// that are neither static nor shared.
     pub fn ok_for_sharing(&self, peer: &Peer, now: Instant) -> bool {
         let Some(state) = self.peers.get(peer) else {
             return false;

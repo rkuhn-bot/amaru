@@ -209,7 +209,6 @@ pub fn build_injector(
             Arc::new(PREPROD_ERA_HISTORY.clone()),
             StageRef::blackhole(),
             StageRef::blackhole(),
-            StageRef::blackhole(),
         ),
     );
     let manager_ref = manager.without_state();
@@ -258,7 +257,6 @@ pub fn build_injector_peer(
             ManagerConfig::default().with_accept_interval(Duration::ZERO).with_reconnect_delay(Duration::ZERO),
             Arc::new(PREPROD_ERA_HISTORY.clone()),
             pipeline.without_state(),
-            StageRef::blackhole(),
             StageRef::blackhole(),
         ),
     );

@@ -71,10 +71,10 @@
 //! | `note_dial` | peer selection | malus half-life | C8 | recorded immediately |
 //! | `is_static_peer` | peer selection | churn | C8 | on demand |
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
-//! | `select_share_peers` | peer selection | peer-sharing reply | C9 | worker copies candidates; caller samples |
-//! | `query_share_peers` | not called yet | peer-sharing reply | C9 | worker copies candidates; caller samples |
+//! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
+//! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `record_shared_peers` | not called yet | outbound pools | C9 | recorded immediately |
-//! | `record_share_request_served` | not called yet | not read yet | C9 | recorded immediately |
+//! | `record_share_request_served` | peer-sharing responder | not read yet | C9 | recorded immediately |
 //! | `ingest_shared_peers` | peer selection | outbound pools | C9 | on demand |
 //! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
 //!

@@ -30,11 +30,7 @@ use std::{
 use amaru_kernel::{BlockHeight, Peer, PeerCandidate};
 use amaru_observability::{Instrument, TraceContext, debug, debug_span, info, trace, warn};
 use amaru_ouroboros::{ConnectionDirection, ConnectionId, ObservedAt};
-use amaru_protocols::{
-    connection::LocalUse,
-    manager::ManagerMessage,
-    peer_sharing::{SharePeersReply, ShareResult},
-};
+use amaru_protocols::{connection::LocalUse, manager::ManagerMessage, peer_sharing::ShareResult};
 use amaru_pure_stage::{Effects, Instant, StageRef};
 
 pub use crate::performance::{DEFAULT_PEER_MIX, PeerMix, PeerMixParseError};
@@ -252,8 +248,6 @@ pub enum PeerSelectionMsg {
     Uninteresting { peer: Peer, conn_id: ConnectionId, after_rollback: bool },
     /// Reply from the peer-sharing initiator (one result per request cycle).
     SharePeersResult { peer: Peer, peers: Vec<SocketAddr> },
-    /// Server-side peer-sharing: select addresses to advertise to `peer` and reply on `reply_to`.
-    ShareRequest { peer: Peer, amount: u8, reply_to: StageRef<SharePeersReply> },
     /// DNS result for a selected bootstrap [`amaru_kernel::PeerCandidate`] (at most one [`Peer`]).
     Resolved(ResolvePeerCandidateResult),
     /// Wake from the single timeout.
@@ -1132,14 +1126,6 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
             let now = eff.clock().await;
             let mut budget = state.budget();
             state.regulate_peers(now, &eff, &mut budget).await;
-        }
-        PeerSelectionMsg::ShareRequest { peer, amount, reply_to } => {
-            let now = eff.clock().await;
-            let selected = eff.external(Performance::select_share_peers(peer, amount, now)).await;
-            let peers_list = selected.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-            let count = selected.len();
-            info!(protocols::peer_selection::sharing::SENT, peer, peers = peers_list, requested = amount, count,);
-            eff.send(&reply_to, SharePeersReply { peers: selected }).await;
         }
         PeerSelectionMsg::Resolved(ResolvePeerCandidateResult { candidate, origin, peer }) => {
             state.pending_resolve.remove(&candidate);
