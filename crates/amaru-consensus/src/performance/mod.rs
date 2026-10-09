@@ -64,7 +64,8 @@
 //! | `record_advertisability` | manager (inside established) and peer selection | sharing filters | C8 | recorded immediately |
 //! | `record_connection_failure` | manager (inside connect-failed) | malus, sharing filters | C8 | recorded immediately |
 //! | `clear_peer_availability` | peer selection, track_peers | fetch selection | C8 | recorded immediately |
-//! | `query_peer_view` | peer selection | peer selection | C8 | on demand; `None` when the generation is unchanged |
+//! | `query_peer_view` | peer selection | peer selection | C8 | on demand; `None` when the generation is unchanged; marks are those newer than `since` |
+//! | `record_uninteresting` | track_peers | peer selection | C8 | recorded immediately; bumps generation |
 //! | `select_outbound` | peer selection | peer selection | C8 | worker copies inputs; caller samples |
 //! | `rank_peers_for_churn` | peer selection | peer selection | C8 | worker copies scores; caller ranks |
 //! | `set_ledger_candidates` | peer selection | outbound pools | C8 | recorded immediately |
@@ -111,7 +112,7 @@ pub use peers::{
     DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS,
     OutboundInputs, OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags,
     PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams,
-    SelectPeersParams, SelectUsing, SharedIngestResult, SourceCounts, ViewConnection, malus_at,
+    SelectPeersParams, SelectUsing, SharedIngestResult, SourceCounts, UninterestingMark, ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},
@@ -398,6 +399,15 @@ impl Performance {
     /// Approximate number of ops queued or in flight.
     pub fn queue_depth(&self) -> usize {
         self.pending.load(Ordering::Relaxed)
+    }
+
+    /// Queue a ledger-candidate replacement on this worker. Tests use it to bump the generation
+    /// the same way the ledger-check child does.
+    #[cfg(test)]
+    pub(crate) fn testing_replace_ledger_candidates(&self, candidates: std::collections::BTreeSet<PeerCandidate>) {
+        self.submit(ops::PerformanceOp::Peer(ops::PeerOp::SetLedgerCandidates {
+            effect: SetLedgerCandidatesEffect { candidates },
+        }));
     }
 
     /// Returns true at most once per [`QUEUE_WARN_MIN_INTERVAL`] across all producers.

@@ -33,6 +33,14 @@ pub struct ViewConnection {
     pub local_use: LocalUse,
 }
 
+/// One intersection-not-found mark recorded after `since`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UninterestingMark {
+    pub peer: Peer,
+    pub conn_id: ConnectionId,
+    pub after_rollback: bool,
+}
+
 /// Latest close of one peer. A closed connection is not a connect failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DialOutcome {
@@ -47,10 +55,13 @@ pub struct PeerView {
     pub connect_failures: BTreeMap<Peer, ObservedAt>,
     /// Latest close of each peer. The caller applies a close only when it is at or after the dial.
     pub closes: BTreeMap<Peer, DialOutcome>,
+    /// Marks whose generation is newer than the `since` the caller passed.
+    pub uninteresting: Vec<UninterestingMark>,
 }
 
 impl PeerPerformance {
-    /// Copy live bearers, dial failures, and the latest close of each peer when `since_generation` is behind.
+    /// Copy live bearers, dial failures, the latest close of each peer, and intersection-not-found
+    /// marks newer than `since_generation`.
     ///
     /// Returns `None` when nothing this view carries has changed, so the caller can skip a round.
     /// Bearers are already ordered by [`ConnectionId`].
@@ -76,11 +87,22 @@ impl PeerPerformance {
             .iter()
             .map(|(peer, close)| (*peer, DialOutcome::Closed { at: close.at, reason: close.reason }))
             .collect();
+        let mut uninteresting = Vec::new();
+        for (peer, mark) in &self.uninteresting {
+            if mark.generation > since_generation {
+                uninteresting.push(UninterestingMark {
+                    peer: *peer,
+                    conn_id: mark.conn_id,
+                    after_rollback: mark.after_rollback,
+                });
+            }
+        }
         Some(PeerView {
             generation: self.generation,
             connections,
             connect_failures: self.last_connect_failure.clone(),
             closes,
+            uninteresting,
         })
     }
 }

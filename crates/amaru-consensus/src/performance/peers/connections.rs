@@ -45,6 +45,14 @@ pub(super) struct ShareRequests {
     pub(super) last_at: ObservedAt,
 }
 
+/// Latest intersection-not-found mark for one peer.
+#[derive(Debug)]
+pub(super) struct UninterestingRecord {
+    pub(super) conn_id: ConnectionId,
+    pub(super) after_rollback: bool,
+    pub(super) generation: u64,
+}
+
 pub(crate) fn instant_of(at: ObservedAt) -> Instant {
     Instant::at_offset(at.elapsed, at.global_epoch_offset)
 }
@@ -75,6 +83,7 @@ impl PeerPerformance {
         if !still_live {
             self.clear_availability(&peer);
         }
+        self.drop_uninteresting_if_bearer_gone(peer);
         self.bump_generation();
     }
 
@@ -108,6 +117,29 @@ impl PeerPerformance {
     ) -> super::SharedIngestResult {
         self.last_shared_at.insert(*from, at);
         self.ingest_shared_peers(from, addrs)
+    }
+
+    /// Keep one mark per peer, at the generation this write just advanced.
+    ///
+    /// A mark whose bearer is already gone is not stored and does not move the generation.
+    pub fn record_uninteresting(&mut self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, _at: ObservedAt) {
+        let live = self.connections.values().any(|live| live.record.peer == peer && live.record.conn_id == conn_id);
+        if !live {
+            return;
+        }
+        self.bump_generation();
+        self.uninteresting.insert(peer, UninterestingRecord { conn_id, after_rollback, generation: self.generation });
+    }
+
+    fn drop_uninteresting_if_bearer_gone(&mut self, peer: Peer) {
+        let Some(mark) = self.uninteresting.get(&peer) else {
+            return;
+        };
+        let live =
+            self.connections.values().any(|live| live.record.peer == peer && live.record.conn_id == mark.conn_id);
+        if !live {
+            self.uninteresting.remove(&peer);
+        }
     }
 
     pub fn record_share_request_served(&mut self, requester: Peer, amount: u8, at: ObservedAt) {

@@ -45,7 +45,7 @@ pub use select_outbound::{
 pub use select_share::SHARE_POLICY_MAX;
 pub(crate) use select_share::{ShareCandidate, sample_share_peers, share_reply_seed};
 pub use sources::{SharedIngestResult, SourceCounts};
-pub use view::{DialOutcome, PeerView, ViewConnection};
+pub use view::{DialOutcome, PeerView, UninterestingMark, ViewConnection};
 
 /// Peer performance map (availability + scores + source pools). Owned by the performance worker.
 #[derive(Debug, Default)]
@@ -76,8 +76,10 @@ pub struct PeerPerformance {
     last_shared_at: BTreeMap<Peer, amaru_ouroboros::ObservedAt>,
     /// Share requests this node has answered.
     share_requests: BTreeMap<Peer, connections::ShareRequests>,
-    /// Advances when a lifecycle write, a ledger-candidate replacement, or a share ingest that
-    /// adds candidates changes what selection reads.
+    /// Latest intersection-not-found mark per peer. Dropped when that bearer is gone.
+    uninteresting: BTreeMap<Peer, connections::UninterestingRecord>,
+    /// Advances when a lifecycle write, a ledger-candidate replacement, a share ingest that adds
+    /// candidates, or an intersection-not-found mark changes what selection reads.
     generation: u64,
 }
 

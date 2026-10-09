@@ -12,22 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use amaru_kernel::PeerCandidate;
 use amaru_observability::tracing::Level;
-use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking};
 use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{Effect, simulation::SimulationRunning, trace_buffer::TraceEntry};
 
 use super::*;
 use crate::{
-    performance::{DialOutcome, PeerPerformance, PeerView, ViewConnection},
+    performance::{DialOutcome, PeerPerformance, PeerView, ResourcePerformance, ViewConnection},
     stages::{
-        peer_selection::test_setup::{TestPrep, setup, sim_t0, test_prep},
+        peer_selection::test_setup::{SIM_INITIAL_CLOCK_SECS, TestPrep, setup, sim_t0, test_prep},
         test_utils::start_in_era,
     },
 };
+
+fn peer_view(
+    generation: u64,
+    connections: Vec<ViewConnection>,
+    connect_failures: BTreeMap<Peer, ObservedAt>,
+) -> PeerView {
+    PeerView { generation, connections, connect_failures, closes: BTreeMap::new(), uninteresting: Vec::new() }
+}
 
 fn view_conn(peer: Peer, conn_id: ConnectionId, direction: ConnectionDirection, local_use: LocalUse) -> ViewConnection {
     ViewConnection {
@@ -120,12 +131,7 @@ fn refill_after_a_close_dials_the_next_static_peer() {
         .outbound_peers
         .insert(gone, connected(gone, ConnectionId::initial(), LocalUse::Diffusion, LocalUse::Diffusion));
     far_deadlines(&mut prep.state);
-    prep.scripted_view = Some(PeerView {
-        generation: 1,
-        connections: Vec::new(),
-        connect_failures: BTreeMap::new(),
-        closes: BTreeMap::new(),
-    });
+    prep.scripted_view = Some(peer_view(1, Vec::new(), BTreeMap::new()));
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let sends = manager_sends(&running);
@@ -202,12 +208,11 @@ fn banned_inbound_reconnect_is_disconnected() {
     let mut prep = test_prep(&[]);
     prep.state.cooldowns.cooldown_until.insert(peer, sim_t0() + Duration::from_secs(60));
     far_deadlines(&mut prep.state);
-    prep.scripted_view = Some(PeerView {
-        generation: 1,
-        connections: vec![view_conn(peer, conn_id, ConnectionDirection::Inbound, LocalUse::None)],
-        connect_failures: BTreeMap::new(),
-        closes: BTreeMap::new(),
-    });
+    prep.scripted_view = Some(peer_view(
+        1,
+        vec![view_conn(peer, conn_id, ConnectionDirection::Inbound, LocalUse::None)],
+        BTreeMap::new(),
+    ));
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     assert_eq!(manager_sends(&running), vec![ManagerMessage::Disconnect(peer, conn_id)]);
@@ -251,8 +256,7 @@ fn a_round_sends_at_most_upstream_plus_downstream_commands() {
         prep.state.cooldowns.cooldown_until.insert(peer, sim_t0() + Duration::from_secs(60));
         connections.push(view_conn(peer, conn_id, ConnectionDirection::Inbound, LocalUse::None));
     }
-    prep.scripted_view =
-        Some(PeerView { generation: 1, connections, connect_failures: BTreeMap::new(), closes: BTreeMap::new() });
+    prep.scripted_view = Some(peer_view(1, connections, BTreeMap::new()));
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let disconnects =
@@ -306,12 +310,11 @@ fn a_failure_next_to_a_live_outbound_keeps_that_connection() {
     far_deadlines(&mut prep.state);
     let mut connect_failures = BTreeMap::new();
     connect_failures.insert(peer, ObservedAt::new(Duration::from_secs(10), start_in_era().relative_time));
-    prep.scripted_view = Some(PeerView {
-        generation: 1,
-        connections: vec![view_conn(peer, conn_id, ConnectionDirection::Outbound, LocalUse::Diffusion)],
+    prep.scripted_view = Some(peer_view(
+        1,
+        vec![view_conn(peer, conn_id, ConnectionDirection::Outbound, LocalUse::Diffusion)],
         connect_failures,
-        closes: BTreeMap::new(),
-    });
+    ));
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let state = ps_state(&running);
@@ -339,8 +342,7 @@ fn churn_demotes_the_worst_non_static_peer_without_asking_per_peer() {
         prep.state.outbound_peers.insert(peer, connected(peer, conn_id, LocalUse::Diffusion, LocalUse::Diffusion));
         connections.push(view_conn(peer, conn_id, ConnectionDirection::Outbound, LocalUse::Diffusion));
     }
-    prep.scripted_view =
-        Some(PeerView { generation: 1, connections, connect_failures: BTreeMap::new(), closes: BTreeMap::new() });
+    prep.scripted_view = Some(peer_view(1, connections, BTreeMap::new()));
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     let demoted: Vec<_> = manager_sends(&running)
@@ -369,4 +371,126 @@ fn a_share_result_with_new_candidates_dials_on_the_next_round() {
 
     let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
     assert_eq!(manager_sends(&running), vec![ManagerMessage::AddPeer(learned)]);
+}
+
+fn set_local_uses(running: &SimulationRunning) -> Vec<(Peer, LocalUse)> {
+    manager_sends(running)
+        .into_iter()
+        .filter_map(|msg| {
+            if let ManagerMessage::SetLocalUse { peer, local_use, .. } = msg { Some((peer, local_use)) } else { None }
+        })
+        .collect()
+}
+
+fn wanted(state: &PeerSelection, peer: Peer) -> LocalUse {
+    match state.outbound_peers.get(&peer) {
+        Some(OutboundIntent::Connected(bearer)) => bearer.wanted,
+        other => panic!("expected a connected bearer for {peer}, got {other:?}"),
+    }
+}
+
+fn drive_until(running: &mut SimulationRunning, until: amaru_pure_stage::Instant) {
+    use amaru_pure_stage::simulation::{Externals, Run, TimeAdvance};
+    running.run(Run { time: TimeAdvance::Until(until), externals: Externals::Resolve });
+}
+
+#[test]
+fn an_uninteresting_mark_demotes_on_the_next_round_and_promotes_when_due() {
+    let peer = TestPrep::peer("1.2.3.4:4");
+    let conn_id = ConnectionId::initial();
+    let mut prep = test_prep(&["1.2.3.4:4"]);
+    prep.state.target_upstream_peers = 1;
+    far_deadlines(&mut prep.state);
+    prep.established = Some((peer, conn_id));
+    prep.uninteresting = Some((peer, conn_id, false));
+
+    let (mut running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let state = ps_state(&running);
+    assert_eq!(wanted(&state, peer), LocalUse::Maintenance);
+    assert_eq!(state.demoted_until.get(&peer).copied(), Some(sim_t0() + UNINTERESTING_RETRY));
+    assert_eq!(set_local_uses(&running), vec![(peer, LocalUse::Maintenance)]);
+
+    let deadline = sim_t0() + UNINTERESTING_RETRY;
+    drive_until(&mut running, deadline);
+    let state = ps_state(&running);
+    assert_eq!(wanted(&state, peer), LocalUse::Diffusion);
+    assert!(!state.demoted_until.contains_key(&peer));
+    let uses = set_local_uses(&running);
+    assert_eq!(uses.first().copied(), Some((peer, LocalUse::Maintenance)));
+    assert_eq!(uses.last().copied(), Some((peer, LocalUse::Diffusion)));
+    assert_eq!(uses.iter().filter(|(_, local_use)| *local_use == LocalUse::Diffusion).count(), 1);
+}
+
+#[test]
+fn a_repeated_uninteresting_mark_keeps_the_demotion_deadline() {
+    let peer = TestPrep::peer("1.2.3.5:5");
+    let conn_id = ConnectionId::initial();
+    let mut prep = test_prep(&["1.2.3.5:5"]);
+    prep.state.target_upstream_peers = 1;
+    far_deadlines(&mut prep.state);
+    prep.established = Some((peer, conn_id));
+    prep.uninteresting = Some((peer, conn_id, false));
+
+    let (mut running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let deadline = ps_state(&running).demoted_until.get(&peer).copied();
+    assert_eq!(deadline, Some(sim_t0() + UNINTERESTING_RETRY));
+
+    let performance = running.resources().get::<ResourcePerformance>().expect("performance").clone();
+    performance.record_uninteresting(
+        peer,
+        conn_id,
+        true,
+        ObservedAt::new(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time),
+    );
+    drive_until(&mut running, sim_t0() + Duration::from_secs(1));
+
+    let state = ps_state(&running);
+    assert_eq!(wanted(&state, peer), LocalUse::Maintenance);
+    assert_eq!(state.demoted_until.get(&peer).copied(), deadline);
+    assert_eq!(set_local_uses(&running), vec![(peer, LocalUse::Maintenance)]);
+}
+
+#[test]
+fn an_uninteresting_mark_after_rollback_demotes_for_180s() {
+    let peer = TestPrep::peer("1.2.3.6:6");
+    let conn_id = ConnectionId::initial();
+    let mut prep = test_prep(&["1.2.3.6:6"]);
+    prep.state.target_upstream_peers = 1;
+    far_deadlines(&mut prep.state);
+    prep.established = Some((peer, conn_id));
+    prep.uninteresting = Some((peer, conn_id, true));
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let state = ps_state(&running);
+    assert_eq!(wanted(&state, peer), LocalUse::Maintenance);
+    assert_eq!(state.demoted_until.get(&peer).copied(), Some(sim_t0() + UNINTERESTING_RETRY_AFTER_ROLLBACK));
+}
+
+#[test]
+fn an_uninteresting_mark_for_a_gone_peer_does_nothing() {
+    let peer = TestPrep::peer("5.5.5.5:5");
+    let mut prep = test_prep(&[]);
+    prep.state.target_upstream_peers = 1;
+    far_deadlines(&mut prep.state);
+    prep.uninteresting = Some((peer, ConnectionId::initial(), false));
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    let state = ps_state(&running);
+    assert_eq!(state.seen_generation, 0, "a mark with no bearer does not move the generation");
+    assert!(!state.demoted_until.contains_key(&peer));
+    assert!(!state.outbound_peers.contains_key(&peer));
+    assert!(set_local_uses(&running).is_empty());
+}
+
+#[test]
+fn a_ledger_candidate_write_dials_on_the_next_round() {
+    let peer = TestPrep::peer("8.8.8.8:8");
+    let mut prep = test_prep(&[]);
+    prep.state.target_upstream_peers = 1;
+    prep.peer_mix = "ledger~1".parse().expect("ledger-only mix");
+    far_deadlines(&mut prep.state);
+    prep.ledger_write = Some(BTreeSet::from([PeerCandidate::from(peer)]));
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    assert_eq!(manager_sends(&running), vec![ManagerMessage::AddPeer(peer)]);
 }

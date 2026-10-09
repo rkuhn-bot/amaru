@@ -18,8 +18,8 @@ use std::{
 };
 
 use amaru_kernel::{Peer, PeerCandidate, Point};
-use amaru_ouroboros::{ObservedAt, PeerTracking};
-use amaru_protocols::manager::ManagerMessage;
+use amaru_ouroboros::{ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking};
+use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{
     DeserializerGuards, Instant, ScheduleId, StageGraph, StageRef,
     simulation::{SimulationRunning, running::OverrideResult},
@@ -52,6 +52,12 @@ pub struct TestPrep {
     pub scripted_view: Option<crate::performance::PeerView>,
     /// Recorded on the resource before the stage runs. A new candidate bumps the generation.
     pub learned_share: Option<(Peer, std::net::SocketAddr)>,
+    /// Established outbound bearer recorded before the stage runs.
+    pub established: Option<(Peer, ConnectionId)>,
+    /// Intersection-not-found mark recorded before the stage runs.
+    pub uninteresting: Option<(Peer, ConnectionId, bool)>,
+    /// Replaces ledger candidates before the stage runs, bumping the generation.
+    pub ledger_write: Option<BTreeSet<PeerCandidate>>,
 }
 
 impl TestPrep {
@@ -81,6 +87,9 @@ pub fn test_prep_with_snapshot(static_names: &[&str], snapshot_names: &[&str]) -
         resolve: BTreeMap::new(),
         scripted_view: None,
         learned_share: None,
+        established: None,
+        uninteresting: None,
+        ledger_write: None,
     }
 }
 
@@ -170,6 +179,28 @@ fn setup_preload_with_mode(
                     vec![addr],
                     ObservedAt::new(Duration::ZERO, Duration::ZERO),
                 ));
+            }
+            let observed = ObservedAt::new(Duration::from_secs(SIM_INITIAL_CLOCK_SECS), start_in_era().relative_time);
+            if let Some((peer, conn_id)) = prep.established {
+                performance.record_connection_established(
+                    ConnectionRecord {
+                        peer,
+                        conn_id,
+                        direction: ConnectionDirection::Outbound,
+                        full_duplex_capable: true,
+                        full_duplex: false,
+                        advertisable: false,
+                        local_use: LocalUse::Diffusion,
+                        established_at: observed,
+                    },
+                    observed,
+                );
+            }
+            if let Some((peer, conn_id, after_rollback)) = prep.uninteresting {
+                performance.record_uninteresting(peer, conn_id, after_rollback, observed);
+            }
+            if let Some(candidates) = prep.ledger_write.clone() {
+                performance.testing_replace_ledger_candidates(candidates);
             }
             resources.put::<crate::performance::ResourcePerformance>(std::sync::Arc::new(performance));
         },
