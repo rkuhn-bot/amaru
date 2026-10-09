@@ -18,7 +18,8 @@
 //! [`amaru_ouroboros::PeerTracking`]. The manager records a handshake, a close, a failed
 //! outbound attempt, and applied local use. The peer-sharing responder queries a reply and
 //! records that it served the request. The initiator records addresses learned from a reply.
-//! track_peers records an intersection miss. Keep-alive samples are not called yet.
+//! track_peers records an intersection miss. The keep-alive initiator records each matching
+//! round trip. The peer-sharing responder records each inbound request it answers.
 
 use std::{net::SocketAddr, time::Duration};
 

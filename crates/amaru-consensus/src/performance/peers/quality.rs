@@ -29,6 +29,7 @@ pub struct PeerScores {
     pub header_lag_ewma: Option<Duration>,
     pub block_response_ewma: Option<Duration>,
     pub bandwidth_ewma_bps: Option<f64>,
+    pub keepalive_rtt_latest: Option<Duration>,
     pub keepalive_rtt_ewma: Option<Duration>,
     pub fetch_timeouts: u32,
     pub fetch_successes: u32,
@@ -116,6 +117,7 @@ impl PeerPerformance {
 
     pub fn record_keepalive_rtt(&mut self, peer: Peer, rtt: Duration, at: Instant) {
         let state = self.peers.entry(peer).or_default();
+        state.scores.keepalive_rtt_latest = Some(rtt);
         state.scores.keepalive_rtt_ewma = Some(ewma_duration(state.scores.keepalive_rtt_ewma, rtt));
         state.scores.last_change = Some(at);
     }

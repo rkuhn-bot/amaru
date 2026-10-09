@@ -32,7 +32,7 @@ use tracing_subscriber::{EnvFilter, prelude::*};
 
 use super::{
     ClaimKind, HeaderLifecycleOutcome, HeaderPerformance, PeerPerformance, PeerShareFlags, Performance,
-    ResourcePerformance, SelectPeersParams,
+    ResourcePerformance, SHARE_REQUEST_WINDOW, SelectPeersParams, ShareRequestRecord,
 };
 
 fn t(secs: u64) -> Instant {
@@ -1195,11 +1195,31 @@ fn keepalive_sample_keeps_both_clock_fields() {
     let mut peers = PeerPerformance::new();
     let alice = peer("alice");
     let at = observed(11, 70);
+    let generation = peers.generation();
     peers.record_keepalive_sample(alice, Duration::from_millis(12), at);
+    assert_eq!(peers.scores(&alice).keepalive_rtt_latest, Some(Duration::from_millis(12)));
     assert_eq!(peers.scores(&alice).keepalive_rtt_ewma, Some(Duration::from_millis(12)));
     let last = peers.scores(&alice).last_change.expect("sample time");
     assert_eq!(last.sim_elapsed(), Duration::from_secs(11));
     assert_eq!(last.duration_since_global_epoch(), Duration::from_secs(81));
+    assert_eq!(peers.generation(), generation);
+}
+
+#[test]
+fn keepalive_rtt_summary_keeps_latest_and_smoothed() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let first = Duration::from_millis(12);
+    let second = Duration::from_millis(32);
+    peers.record_keepalive_rtt(alice, first, t(1));
+    peers.record_keepalive_rtt(alice, second, t(2));
+
+    let expected = Duration::from_secs_f64((1.0 - 0.2) * first.as_secs_f64() + 0.2 * second.as_secs_f64());
+    let scores = peers.scores(&alice);
+    assert_eq!(scores.keepalive_rtt_latest, Some(second));
+    assert_eq!(scores.keepalive_rtt_ewma, Some(expected));
+    assert_eq!(peers.snapshot(&alice).expect("row").scores, scores);
+    assert_eq!(peers.churn_inputs(&[alice])[0].scores, scores);
 }
 
 #[test]
@@ -1218,7 +1238,134 @@ fn shared_peers_and_share_requests_are_recorded() {
 
     peers.record_share_request_served(asker, 3, observed(1, 2));
     peers.record_share_request_served(asker, 5, observed(6, 2));
-    assert_eq!(peers.share_requests(&asker), Some((2, 5, observed(6, 2))));
+    assert_eq!(
+        peers.share_requests(&asker),
+        Some(ShareRequestRecord {
+            count: 2,
+            last_amount: 5,
+            last_at: observed(6, 2),
+            window_start: observed(1, 2),
+            current_window: 2,
+            previous_window: 0,
+        })
+    );
+}
+
+#[test]
+fn share_request_window_rolls_current_into_previous() {
+    let mut peers = PeerPerformance::new();
+    let asker = Peer::for_test(4003);
+    let start = observed(100, 2);
+    let at = |extra: Duration| ObservedAt::new(start.elapsed + extra, start.global_epoch_offset);
+
+    peers.record_share_request_served(asker, 3, start);
+    peers.record_share_request_served(asker, 4, at(SHARE_REQUEST_WINDOW - Duration::from_secs(1)));
+    let inside = peers.share_requests(&asker).expect("row");
+    assert_eq!(inside.count, 2);
+    assert_eq!(inside.last_amount, 4);
+    assert_eq!(inside.current_window, 2);
+    assert_eq!(inside.previous_window, 0);
+    assert_eq!(inside.window_start, start);
+
+    peers.record_share_request_served(asker, 5, at(SHARE_REQUEST_WINDOW));
+    let rolled = peers.share_requests(&asker).expect("row");
+    assert_eq!(rolled.count, 3);
+    assert_eq!(rolled.last_amount, 5);
+    assert_eq!(rolled.last_at, at(SHARE_REQUEST_WINDOW));
+    assert_eq!(rolled.current_window, 1);
+    assert_eq!(rolled.previous_window, 2);
+    assert_eq!(rolled.window_start, at(SHARE_REQUEST_WINDOW));
+
+    peers.record_share_request_served(asker, 1, at(SHARE_REQUEST_WINDOW + Duration::from_secs(10)));
+    peers.record_share_request_served(asker, 7, at(SHARE_REQUEST_WINDOW.saturating_mul(3)));
+    let skipped = peers.share_requests(&asker).expect("row");
+    assert_eq!(skipped.count, 5);
+    assert_eq!(skipped.last_amount, 7);
+    assert_eq!(skipped.current_window, 1);
+    assert_eq!(skipped.previous_window, 0);
+    assert_eq!(skipped.window_start, at(SHARE_REQUEST_WINDOW.saturating_mul(3)));
+    assert_eq!(peers.generation(), 0);
+}
+
+#[test]
+fn share_request_window_stays_on_the_boundary_when_the_sample_is_off_grid() {
+    let mut peers = PeerPerformance::new();
+    let asker = Peer::for_test(4004);
+    let start = observed(100, 2);
+    let at = |extra: Duration| ObservedAt::new(start.elapsed + extra, start.global_epoch_offset);
+
+    peers.record_share_request_served(asker, 3, start);
+    peers.record_share_request_served(asker, 4, at(Duration::from_secs(90)));
+    let rolled = peers.share_requests(&asker).expect("row");
+    assert_eq!(rolled.count, 2);
+    assert_eq!(rolled.current_window, 1);
+    assert_eq!(rolled.previous_window, 1, "one whole window rolls the current count forward");
+    assert_eq!(rolled.window_start, at(SHARE_REQUEST_WINDOW), "the window stays on the 60s boundary");
+    assert_eq!(peers.generation(), 0);
+}
+
+#[test]
+fn observations_do_not_change_fetch_or_share_replies() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let bob = peer("bob");
+    peers.record_header_announcement(alice, tip(1, 1), None, t(1));
+    peers.record_header_announcement(bob, tip(1, 1), None, t(1));
+    let fetch_before = peers.select_peers_for_fetch(select(vec![hash(1)], 2));
+    assert_eq!(fetch_before.peers.len(), 2);
+    // The peer fetch currently prefers gets the slow sample. Reading RTT would reorder.
+    peers.record_keepalive_rtt(fetch_before.peers[0], Duration::from_secs(3600), t(3));
+    peers.record_keepalive_rtt(fetch_before.peers[1], Duration::from_millis(1), t(3));
+    assert_eq!(peers.select_peers_for_fetch(select(vec![hash(1)], 2)), fetch_before);
+
+    let mut churn_peers = PeerPerformance::new();
+    churn_peers.record_header_announcement(alice, tip(1, 1), None, t(1));
+    churn_peers.record_header_announcement(bob, tip(1, 1), None, t(1));
+    let churn_before: Vec<_> =
+        churn_peers.rank_peers_for_churn(&[alice, bob], t(2)).into_iter().map(|row| row.peer).collect();
+    assert_eq!(churn_before.len(), 2);
+    // Worst-first: the last peer is the one churn prefers. A slow sample there would move it first.
+    churn_peers.record_keepalive_rtt(churn_before[1], Duration::from_secs(3600), t(3));
+    churn_peers.record_keepalive_rtt(churn_before[0], Duration::from_millis(1), t(3));
+    let churn_after: Vec<_> =
+        churn_peers.rank_peers_for_churn(&[alice, bob], t(4)).into_iter().map(|row| row.peer).collect();
+    assert_eq!(churn_after, churn_before);
+
+    let donor = Peer::for_test(4001);
+    let other = Peer::for_test(4002);
+    let asker = Peer::for_test(4003);
+    let at = observed(2, 0);
+    peers.record_shared_peers(&donor, &[SocketAddr::from(other), SocketAddr::from(donor)], at);
+    let now = t(2);
+    let reply_before = peers.select_share_peers(&asker, 10, now);
+    assert!(!reply_before.is_empty());
+    for step in 0..5 {
+        let when =
+            ObservedAt::new(at.elapsed + SHARE_REQUEST_WINDOW.saturating_mul(step as u32), at.global_epoch_offset);
+        peers.record_share_request_served(asker, 10, when);
+        peers.record_share_request_served(other, 10, when);
+    }
+    assert_eq!(peers.select_share_peers(&asker, 10, now), reply_before);
+}
+
+#[test]
+fn adversarial_mark_clears_rtt_and_share_rate_and_close_keeps_them() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let (id, _) = conn_ids();
+    let at = observed(1, 2);
+    peers.record_connection_established(connection_record(alice, id, at, true), at);
+    peers.record_keepalive_sample(alice, Duration::from_millis(12), at);
+    peers.record_share_request_served(alice, 3, at);
+
+    peers.record_connection_closed(alice, id, CloseReason::BearerEnded, observed(2, 2));
+    assert_eq!(peers.scores(&alice).keepalive_rtt_latest, Some(Duration::from_millis(12)));
+    assert!(peers.share_requests(&alice).is_some());
+
+    peers.mark_adversarial(&alice, t(4));
+    assert!(peers.scores(&alice).keepalive_rtt_latest.is_none());
+    assert!(peers.scores(&alice).keepalive_rtt_ewma.is_none());
+    assert!(peers.share_requests(&alice).is_none());
 }
 
 #[test]

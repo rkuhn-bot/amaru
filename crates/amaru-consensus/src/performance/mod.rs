@@ -56,7 +56,7 @@
 //! | `sync_adoption_is_fast` | track_peers | track_peers | C4 | on demand |
 //! | `prune_below` | adopt_chain | claims and header lifecycles | horizon | awaited |
 //! | `peer_adversarial` | peer selection | sharing filters, outbound ranking | C5 | recorded immediately |
-//! | `record_keepalive_rtt` | not called yet | fetch ranking, churn | C7 | recorded immediately; read on demand |
+//! | `record_keepalive_rtt` | keep-alive initiator | `scores`, `snapshot`, `churn_inputs` | C7 | recorded immediately; read on demand; latest sample and EWMA; does not bump generation |
 //! | `record_connection_established` | manager | peer selection | C8 | recorded immediately |
 //! | `record_connection_closed` | manager | peer selection | C8 | recorded immediately |
 //! | `record_connect_failed` | manager | malus, sharing filters | C8 | recorded immediately |
@@ -74,8 +74,8 @@
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
 //! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
-//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest |
-//! | `record_share_request_served` | peer-sharing responder | not read yet | C9 | recorded immediately |
+//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest; new candidates bump generation |
+//! | `record_share_request_served` | peer-sharing responder | `share_requests` | C9 | recorded immediately; count, last answer, current and previous window; not enforced |
 //! | `ingest_shared_peers` | `record_shared_peers` | outbound pools | C9 | same ingest; new candidates bump generation |
 //! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
 //!
@@ -111,8 +111,9 @@ pub use peers::{
     ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
     DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS,
     OutboundInputs, OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags,
-    PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams,
-    SelectPeersParams, SelectUsing, SharedIngestResult, SourceCounts, UninterestingMark, ViewConnection, malus_at,
+    PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SHARE_REQUEST_WINDOW,
+    SelectOutboundParams, SelectPeersParams, SelectUsing, ShareRequestRecord, SharedIngestResult, SourceCounts,
+    UninterestingMark, ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},
