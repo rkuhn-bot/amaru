@@ -145,7 +145,7 @@ An observation that can change the next header or block request, or which chain 
 
 Protocols reach the population half through the `PeerTracking` trait (`amaru-ouroboros-traits`). `Performance` implements that trait by enqueueing on this same worker, and the node registers that one handle under both resource names. Consensus stages keep using the existing `Performance` effects. The trait methods are the protocols-facing names.
 
-The manager writes connection established, closed, connect-failed, and local-use-applied, one worker operation per event. Peer selection still receives `Connected`, `Disconnected`, and `ConnectFailed` and still records advertisability and clears availability when it handles them. Connection-failure malus is applied only inside the manager's connect-failed write, so the message path does not add that impulse again. The remaining trait methods have no stage call site yet.
+The manager writes connection established, closed, connect-failed, and local-use-applied, one worker operation per event. Connection-failure malus is applied only inside the manager's connect-failed write. Peer selection does not receive connection lifecycle messages. It keeps one timeout, armed for the earlier of one second and the next stored deadline, and re-arms that timeout at the end of every turn. On each wake it asks the resource for a peer view since the generation it last saw. The resource generation advances on each lifecycle write and when ledger candidates are replaced. An unchanged generation returns no view. The view carries the live bearers, the latest connect failure of each peer, and the latest close of each peer. A dial whose connection closed before this tick is dropped on the next round and is not held off; only a connect failure or a lost dial sets that hold-off. A full round runs when the view changed, a stored deadline is due, or thirty seconds have passed since the last full round. The round reconciles desired use with the view, then refills outbound slots. Repeated adversarial reports while a ban is active are ignored apart from a debug log. The first report records the ban, writes the adversarial mark, and removes the peer; the refill waits for the next round. The remaining trait methods have no stage call site yet.
 
 ## Consequences
 
@@ -160,7 +160,7 @@ The manager writes connection established, closed, connect-failed, and local-use
 ## Future work
 
 1. **Keepalive RTT tracking** — call `record_keepalive_rtt` from the keepalive mini-protocol handler; fold `keepalive_rtt_ewma` into fetch ranking and churn badness (and into bandwidth estimation where response time includes RTT).
-2. **Churn** — peer selection should demote/promote using `rank_peers_for_churn` (or successor) on a schedule, not only react to adversarial bans.
+2. **Churn** — the selection round ranks copied score rows and demotes the worst non-static Using peers when the stored churn deadline is due.
 3. **Scoring policy** — replace provisional EWMA heuristics with an explicit, testable policy (document knobs; avoid silent retunes).
 4. **Horizon / dual-connection edge cases** — keep pruning and clear/forget rules aligned with multi-connection peers (inbound+outbound) so availability is cleared only when no usable connection remains.
 5. **Failure-count decay** — superseded by connection **malus** with lazy half-life decay ([EDR-031](./031-peer-source-mix.md)); telemetry may still keep a raw failure counter.

@@ -2091,6 +2091,11 @@ define_schemas! {
                         required peer: %amaru_kernel::Peer
                         required conn_id: u64
                     }
+                    /// An inbound handshake was refused because the inbound cap is full
+                    public INBOUND_REFUSED {
+                        required peer: %amaru_kernel::Peer
+                        required conn_id: u64
+                    }
                     /// A connection is being closed on request.
                     /// Direction ∈ {inbound, outbound}.
                     public DISCONNECTING {
@@ -2198,7 +2203,7 @@ define_schemas! {
                         required was_banned: bool
                     }
                     /// A peer was not added to the outbound set.
-                    /// Reason ∈ {already_added, too_many_inbound}.
+                    /// Reason ∈ {already_added}.
                     public ADD_SKIPPED {
                         required peer: %amaru_kernel::Peer
                         required reason: String
@@ -2219,15 +2224,12 @@ define_schemas! {
                         required candidate: String
                         required reason: String
                     }
-                    /// A peer reconnected while a previous connection was still registered;
-                    /// the older connection is dropped. Direction ∈ {inbound, outbound}.
-                    public RECONNECTED {
-                        required peer: %amaru_kernel::Peer
-                        required direction: String
-                        required conn_id: u64
-                    }
                     /// A peer was reported as adversarial and is about to be banned
                     ADVERSARIAL {
+                        required peer: %amaru_kernel::Peer
+                    }
+                    /// A repeat adversarial report arrived while that peer's ban is still active
+                    ADVERSARIAL_DUPLICATE {
                         required peer: %amaru_kernel::Peer
                     }
                     /// Local use dropped to Maintenance. Reason ∈ {churn, uninteresting}.
@@ -2246,6 +2248,10 @@ define_schemas! {
                     public CANDIDATES_FAILED {
                         required error: String
                     }
+                }
+                /// One wake of the selection timeout. `full` is true when this wake ran a round.
+                public TICK {
+                    required full: bool
                 }
                 /// Connect to the initial set of peers at startup
                 public CONNECT_INITIAL {

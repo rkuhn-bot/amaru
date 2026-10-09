@@ -40,32 +40,10 @@ mod tests;
 
 /// Messages the [`Manager`] sends to the consensus `peer_selection` stage.
 ///
-/// Notifications are sent *only after the handshake completes successfully*, so that
-/// `full_duplex` status is known accurately.
+/// Connection lifecycle is written to the peer-tracking resource. Peer selection reads that
+/// resource on its own tick. It is not told about handshakes, closes, or failed dials.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PeerSelectionNotify {
-    /// A connection has been established and the handshake completed successfully.
-    /// This is the only moment at which `peer_selection` learns about a usable connection.
-    Connected {
-        peer: Peer,
-        conn_id: ConnectionId,
-        direction: ConnectionDirection,
-        full_duplex_capable: bool,
-        full_duplex: bool,
-        advertisable: bool,
-    },
-
-    /// A connection has been terminated (graceful disconnect, error, handshake refusal,
-    /// or network error).
-    ///
-    /// The connection is gone. peer-selection owns redial via `Dial` message.
-    Disconnected { peer: Peer, conn_id: ConnectionId, direction: ConnectionDirection },
-
-    /// The outbound connection attempt failed (timeout, refusal, or another network error).
-    ///
-    /// The manager does not retry. Peer selection decides whether to [`ManagerMessage::AddPeer`] again.
-    ConnectFailed { peer: Peer },
-
     /// Inbound peer-sharing request: select addresses to advertise and reply on `reply_to`.
     ShareRequest { peer: Peer, amount: u8, reply_to: StageRef<SharePeersReply> },
 }
@@ -74,7 +52,7 @@ pub enum PeerSelectionNotify {
 pub enum ManagerMessage {
     /// Start one outbound connection attempt to the given peer.
     ///
-    /// A failed attempt is reported as [`PeerSelectionNotify::ConnectFailed`] and is not retried.
+    /// A failed attempt is written to the peer-tracking resource and is not retried.
     /// After a successful session dies, peer selection issues a new `AddPeer`; the manager does not redial.
     AddPeer(Peer),
     /// Remove a peer and terminate all of its connections.
@@ -176,37 +154,24 @@ impl ManagerMessage {
 /// If a second connection comes in from the same peer, this new connection will be
 /// terminated (the handshake will be run, sending [`crate::protocol_messages::handshake::RefuseReason::Refused`]).
 ///
-/// An inbound connection is accepted (subject to connection limits and the above) and
-/// after successful handshake the manager notifies `peer_selection` about the new connection.
-/// When the connection dies, there are no retries and the manager immediately notifies
-/// `peer_selection` about the disconnection.
+/// An inbound connection is accepted when this peer has no inbound bearer yet and the inbound
+/// cap is not full. A handshake past the cap is refused: nothing is written, and the bearer is
+/// disconnected. When a connection dies, there are no retries.
 ///
 /// An outbound connection is initiated by sending `ManagerMessage::AddPeer`. The manager makes
-/// one attempt. If it fails, the manager notifies `peer_selection` with
-/// [`PeerSelectionNotify::ConnectFailed`] and does not retry. After a successful connection and
-/// handshake, the manager notifies `peer_selection` about the new connection. When the connection
-/// dies, the manager notifies `peer_selection` and does **not** redial. Peer selection decides
-/// whether to `AddPeer` again.
+/// one attempt. If it fails, the failure is written to the peer-tracking resource and the manager
+/// does not retry. After a successful connection and handshake, the bearer is written the same way.
+/// When the connection dies, the close is written and the manager does **not** redial. Peer
+/// selection decides whether to `AddPeer` again.
 ///
-/// ## Behavioural contracts
+/// A second outbound handshake that is rejected because this peer is already connected does not
+/// write a bearer. When that extra bearer later dies, the manager does not record a connect
+/// failure. The live connection stays.
 ///
-/// - [`PeerSelectionNotify::Connected`] is always paired with a future [`PeerSelectionNotify::Disconnected`]
-///   for the same `peer` and `conn_id`.
-///
-///   This also holds true if [`ManagerMessage::RemovePeer`] is processed between.
-///
-/// - Sending [`ManagerMessage::AddPeer`] will generate [`PeerSelectionNotify::ConnectFailed`]
-///   if that attempt fails before [`ManagerMessage::RemovePeer`] is received.
-///
-///   A second outbound handshake that is rejected because this peer is already connected does not
-///   write a bearer. When that extra bearer later dies, the manager does not record a connect
-///   failure and does not send [`PeerSelectionNotify::ConnectFailed`]. The live connection stays.
-///
-/// The same facts are written to the peer-tracking resource, one update per event:
-/// handshake (`record_connection_established`), applied local use, a close, and a failed
-/// outbound attempt. The notifications above are still sent. Outbound local use at handshake
-/// is [`LocalUse::Diffusion`] and inbound is [`LocalUse::None`], which is what peer selection
-/// stores when it accepts `Connected`. A later [`ManagerMessage::LocalUseApplied`] overwrites it.
+/// Each lifecycle fact is one worker operation: handshake (`record_connection_established`),
+/// applied local use, a close, and a failed outbound attempt. Outbound local use at handshake is
+/// [`LocalUse::Diffusion`] and inbound is [`LocalUse::None`]. A later
+/// [`ManagerMessage::LocalUseApplied`] overwrites it.
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Manager {
     peers: BTreeMap<Peer, PeerState>,
@@ -296,7 +261,12 @@ pub struct ManagerConfig {
     ///
     /// Defaults to [`VersionNumber::CURRENT`] (V15). Tests pin V14 to check fallback.
     pub max_n2n_version: VersionNumber,
+    /// Live inbound bearers accepted at handshake. Further inbound handshakes are refused.
+    pub max_inbound: usize,
 }
+
+/// Default inbound cap. The node sets this from its downstream peer target.
+pub const DEFAULT_MAX_INBOUND: usize = 10;
 
 impl ManagerConfig {
     pub fn with_reconnect_delay(mut self, reconnect_delay: Duration) -> Self {
@@ -328,6 +298,11 @@ impl ManagerConfig {
         self.max_n2n_version = version;
         self
     }
+
+    pub fn with_max_inbound(mut self, max_inbound: usize) -> Self {
+        self.max_inbound = max_inbound;
+        self
+    }
 }
 
 impl Default for ManagerConfig {
@@ -341,6 +316,7 @@ impl Default for ManagerConfig {
             diffusion_stop_timeout: Duration::from_secs(300),
             maintenance_stop_timeout: Duration::from_secs(120),
             max_n2n_version: VersionNumber::CURRENT,
+            max_inbound: DEFAULT_MAX_INBOUND,
         }
     }
 }
@@ -379,7 +355,6 @@ impl Manager {
             self.peers.remove(&peer);
         }
         record_connect_failed(eff, peer).await;
-        eff.send(&self.peer_selection, PeerSelectionNotify::ConnectFailed { peer }).await;
     }
 
     async fn connection_result(
@@ -486,6 +461,22 @@ impl Manager {
             full_duplex,
             advertisable
         );
+        let inbound_live = self.peers.values().filter(|state| state.inbound.is_some()).count();
+        let over_cap = direction == ConnectionDirection::Inbound
+            && self.peers.get(&peer).is_none_or(|state| state.inbound.is_none())
+            && inbound_live >= self.config.max_inbound;
+        if over_cap {
+            info!(protocols::manager::peer::INBOUND_REFUSED, peer, conn_id = conn_id.as_u64());
+            let empty = self
+                .peers
+                .get(&peer)
+                .is_none_or(|state| state.inbound.is_none() && state.outbound == OutboundState::None);
+            if empty {
+                self.peers.remove(&peer);
+            }
+            eff.send(&stage, ConnectionMessage::Disconnect).await;
+            return;
+        }
         let peer_state = self.peers.entry(peer).or_default();
         let accept_this = match direction {
             ConnectionDirection::Outbound => {
@@ -507,22 +498,10 @@ impl Manager {
         };
         if accept_this {
             // Outbound handshake starts Diffusion initiators in the same connection turn,
-            // so share/fetch must see `may_initiate` before `Connected` is processed.
+            // so share/fetch must see `may_initiate` on this bearer immediately.
             let may_initiate = direction == ConnectionDirection::Outbound;
             self.connections.insert(conn_id, Connection { stage, direction, full_duplex_capable, peer, may_initiate });
             record_established(eff, peer, conn_id, direction, full_duplex_capable, full_duplex, advertisable).await;
-            eff.send(
-                &self.peer_selection,
-                PeerSelectionNotify::Connected {
-                    peer,
-                    conn_id,
-                    direction,
-                    full_duplex_capable,
-                    full_duplex,
-                    advertisable,
-                },
-            )
-            .await;
         } else {
             info!(protocols::manager::peer::DUPLICATE_TERMINATED, peer, conn_id = conn_id.as_u64());
             eff.send(&stage, ConnectionMessage::Disconnect).await;
@@ -539,22 +518,12 @@ impl Manager {
             info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = "inbound");
             let connection = self.connections.remove(&conn_id).expect("PeerState implies Connection");
             record_closed(eff, peer, conn_id, CloseReason::LocalDisconnect).await;
-            eff.send(
-                &self.peer_selection,
-                PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Inbound },
-            )
-            .await;
             eff.send(&connection.stage, ConnectionMessage::Disconnect).await;
         }
         if let OutboundState::Connected { conn_id } = entry.outbound {
             info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = "outbound");
             let connection = self.connections.remove(&conn_id).expect("PeerState implies Connection");
             record_closed(eff, peer, conn_id, CloseReason::LocalDisconnect).await;
-            eff.send(
-                &self.peer_selection,
-                PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Outbound },
-            )
-            .await;
             eff.send(&connection.stage, ConnectionMessage::Disconnect).await;
         }
     }
@@ -606,9 +575,8 @@ impl Manager {
                 }
             }
             record_closed(eff, peer, conn_id, CloseReason::BearerEnded).await;
-            eff.send(&self.peer_selection, PeerSelectionNotify::Disconnected { peer, conn_id, direction }).await;
         } else {
-            // pre-handshake death (no entry was inserted to connections, and no Connected notify was sent)
+            // pre-handshake death (no bearer was inserted)
             debug!(
                 protocols::manager::peer::DISCONNECT_IGNORED,
                 peer,
@@ -623,7 +591,6 @@ impl Manager {
                     }
                 }
                 record_connect_failed(eff, peer).await;
-                eff.send(&self.peer_selection, PeerSelectionNotify::ConnectFailed { peer }).await;
             }
             // inbound pre-HS deaths require no further action (peer entry is only created on HS success)
         }
@@ -816,7 +783,7 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
     .await
 }
 
-/// Local use peer selection stores on `Connected`: outbound starts in diffusion, inbound stays none.
+/// Local use stored at handshake: outbound starts in diffusion, inbound stays none.
 fn handshake_local_use(direction: ConnectionDirection) -> LocalUse {
     match direction {
         ConnectionDirection::Outbound => LocalUse::Diffusion,

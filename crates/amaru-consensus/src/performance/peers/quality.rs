@@ -120,9 +120,17 @@ impl PeerPerformance {
         state.scores.last_change = Some(at);
     }
 
+    /// Copy the rows churn ranking needs. Ordering is the caller's.
+    pub fn churn_inputs(&self, candidates: &[Peer]) -> Vec<ChurnInput> {
+        candidates
+            .iter()
+            .map(|peer| ChurnInput { peer: *peer, scores: self.scores(peer), is_static: self.is_static_peer(peer) })
+            .collect()
+    }
+
     /// Rank candidates for churn (worst first). `now` is reserved for future staleness ranking.
-    pub fn rank_peers_for_churn(&self, candidates: &[Peer], _now: Instant) -> Vec<(Peer, PeerScores)> {
-        self.rank_for_churn(candidates)
+    pub fn rank_peers_for_churn(&self, candidates: &[Peer], _now: Instant) -> Vec<ChurnRank> {
+        rank_churn(self.churn_inputs(candidates))
     }
 
     pub fn scores(&self, peer: &Peer) -> PeerScores {
@@ -144,17 +152,38 @@ impl PeerPerformance {
         state.scores.fetch_successes = state.scores.fetch_successes.saturating_add(1);
         state.scores.last_change = Some(at);
     }
+}
 
-    fn rank_for_churn(&self, candidates: &[Peer]) -> Vec<(Peer, PeerScores)> {
-        let mut ranked: Vec<(f64, Peer, PeerScores)> = candidates
-            .iter()
-            .map(|peer| {
-                let scores = self.peers.get(peer).map(|s| s.scores.clone()).unwrap_or_default();
-                let badness = churn_badness(&scores);
-                (badness, *peer, scores)
-            })
-            .collect();
-        ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
-        ranked.into_iter().map(|(_, p, s)| (p, s)).collect()
-    }
+/// Scores and static-ness copied off the worker before churn ranking.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChurnInput {
+    pub peer: Peer,
+    pub scores: PeerScores,
+    pub is_static: bool,
+}
+
+/// One peer after churn ranking (worst first).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChurnRank {
+    pub peer: Peer,
+    pub scores: PeerScores,
+    pub is_static: bool,
+}
+
+/// Rank copied rows, worst first. Ties break toward the smaller peer address.
+pub fn rank_churn(inputs: Vec<ChurnInput>) -> Vec<ChurnRank> {
+    let mut ranked: Vec<(f64, ChurnInput)> = inputs
+        .into_iter()
+        .map(|input| {
+            let badness = churn_badness(&input.scores);
+            (badness, input)
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right.0.partial_cmp(&left.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| left.1.peer.cmp(&right.1.peer))
+    });
+    ranked
+        .into_iter()
+        .map(|(_, input)| ChurnRank { peer: input.peer, scores: input.scores, is_static: input.is_static })
+        .collect()
 }

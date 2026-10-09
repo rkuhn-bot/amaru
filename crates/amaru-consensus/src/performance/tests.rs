@@ -655,8 +655,8 @@ fn churn_ranks_unreliable_peers_first() {
     peers.record_fetch_failure(std::slice::from_ref(&bad), t(4));
 
     let ranked = peers.rank_peers_for_churn(&[good, bad], t(5));
-    assert_eq!(ranked[0].0, bad);
-    assert_eq!(ranked[1].0, good);
+    assert_eq!(ranked[0].peer, bad);
+    assert_eq!(ranked[1].peer, good);
 }
 
 #[test]
@@ -1248,4 +1248,115 @@ fn install_shares_one_worker_and_a_later_query_sees_the_write() {
     );
     let shared = rt.block_on(tracking.query_share_peers(asker, 1, at));
     assert_eq!(shared, vec![SocketAddr::from(other)]);
+}
+
+#[test]
+fn lifecycle_writes_bump_generation() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let at = observed(1, 0);
+    let (id, _) = conn_ids();
+    assert_eq!(peers.generation(), 0);
+    assert!(peers.query_peer_view(0).is_none());
+
+    peers.record_connection_established(connection_record(alice, id, at, true), at);
+    assert_eq!(peers.generation(), 1);
+    assert!(peers.query_peer_view(0).is_some());
+    assert!(peers.query_peer_view(1).is_none());
+
+    peers.record_local_use_applied(alice, id, LocalUse::Diffusion, observed(2, 0));
+    assert_eq!(peers.generation(), 2);
+    peers.record_connect_failed(peer("bob"), observed(3, 0));
+    assert_eq!(peers.generation(), 3);
+    peers.record_connection_closed(alice, id, CloseReason::BearerEnded, observed(4, 0));
+    assert_eq!(peers.generation(), 4);
+
+    peers.record_connection_closed(alice, id, CloseReason::BearerEnded, observed(5, 0));
+    assert_eq!(peers.generation(), 4, "a close for an unknown bearer is not a write");
+}
+
+#[test]
+fn select_outbound_is_stable_for_a_fixed_seed() {
+    use std::collections::BTreeSet;
+
+    use amaru_kernel::PeerCandidate;
+
+    use super::{PeerMix, SelectOutboundParams};
+
+    let left: Peer = "10.0.0.1:4001".parse().expect("peer");
+    let right: Peer = "10.0.0.2:4002".parse().expect("peer");
+    let peers = PeerPerformance::with_sources(
+        BTreeSet::from([PeerCandidate::from(left), PeerCandidate::from(right)]),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        PeerMix::default(),
+    );
+    let params =
+        SelectOutboundParams { open: 1, excluded: BTreeSet::new(), eligible_inbound: 0, seed: [0x42; 32], now: t(1) };
+    let first = peers.select_outbound(params.clone());
+    let second = peers.select_outbound(params);
+    assert_eq!(first, second);
+    assert_eq!(first.outbound.len(), 1, "{first:?}");
+    assert_eq!(first.outbound[0].candidate, PeerCandidate::from(right), "{first:?}");
+}
+
+/// Workaround `instrumented-worker-queue-wait`.
+///
+/// The simulation clock does not advance while the performance worker runs, so a world
+/// test cannot see how long `record_header_announcement` and `select_peers_for_fetch`
+/// waited behind a burst of connection closes. This test pauses the worker, queues 32
+/// establish/close pairs and then those two ops, and measures dequeue time minus
+/// `max(enqueue time, worker-ready time)`.
+#[test]
+fn instrumented_worker_queue_wait() {
+    use tokio::sync::oneshot;
+
+    use super::ops::{PeerOp, PerformanceOp};
+    use crate::performance::{RecordHeaderAnnouncementEffect, SelectPeersForFetchEffect};
+
+    let (perf, release, probe) = Performance::paused();
+    let at = observed(1, 0);
+    let mut ids = ConnectionId::initial();
+    for n in 0..32u16 {
+        let id = ids.get_and_increment();
+        let who = Peer::for_test(5_000 + n);
+        perf.submit(PerformanceOp::Peer(PeerOp::RecordConnectionEstablished {
+            conn: connection_record(who, id, at, false),
+            at,
+        }));
+        perf.submit(PerformanceOp::Peer(PeerOp::RecordConnectionClosed {
+            peer: who,
+            conn_id: id,
+            reason: CloseReason::BearerEnded,
+            at,
+        }));
+    }
+    let announcer = peer("announcer");
+    let (header_tx, header_rx) = oneshot::channel();
+    perf.submit(PerformanceOp::Peer(PeerOp::RecordHeaderAnnouncement {
+        effect: RecordHeaderAnnouncementEffect {
+            peer: announcer,
+            header: tip(1, 1),
+            parent: None,
+            at: t(2),
+            slot_start_to_header_micros: 0,
+            slot_onset: Duration::ZERO,
+            already_stored: false,
+        },
+        reply: header_tx,
+    }));
+    let (fetch_tx, fetch_rx) = oneshot::channel();
+    perf.submit(PerformanceOp::Peer(PeerOp::SelectPeersForFetch {
+        effect: SelectPeersForFetchEffect { params: select(vec![hash(1)], 1) },
+        reply: fetch_tx,
+    }));
+    release.send(()).expect("worker is waiting");
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    rt.block_on(async {
+        header_rx.await.expect("header announcement");
+        fetch_rx.await.expect("fetch selection");
+    });
+    let waited = probe.max_urgent_wait();
+    assert!(!waited.is_zero(), "urgent ops were not timed");
+    assert!(waited <= Duration::from_millis(1), "urgent queue wait {waited:?}");
 }

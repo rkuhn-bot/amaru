@@ -64,8 +64,9 @@
 //! | `record_advertisability` | manager (inside established) and peer selection | sharing filters | C8 | recorded immediately |
 //! | `record_connection_failure` | manager (inside connect-failed) | malus, sharing filters | C8 | recorded immediately |
 //! | `clear_peer_availability` | peer selection, track_peers | fetch selection | C8 | recorded immediately |
-//! | `select_outbound` | peer selection | peer selection | C8 | on demand |
-//! | `rank_peers_for_churn` | peer selection | peer selection | C8 | on demand |
+//! | `query_peer_view` | peer selection | peer selection | C8 | on demand; `None` when the generation is unchanged |
+//! | `select_outbound` | peer selection | peer selection | C8 | worker copies inputs; caller samples |
+//! | `rank_peers_for_churn` | peer selection | peer selection | C8 | worker copies scores; caller ranks |
 //! | `set_ledger_candidates` | peer selection | outbound pools | C8 | recorded immediately |
 //! | `note_dial` | peer selection | malus half-life | C8 | recorded immediately |
 //! | `is_static_peer` | peer selection | churn | C8 | on demand |
@@ -106,16 +107,18 @@ pub use header::{ForkSwitchOutcome, HeaderLifecycleOutcome, HeaderPerformance, H
 use ops::PerformanceOp;
 use parking_lot::Mutex;
 pub use peers::{
-    ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
-    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS, OutboundPick,
-    PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags, PeerSnapshot, PeerSource,
-    SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams, SelectPeersParams, SelectUsing, SharedIngestResult,
-    SourceCounts, malus_at,
+    ADVERSARIAL_IMPULSE, BlockClaim, CONNECT_FAIL_IMPULSE, ChurnInput, ChurnRank, ClaimKind, DEFAULT_MALUS_HALF_LIFE,
+    DEFAULT_PEER_MALUS_HALF_LIFE, DEFAULT_PEER_MIX, DialOutcome, FetchPeerSet, MixEntry, NEVER_CONNECTED_BONUS,
+    OutboundInputs, OutboundPick, PeerMix, PeerMixParseError, PeerPerformance, PeerScores, PeerShareFlags,
+    PeerSnapshot, PeerSource, PeerView, SHARE_MALUS_THRESHOLD, SHARE_POLICY_MAX, SelectOutboundParams,
+    SelectPeersParams, SelectUsing, SharedIngestResult, SourceCounts, ViewConnection, malus_at,
 };
 use tokio::{
     sync::mpsc::{UnboundedSender, unbounded_channel},
     time::Instant as TokioInstant,
 };
+#[cfg(test)]
+use {ops::is_urgent_op, std::sync::atomic::AtomicU64};
 
 /// Resource type installed in pure-stage `Resources`.
 pub type ResourcePerformance = Arc<Performance>;
@@ -156,6 +159,103 @@ impl Drop for WorkerGuard {
     }
 }
 
+struct Job {
+    op: PerformanceOp,
+    #[cfg(test)]
+    queued_at: std::time::Instant,
+}
+
+#[cfg(test)]
+struct Probe(Option<Arc<QueueProbe>>);
+#[cfg(not(test))]
+struct Probe;
+
+impl Probe {
+    fn none() -> Self {
+        #[cfg(test)]
+        {
+            Self(None)
+        }
+        #[cfg(not(test))]
+        {
+            Self
+        }
+    }
+
+    #[cfg(test)]
+    fn hold(probe: Arc<QueueProbe>) -> Self {
+        Self(Some(probe))
+    }
+}
+
+#[expect(clippy::expect_used)]
+fn spawn_worker(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Job>,
+    pending: Arc<AtomicUsize>,
+    initial_peers: PeerPerformance,
+    probe: Probe,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("performance".into())
+        .spawn(move || {
+            #[cfg(not(test))]
+            let _probe = probe;
+            #[cfg(test)]
+            let probe = {
+                if let Some(probe) = probe.0 {
+                    if let Some(gate) = probe.release.lock().take() {
+                        let _ = gate.recv();
+                    }
+                    *probe.ready_at.lock() = Some(std::time::Instant::now());
+                    Some(probe)
+                } else {
+                    None
+                }
+            };
+            let rt =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().expect("performance worker runtime");
+            rt.block_on(async move {
+                let mut peers = initial_peers;
+                let mut headers = HeaderPerformance::new();
+                let mut pace = SyncAdoptionPace::default();
+                while let Some(job) = rx.recv().await {
+                    pending.fetch_sub(1, Ordering::Relaxed);
+                    #[cfg(test)]
+                    if let Some(probe) = probe.as_ref()
+                        && is_urgent_op(&job.op)
+                    {
+                        let ready = *probe.ready_at.lock();
+                        let basis = ready.map(|ready| job.queued_at.max(ready)).unwrap_or(job.queued_at);
+                        let wait = std::time::Instant::now().saturating_duration_since(basis);
+                        let nanos = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+                        probe.max_urgent_ns.fetch_max(nanos, Ordering::Relaxed);
+                    }
+                    ops::dispatch(&mut peers, &mut headers, &mut pace, job.op);
+                }
+            });
+        })
+        .expect("failed to spawn performance worker thread")
+}
+
+/// Records how long urgent ops waited in the worker queue after the worker was ready.
+///
+/// The gate holds the worker before its receive loop so a test can fill the queue first.
+/// Wait is measured from `max(enqueue time, worker-ready time)`, so the artificial pause
+/// is not included. This is the `instrumented-worker-queue-wait` measurement.
+#[cfg(test)]
+pub struct QueueProbe {
+    release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    ready_at: Mutex<Option<std::time::Instant>>,
+    max_urgent_ns: AtomicU64,
+}
+
+#[cfg(test)]
+impl QueueProbe {
+    pub fn max_urgent_wait(&self) -> Duration {
+        Duration::from_nanos(self.max_urgent_ns.load(Ordering::Relaxed))
+    }
+}
+
 /// Handle to the performance subsystem (Send + Sync). State lives on a worker thread.
 ///
 /// Field order matters for cleanup: `tx` is dropped before the worker join guard, so the last
@@ -164,7 +264,7 @@ impl Drop for WorkerGuard {
 /// Dropping the last clone joins the worker and waits while it drains any remaining ops,
 /// unless a retained [`Self::shutdown_callback`] owns that join.
 pub struct Performance {
-    tx: UnboundedSender<PerformanceOp>,
+    tx: UnboundedSender<Job>,
     /// Approximate number of ops queued or being processed (incremented before send).
     pending: Arc<AtomicUsize>,
     /// Monotonic time of the last queue-depth WARN (for 1/s rate limiting).
@@ -216,31 +316,11 @@ impl Performance {
         ledger_candidates: std::collections::BTreeSet<PeerCandidate>,
         peer_mix: PeerMix,
     ) -> Self {
-        let (tx, mut rx) = unbounded_channel::<PerformanceOp>();
+        let (tx, rx) = unbounded_channel::<Job>();
         let pending = Arc::new(AtomicUsize::new(0));
-        let pending_worker = Arc::clone(&pending);
         let initial_peers =
             PeerPerformance::with_sources(static_peers, snapshot_candidates, ledger_candidates, peer_mix);
-
-        #[expect(clippy::expect_used)]
-        let join = thread::Builder::new()
-            .name("performance".into())
-            .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("performance worker runtime");
-                rt.block_on(async move {
-                    let mut peers = initial_peers;
-                    let mut headers = HeaderPerformance::new();
-                    let mut pace = SyncAdoptionPace::default();
-                    while let Some(op) = rx.recv().await {
-                        pending_worker.fetch_sub(1, Ordering::Relaxed);
-                        ops::dispatch(&mut peers, &mut headers, &mut pace, op);
-                    }
-                });
-            })
-            .expect("failed to spawn performance worker thread");
+        let join = spawn_worker(rx, Arc::clone(&pending), initial_peers, Probe::none());
 
         Self {
             tx,
@@ -248,6 +328,32 @@ impl Performance {
             last_queue_warn: Arc::new(Mutex::new(None)),
             worker: Arc::new(WorkerGuard { join: Mutex::new(Some(join)) }),
         }
+    }
+
+    /// Worker that waits on `release` before receiving, so a test can fill the queue first.
+    ///
+    /// Urgent-op wait is [`QueueProbe::max_urgent_wait`]. Named `instrumented-worker-queue-wait`.
+    #[cfg(test)]
+    pub fn paused() -> (Self, std::sync::mpsc::Sender<()>, Arc<QueueProbe>) {
+        let (tx, rx) = unbounded_channel::<Job>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let probe = Arc::new(QueueProbe {
+            release: Mutex::new(Some(release_rx)),
+            ready_at: Mutex::new(None),
+            max_urgent_ns: AtomicU64::new(0),
+        });
+        let pending = Arc::new(AtomicUsize::new(0));
+        let join = spawn_worker(rx, Arc::clone(&pending), PeerPerformance::new(), Probe::hold(Arc::clone(&probe)));
+        (
+            Self {
+                tx,
+                pending,
+                last_queue_warn: Arc::new(Mutex::new(None)),
+                worker: Arc::new(WorkerGuard { join: Mutex::new(Some(join)) }),
+            },
+            release_tx,
+            probe,
+        )
     }
 
     /// Retain a worker join callback without keeping its request channel open.
@@ -279,7 +385,12 @@ impl Performance {
             panic!("performance op queue exceeded {QUEUE_ERROR_THRESHOLD}");
         }
         // If the worker has died, drop the op; the pending counter will be slightly wrong.
-        if self.tx.send(op).is_err() {
+        let job = Job {
+            op,
+            #[cfg(test)]
+            queued_at: std::time::Instant::now(),
+        };
+        if self.tx.send(job).is_err() {
             self.pending.fetch_sub(1, Ordering::Relaxed);
         }
     }

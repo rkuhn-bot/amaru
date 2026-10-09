@@ -14,7 +14,10 @@
 
 //! Mix allotment and quality-weighted outbound picks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use amaru_kernel::PeerCandidate;
 use amaru_pure_stage::Instant;
@@ -22,7 +25,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use super::{
     PeerPerformance,
-    peer_mix::PeerSource,
+    peer_mix::{PeerMix, PeerSource},
     quality::{PeerScores, rank_score},
     reputation::malus_at,
 };
@@ -63,6 +66,44 @@ pub struct SelectUsing {
 pub struct OutboundPick {
     pub candidate: PeerCandidate,
     pub origin: PeerSource,
+}
+
+/// Rows copied off the worker before mix sampling.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutboundInputs {
+    pub mix: PeerMix,
+    pub sources: Vec<OutboundSourceInputs>,
+}
+
+/// Eligible candidates of one source, in pool order, with the fields sampling needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutboundSourceInputs {
+    pub source: PeerSource,
+    pub candidates: Vec<OutboundCandidateInput>,
+}
+
+/// Score inputs for one candidate. The weight is computed by the caller, not the worker.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutboundCandidateInput {
+    pub candidate: PeerCandidate,
+    pub score: OutboundScoreInput,
+}
+
+/// How a candidate's outbound weight is derived. Mirrors the three branches of the worker lookup.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutboundScoreInput {
+    /// Host or SRV name with no resolved address yet.
+    Unresolved,
+    /// Resolved address that has no performance row.
+    NoRow,
+    /// Resolved address with a performance row.
+    Observed {
+        scores: PeerScores,
+        malus: f64,
+        malus_as_of: Option<Instant>,
+        half_life: Duration,
+        never_connected: bool,
+    },
 }
 
 struct OutboundWeight {
@@ -136,87 +177,122 @@ fn outbound_sampling_weight(score: f64) -> f64 {
 }
 
 impl PeerPerformance {
+    /// Copy mix rows and per-candidate score inputs. Does not sample.
+    pub fn outbound_inputs(&self, excluded: &BTreeSet<PeerCandidate>) -> OutboundInputs {
+        let mut sources = Vec::new();
+        for entry in self.peer_mix.entries() {
+            if entry.source.is_inbound() {
+                continue;
+            }
+            let candidates = self
+                .eligible_for_source(entry.source, excluded)
+                .into_iter()
+                .map(|candidate| OutboundCandidateInput { score: self.score_input(&candidate), candidate })
+                .collect();
+            sources.push(OutboundSourceInputs { source: entry.source, candidates });
+        }
+        OutboundInputs { mix: self.peer_mix.clone(), sources }
+    }
+
     /// Mix allotment: inbound Using promotions plus quality-weighted outbound dials.
     pub fn select_outbound(&self, params: SelectOutboundParams) -> SelectUsing {
-        if params.open == 0 {
-            return SelectUsing { inbound: 0, outbound: Vec::new() };
-        }
-        let mut eligible_counts = BTreeMap::new();
-        let mut eligible_by_source: BTreeMap<PeerSource, Vec<PeerCandidate>> = BTreeMap::new();
-        for entry in self.peer_mix.entries() {
-            if entry.source.is_inbound() {
-                eligible_counts.insert(PeerSource::Inbound, params.eligible_inbound);
-                continue;
-            }
-            let list = self.eligible_for_source(entry.source, &params.excluded);
-            eligible_counts.insert(entry.source, list.len());
-            eligible_by_source.insert(entry.source, list);
-        }
-        let allotment = self.peer_mix.allot(params.open, &eligible_counts);
-        let inbound = allotment.get(&PeerSource::Inbound).copied().unwrap_or(0);
-        if allotment.values().all(|&n| n == 0) {
-            return SelectUsing { inbound: 0, outbound: Vec::new() };
-        }
-
-        let mut rng = StdRng::from_seed(params.seed);
-        let mut picked = Vec::new();
-        let mut already: BTreeSet<PeerCandidate> = BTreeSet::new();
-
-        for entry in self.peer_mix.entries() {
-            if entry.source.is_inbound() {
-                continue;
-            }
-            let n = allotment.get(&entry.source).copied().unwrap_or(0);
-            if n == 0 {
-                continue;
-            }
-            let candidates = eligible_by_source.remove(&entry.source).unwrap_or_default();
-            let candidates: Vec<PeerCandidate> = candidates.into_iter().filter(|c| !already.contains(c)).collect();
-            if candidates.is_empty() {
-                continue;
-            }
-            let weights = self.outbound_weights_for(&candidates, params.now);
-            // Best score first, then worse scores, until the bucket is full. Malus makes a
-            // peer less preferred; it does not drop the peer while a slot is still open.
-            for candidate in fill_by_worsening_score(&mut rng, weights, n) {
-                already.insert(candidate.clone());
-                picked.push(OutboundPick { candidate, origin: entry.source });
-            }
-        }
-        SelectUsing { inbound, outbound: picked }
+        select_outbound_from(&self.outbound_inputs(&params.excluded), &params)
     }
 
-    fn outbound_weights_for(&self, candidates: &[PeerCandidate], now: Instant) -> Vec<OutboundWeight> {
-        candidates
+    fn score_input(&self, candidate: &PeerCandidate) -> OutboundScoreInput {
+        let Some(peer) = candidate.as_peer().or_else(|| self.last_peer.get(candidate).copied()) else {
+            return OutboundScoreInput::Unresolved;
+        };
+        let Some(state) = self.peers.get(&peer) else {
+            return OutboundScoreInput::NoRow;
+        };
+        // Fresh / unknown to Performance: no successful handshake yet and no scores
+        // or tip activity. Failure-only stubs set `last_change` (and malus) so they
+        // do not receive the never-connected exploration bonus.
+        let never_connected = !state.ever_connected && state.scores.last_change.is_none() && state.tips.is_empty();
+        OutboundScoreInput::Observed {
+            scores: state.scores.clone(),
+            malus: state.malus,
+            malus_as_of: state.malus_as_of,
+            half_life: self.half_life_for(&peer),
+            never_connected,
+        }
+    }
+}
+
+/// Sample outbound dials from a copied snapshot. Same seed and inputs yield the same picks.
+pub fn select_outbound_from(inputs: &OutboundInputs, params: &SelectOutboundParams) -> SelectUsing {
+    if params.open == 0 {
+        return SelectUsing { inbound: 0, outbound: Vec::new() };
+    }
+    let mut eligible_counts = BTreeMap::new();
+    for entry in inputs.mix.entries() {
+        if entry.source.is_inbound() {
+            eligible_counts.insert(PeerSource::Inbound, params.eligible_inbound);
+            continue;
+        }
+        let count = inputs
+            .sources
             .iter()
-            .map(|candidate| {
-                let Some(peer) = candidate.as_peer().or_else(|| self.last_peer.get(candidate).copied()) else {
-                    return OutboundWeight {
-                        candidate: candidate.clone(),
-                        score: NEVER_CONNECTED_BONUS,
-                        weight: outbound_sampling_weight(NEVER_CONNECTED_BONUS),
-                    };
-                };
-                let half_life = self.half_life_for(&peer);
-                let (malus, goodness, never_connected) = match self.peers.get(&peer) {
-                    None => (0.0, 0.0, true),
-                    Some(state) => {
-                        let malus = malus_at(state.malus, state.malus_as_of, now, half_life);
-                        // Fresh / unknown to Performance: no successful handshake yet and no scores
-                        // or tip activity. Failure-only stubs set `last_change` (and malus) so they
-                        // do not receive the never-connected exploration bonus.
-                        let never_connected =
-                            !state.ever_connected && state.scores.last_change.is_none() && state.tips.is_empty();
-                        let goodness = outbound_goodness(Some(&state.scores));
-                        (malus, goodness, never_connected)
-                    }
-                };
-                let mut score = goodness - OUTBOUND_MALUS_LAMBDA * malus;
-                if never_connected {
-                    score += NEVER_CONNECTED_BONUS;
-                }
-                OutboundWeight { candidate: candidate.clone(), score, weight: outbound_sampling_weight(score) }
-            })
-            .collect()
+            .find(|source| source.source == entry.source)
+            .map(|source| source.candidates.len())
+            .unwrap_or(0);
+        eligible_counts.insert(entry.source, count);
     }
+    let allotment = inputs.mix.allot(params.open, &eligible_counts);
+    let inbound = allotment.get(&PeerSource::Inbound).copied().unwrap_or(0);
+    if allotment.values().all(|&n| n == 0) {
+        return SelectUsing { inbound: 0, outbound: Vec::new() };
+    }
+
+    let mut rng = StdRng::from_seed(params.seed);
+    let mut picked = Vec::new();
+    let mut already: BTreeSet<PeerCandidate> = BTreeSet::new();
+
+    for entry in inputs.mix.entries() {
+        if entry.source.is_inbound() {
+            continue;
+        }
+        let n = allotment.get(&entry.source).copied().unwrap_or(0);
+        if n == 0 {
+            continue;
+        }
+        let Some(source) = inputs.sources.iter().find(|source| source.source == entry.source) else {
+            continue;
+        };
+        let candidates: Vec<&OutboundCandidateInput> =
+            source.candidates.iter().filter(|input| !already.contains(&input.candidate)).collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let weights = candidates
+            .iter()
+            .map(|input| {
+                let (score, weight) = outbound_weight(&input.score, params.now);
+                OutboundWeight { candidate: input.candidate.clone(), score, weight }
+            })
+            .collect();
+        // Best score first, then worse scores, until the bucket is full. Malus makes a
+        // peer less preferred; it does not drop the peer while a slot is still open.
+        for candidate in fill_by_worsening_score(&mut rng, weights, n) {
+            already.insert(candidate.clone());
+            picked.push(OutboundPick { candidate, origin: entry.source });
+        }
+    }
+    SelectUsing { inbound, outbound: picked }
+}
+
+fn outbound_weight(input: &OutboundScoreInput, now: Instant) -> (f64, f64) {
+    let score = match input {
+        OutboundScoreInput::Unresolved | OutboundScoreInput::NoRow => NEVER_CONNECTED_BONUS,
+        OutboundScoreInput::Observed { scores, malus, malus_as_of, half_life, never_connected } => {
+            let malus = malus_at(*malus, *malus_as_of, now, *half_life);
+            let mut score = outbound_goodness(Some(scores)) - OUTBOUND_MALUS_LAMBDA * malus;
+            if *never_connected {
+                score += NEVER_CONNECTED_BONUS;
+            }
+            score
+        }
+    };
+    (score, outbound_sampling_weight(score))
 }

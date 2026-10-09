@@ -46,6 +46,10 @@ struct Harness {
 }
 
 fn harness() -> Harness {
+    harness_with(ManagerConfig::default())
+}
+
+fn harness_with(config: ManagerConfig) -> Harness {
     let _guards = {
         let mut guards = super::register_deserializers();
         guards.extend(crate::peer_tracking_effects::register_deserializers());
@@ -63,7 +67,7 @@ fn harness() -> Harness {
         manager,
         Manager::new(
             NetworkMagic::PREPROD,
-            ManagerConfig::default(),
+            config,
             Arc::new(PREPROD_ERA_HISTORY.clone()),
             StageRef::blackhole(),
             StageRef::blackhole(),
@@ -135,18 +139,7 @@ fn outbound_handshake_is_recorded_and_still_notified() {
     );
     assert!(sim.recorder.closed().is_empty());
     assert!(sim.recorder.connect_failures().is_empty());
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(
-        notes,
-        vec![PeerSelectionNotify::Connected {
-            peer,
-            conn_id,
-            direction: ConnectionDirection::Outbound,
-            full_duplex_capable: true,
-            full_duplex: false,
-            advertisable: true,
-        }]
-    );
+    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -162,18 +155,7 @@ fn inbound_handshake_starts_at_no_local_use() {
         sim.recorder.established(),
         vec![(record_for(peer, conn_id, ConnectionDirection::Inbound, false, LocalUse::None, at), at)]
     );
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(
-        notes,
-        vec![PeerSelectionNotify::Connected {
-            peer,
-            conn_id,
-            direction: ConnectionDirection::Inbound,
-            full_duplex_capable: true,
-            full_duplex: false,
-            advertisable: false,
-        }]
-    );
+    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -193,8 +175,7 @@ fn duplicate_handshake_writes_nothing_and_disconnects_the_extra() {
     assert_eq!(sim.recorder.established().len(), 1);
     assert_eq!(sim.recorder.established()[0].0.conn_id, conn_id);
     assert!(sim.recorder.closed().is_empty());
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(notes.len(), 1);
+    assert!(sim.notify.drain().next().is_none());
     assert!(sim.connection_rx.drain().next().is_none());
     let extra: Vec<_> = sim.extra_rx.drain().collect();
     assert_eq!(extra, vec![ConnectionMessage::Disconnect]);
@@ -240,30 +221,7 @@ fn remove_peer_closes_each_bearer_and_still_notifies() {
         sim.recorder.closed(),
         vec![(peer, inbound, CloseReason::LocalDisconnect, at), (peer, outbound, CloseReason::LocalDisconnect, at),]
     );
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(
-        notes,
-        vec![
-            PeerSelectionNotify::Connected {
-                peer,
-                conn_id: inbound,
-                direction: ConnectionDirection::Inbound,
-                full_duplex_capable: true,
-                full_duplex: false,
-                advertisable: false,
-            },
-            PeerSelectionNotify::Connected {
-                peer,
-                conn_id: outbound,
-                direction: ConnectionDirection::Outbound,
-                full_duplex_capable: true,
-                full_duplex: false,
-                advertisable: true,
-            },
-            PeerSelectionNotify::Disconnected { peer, conn_id: inbound, direction: ConnectionDirection::Inbound },
-            PeerSelectionNotify::Disconnected { peer, conn_id: outbound, direction: ConnectionDirection::Outbound },
-        ]
-    );
+    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -284,21 +242,7 @@ fn bearer_death_closes_with_bearer_ended_and_a_later_death_does_not_write_again(
     let at = observed_at(sim.running.now());
     assert_eq!(sim.recorder.closed(), vec![(peer, conn_id, CloseReason::BearerEnded, at)]);
     assert!(sim.recorder.connect_failures().is_empty());
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(
-        notes,
-        vec![
-            PeerSelectionNotify::Connected {
-                peer,
-                conn_id,
-                direction: ConnectionDirection::Outbound,
-                full_duplex_capable: true,
-                full_duplex: false,
-                advertisable: true,
-            },
-            PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Outbound },
-        ]
-    );
+    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -314,8 +258,7 @@ fn failed_attempt_is_recorded_once_and_still_notified() {
     let at = observed_at(sim.running.now());
     assert_eq!(sim.recorder.connect_failures(), vec![(peer, at)]);
     assert!(sim.recorder.established().is_empty());
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(notes, vec![PeerSelectionNotify::ConnectFailed { peer }]);
+    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -335,8 +278,7 @@ fn initiator_death_before_handshake_is_recorded_once() {
     assert_eq!(sim.recorder.connect_failures()[0].0, peer);
     assert!(sim.recorder.established().is_empty());
     assert!(sim.recorder.closed().is_empty());
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert_eq!(notes, vec![PeerSelectionNotify::ConnectFailed { peer }]);
+    assert!(sim.notify.drain().next().is_none());
 }
 
 #[test]
@@ -360,17 +302,31 @@ fn rejected_outbound_duplicate_death_does_not_fail_the_live_connection() {
     assert_eq!(sim.recorder.established().len(), 1);
     assert_eq!(sim.recorder.established()[0].0.conn_id, live);
     assert_eq!(sim.recorder.closed(), vec![(peer, live, CloseReason::BearerEnded, at)]);
-    let notes: Vec<_> = sim.notify.drain().collect();
-    assert!(!notes.iter().any(|note| matches!(note, PeerSelectionNotify::ConnectFailed { .. })));
-    assert!(!notes.iter().any(|note| matches!(
-        note,
-        PeerSelectionNotify::Disconnected { conn_id, .. } if *conn_id == extra_id
-    )));
-    assert!(notes.iter().any(|note| matches!(
-        note,
-        PeerSelectionNotify::Disconnected { conn_id, direction, .. }
-            if *conn_id == live && *direction == ConnectionDirection::Outbound
-    )));
+    assert!(sim.notify.drain().next().is_none());
+}
+
+#[test]
+fn inbound_handshake_is_refused_once_the_cap_is_full() {
+    let mut sim = harness_with(ManagerConfig::default().with_max_inbound(1));
+    let first = Peer::for_test(4201);
+    let second = Peer::for_test(4202);
+    let (live, extra_id) = ids();
+    sim.running.enqueue_msg(
+        &sim.manager,
+        [
+            handshake(first, sim.connection.clone(), live, Role::Responder, false),
+            handshake(second, sim.extra.clone(), extra_id, Role::Responder, false),
+        ],
+    );
+    sim.running.run(Run::skip_and_resolve()).assert_idle();
+
+    assert_eq!(sim.recorder.established().len(), 1);
+    assert_eq!(sim.recorder.established()[0].0.conn_id, live);
+    assert_eq!(sim.recorder.established()[0].0.peer, first);
+    assert!(sim.recorder.closed().is_empty());
+    assert!(sim.connection_rx.drain().next().is_none());
+    let extra: Vec<_> = sim.extra_rx.drain().collect();
+    assert_eq!(extra, vec![ConnectionMessage::Disconnect]);
 }
 
 #[test]
