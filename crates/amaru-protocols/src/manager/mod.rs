@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, net::SocketAddr, num::NonZeroU8, sync::Arc, tim
 
 use amaru_kernel::{EraHistory, NetworkMagic, Peer, Point};
 use amaru_observability::{Instrument, TraceContext, debug, debug_span, error, info};
-use amaru_ouroboros::{ConnectionDirection, ConnectionId, MempoolMsg};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, MempoolMsg};
 use amaru_pure_stage::{DeserializerGuards, Effects, Instant, StageRef, register_data_deserializer};
 
 use crate::{
@@ -26,12 +26,17 @@ use crate::{
     connection::{self, ConnectionMessage, LocalUse},
     network_effects::{ConnectError, Network, NetworkOps},
     peer_sharing::{SharePeersReply, ShareResult},
+    peer_tracking::observed_at,
+    peer_tracking_effects::PeerTrack,
     protocol::Role,
     protocol_messages::version_number::VersionNumber,
     tx_submission::ResponderParams,
 };
 
 pub mod connector;
+
+#[cfg(test)]
+mod tests;
 
 /// Messages the [`Manager`] sends to the consensus `peer_selection` stage.
 ///
@@ -192,6 +197,16 @@ impl ManagerMessage {
 ///
 /// - Sending [`ManagerMessage::AddPeer`] will generate [`PeerSelectionNotify::ConnectFailed`]
 ///   if that attempt fails before [`ManagerMessage::RemovePeer`] is received.
+///
+///   A second outbound handshake that is rejected because this peer is already connected does not
+///   write a bearer. When that extra bearer later dies, the manager does not record a connect
+///   failure and does not send [`PeerSelectionNotify::ConnectFailed`]. The live connection stays.
+///
+/// The same facts are written to the peer-tracking resource, one update per event:
+/// handshake (`record_connection_established`), applied local use, a close, and a failed
+/// outbound attempt. The notifications above are still sent. Outbound local use at handshake
+/// is [`LocalUse::Diffusion`] and inbound is [`LocalUse::None`], which is what peer selection
+/// stores when it accepts `Connected`. A later [`ManagerMessage::LocalUseApplied`] overwrites it.
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Manager {
     peers: BTreeMap<Peer, PeerState>,
@@ -363,6 +378,7 @@ impl Manager {
         } else {
             self.peers.remove(&peer);
         }
+        record_connect_failed(eff, peer).await;
         eff.send(&self.peer_selection, PeerSelectionNotify::ConnectFailed { peer }).await;
     }
 
@@ -494,6 +510,7 @@ impl Manager {
             // so share/fetch must see `may_initiate` before `Connected` is processed.
             let may_initiate = direction == ConnectionDirection::Outbound;
             self.connections.insert(conn_id, Connection { stage, direction, full_duplex_capable, peer, may_initiate });
+            record_established(eff, peer, conn_id, direction, full_duplex_capable, full_duplex, advertisable).await;
             eff.send(
                 &self.peer_selection,
                 PeerSelectionNotify::Connected {
@@ -521,6 +538,7 @@ impl Manager {
         if let Some(conn_id) = entry.inbound {
             info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = "inbound");
             let connection = self.connections.remove(&conn_id).expect("PeerState implies Connection");
+            record_closed(eff, peer, conn_id, CloseReason::LocalDisconnect).await;
             eff.send(
                 &self.peer_selection,
                 PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Inbound },
@@ -531,6 +549,7 @@ impl Manager {
         if let OutboundState::Connected { conn_id } = entry.outbound {
             info!(protocols::manager::peer::DISCONNECTING, peer, conn_id = conn_id.as_u64(), direction = "outbound");
             let connection = self.connections.remove(&conn_id).expect("PeerState implies Connection");
+            record_closed(eff, peer, conn_id, CloseReason::LocalDisconnect).await;
             eff.send(
                 &self.peer_selection,
                 PeerSelectionNotify::Disconnected { peer, conn_id, direction: ConnectionDirection::Outbound },
@@ -547,6 +566,20 @@ impl Manager {
             debug!(protocols::manager::peer::DISCONNECT_IGNORED, peer, reason = "peer_already_removed");
             return;
         };
+        // A handshake that lost the duplicate check never entered `connections`. Its later death
+        // is not the live dial: the peer already has an outbound bearer.
+        if role == Role::Initiator
+            && matches!(peer_state.outbound, OutboundState::Connected { .. })
+            && !self.connections.contains_key(&conn_id)
+        {
+            debug!(
+                protocols::manager::peer::DISCONNECT_IGNORED,
+                peer,
+                reason = "rejected_duplicate",
+                conn_id = conn_id.as_u64()
+            );
+            return;
+        }
         if let Some(Connection { direction, .. }) = self.connections.remove(&conn_id) {
             match direction {
                 ConnectionDirection::Inbound => {
@@ -572,6 +605,7 @@ impl Manager {
                     }
                 }
             }
+            record_closed(eff, peer, conn_id, CloseReason::BearerEnded).await;
             eff.send(&self.peer_selection, PeerSelectionNotify::Disconnected { peer, conn_id, direction }).await;
         } else {
             // pre-handshake death (no entry was inserted to connections, and no Connected notify was sent)
@@ -588,6 +622,7 @@ impl Manager {
                         self.peers.remove(&peer);
                     }
                 }
+                record_connect_failed(eff, peer).await;
                 eff.send(&self.peer_selection, PeerSelectionNotify::ConnectFailed { peer }).await;
             }
             // inbound pre-HS deaths require no further action (peer entry is only created on HS success)
@@ -764,8 +799,14 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
                     conn_id = conn_id.as_u64(),
                     local_use = local_use.as_str(),
                 );
-                if let Some(connection) = manager.connections.get_mut(&conn_id) {
+                let known = if let Some(connection) = manager.connections.get_mut(&conn_id) {
                     connection.may_initiate = local_use == LocalUse::Diffusion;
+                    true
+                } else {
+                    false
+                };
+                if known {
+                    record_local_use(&eff, peer, conn_id, local_use).await;
                 }
             }
         }
@@ -773,6 +814,52 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
     }
     .instrument(span)
     .await
+}
+
+/// Local use peer selection stores on `Connected`: outbound starts in diffusion, inbound stays none.
+fn handshake_local_use(direction: ConnectionDirection) -> LocalUse {
+    match direction {
+        ConnectionDirection::Outbound => LocalUse::Diffusion,
+        ConnectionDirection::Inbound => LocalUse::None,
+    }
+}
+
+async fn record_established(
+    eff: &Effects<ManagerMessage>,
+    peer: Peer,
+    conn_id: ConnectionId,
+    direction: ConnectionDirection,
+    full_duplex_capable: bool,
+    full_duplex: bool,
+    advertisable: bool,
+) {
+    let at = eff.clock().await;
+    let conn = ConnectionRecord {
+        peer,
+        conn_id,
+        direction,
+        full_duplex_capable,
+        full_duplex,
+        advertisable,
+        local_use: handshake_local_use(direction),
+        established_at: observed_at(at),
+    };
+    PeerTrack::new(eff).record_connection_established(conn, at).await;
+}
+
+async fn record_closed(eff: &Effects<ManagerMessage>, peer: Peer, conn_id: ConnectionId, reason: CloseReason) {
+    let at = eff.clock().await;
+    PeerTrack::new(eff).record_connection_closed(peer, conn_id, reason, at).await;
+}
+
+async fn record_connect_failed(eff: &Effects<ManagerMessage>, peer: Peer) {
+    let at = eff.clock().await;
+    PeerTrack::new(eff).record_connect_failed(peer, at).await;
+}
+
+async fn record_local_use(eff: &Effects<ManagerMessage>, peer: Peer, conn_id: ConnectionId, local_use: LocalUse) {
+    let at = eff.clock().await;
+    PeerTrack::new(eff).record_local_use_applied(peer, conn_id, local_use, at).await;
 }
 
 /// Close the connection and log any errors.

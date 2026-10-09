@@ -143,7 +143,9 @@ An observation that can change the next header or block request, or which chain 
 | C9 | Peer-sharing results | minutes |
 | C10 | Transaction-submission statistics. No instance in this node today | seconds or longer |
 
-Protocols reach the population half through the `PeerTracking` trait (`amaru-ouroboros-traits`). `Performance` implements that trait by enqueueing on this same worker, and the node registers that one handle under both resource names. Consensus stages keep using the existing `Performance` effects. The trait methods are the protocols-facing names; stage call sites are added separately, so both paths exist until each old message is removed.
+Protocols reach the population half through the `PeerTracking` trait (`amaru-ouroboros-traits`). `Performance` implements that trait by enqueueing on this same worker, and the node registers that one handle under both resource names. Consensus stages keep using the existing `Performance` effects. The trait methods are the protocols-facing names.
+
+The manager writes connection established, closed, connect-failed, and local-use-applied, one worker operation per event. Peer selection still receives `Connected`, `Disconnected`, and `ConnectFailed` and still records advertisability and clears availability when it handles them. Connection-failure malus is applied only inside the manager's connect-failed write, so the message path does not add that impulse again. The remaining trait methods have no stage call site yet.
 
 ## Consequences
 

@@ -591,10 +591,16 @@ pub fn assert_trace_contains(running: &SimulationRunning, expected: &[TraceMatch
 
 /// Asserts that none of the provided [`TraceMatch`] values appear anywhere
 /// in the filtered trace.
+///
+/// Resume entries are ignored, as with [`assert_trace_contains`]. The buffer is left
+/// in place, so a later contains or exact-match assertion still sees the trace.
 #[track_caller]
 #[expect(clippy::panic)]
 pub fn assert_trace_does_not_contain(running: &SimulationRunning, forbidden: &[TraceMatch<'_>]) {
-    let trace = collect_trace_filter(running, &[tm_resume()]);
+    let trace: Vec<TraceEntry> = {
+        let tb = running.trace_buffer().lock();
+        tb.iter_entries().map(|(_, entry)| entry).filter(|entry| tm_resume() != *entry).collect()
+    };
 
     for entry in &trace {
         for f in forbidden {
