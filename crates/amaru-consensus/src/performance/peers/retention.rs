@@ -14,14 +14,18 @@
 
 //! Retention of per-peer rows and the caps on learned addresses and those rows.
 //!
-//! Activity is the latest instant a peer was observed. The observers are a handshake, a close, a
-//! dial failure, a dial note, a local-use update, a header or block claim, a fetch result, a
-//! keep-alive sample, a share request this node answered, a share ingest (the donor), an
-//! intersection-not-found mark, and an adversarial mark. The instant only moves forward.
+//! A write goes through [`PeerPerformance::touch`] or [`PeerPerformance::write_peer`]. That records
+//! the latest observation instant (it only moves forward) and seats the peer: a live bearer, a
+//! static, ledger, or snapshot candidate, or an active ban stub stays out of the dead sets. Losing
+//! the last of those moves the peer into a dead set keyed by that instant. Becoming live again
+//! takes it back out.
 //!
-//! A shared address is as fresh as the later of when it was first learned and that activity.
-//! Repeating a share reply does not move the learned instant. An in-flight dial is protected by
-//! the set peer selection passes in, and the dial note records activity at the dial instant.
+//! The sweep only pops those dead sets. Expired entries come off the front. While over the record
+//! cap, the oldest unverified dead entries come off the front too. Established peers stay until
+//! retention. There is no cursor and no fixed batch.
+//!
+//! A shared address is as fresh as the later of when it was first learned and the peer's activity.
+//! Repeating a share reply does not move the learned instant. The same live/dead split applies.
 
 #[cfg(test)]
 use std::net::SocketAddr;
@@ -37,31 +41,21 @@ pub const PEER_RECORD_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long a banned peer's reputation stub is kept after the mark.
 ///
-/// While peer selection still lists the peer as protected, each eviction extends this by the
-/// same duration, so the stub outlasts the ban.
+/// While peer selection still lists the peer as protected, each sweep extends this by the same
+/// duration, so the stub outlasts the ban.
 pub const BAN_STUB_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Learned share-reply addresses. Newcomers past this cap are dropped on ingest.
 pub const SHARED_PEERS_CAP: usize = 4096;
 
-/// Per-peer rows (activity index). A live bearer may briefly exceed it; the sweep frees slots.
+/// Per-peer rows. A live bearer may briefly exceed it; the sweep frees unverified dead slots.
 pub const PEER_RECORD_CAP: usize = 8192;
 
-/// Most entries one eviction inspects. The work stays on one worker operation.
-pub const EVICTION_BATCH: usize = 256;
-
-/// What one eviction examined and removed.
+/// What one sweep removed. It does not bump [`PeerPerformance::generation`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EvictBatch {
-    pub examined: usize,
+pub struct Sweep {
     pub removed_records: usize,
     pub removed_shared: usize,
-}
-
-enum Decide {
-    Stop,
-    Keep,
-    Drop,
 }
 
 impl PeerPerformance {
@@ -69,35 +63,50 @@ impl PeerPerformance {
         self.activity.len()
     }
 
-    /// Drop stale unprotected rows, then the oldest unprotected unverified rows while over a cap.
+    /// Drop expired dead rows, then the oldest unverified dead rows while over a cap.
     ///
-    /// Examines at most [`EVICTION_BATCH`] entries. When both indexes are non-empty the budget is
-    /// split evenly. Each index resumes from its cursor, so a later call does not rescan the
-    /// prefix. Does not bump [`Self::generation`]: the next selection round reads the pools.
-    pub fn evict_batch(
+    /// Protected peers and candidates passed in are marked live for this sweep and are not
+    /// candidates. An adversarial peer among them has its ban stub extended by [`BAN_STUB_GRACE`].
+    pub fn sweep(
         &mut self,
         now: Instant,
         protected_peers: &BTreeSet<Peer>,
         protected_candidates: &BTreeSet<PeerCandidate>,
-    ) -> EvictBatch {
-        let live: BTreeSet<Peer> = self.connections.values().map(|live| live.record.peer).collect();
-        let (record_budget, shared_budget) = self.eviction_budgets();
-        let (record_examined, removed_records) =
-            self.evict_peer_records(now, record_budget, &live, protected_peers, protected_candidates);
-        let (shared_examined, removed_shared) =
-            self.evict_shared_candidates(now, shared_budget, &live, protected_peers, protected_candidates);
-        EvictBatch { examined: record_examined + shared_examined, removed_records, removed_shared }
+    ) -> Sweep {
+        self.release_external_holds(protected_peers, protected_candidates);
+        for peer in protected_peers {
+            self.shelter_peer(*peer, now);
+        }
+        for candidate in protected_candidates {
+            self.shelter_candidate(candidate, now);
+        }
+        let mut removed_records = 0usize;
+        let mut removed_shared = 0usize;
+        self.expire_stubs(now, &mut removed_records);
+        self.pop_expired_peers(now, &mut removed_records);
+        self.pop_record_cap(&mut removed_records);
+        self.pop_expired_shared(now, &mut removed_shared);
+        self.pop_shared_cap(&mut removed_shared);
+        Sweep { removed_records, removed_shared }
     }
 
-    pub(super) fn note_activity(&mut self, peer: Peer, at: Instant) {
-        if let Some(prev) = self.activity.get(&peer).copied() {
-            if at <= prev {
-                return;
-            }
-            self.activity_order.remove(&(prev, peer));
-        }
-        self.activity.insert(peer, at);
-        self.activity_order.insert((at, peer));
+    /// Record an observation and seat the peer. The instant only moves forward.
+    pub(super) fn touch(&mut self, peer: Peer, at: Instant) {
+        self.unseat_peer(peer);
+        self.unseat_shared_peer(peer);
+        self.advance_activity(peer, at);
+        self.seat_peer(peer);
+        self.seat_shared_peer(peer);
+    }
+
+    /// Update the peer row, then [`Self::touch`]. Unseats before `update` so a new ban stub is indexed.
+    pub(super) fn write_peer(&mut self, peer: Peer, at: Instant, update: impl FnOnce(&mut PeerState)) {
+        self.unseat_peer(peer);
+        self.unseat_shared_peer(peer);
+        update(self.peers.entry(peer).or_default());
+        self.advance_activity(peer, at);
+        self.seat_peer(peer);
+        self.seat_shared_peer(peer);
     }
 
     /// Remember a learned address. A repeat does not move the learned instant.
@@ -107,7 +116,22 @@ impl PeerPerformance {
         }
         self.shared_peers.insert(candidate.clone());
         self.shared_learned.insert(candidate.clone(), at);
-        self.shared_order.insert((at, candidate));
+        self.seat_shared(&candidate);
+    }
+
+    /// Ledger membership changed. Peers that already have a row move between held and dead.
+    pub(super) fn reclassify_source_members(&mut self, previous: &BTreeSet<PeerCandidate>) {
+        let mut peers = BTreeSet::new();
+        for candidate in previous.iter().chain(self.ledger_candidates.iter()) {
+            if let Some(peer) = candidate.as_peer()
+                && self.activity.contains_key(&peer)
+            {
+                peers.insert(peer);
+            }
+        }
+        for peer in peers {
+            self.reseat(peer);
+        }
     }
 
     pub(super) fn clear_peer_claims(&mut self, peer: &Peer) {
@@ -131,127 +155,260 @@ impl PeerPerformance {
         }
     }
 
-    fn eviction_budgets(&self) -> (usize, usize) {
-        let records = !self.activity_order.is_empty();
-        let shared = !self.shared_order.is_empty();
-        match (records, shared) {
-            (true, true) => (EVICTION_BATCH / 2, EVICTION_BATCH - EVICTION_BATCH / 2),
-            (true, false) => (EVICTION_BATCH, 0),
-            (false, true) => (0, EVICTION_BATCH),
-            (false, false) => (0, 0),
+    fn reseat(&mut self, peer: Peer) {
+        self.unseat_peer(peer);
+        self.unseat_shared_peer(peer);
+        self.seat_peer(peer);
+        self.seat_shared_peer(peer);
+    }
+
+    fn advance_activity(&mut self, peer: Peer, at: Instant) {
+        match self.activity.get(&peer).copied() {
+            Some(prev) if at <= prev => {}
+            _ => {
+                self.activity.insert(peer, at);
+            }
         }
     }
 
-    fn evict_peer_records(
+    fn release_external_holds(
         &mut self,
-        now: Instant,
-        budget: usize,
-        live: &BTreeSet<Peer>,
         protected_peers: &BTreeSet<Peer>,
         protected_candidates: &BTreeSet<PeerCandidate>,
-    ) -> (usize, usize) {
-        let keys = collect_from(&self.activity_order, self.activity_cursor, budget);
-        let mut examined = 0usize;
-        let mut removed = 0usize;
-        let mut stopped = false;
-        for (at, peer) in &keys {
-            if self.activity.get(peer) != Some(at) {
-                continue;
-            }
-            examined += 1;
-            match self.decide_peer(*peer, *at, now, live, protected_peers, protected_candidates) {
-                Decide::Stop => {
-                    stopped = true;
-                    break;
-                }
-                Decide::Keep => {}
-                Decide::Drop => {
-                    self.forget_peer(*peer);
-                    removed += 1;
-                }
+    ) {
+        let held = std::mem::take(&mut self.held_external);
+        for peer in held {
+            let socket = PeerCandidate::from(peer);
+            if protected_peers.contains(&peer) || protected_candidates.contains(&socket) {
+                self.held_external.insert(peer);
+            } else {
+                self.reseat(peer);
             }
         }
-        advance_cursor(&mut self.activity_cursor, &keys, budget, stopped);
-        (examined, removed)
+        let shared = std::mem::take(&mut self.shared_held);
+        for candidate in shared {
+            let peer_protected = candidate.as_peer().is_some_and(|peer| protected_peers.contains(&peer));
+            if protected_candidates.contains(&candidate) || peer_protected || self.shared_internally_held(&candidate) {
+                self.shared_held.insert(candidate);
+            } else {
+                self.seat_shared(&candidate);
+            }
+        }
     }
 
-    fn evict_shared_candidates(
-        &mut self,
-        now: Instant,
-        budget: usize,
-        live: &BTreeSet<Peer>,
-        protected_peers: &BTreeSet<Peer>,
-        protected_candidates: &BTreeSet<PeerCandidate>,
-    ) -> (usize, usize) {
-        let keys = collect_from(&self.shared_order, self.shared_cursor.clone(), budget);
-        let mut examined = 0usize;
-        let mut removed = 0usize;
-        for (learned, candidate) in &keys {
-            if self.shared_learned.get(candidate) != Some(learned) {
-                continue;
-            }
-            examined += 1;
-            if self.drop_shared(candidate, *learned, now, live, protected_peers, protected_candidates) {
-                removed += 1;
-            }
+    fn shelter_peer(&mut self, peer: Peer, now: Instant) {
+        if !self.activity.contains_key(&peer) {
+            return;
         }
-        advance_cursor(&mut self.shared_cursor, &keys, budget, false);
-        (examined, removed)
-    }
-
-    fn decide_peer(
-        &mut self,
-        peer: Peer,
-        at: Instant,
-        now: Instant,
-        live: &BTreeSet<Peer>,
-        protected_peers: &BTreeSet<Peer>,
-        protected_candidates: &BTreeSet<PeerCandidate>,
-    ) -> Decide {
-        let stale = now.saturating_since(at) >= PEER_RECORD_RETENTION;
-        let over_cap = self.activity.len() > PEER_RECORD_CAP;
-        if !stale && !over_cap {
-            return Decide::Stop;
-        }
-        if self.externally_protected(peer, live, protected_peers, protected_candidates) {
+        self.unseat_peer(peer);
+        if self.peers.get(&peer).is_some_and(|state| state.adversarial) {
             self.refresh_ban_stub(peer, now);
-            return Decide::Keep;
         }
-        if self.stub_active(peer, now) || (!stale && self.is_established_peer(peer)) {
-            return Decide::Keep;
+        if self.stub_indexed(peer) {
+            self.seat_shared_peer(peer);
+            return;
         }
-        Decide::Drop
+        if !self.internally_held(peer) {
+            self.held_external.insert(peer);
+        }
+        self.seat_shared_peer(peer);
     }
 
-    fn drop_shared(
-        &mut self,
-        candidate: &PeerCandidate,
-        learned: Instant,
-        now: Instant,
-        live: &BTreeSet<Peer>,
-        protected_peers: &BTreeSet<Peer>,
-        protected_candidates: &BTreeSet<PeerCandidate>,
-    ) -> bool {
-        let useful = self.shared_useful_at(candidate, learned);
-        let stale = now.saturating_since(useful) >= PEER_RECORD_RETENTION;
-        let over_cap = self.shared_peers.len() > SHARED_PEERS_CAP;
-        if protected_candidates.contains(candidate) {
-            return false;
+    fn shelter_candidate(&mut self, candidate: &PeerCandidate, now: Instant) {
+        if self.shared_learned.contains_key(candidate) {
+            self.unseat_shared(candidate);
+            self.shared_held.insert(candidate.clone());
         }
-        if let Some(peer) = candidate.as_peer()
-            && (self.externally_protected(peer, live, protected_peers, protected_candidates)
-                || self.stub_active(peer, now))
+        if let Some(peer) = candidate.as_peer() {
+            self.shelter_peer(peer, now);
+        }
+    }
+
+    fn expire_stubs(&mut self, now: Instant, removed: &mut usize) {
+        while let Some((until, peer)) = self.stubs.first().copied() {
+            if until > now {
+                break;
+            }
+            self.stubs.remove(&(until, peer));
+            if self.internally_held(peer) || self.held_external.contains(&peer) {
+                continue;
+            }
+            let Some(at) = self.activity.get(&peer).copied() else {
+                continue;
+            };
+            self.insert_dead(peer, at);
+            if self.activity_expired(at, now) {
+                self.remove_dead_key(peer, at);
+                self.forget_peer(peer);
+                *removed += 1;
+            }
+        }
+    }
+
+    fn pop_expired_peers(&mut self, now: Instant, removed: &mut usize) {
+        self.pop_expired_peer_set(now, true, removed);
+        self.pop_expired_peer_set(now, false, removed);
+    }
+
+    fn pop_expired_peer_set(&mut self, now: Instant, established: bool, removed: &mut usize) {
+        loop {
+            let front = if established {
+                self.dead_established.first().copied()
+            } else {
+                self.dead_unverified.first().copied()
+            };
+            let Some((at, peer)) = front else {
+                break;
+            };
+            if !self.activity_expired(at, now) {
+                break;
+            }
+            self.remove_dead_key(peer, at);
+            if self.activity.get(&peer).copied() == Some(at) && self.droppable(peer) {
+                self.forget_peer(peer);
+                *removed += 1;
+            }
+        }
+    }
+
+    fn pop_record_cap(&mut self, removed: &mut usize) {
+        while self.activity.len() > PEER_RECORD_CAP {
+            let Some((at, peer)) = self.dead_unverified.first().copied() else {
+                break;
+            };
+            self.dead_unverified.remove(&(at, peer));
+            if self.activity.get(&peer).copied() == Some(at) && self.droppable(peer) {
+                self.forget_peer(peer);
+                *removed += 1;
+            }
+        }
+    }
+
+    fn pop_expired_shared(&mut self, now: Instant, removed: &mut usize) {
+        self.pop_expired_shared_set(now, true, removed);
+        self.pop_expired_shared_set(now, false, removed);
+    }
+
+    fn pop_expired_shared_set(&mut self, now: Instant, established: bool, removed: &mut usize) {
+        loop {
+            let front = if established {
+                self.shared_dead_established.first().cloned()
+            } else {
+                self.shared_dead_unverified.first().cloned()
+            };
+            let Some((useful, candidate)) = front else {
+                break;
+            };
+            if !self.activity_expired(useful, now) {
+                break;
+            }
+            self.remove_shared_dead_key(&candidate, useful);
+            if self.drop_shared_if_current(&candidate, useful) {
+                *removed += 1;
+            }
+        }
+    }
+
+    fn pop_shared_cap(&mut self, removed: &mut usize) {
+        while self.shared_peers.len() > SHARED_PEERS_CAP {
+            let Some((useful, candidate)) = self.shared_dead_unverified.first().cloned() else {
+                break;
+            };
+            self.shared_dead_unverified.remove(&(useful, candidate.clone()));
+            if self.drop_shared_if_current(&candidate, useful) {
+                *removed += 1;
+            }
+        }
+    }
+
+    fn droppable(&self, peer: Peer) -> bool {
+        !self.internally_held(peer) && !self.held_external.contains(&peer) && !self.stub_indexed(peer)
+    }
+
+    fn activity_expired(&self, at: Instant, now: Instant) -> bool {
+        now.saturating_since(at) >= PEER_RECORD_RETENTION
+    }
+
+    fn insert_dead(&mut self, peer: Peer, at: Instant) {
+        if self.is_established_peer(peer) {
+            self.dead_established.insert((at, peer));
+        } else {
+            self.dead_unverified.insert((at, peer));
+        }
+    }
+
+    fn remove_dead_key(&mut self, peer: Peer, at: Instant) {
+        self.dead_unverified.remove(&(at, peer));
+        self.dead_established.remove(&(at, peer));
+    }
+
+    fn unseat_peer(&mut self, peer: Peer) {
+        if let Some(at) = self.activity.get(&peer).copied() {
+            self.remove_dead_key(peer, at);
+        }
+        if let Some(until) = self.peers.get(&peer).and_then(|state| state.stub_until) {
+            self.stubs.remove(&(until, peer));
+        }
+        self.held_external.remove(&peer);
+    }
+
+    fn seat_peer(&mut self, peer: Peer) {
+        if self.internally_held(peer) {
+            return;
+        }
+        let Some(at) = self.activity.get(&peer).copied() else {
+            return;
+        };
+        if let Some(until) = self.peers.get(&peer).and_then(|state| state.stub_until)
+            && until > at
         {
-            return false;
+            self.stubs.insert((until, peer));
+            return;
         }
-        if !stale && !over_cap {
-            return false;
+        self.insert_dead(peer, at);
+    }
+
+    fn internally_held(&self, peer: Peer) -> bool {
+        self.has_live_bearer(peer) || self.is_source_protected(peer)
+    }
+
+    fn has_live_bearer(&self, peer: Peer) -> bool {
+        self.connections.values().any(|live| live.record.peer == peer)
+    }
+
+    fn is_source_protected(&self, peer: Peer) -> bool {
+        let socket = PeerCandidate::from(peer);
+        self.static_peers.contains(&socket)
+            || self.snapshot_candidates.contains(&socket)
+            || self.ledger_candidates.contains(&socket)
+    }
+
+    fn stub_indexed(&self, peer: Peer) -> bool {
+        self.peers
+            .get(&peer)
+            .and_then(|state| state.stub_until)
+            .is_some_and(|until| self.stubs.contains(&(until, peer)))
+    }
+
+    fn refresh_ban_stub(&mut self, peer: Peer, now: Instant) {
+        let Some(state) = self.peers.get_mut(&peer) else {
+            return;
+        };
+        if !state.adversarial {
+            return;
         }
-        if !stale && self.candidate_is_established(candidate) {
-            return false;
+        let until = now + BAN_STUB_GRACE;
+        if state.stub_until.is_some_and(|existing| existing >= until) {
+            if let Some(existing) = state.stub_until {
+                self.stubs.insert((existing, peer));
+            }
+            return;
         }
-        self.forget_shared(candidate, learned);
-        true
+        if let Some(old) = state.stub_until {
+            self.stubs.remove(&(old, peer));
+        }
+        state.stub_until = Some(until);
+        self.stubs.insert((until, peer));
     }
 
     fn shared_useful_at(&self, candidate: &PeerCandidate, learned: Instant) -> Instant {
@@ -264,53 +421,84 @@ impl PeerPerformance {
         }
     }
 
-    fn externally_protected(
-        &self,
-        peer: Peer,
-        live: &BTreeSet<Peer>,
-        protected_peers: &BTreeSet<Peer>,
-        protected_candidates: &BTreeSet<PeerCandidate>,
-    ) -> bool {
-        if live.contains(&peer) || protected_peers.contains(&peer) {
-            return true;
-        }
-        let socket = PeerCandidate::from(peer);
-        protected_candidates.contains(&socket)
-            || self.static_peers.contains(&socket)
-            || self.snapshot_candidates.contains(&socket)
-            || self.ledger_candidates.contains(&socket)
+    fn shared_internally_held(&self, candidate: &PeerCandidate) -> bool {
+        candidate.as_peer().is_some_and(|peer| self.internally_held(peer) || self.stub_indexed(peer))
     }
 
-    fn stub_active(&self, peer: Peer, now: Instant) -> bool {
-        self.peers.get(&peer).and_then(|state| state.stub_until).is_some_and(|until| until > now)
+    fn unseat_shared_peer(&mut self, peer: Peer) {
+        let candidate = PeerCandidate::from(peer);
+        if self.shared_learned.contains_key(&candidate) {
+            self.unseat_shared(&candidate);
+        }
+    }
+
+    fn seat_shared_peer(&mut self, peer: Peer) {
+        let candidate = PeerCandidate::from(peer);
+        if self.shared_learned.contains_key(&candidate) {
+            self.seat_shared(&candidate);
+        }
+    }
+
+    fn unseat_shared(&mut self, candidate: &PeerCandidate) {
+        if let Some(learned) = self.shared_learned.get(candidate).copied() {
+            let useful = self.shared_useful_at(candidate, learned);
+            self.remove_shared_dead_key(candidate, useful);
+        }
+        self.shared_held.remove(candidate);
+    }
+
+    fn seat_shared(&mut self, candidate: &PeerCandidate) {
+        let Some(learned) = self.shared_learned.get(candidate).copied() else {
+            return;
+        };
+        let useful = self.shared_useful_at(candidate, learned);
+        if self.shared_internally_held(candidate)
+            || candidate.as_peer().is_some_and(|peer| self.held_external.contains(&peer))
+        {
+            self.shared_held.insert(candidate.clone());
+            return;
+        }
+        if self.candidate_is_established(candidate) {
+            self.shared_dead_established.insert((useful, candidate.clone()));
+        } else {
+            self.shared_dead_unverified.insert((useful, candidate.clone()));
+        }
+    }
+
+    fn remove_shared_dead_key(&mut self, candidate: &PeerCandidate, useful: Instant) {
+        self.shared_dead_unverified.remove(&(useful, candidate.clone()));
+        self.shared_dead_established.remove(&(useful, candidate.clone()));
+    }
+
+    fn drop_shared_if_current(&mut self, candidate: &PeerCandidate, useful: Instant) -> bool {
+        let Some(learned) = self.shared_learned.get(candidate).copied() else {
+            return false;
+        };
+        if self.shared_useful_at(candidate, learned) != useful {
+            return false;
+        }
+        if self.shared_internally_held(candidate) || self.shared_held.contains(candidate) {
+            self.shared_held.insert(candidate.clone());
+            return false;
+        }
+        self.shared_peers.remove(candidate);
+        self.shared_learned.remove(candidate);
+        self.shared_held.remove(candidate);
+        true
     }
 
     /// Handshake, a score change, a keep-alive sample, or a fetch success or timeout.
     fn is_established_peer(&self, peer: Peer) -> bool {
-        let Some(state) = self.peers.get(&peer) else {
-            return false;
-        };
-        peer_is_established(state)
+        self.peers.get(&peer).is_some_and(peer_is_established)
     }
 
     fn candidate_is_established(&self, candidate: &PeerCandidate) -> bool {
         candidate.as_peer().is_some_and(|peer| self.is_established_peer(peer))
     }
 
-    fn refresh_ban_stub(&mut self, peer: Peer, now: Instant) {
-        let Some(state) = self.peers.get_mut(&peer) else {
-            return;
-        };
-        if !state.adversarial {
-            return;
-        }
-        let until = now + BAN_STUB_GRACE;
-        if state.stub_until.is_none_or(|existing| existing < until) {
-            state.stub_until = Some(until);
-        }
-    }
-
     fn forget_peer(&mut self, peer: Peer) {
+        self.unseat_peer(peer);
+        self.unseat_shared_peer(peer);
         self.clear_peer_claims(&peer);
         self.peers.remove(&peer);
         self.share_requests.remove(&peer);
@@ -326,47 +514,33 @@ impl PeerPerformance {
                 }
             }
         }
-        if let Some(at) = self.activity.remove(&peer) {
-            self.activity_order.remove(&(at, peer));
-        }
+        self.activity.remove(&peer);
+        self.seat_shared_peer(peer);
     }
 
-    fn forget_shared(&mut self, candidate: &PeerCandidate, learned: Instant) {
-        if self.shared_learned.get(candidate) != Some(&learned) {
-            self.shared_order.remove(&(learned, candidate.clone()));
-            return;
-        }
-        self.shared_peers.remove(candidate);
-        self.shared_learned.remove(candidate);
-        self.shared_order.remove(&(learned, candidate.clone()));
-    }
-
-    /// Cap-sized maps whose oldest half-batch on each index is stale.
+    /// Cap-sized dead sets whose entries are already past retention at `stale_at`.
     #[cfg(test)]
-    pub fn testing_seed_eviction_cap(&mut self, stale_at: Instant, fresh_at: Instant) {
-        let stale_records = EVICTION_BATCH / 2;
+    pub fn testing_seed_eviction_cap(&mut self, stale_at: Instant, _fresh_at: Instant) {
         for n in 0..PEER_RECORD_CAP {
-            let at = if n < stale_records { stale_at } else { fresh_at };
-            self.testing_insert_idle_peer(Peer::for_test((n as u16).saturating_add(1)), at);
+            self.testing_insert_idle_peer(Peer::for_test((n as u16).saturating_add(1)), stale_at);
         }
-        let stale_shared = EVICTION_BATCH / 2;
         for n in 0..SHARED_PEERS_CAP {
-            let at = if n < stale_shared { stale_at } else { fresh_at };
-            self.testing_insert_shared(addr_from_port(20_000u16.saturating_add(n as u16)), at);
+            self.testing_insert_shared(addr_from_port(20_000u16.saturating_add(n as u16)), stale_at);
         }
     }
 
     #[cfg(test)]
     pub fn testing_insert_idle_peer(&mut self, peer: Peer, at: Instant) {
-        self.note_activity(peer, at);
+        self.touch(peer, at);
     }
 
     #[cfg(test)]
     pub fn testing_set_activity(&mut self, peer: Peer, at: Instant) {
-        if let Some(prev) = self.activity.insert(peer, at) {
-            self.activity_order.remove(&(prev, peer));
-        }
-        self.activity_order.insert((at, peer));
+        self.unseat_peer(peer);
+        self.unseat_shared_peer(peer);
+        self.activity.insert(peer, at);
+        self.seat_peer(peer);
+        self.seat_shared_peer(peer);
     }
 
     #[cfg(test)]
@@ -375,16 +549,33 @@ impl PeerPerformance {
             return;
         };
         let candidate = PeerCandidate::from(peer);
+        self.unseat_shared(&candidate);
         self.shared_peers.insert(candidate.clone());
-        if let Some(prev) = self.shared_learned.insert(candidate.clone(), at) {
-            self.shared_order.remove(&(prev, candidate.clone()));
-        }
-        self.shared_order.insert((at, candidate));
+        self.shared_learned.insert(candidate.clone(), at);
+        self.seat_shared(&candidate);
     }
 
     #[cfg(test)]
     pub fn testing_stub_until(&self, peer: &Peer) -> Option<Instant> {
         self.peers.get(peer).and_then(|state| state.stub_until)
+    }
+
+    #[cfg(test)]
+    pub fn testing_is_held(&self, peer: Peer) -> bool {
+        self.activity.contains_key(&peer) && (self.internally_held(peer) || self.held_external.contains(&peer))
+    }
+
+    #[cfg(test)]
+    pub fn testing_is_dead(&self, peer: Peer) -> bool {
+        self.activity
+            .get(&peer)
+            .copied()
+            .is_some_and(|at| self.dead_unverified.contains(&(at, peer)) || self.dead_established.contains(&(at, peer)))
+    }
+
+    #[cfg(test)]
+    pub fn testing_is_dead_established(&self, peer: Peer) -> bool {
+        self.activity.get(&peer).copied().is_some_and(|at| self.dead_established.contains(&(at, peer)))
     }
 }
 
@@ -401,38 +592,15 @@ fn peer_is_established(state: &PeerState) -> bool {
         || state.scores.fetch_timeouts > 0
 }
 
-fn collect_from<K: Clone + Ord>(
-    order: &BTreeSet<(Instant, K)>,
-    cursor: Option<(Instant, K)>,
-    budget: usize,
-) -> Vec<(Instant, K)> {
-    if budget == 0 {
-        return Vec::new();
-    }
-    let start = match cursor {
-        Some(cursor) => std::ops::Bound::Excluded(cursor),
-        None => std::ops::Bound::Unbounded,
-    };
-    order.range((start, std::ops::Bound::Unbounded)).take(budget).cloned().collect()
-}
-
-fn advance_cursor<K: Clone>(cursor: &mut Option<(Instant, K)>, keys: &[(Instant, K)], budget: usize, stopped: bool) {
-    if stopped || keys.len() < budget {
-        *cursor = None;
-    } else {
-        *cursor = keys.last().cloned();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
     use amaru_kernel::{BlockHeight, HeaderHash, Peer, PeerCandidate, Point, Slot};
-    use amaru_ouroboros::{ConnectionDirection, ConnectionId, ConnectionRecord, LocalUse, ObservedAt};
+    use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, LocalUse, ObservedAt};
     use amaru_pure_stage::Instant;
 
-    use super::{BAN_STUB_GRACE, EVICTION_BATCH, PEER_RECORD_CAP, PEER_RECORD_RETENTION, SHARED_PEERS_CAP};
+    use super::{BAN_STUB_GRACE, PEER_RECORD_CAP, PEER_RECORD_RETENTION, SHARED_PEERS_CAP};
     use crate::performance::{PeerMix, PeerPerformance};
 
     fn t(secs: u64) -> Instant {
@@ -486,13 +654,13 @@ mod tests {
         let generation = peers.generation();
 
         let before = t(1_000) + PEER_RECORD_RETENTION - Duration::from_secs(1);
-        let kept = peers.evict_batch(before, &protected_peers, &protected_candidates);
+        let kept = peers.sweep(before, &protected_peers, &protected_candidates);
         assert_eq!(kept.removed_records, 0);
         assert!(peers.share_flags(&who).is_some());
         assert_eq!(peers.direct_claimants(&hash(1)).len(), 1);
 
         let due = t(1_000) + PEER_RECORD_RETENTION;
-        let gone = peers.evict_batch(due, &protected_peers, &protected_candidates);
+        let gone = peers.sweep(due, &protected_peers, &protected_candidates);
         assert_eq!(gone.removed_records, 1);
         assert!(peers.share_flags(&who).is_none());
         assert!(peers.share_requests(&who).is_none());
@@ -528,8 +696,8 @@ mod tests {
         let protected_peers = BTreeSet::from([banned]);
         let protected_candidates = BTreeSet::from([PeerCandidate::from(dialing)]);
 
-        let batch = peers.evict_batch(now, &protected_peers, &protected_candidates);
-        assert_eq!(batch.removed_records, 1);
+        let sweep = peers.sweep(now, &protected_peers, &protected_candidates);
+        assert_eq!(sweep.removed_records, 1);
         assert!(peers.share_flags(&static_peer).is_none());
         assert_eq!(peers.peer_record_count(), 6);
         for who in [static_peer, snapshot_peer, ledger_peer, live_peer, banned, dialing] {
@@ -550,16 +718,16 @@ mod tests {
         peers.testing_set_activity(who, marked - Duration::from_secs(48 * 60 * 60));
 
         let during_ban = marked + Duration::from_secs(10 * 60);
-        peers.evict_batch(during_ban, &protected_peers, &protected_candidates);
+        peers.sweep(during_ban, &protected_peers, &protected_candidates);
         assert!(peers.share_flags(&who).is_some_and(|flags| flags.adversarial));
 
         let almost = marked + BAN_STUB_GRACE - Duration::from_secs(1);
-        peers.evict_batch(almost, &protected_peers, &protected_candidates);
+        peers.sweep(almost, &protected_peers, &protected_candidates);
         assert!(peers.share_flags(&who).is_some_and(|flags| flags.adversarial));
         assert_eq!(peers.testing_stub_until(&who), Some(marked + BAN_STUB_GRACE));
 
         let ended = marked + BAN_STUB_GRACE;
-        peers.evict_batch(ended, &protected_peers, &protected_candidates);
+        peers.sweep(ended, &protected_peers, &protected_candidates);
         assert!(peers.share_flags(&who).is_none());
     }
 
@@ -584,18 +752,8 @@ mod tests {
         assert!(peers.source_counts().shared_peers > SHARED_PEERS_CAP);
         let (protected_peers, protected_candidates) = empty();
         let now = learned + Duration::from_secs(2);
-        let mut removed = 0usize;
-        let mut steps = 0usize;
-        while peers.source_counts().shared_peers > SHARED_PEERS_CAP {
-            let batch = peers.evict_batch(now, &protected_peers, &protected_candidates);
-            assert!(batch.examined <= EVICTION_BATCH);
-            assert!(batch.removed_shared <= EVICTION_BATCH);
-            assert!(batch.removed_shared > 0);
-            removed += batch.removed_shared;
-            steps += 1;
-            assert!(steps < 8, "sweep did not return to the cap");
-        }
-        assert!(removed >= 100);
+        let sweep = peers.sweep(now, &protected_peers, &protected_candidates);
+        assert!(sweep.removed_shared >= 100);
         assert_eq!(peers.source_counts().shared_peers, SHARED_PEERS_CAP);
         assert!(peers.shared_contains(&Peer::for_test(SHARED_PEERS_CAP as u16)));
         assert!(!peers.shared_contains(&Peer::for_test(40_001)));
@@ -637,15 +795,8 @@ mod tests {
         assert!(peers.peer_record_count() > PEER_RECORD_CAP);
 
         let (protected_peers, protected_candidates) = empty();
-        let mut steps = 0usize;
-        while peers.peer_record_count() > PEER_RECORD_CAP {
-            let batch = peers.evict_batch(fresh, &protected_peers, &protected_candidates);
-            assert!(batch.examined <= EVICTION_BATCH);
-            assert!(batch.removed_records > 0);
-            assert!(batch.removed_records <= EVICTION_BATCH);
-            steps += 1;
-            assert!(steps < 8);
-        }
+        let sweep = peers.sweep(fresh, &protected_peers, &protected_candidates);
+        assert!(sweep.removed_records >= 2);
         assert!(peers.share_flags(&scored).is_some_and(|flags| flags.ever_connected));
         assert!(peers.connection(ConnectionId::initial()).is_some());
         assert!(peers.peer_record_count() <= PEER_RECORD_CAP);
@@ -677,32 +828,24 @@ mod tests {
             peers.testing_insert_shared(addr(52_000 + port), learned);
         }
         let (protected_peers, protected_candidates) = empty();
-        let mut steps = 0usize;
-        while peers.source_counts().shared_peers > SHARED_PEERS_CAP {
-            let batch = peers.evict_batch(fresh, &protected_peers, &protected_candidates);
-            assert!(batch.removed_records == 0, "scored rows must stay");
-            assert!(batch.removed_shared > 0);
-            steps += 1;
-            assert!(steps < 8);
-        }
+        let sweep = peers.sweep(fresh, &protected_peers, &protected_candidates);
+        assert_eq!(sweep.removed_records, 0, "scored rows must stay");
+        assert!(sweep.removed_shared > 0);
+        assert_eq!(peers.source_counts().shared_peers, SHARED_PEERS_CAP);
         assert!(peers.shared_contains(&scored));
         assert!(peers.scores(&scored).keepalive_rtt_latest.is_some());
         assert!(!peers.shared_contains(&Peer::for_test(50_000)));
         assert!(!peers.shared_contains(&Peer::for_test(52_001)));
 
         let due = learned + Duration::from_secs(1) + PEER_RECORD_RETENTION;
-        let mut steps = 0usize;
-        while peers.shared_contains(&Peer::for_test(1)) {
-            peers.evict_batch(due, &protected_peers, &protected_candidates);
-            steps += 1;
-            assert!(steps < 40, "a repeat ingest must not refresh the learned instant");
-        }
+        peers.sweep(due, &protected_peers, &protected_candidates);
+        assert!(!peers.shared_contains(&Peer::for_test(1)), "a repeat ingest must not refresh the learned instant");
         assert!(peers.shared_contains(&scored));
         assert!(peers.scores(&scored).keepalive_rtt_latest.is_some());
     }
 
     #[test]
-    fn one_eviction_examines_at_most_one_batch() {
+    fn one_sweep_drops_every_expired_dead_record() {
         let mut peers = PeerPerformance::new();
         let stale = t(5_000);
         let now = stale + PEER_RECORD_RETENTION;
@@ -710,40 +853,33 @@ mod tests {
         for port in 1..=400u16 {
             peers.testing_insert_idle_peer(Peer::for_test(port), stale);
         }
-        let first = peers.evict_batch(now, &protected_peers, &protected_candidates);
-        assert_eq!(first.examined, EVICTION_BATCH);
-        assert_eq!(first.removed_records, EVICTION_BATCH);
-        assert_eq!(peers.peer_record_count(), 400 - EVICTION_BATCH);
-
-        let second = peers.evict_batch(now, &protected_peers, &protected_candidates);
-        assert_eq!(second.removed_records, 400 - EVICTION_BATCH);
-        assert!(second.examined <= EVICTION_BATCH);
+        let sweep = peers.sweep(now, &protected_peers, &protected_candidates);
+        assert_eq!(sweep.removed_records, 400);
         assert_eq!(peers.peer_record_count(), 0);
     }
 
     #[test]
-    fn the_cursor_passes_a_protected_prefix() {
+    fn a_live_peer_moves_between_the_live_and_dead_sets() {
         let mut peers = PeerPerformance::new();
-        let ancient = t(6_000);
-        let now = ancient + PEER_RECORD_RETENTION + Duration::from_secs(10);
-        let mut protected_peers = BTreeSet::new();
-        for port in 1..=EVICTION_BATCH as u16 {
-            let who = Peer::for_test(port);
-            peers.testing_insert_idle_peer(who, ancient);
-            protected_peers.insert(who);
-        }
-        for port in 1..=10u16 {
-            peers.testing_insert_idle_peer(Peer::for_test(8_000 + port), ancient + Duration::from_secs(1));
-        }
-        let protected_candidates = BTreeSet::new();
-        let first = peers.evict_batch(now, &protected_peers, &protected_candidates);
-        assert_eq!(first.removed_records, 0);
-        assert_eq!(first.examined, EVICTION_BATCH);
-        assert_eq!(peers.peer_record_count(), EVICTION_BATCH + 10);
+        let who = Peer::for_test(12);
+        let (protected_peers, protected_candidates) = empty();
+        connect(&mut peers, who, t(100));
+        assert!(peers.testing_is_held(who));
+        assert!(!peers.testing_is_dead(who));
 
-        let second = peers.evict_batch(now, &protected_peers, &protected_candidates);
-        assert_eq!(second.removed_records, 10);
-        assert_eq!(peers.peer_record_count(), EVICTION_BATCH);
+        peers.record_connection_closed(who, ConnectionId::initial(), CloseReason::BearerEnded, observed(200));
+        assert!(!peers.testing_is_held(who));
+        assert!(peers.testing_is_dead_established(who));
+
+        connect(&mut peers, who, t(300));
+        assert!(peers.testing_is_held(who));
+        assert!(!peers.testing_is_dead(who));
+
+        let far = t(300) + PEER_RECORD_RETENTION + Duration::from_secs(10);
+        let sweep = peers.sweep(far, &protected_peers, &protected_candidates);
+        assert_eq!(sweep.removed_records, 0);
+        assert!(peers.connection(ConnectionId::initial()).is_some());
+        assert!(peers.testing_is_held(who));
     }
 
     impl PeerPerformance {
@@ -756,14 +892,10 @@ mod tests {
     fn activity_does_not_move_backward() {
         let mut peers = PeerPerformance::new();
         let who = Peer::for_test(11);
-        peers.note_activity(who, t(20));
-        peers.note_activity(who, t(10));
+        peers.touch(who, t(20));
+        peers.touch(who, t(10));
         let (protected_peers, protected_candidates) = empty();
-        peers.evict_batch(
-            t(20) + PEER_RECORD_RETENTION - Duration::from_secs(1),
-            &protected_peers,
-            &protected_candidates,
-        );
+        peers.sweep(t(20) + PEER_RECORD_RETENTION - Duration::from_secs(1), &protected_peers, &protected_candidates);
         assert_eq!(peers.peer_record_count(), 1);
     }
 }

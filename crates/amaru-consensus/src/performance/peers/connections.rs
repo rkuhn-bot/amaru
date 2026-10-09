@@ -95,7 +95,6 @@ impl PeerPerformance {
         let advertisable = conn.advertisable;
         self.connections.insert(conn.conn_id, LiveConnection { record: conn, use_applied_at: None });
         self.record_advertisability(peer, advertisable, instant_of(at));
-        self.note_activity(peer, instant_of(at));
         self.bump_generation();
     }
 
@@ -112,7 +111,7 @@ impl PeerPerformance {
         }
         self.connections.remove(&conn_id);
         self.last_close.insert(peer, CloseRecord { conn_id, reason, at });
-        self.note_activity(peer, instant_of(at));
+        self.touch(peer, instant_of(at));
         let still_live = self.connections.values().any(|live| live.record.peer == peer);
         if !still_live {
             self.clear_availability(&peer);
@@ -136,7 +135,7 @@ impl PeerPerformance {
         }
         live.record.local_use = local_use;
         live.use_applied_at = Some(at);
-        self.note_activity(peer, instant_of(at));
+        self.touch(peer, instant_of(at));
         self.bump_generation();
     }
 
@@ -151,7 +150,7 @@ impl PeerPerformance {
         at: ObservedAt,
     ) -> super::SharedIngestResult {
         self.last_shared_at.insert(*from, at);
-        self.note_activity(*from, instant_of(at));
+        self.touch(*from, instant_of(at));
         self.ingest_shared_peers(from, addrs, instant_of(at))
     }
 
@@ -165,7 +164,7 @@ impl PeerPerformance {
         }
         self.bump_generation();
         self.uninteresting.insert(peer, UninterestingRecord { conn_id, after_rollback, generation: self.generation });
-        self.note_activity(peer, instant_of(at));
+        self.touch(peer, instant_of(at));
     }
 
     fn drop_uninteresting_if_bearer_gone(&mut self, peer: Peer) {
@@ -183,7 +182,7 @@ impl PeerPerformance {
         if !self.activity.contains_key(&requester) && self.activity.len() >= PEER_RECORD_CAP {
             return;
         }
-        self.note_activity(requester, instant_of(at));
+        self.touch(requester, instant_of(at));
         let entry = self.share_requests.entry(requester).or_insert(ShareRequests {
             count: 0,
             last_amount: amount,

@@ -19,8 +19,8 @@
 //! performance resource. A single timeout wakes the stage at the earlier of one second and the
 //! next stored deadline. The wake copies a peer view only when the resource generation has moved,
 //! and runs a full round when that view changed, a deadline is due, or thirty seconds have passed
-//! since the last full round. An eviction deadline every five minutes enqueues one bounded
-//! retention batch and does not wait for the worker to finish it. A mark for a live Using bearer
+//! since the last full round. An eviction deadline every five minutes enqueues one sweep of the
+//! dead records and does not wait for the worker to finish it. A mark for a live Using bearer
 //! sets Maintenance until its deadline.
 
 use std::{
@@ -65,7 +65,7 @@ const DIAL_HOLDOFF: Duration = Duration::from_secs(2);
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// A full round runs at least this often, even when the view is unchanged.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
-/// How often one bounded retention batch is enqueued.
+/// How often one sweep of the dead records is enqueued.
 const EVICTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Do not repeat `SetLocalUse` for one bearer more often than this.
 const LOCAL_USE_MIN_INTERVAL: Duration = Duration::from_secs(30);

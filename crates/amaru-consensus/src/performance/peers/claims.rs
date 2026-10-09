@@ -291,9 +291,11 @@ impl PeerPerformance {
         }
 
         self.claim_index.entry(peer).or_default().insert(hash);
-        self.note_activity(peer, at);
-        let state = self.peers.entry(peer).or_default();
-        self::dominate_tips(&self.parents, &mut state.tips, hash, meta);
+        {
+            let state = self.peers.entry(peer).or_default();
+            self::dominate_tips(&self.parents, &mut state.tips, hash, meta);
+        }
+        self.touch(peer, at);
     }
 
     pub fn first_announced_at(&self, hash: &HeaderHash) -> Option<(Peer, Instant)> {
