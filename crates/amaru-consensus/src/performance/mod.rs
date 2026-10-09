@@ -57,6 +57,10 @@
 //! | `prune_below` | adopt_chain | claims and header lifecycles | horizon | awaited |
 //! | `peer_adversarial` | peer selection | sharing filters, outbound ranking | C5 | recorded immediately |
 //! | `record_keepalive_rtt` | not called yet | fetch ranking, churn | C7 | recorded immediately; read on demand |
+//! | `record_connection_established` | not called yet | peer selection | C8 | recorded immediately |
+//! | `record_connection_closed` | not called yet | peer selection | C8 | recorded immediately |
+//! | `record_connect_failed` | not called yet | malus, sharing filters | C8 | recorded immediately |
+//! | `record_local_use_applied` | not called yet | peer selection | C8 | recorded immediately |
 //! | `record_advertisability` | peer selection | sharing filters | C8 | recorded immediately |
 //! | `record_connection_failure` | peer selection | malus, sharing filters | C8 | recorded immediately |
 //! | `clear_peer_availability` | peer selection, track_peers | fetch selection | C8 | recorded immediately |
@@ -66,7 +70,10 @@
 //! | `note_dial` | peer selection | malus half-life | C8 | recorded immediately |
 //! | `is_static_peer` | peer selection | churn | C8 | on demand |
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
-//! | `select_share_peers` | peer selection | peer-sharing reply | C9 | on demand |
+//! | `select_share_peers` | peer selection | peer-sharing reply | C9 | worker copies candidates; caller samples |
+//! | `query_share_peers` | not called yet | peer-sharing reply | C9 | worker copies candidates; caller samples |
+//! | `record_shared_peers` | not called yet | outbound pools | C9 | recorded immediately |
+//! | `record_share_request_served` | not called yet | not read yet | C9 | recorded immediately |
 //! | `ingest_shared_peers` | peer selection | outbound pools | C9 | on demand |
 //! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
 //!
@@ -78,6 +85,7 @@ mod adoption;
 mod effects;
 mod header;
 mod ops;
+mod peer_tracking;
 mod peers;
 
 use std::{

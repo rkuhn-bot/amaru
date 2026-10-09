@@ -17,12 +17,16 @@
 
 use std::{
     io::{self, Write},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use amaru_kernel::{BlockHeight, HeaderHash, Peer, Point, Slot};
 use amaru_observability::{CborConsoleEventFormat, console_field_formatter, debug, info};
+use amaru_ouroboros::{
+    CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, PeerTrackingResource,
+};
 use amaru_pure_stage::{ExternalEffect, Instant, Resources};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
@@ -1054,4 +1058,194 @@ fn env_filter_selects_exactly_the_four_blockperf_events() {
     assert!(with_info.contains("blocks.paused"), "{with_info}");
     assert!(!with_info.contains("blocks.timeout"), "{with_info}");
     assert!(with_info.contains("header.announced") && with_info.contains("block.adopted"), "{with_info}");
+}
+
+fn observed(elapsed_secs: u64, offset_secs: u64) -> ObservedAt {
+    ObservedAt::new(Duration::from_secs(elapsed_secs), Duration::from_secs(offset_secs))
+}
+
+fn connection_record(peer: Peer, conn_id: ConnectionId, at: ObservedAt, advertisable: bool) -> ConnectionRecord {
+    ConnectionRecord {
+        peer,
+        conn_id,
+        direction: ConnectionDirection::Outbound,
+        full_duplex_capable: true,
+        full_duplex: false,
+        advertisable,
+        local_use: LocalUse::None,
+        established_at: at,
+    }
+}
+
+fn conn_ids() -> (ConnectionId, ConnectionId) {
+    let mut ids = ConnectionId::initial();
+    let first = ids.get_and_increment();
+    let second = ids.get_and_increment();
+    (first, second)
+}
+
+#[test]
+fn established_connection_is_stored_and_marks_ever_connected() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let (id, _) = conn_ids();
+    let established_at = observed(1, 0);
+    let at = observed(2, 5);
+    let mut record = connection_record(alice, id, established_at, false);
+    record.full_duplex = true;
+    record.direction = ConnectionDirection::Inbound;
+    peers.record_connection_established(record.clone(), at);
+
+    assert_eq!(peers.connection(id).cloned(), Some(record));
+    assert_eq!(
+        peers.share_flags(&alice),
+        Some(PeerShareFlags { ever_connected: true, advertisable: false, failure_count: 0, adversarial: false })
+    );
+    let last = peers.scores(&alice).last_change.expect("observation time");
+    assert_eq!(last.sim_elapsed(), Duration::from_secs(2));
+    assert_eq!(last.duration_since_global_epoch(), Duration::from_secs(7));
+}
+
+#[test]
+fn last_close_clears_claims_and_keeps_reputation() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    peers.record_intersection(alice, tip(1, 1), None, t(1));
+    let at = observed(4, 9);
+    let (id_a, id_b) = conn_ids();
+    peers.record_connection_established(connection_record(alice, id_a, at, true), at);
+    peers.record_connection_established(connection_record(alice, id_b, at, true), at);
+
+    peers.record_connection_closed(alice, id_a, CloseReason::BearerEnded, at);
+    let mid = peers.snapshot(&alice).expect("peer row");
+    assert!(!mid.tips.is_empty(), "claims stay while another bearer is live");
+    assert!(peers.connection(id_b).is_some());
+    assert_eq!(peers.last_close(&alice), Some((id_a, CloseReason::BearerEnded, at)));
+
+    let later = observed(5, 9);
+    peers.record_connection_closed(alice, id_b, CloseReason::LocalDisconnect, later);
+    let end = peers.snapshot(&alice).expect("reputation stub");
+    assert!(end.tips.is_empty());
+    assert!(end.share.ever_connected);
+    assert!(end.share.advertisable);
+    assert!(peers.connection(id_a).is_none());
+    assert!(peers.connection(id_b).is_none());
+    assert_eq!(peers.last_close(&alice), Some((id_b, CloseReason::LocalDisconnect, later)));
+}
+
+#[test]
+fn close_for_unknown_connection_or_other_peer_changes_nothing() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let bob = peer("bob");
+    peers.record_intersection(alice, tip(1, 1), None, t(1));
+    let at = observed(1, 0);
+    let (id_a, id_b) = conn_ids();
+    peers.record_connection_established(connection_record(alice, id_a, at, true), at);
+
+    peers.record_connection_closed(alice, id_b, CloseReason::BearerEnded, at);
+    peers.record_connection_closed(bob, id_a, CloseReason::LocalDisconnect, observed(3, 0));
+
+    assert_eq!(peers.connection(id_a).map(|conn| conn.peer), Some(alice));
+    assert!(!peers.snapshot(&alice).expect("row").tips.is_empty());
+    assert!(peers.last_close(&alice).is_none());
+    assert!(peers.last_close(&bob).is_none());
+}
+
+#[test]
+fn local_use_applies_only_to_the_named_bearer() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let bob = peer("bob");
+    let at = observed(1, 2);
+    let (id, missing) = conn_ids();
+    peers.record_connection_established(connection_record(alice, id, at, true), at);
+
+    let applied = observed(8, 2);
+    peers.record_local_use_applied(alice, id, LocalUse::Diffusion, applied);
+    assert_eq!(peers.connection(id).map(|conn| conn.local_use), Some(LocalUse::Diffusion));
+    assert_eq!(peers.use_applied_at(id), Some(applied));
+
+    peers.record_local_use_applied(bob, id, LocalUse::Maintenance, observed(9, 2));
+    assert_eq!(peers.connection(id).map(|conn| conn.local_use), Some(LocalUse::Diffusion));
+    assert_eq!(peers.use_applied_at(id), Some(applied));
+
+    peers.record_local_use_applied(alice, missing, LocalUse::None, observed(10, 2));
+    assert!(peers.use_applied_at(missing).is_none());
+}
+
+#[test]
+fn connect_failure_raises_malus_without_ever_connected() {
+    let mut peers = PeerPerformance::new();
+    let bob = peer("bob");
+    let at = observed(3, 4);
+    peers.record_connect_failed(bob, at);
+    assert_eq!(
+        peers.share_flags(&bob),
+        Some(PeerShareFlags { ever_connected: false, advertisable: false, failure_count: 1, adversarial: false })
+    );
+    assert_eq!(peers.last_connect_failure(&bob), Some(at));
+    let last = peers.scores(&bob).last_change.expect("failure time");
+    assert_eq!(last.sim_elapsed(), Duration::from_secs(3));
+    assert_eq!(last.duration_since_global_epoch(), Duration::from_secs(7));
+}
+
+#[test]
+fn keepalive_sample_keeps_both_clock_fields() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let at = observed(11, 70);
+    peers.record_keepalive_sample(alice, Duration::from_millis(12), at);
+    assert_eq!(peers.scores(&alice).keepalive_rtt_ewma, Some(Duration::from_millis(12)));
+    let last = peers.scores(&alice).last_change.expect("sample time");
+    assert_eq!(last.sim_elapsed(), Duration::from_secs(11));
+    assert_eq!(last.duration_since_global_epoch(), Duration::from_secs(81));
+}
+
+#[test]
+fn shared_peers_and_share_requests_are_recorded() {
+    let mut peers = PeerPerformance::new();
+    let donor = Peer::for_test(4001);
+    let other = Peer::for_test(4002);
+    let asker = Peer::for_test(4003);
+    let addr = SocketAddr::from(other);
+    let at = observed(2, 0);
+    peers.record_shared_peers(&donor, &[addr], at);
+    assert!(peers.shared_contains(&other));
+    assert_eq!(peers.last_shared_at(&donor), Some(at));
+    assert_eq!(peers.query_share_peers(&asker, 1, at), vec![addr]);
+    assert!(peers.query_share_peers(&asker, 0, at).is_empty());
+
+    peers.record_share_request_served(asker, 3, observed(1, 2));
+    peers.record_share_request_served(asker, 5, observed(6, 2));
+    assert_eq!(peers.share_requests(&asker), Some((2, 5, observed(6, 2))));
+}
+
+#[test]
+fn install_shares_one_worker_and_a_later_query_sees_the_write() {
+    let resources = Resources::default();
+    let _join = Performance::new().install(&resources);
+    let performance = resources.get::<ResourcePerformance>().expect("performance").clone();
+    let tracking = resources.get::<PeerTrackingResource>().expect("peer tracking").clone();
+    assert_eq!(Arc::as_ptr(&performance) as *const (), Arc::as_ptr(&tracking) as *const ());
+
+    let alice = peer("alice");
+    let at = observed(4, 1);
+    let (id, _) = conn_ids();
+    tracking.record_connection_established(connection_record(alice, id, at, true), at);
+
+    let donor = Peer::for_test(4101);
+    let other = Peer::for_test(4102);
+    let asker = Peer::for_test(4103);
+    tracking.record_shared_peers(donor, vec![SocketAddr::from(other)], at);
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let flags_response = rt.block_on(Box::new(Performance::share_flags(alice)).run(resources));
+    let flags = *flags_response.cast::<Option<PeerShareFlags>>().expect("share flags");
+    assert_eq!(
+        flags,
+        Some(PeerShareFlags { ever_connected: true, advertisable: true, failure_count: 0, adversarial: false })
+    );
+    let shared = rt.block_on(tracking.query_share_peers(asker, 1, at));
+    assert_eq!(shared, vec![SocketAddr::from(other)]);
 }
