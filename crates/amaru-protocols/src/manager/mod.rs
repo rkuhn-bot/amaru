@@ -25,7 +25,7 @@ use crate::{
     chainsync::ChainSyncInitiatorMsg,
     connection::{self, ConnectionMessage, LocalUse},
     network_effects::{ConnectError, Network, NetworkOps},
-    peer_sharing::ShareResult,
+    peer_sharing::{SHARE_REQUEST_AMOUNT, SHARE_REQUEST_INITIAL_DELAY, SHARE_REQUEST_INTERVAL},
     peer_tracking::observed_at,
     peer_tracking_effects::PeerTrack,
     protocol::Role,
@@ -56,18 +56,6 @@ pub enum ManagerMessage {
     /// When `peers` is `Some`, only those peers' initiating connections are asked.
     /// When `None`, every initiating connection is asked (cold-start / empty-selection fallback).
     FetchBlocks { from: Point, through: Point, cr: StageRef<Blocks>, id: u64, peers: Option<Vec<Peer>> },
-    /// Start periodic peer-sharing requests on one outbound connection.
-    ///
-    /// The initiator schedules the first request after `initial_delay`, then every `interval`
-    /// after each reply. Results are delivered on `reply_to` until the connection ends.
-    /// If no initiating connection exists, an empty [`ShareResult`] is sent once.
-    RequestSharePeers {
-        peer: Peer,
-        amount: u8,
-        initial_delay: std::time::Duration,
-        interval: std::time::Duration,
-        reply_to: StageRef<ShareResult>,
-    },
     /// Advertise this new tip to all downstream peers.
     NewTip(Point, TraceContext),
     /// INTERNAL message sent by the connector stage after a connection attempt completes.
@@ -105,7 +93,6 @@ impl ManagerMessage {
             ManagerMessage::Disconnect(..) => "Disconnect",
             ManagerMessage::Listen(_) => "Listen",
             ManagerMessage::FetchBlocks { .. } => "FetchBlocks",
-            ManagerMessage::RequestSharePeers { .. } => "RequestSharePeers",
             ManagerMessage::NewTip(_, _) => "NewTip",
             ManagerMessage::ConnectionResult(..) => "ConnectionResult",
             ManagerMessage::ConnectionDied(..) => "ConnectionDied",
@@ -247,6 +234,12 @@ pub struct ManagerConfig {
     pub max_n2n_version: VersionNumber,
     /// Live inbound bearers accepted at handshake. Further inbound handshakes are refused.
     pub max_inbound: usize,
+    /// Delay after the maintenance group starts before the first share request.
+    pub share_request_initial_delay: Duration,
+    /// Delay between a share reply and the next request.
+    pub share_request_interval: Duration,
+    /// Addresses requested on each share call.
+    pub share_request_amount: u8,
 }
 
 /// Default inbound cap. The node sets this from its downstream peer target.
@@ -287,6 +280,12 @@ impl ManagerConfig {
         self.max_inbound = max_inbound;
         self
     }
+
+    pub fn with_share_request_delays(mut self, initial: Duration, interval: Duration) -> Self {
+        self.share_request_initial_delay = initial;
+        self.share_request_interval = interval;
+        self
+    }
 }
 
 impl Default for ManagerConfig {
@@ -301,6 +300,9 @@ impl Default for ManagerConfig {
             maintenance_stop_timeout: Duration::from_secs(120),
             max_n2n_version: VersionNumber::CURRENT,
             max_inbound: DEFAULT_MAX_INBOUND,
+            share_request_initial_delay: SHARE_REQUEST_INITIAL_DELAY,
+            share_request_interval: SHARE_REQUEST_INTERVAL,
+            share_request_amount: SHARE_REQUEST_AMOUNT,
         }
     }
 }
@@ -619,23 +621,6 @@ impl Manager {
             eff.send(&cr, Blocks::PeersAsked(id, contacted)).await;
         }
     }
-
-    async fn request_share_peers(
-        &self,
-        peer: Peer,
-        amount: u8,
-        initial_delay: std::time::Duration,
-        interval: std::time::Duration,
-        reply_to: StageRef<ShareResult>,
-        eff: &Effects<ManagerMessage>,
-    ) {
-        let Some(conn) = self.connections.values().find(|c| c.may_initiate && c.peer == peer) else {
-            debug!(protocols::manager::sharing::REQUEST_NO_CONNECTION, peer);
-            eff.send(&reply_to, ShareResult { peer, peers: Vec::new() }).await;
-            return;
-        };
-        eff.send(&conn.stage, ConnectionMessage::RequestSharePeers { amount, initial_delay, interval, reply_to }).await;
-    }
 }
 
 /// The manager stage is responsible for managing the connections to the peers.
@@ -722,9 +707,6 @@ pub async fn stage(mut manager: Manager, msg: ManagerMessage, eff: Effects<Manag
             }
             ManagerMessage::FetchBlocks { from, through, cr, id, peers } => {
                 manager.fetch_blocks(from, through, cr, id, peers, &eff).await;
-            }
-            ManagerMessage::RequestSharePeers { peer, amount, initial_delay, interval, reply_to } => {
-                manager.request_share_peers(peer, amount, initial_delay, interval, reply_to, &eff).await;
             }
             ManagerMessage::ConnectionResult(peer, conn_id) => {
                 manager.connection_result(peer, conn_id, &eff).await;

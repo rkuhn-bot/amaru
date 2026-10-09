@@ -18,17 +18,32 @@
 //! - client: `MsgShareRequest(amount)` → wait → `MsgSharePeers`
 //! - server: wait → `MsgShareRequest` → `MsgSharePeers`
 //!
-//! The initiator is registered on outbound connections; the responder on inbound ones.
-//! The responder reads the reply from the peer-tracking resource.
+//! The initiator runs on an outbound connection's maintenance group when the remote side is
+//! advertisable, and writes each reply to the peer-tracking resource. The responder reads its
+//! reply from that resource.
 
 mod initiator;
 mod messages;
 mod responder;
 
+use std::time::Duration;
+
 use amaru_kernel::Peer;
 use amaru_ouroboros::ConnectionId;
 use amaru_pure_stage::{DeserializerGuards, Effects, StageRef};
-pub use initiator::{PeerSharingInitiator, PeerSharingMessage, ShareResult, initiator};
+pub use initiator::{PeerSharingInitiator, PeerSharingMessage, initiator};
+
+/// Delay after the maintenance group starts before the first share request.
+pub const SHARE_REQUEST_INITIAL_DELAY: Duration = Duration::from_secs(300);
+/// Interval between a share reply and the next request.
+pub const SHARE_REQUEST_INTERVAL: Duration = Duration::from_secs(900);
+/// How long to wait for `MsgSharePeers` before giving up on that request.
+///
+/// The previous cadence had no reply timer. Sixty seconds is long enough for a maintenance
+/// round trip and short enough that a silent peer does not stay busy until the connection ends.
+pub const SHARE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// How many peers to request per share call (network-spec amount is `Word8`).
+pub const SHARE_REQUEST_AMOUNT: u8 = 20;
 pub use messages::{MAX_MESSAGE_BYTES, Message};
 pub use responder::{PeerSharingResponder, register_peer_sharing_responder, responder};
 
@@ -72,16 +87,20 @@ where
 }
 
 /// Register the peer-sharing **initiator** (client) on the mux.
+#[expect(clippy::too_many_arguments)]
 pub async fn register_peer_sharing_initiator<M: amaru_pure_stage::SendData>(
     muxer: &StageRef<MuxMessage>,
     peer: Peer,
     conn_id: ConnectionId,
+    amount: u8,
+    initial_delay: Duration,
+    interval: Duration,
     eff: &Effects<M>,
     tombstone: M,
 ) -> StageRef<PeerSharingMessage> {
     use crate::protocol::Inputs;
 
-    let (state, stage) = PeerSharingInitiator::new(muxer.clone(), peer, conn_id);
+    let (state, stage) = PeerSharingInitiator::new(muxer.clone(), peer, conn_id, amount, initial_delay, interval);
     let ps = eff.stage("peer_sharing", initiator()).await;
     let ps = eff.supervise(ps, tombstone);
     let ps = eff.wire_up(ps, (state, stage)).await;

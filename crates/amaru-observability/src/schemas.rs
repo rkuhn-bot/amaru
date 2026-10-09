@@ -2165,12 +2165,6 @@ define_schemas! {
                         required id: u64
                     }
                 }
-                sharing {
-                    /// No initiating connection was available to request shared peers from
-                    REQUEST_NO_CONNECTION {
-                        required peer: %amaru_kernel::Peer
-                    }
-                }
             }
             peer_selection {
                 peer {
@@ -2402,6 +2396,11 @@ define_schemas! {
                     /// Handle peer-sharing initiator protocol messages
                     PEER_SHARING_INITIATOR_PROTOCOL {
                         required message_type: String
+                    }
+                    /// `MsgSharePeers` did not arrive before the share-request timeout.
+                    REQUEST_TIMEOUT {
+                        required peer: %amaru_kernel::Peer
+                        required conn_id: u64
                     }
                     /// The peer broke the peer-sharing protocol and the connection is terminated.
                     /// Reason ∈ {no_request_in_flight, too_many_addresses}.

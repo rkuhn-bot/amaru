@@ -18,6 +18,7 @@ use std::{
 };
 
 use amaru_kernel::{Peer, PeerCandidate, Point};
+use amaru_ouroboros::{ObservedAt, PeerTracking};
 use amaru_protocols::manager::ManagerMessage;
 use amaru_pure_stage::{
     DeserializerGuards, Instant, ScheduleId, StageGraph, StageRef,
@@ -49,6 +50,8 @@ pub struct TestPrep {
     pub resolve: BTreeMap<PeerCandidate, BTreeSet<Peer>>,
     /// When set, `QueryPeerView` returns this view instead of reading the resource.
     pub scripted_view: Option<crate::performance::PeerView>,
+    /// Recorded on the resource before the stage runs. A new candidate bumps the generation.
+    pub learned_share: Option<(Peer, std::net::SocketAddr)>,
 }
 
 impl TestPrep {
@@ -77,6 +80,7 @@ pub fn test_prep_with_snapshot(static_names: &[&str], snapshot_names: &[&str]) -
         peer_mix,
         resolve: BTreeMap::new(),
         scripted_view: None,
+        learned_share: None,
     }
 }
 
@@ -86,7 +90,6 @@ pub fn register_guards() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<PeerSelectionMsg>().boxed(),
         amaru_pure_stage::register_data_deserializer::<ManagerMessage>().boxed(),
         amaru_pure_stage::register_data_deserializer::<ScheduleId>().boxed(),
-        amaru_pure_stage::register_data_deserializer::<amaru_protocols::peer_sharing::ShareResult>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<GenerateRandomSeed>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::ClearPeerAvailabilityEffect>().boxed(),
         amaru_pure_stage::register_effect_deserializer::<crate::performance::PeerAdversarialEffect>().boxed(),
@@ -150,19 +153,25 @@ fn setup_preload_with_mode(
             network
         },
         |resources| {
-            resources.put::<crate::performance::ResourcePerformance>(std::sync::Arc::new(
-                crate::performance::Performance::with_peer_sources(
-                    prep.static_peers
-                        .iter()
-                        .copied()
-                        .map(PeerCandidate::from)
-                        .chain(prep.extra_static.iter().cloned())
-                        .collect(),
-                    prep.snapshot_candidates.iter().copied().map(PeerCandidate::from).collect(),
-                    prep.ledger_candidates.clone(),
-                    prep.peer_mix.clone(),
-                ),
-            ));
+            let performance = crate::performance::Performance::with_peer_sources(
+                prep.static_peers
+                    .iter()
+                    .copied()
+                    .map(PeerCandidate::from)
+                    .chain(prep.extra_static.iter().cloned())
+                    .collect(),
+                prep.snapshot_candidates.iter().copied().map(PeerCandidate::from).collect(),
+                prep.ledger_candidates.clone(),
+                prep.peer_mix.clone(),
+            );
+            if let Some((donor, addr)) = prep.learned_share {
+                prep.rt.block_on(performance.record_shared_peers(
+                    donor,
+                    vec![addr],
+                    ObservedAt::new(Duration::ZERO, Duration::ZERO),
+                ));
+            }
+            resources.put::<crate::performance::ResourcePerformance>(std::sync::Arc::new(performance));
         },
         |running| {
             running.use_virtual_child_stages(true);

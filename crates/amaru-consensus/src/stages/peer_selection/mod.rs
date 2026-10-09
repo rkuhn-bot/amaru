@@ -23,34 +23,24 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::{self, Display},
-    net::SocketAddr,
     time::Duration,
 };
 
 use amaru_kernel::{BlockHeight, Peer, PeerCandidate};
 use amaru_observability::{Instrument, TraceContext, debug, debug_span, info, trace, warn};
 use amaru_ouroboros::{ConnectionDirection, ConnectionId, ObservedAt};
-use amaru_protocols::{connection::LocalUse, manager::ManagerMessage, peer_sharing::ShareResult};
+use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{Effects, Instant, StageRef};
 
 pub use crate::performance::{DEFAULT_PEER_MIX, PeerMix, PeerMixParseError};
 use crate::{
     effects::{GenerateRandomSeed, Ledger, LedgerOps, ResolvePeerCandidate, ResolvePeerCandidateResult},
-    performance::{
-        ChurnRank, DialOutcome, PeerView, Performance, SelectOutboundParams, SelectUsing, SharedIngestResult,
-        ViewConnection,
-    },
+    performance::{ChurnRank, DialOutcome, PeerView, Performance, SelectOutboundParams, SelectUsing, ViewConnection},
 };
 
 const STATIC_PEER_BAN_PERIOD: Duration = Duration::from_secs(10);
 /// Backoff after a failed Host/SRV lookup before that candidate may be picked again.
 const RESOLUTION_RETRY_DELAY: Duration = Duration::from_secs(30);
-/// Delay after outbound connect before the first peer-sharing request.
-pub const SHARE_REQUEST_INITIAL_DELAY: Duration = Duration::from_secs(300);
-/// Interval between subsequent peer-sharing requests on a live outbound connection.
-pub const SHARE_REQUEST_INTERVAL: Duration = Duration::from_secs(900);
-/// How many peers to request per share call (network-spec amount is `Word8`).
-pub const SHARE_REQUEST_AMOUNT: u8 = 20;
 /// Caught-up churn interval before fuzz (Haskell default).
 const CHURN_INTERVAL_BASE: Duration = Duration::from_secs(3300);
 /// Extra delay drawn uniformly from `0..=CHURN_INTERVAL_FUZZ`.
@@ -121,8 +111,6 @@ struct DesiredBearer {
     wanted: LocalUse,
     applied: LocalUse,
     local_use_sent_at: Option<Instant>,
-    sharing_started: bool,
-    advertisable: bool,
 }
 
 impl DesiredBearer {
@@ -134,15 +122,12 @@ impl DesiredBearer {
             wanted,
             applied: conn.local_use,
             local_use_sent_at: None,
-            sharing_started: false,
-            advertisable: conn.advertisable,
         }
     }
 
     fn observe(&mut self, conn: &ViewConnection) {
         self.full_duplex_capable = conn.full_duplex_capable;
         self.full_duplex = conn.full_duplex;
-        self.advertisable = conn.advertisable;
         self.applied = conn.local_use;
     }
 }
@@ -190,10 +175,6 @@ pub struct PeerSelection {
     resolve_backoff: BTreeMap<PeerCandidate, Instant>,
     /// Candidates not dialled again until this instant.
     dial_holdoff: BTreeMap<PeerCandidate, Instant>,
-    /// Contramap target for peer-sharing replies. Ignored in [`PartialEq`].
-    share_reply: StageRef<ShareResult>,
-    share_request_initial_delay: Duration,
-    share_request_interval: Duration,
     /// Next churn. `None` until [`PeerSelectionMsg::Initialize`].
     next_churn_at: Option<Instant>,
     /// Peers demoted from Using that must not be re-promoted until this instant.
@@ -218,13 +199,10 @@ impl PartialEq for PeerSelection {
             && self.bound == other.bound
             && self.resolve_backoff == other.resolve_backoff
             && self.dial_holdoff == other.dial_holdoff
-            && self.share_request_initial_delay == other.share_request_initial_delay
-            && self.share_request_interval == other.share_request_interval
             && self.next_churn_at == other.next_churn_at
             && self.demoted_until == other.demoted_until
             && self.seen_generation == other.seen_generation
             && self.next_sweep_at == other.next_sweep_at
-        // share_reply is omitted: it is wired lazily and its name is test-unstable.
     }
 }
 
@@ -246,8 +224,6 @@ pub enum PeerSelectionMsg {
     Regulate,
     /// ChainSync found no usable intersection (or rolled back past it). Stop diffusion, keep the bearer.
     Uninteresting { peer: Peer, conn_id: ConnectionId, after_rollback: bool },
-    /// Reply from the peer-sharing initiator (one result per request cycle).
-    SharePeersResult { peer: Peer, peers: Vec<SocketAddr> },
     /// DNS result for a selected bootstrap [`amaru_kernel::PeerCandidate`] (at most one [`Peer`]).
     Resolved(ResolvePeerCandidateResult),
     /// Wake from the single timeout.
@@ -285,21 +261,11 @@ impl PeerSelection {
             bound: BTreeMap::new(),
             resolve_backoff: BTreeMap::new(),
             dial_holdoff: BTreeMap::new(),
-            share_reply: StageRef::blackhole(),
-            share_request_initial_delay: SHARE_REQUEST_INITIAL_DELAY,
-            share_request_interval: SHARE_REQUEST_INTERVAL,
             next_churn_at: None,
             demoted_until: BTreeMap::new(),
             seen_generation: 0,
             next_sweep_at: None,
         }
-    }
-
-    /// Override the peer-sharing request cadence (production default is 300s then 900s).
-    pub fn with_share_request_delays(mut self, initial: Duration, interval: Duration) -> Self {
-        self.share_request_initial_delay = initial;
-        self.share_request_interval = interval;
-        self
     }
 
     /// Align lost-dial detection with the manager's connect timeout.
@@ -782,7 +748,6 @@ impl PeerSelection {
             }
         }
         self.sync_local_use(now, eff, budget).await;
-        self.start_pending_shares(eff, budget).await;
     }
 
     fn drop_bearer(&mut self, peer: Peer, conn_id: ConnectionId) {
@@ -864,54 +829,6 @@ impl PeerSelection {
         }
     }
 
-    async fn start_pending_shares(&mut self, eff: &Effects<PeerSelectionMsg>, budget: &mut SendBudget) {
-        let peers: Vec<Peer> = self
-            .outbound_peers
-            .iter()
-            .filter_map(|(peer, intent)| {
-                let OutboundIntent::Connected(bearer) = intent else {
-                    return None;
-                };
-                (bearer.advertisable && !bearer.sharing_started).then_some(*peer)
-            })
-            .collect();
-        for peer in peers {
-            if !self.start_peer_sharing(peer, eff, budget).await {
-                break;
-            }
-            if let Some(OutboundIntent::Connected(bearer)) = self.outbound_peers.get_mut(&peer) {
-                bearer.sharing_started = true;
-            }
-        }
-    }
-
-    async fn start_peer_sharing(
-        &mut self,
-        peer: Peer,
-        eff: &Effects<PeerSelectionMsg>,
-        budget: &mut SendBudget,
-    ) -> bool {
-        if self.share_reply.is_blackhole() {
-            self.share_reply = eff
-                .me_ref()
-                .contramap(|ShareResult { peer, peers }| PeerSelectionMsg::SharePeersResult { peer, peers });
-        }
-        let manager = self.manager.clone();
-        budget
-            .send(
-                eff,
-                &manager,
-                ManagerMessage::RequestSharePeers {
-                    peer,
-                    amount: SHARE_REQUEST_AMOUNT,
-                    initial_delay: self.share_request_initial_delay,
-                    interval: self.share_request_interval,
-                    reply_to: self.share_reply.clone(),
-                },
-            )
-            .await
-    }
-
     fn due(&self, now: Instant) -> bool {
         self.cooldowns.cooldown_until.values().any(|until| *until <= now)
             || self.dial_holdoff.values().any(|until| *until <= now)
@@ -921,7 +838,6 @@ impl PeerSelection {
             || self.next_sweep_at.is_some_and(|at| at <= now)
             || self.lost_dial_due(now)
             || self.local_use_due(now)
-            || self.sharing_pending()
     }
 
     fn lost_dial_due(&self, now: Instant) -> bool {
@@ -938,13 +854,6 @@ impl PeerSelection {
                 OutboundIntent::Connected(bearer) => local_use_ready(bearer, now),
                 OutboundIntent::Dialing { .. } => false,
             })
-    }
-
-    fn sharing_pending(&self) -> bool {
-        self.outbound_peers.values().any(|intent| match intent {
-            OutboundIntent::Connected(bearer) => bearer.advertisable && !bearer.sharing_started,
-            OutboundIntent::Dialing { .. } => false,
-        })
     }
 
     fn earliest_future(&self, now: Instant) -> Option<Instant> {
@@ -1110,16 +1019,6 @@ pub async fn stage(mut state: PeerSelection, msg: PeerSelectionMsg, eff: Effects
                     .insert(peer, OutboundIntent::Dialing { since: now, candidate: PeerCandidate::from(peer) });
             } else {
                 info!(protocols::peer_selection::peer::ADD_SKIPPED, peer, reason = "already_added");
-            }
-        }
-        PeerSelectionMsg::SharePeersResult { peer, peers } => {
-            let peers_list = peers.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-            let SharedIngestResult { added, total } = eff.external(Performance::ingest_shared_peers(peer, peers)).await;
-            info!(protocols::peer_selection::sharing::RECEIVED, peer, peers = peers_list, added, total,);
-            if added > 0 {
-                let now = eff.clock().await;
-                let mut budget = state.budget();
-                state.regulate_peers(now, &eff, &mut budget).await;
             }
         }
         PeerSelectionMsg::Regulate => {

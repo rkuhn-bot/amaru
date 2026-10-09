@@ -356,3 +356,17 @@ fn churn_demotes_the_worst_non_static_peer_without_asking_per_peer() {
     assert_eq!(demoted, vec![TestPrep::peer("1.1.1.1:1")]);
     assert_eq!(counted_external::<crate::performance::IsStaticPeerEffect>(&running), 0);
 }
+
+#[test]
+fn a_share_result_with_new_candidates_dials_on_the_next_round() {
+    let learned = TestPrep::peer("8.8.8.8:8");
+    let donor = TestPrep::peer("9.9.9.9:9");
+    let mut prep = test_prep(&[]);
+    prep.state.target_upstream_peers = 1;
+    prep.peer_mix = "shared~1".parse().expect("shared-only mix");
+    far_deadlines(&mut prep.state);
+    prep.learned_share = Some((donor, std::net::SocketAddr::from(learned)));
+
+    let (running, _guards, _logs) = setup(&prep, PeerSelectionMsg::Tick);
+    assert_eq!(manager_sends(&running), vec![ManagerMessage::AddPeer(learned)]);
+}

@@ -70,7 +70,11 @@ impl PeerPerformance {
                 added += 1;
             }
         }
-        SharedIngestResult { added, total: self.shared_peers.len() }
+        let total = self.shared_peers.len();
+        if added > 0 {
+            self.bump_generation();
+        }
+        SharedIngestResult { added, total }
     }
 
     pub fn is_static_peer(&self, peer: &Peer) -> bool {

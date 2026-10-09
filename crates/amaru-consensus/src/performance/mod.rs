@@ -73,9 +73,9 @@
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
 //! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
 //! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
-//! | `record_shared_peers` | not called yet | outbound pools | C9 | recorded immediately |
+//! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest |
 //! | `record_share_request_served` | peer-sharing responder | not read yet | C9 | recorded immediately |
-//! | `ingest_shared_peers` | peer selection | outbound pools | C9 | on demand |
+//! | `ingest_shared_peers` | `record_shared_peers` | outbound pools | C9 | same ingest; new candidates bump generation |
 //! | `scores`, `share_flags`, `snapshot`, `ok_for_sharing`, `shared_contains` | query | caller | — | on demand |
 //!
 //! Terminal header/fork transitions produce [`HeaderTelemetry`] on the worker; OpenTelemetry
