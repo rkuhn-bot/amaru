@@ -159,13 +159,6 @@ impl Drop for WorkerGuard {
     }
 }
 
-/// Handle to the performance subsystem (Send + Sync). State lives on a worker thread.
-///
-/// Field order matters for cleanup: `tx` is dropped before the worker join guard, so the last
-/// sender closes the op channel and the worker can exit before the join runs.
-///
-/// Dropping the last clone joins the worker and waits while it drains any remaining ops,
-/// unless a retained [`Self::shutdown_callback`] owns that join.
 struct Job {
     op: PerformanceOp,
     #[cfg(test)]
@@ -263,6 +256,13 @@ impl QueueProbe {
     }
 }
 
+/// Handle to the performance subsystem (Send + Sync). State lives on a worker thread.
+///
+/// Field order matters for cleanup: `tx` is dropped before the worker join guard, so the last
+/// sender closes the op channel and the worker can exit before the join runs.
+///
+/// Dropping the last clone joins the worker and waits while it drains any remaining ops,
+/// unless a retained [`Self::shutdown_callback`] owns that join.
 pub struct Performance {
     tx: UnboundedSender<Job>,
     /// Approximate number of ops queued or being processed (incremented before send).
