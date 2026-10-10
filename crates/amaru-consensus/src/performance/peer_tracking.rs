@@ -97,7 +97,7 @@ impl PeerTracking for Performance {
         Box::pin(async move {
             let (reply, rx) = oneshot::channel();
             let now = instant_of(now);
-            this.submit(PerformanceOp::Peer(PeerOp::ShareReplyCandidates { now, reply }));
+            this.submit(PerformanceOp::Peer(PeerOp::ShareReplyCandidates { requester, now, reply }));
             #[expect(clippy::expect_used)]
             let candidates = rx.await.expect("performance worker dropped share-peer reply");
             sample_share_peers(&requester, amount, &candidates, share_reply_seed(&requester))

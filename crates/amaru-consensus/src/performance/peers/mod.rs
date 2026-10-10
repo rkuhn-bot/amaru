@@ -92,6 +92,13 @@ pub struct PeerPerformance {
     stubs: BTreeSet<(Instant, Peer)>,
     /// Pulled out of the dead sets while peer selection still protects them.
     held_external: BTreeSet<Peer>,
+    /// Listen addresses a connection peer has advertised.
+    ///
+    /// `own_share_address` is the bearer IP plus the listen port. On an inbound bearer the
+    /// connection peer is the ephemeral source, so that listen address is a different [`Peer`].
+    /// A share reply records every address whose IP equals the donor, and a later reply to that
+    /// donor leaves those addresses out.
+    listen_addresses: BTreeMap<Peer, BTreeSet<Peer>>,
     /// When a shared address was first learned. A repeat ingest does not move it.
     shared_learned: BTreeMap<PeerCandidate, Instant>,
     /// Unverified shared addresses the sweep may drop, oldest useful instant first.

@@ -28,6 +28,7 @@ use crate::{
     keepalive::{self, register_keepalive},
     manager::{ManagerConfig, ManagerMessage},
     mux::{self, MuxMessage},
+    network_effects::{Network, NetworkOps},
     peer_sharing::{PeerSharingMessage, register_peer_sharing_initiator, register_peer_sharing_responder},
     protocol::{
         Erased, Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
@@ -61,9 +62,21 @@ impl Connection {
         era_history: Arc<EraHistory>,
         mempool_stage: StageRef<MempoolMsg>,
         manager: StageRef<ManagerMessage>,
+        listen_port: Option<u16>,
     ) -> Self {
         Self {
-            params: Params { peer, conn_id, role, config, magic, pipeline, era_history, mempool_stage, manager },
+            params: Params {
+                peer,
+                conn_id,
+                role,
+                config,
+                magic,
+                pipeline,
+                era_history,
+                mempool_stage,
+                manager,
+                listen_port,
+            },
             state: State::Initial,
         }
     }
@@ -80,6 +93,9 @@ struct Params {
     era_history: Arc<EraHistory>,
     mempool_stage: StageRef<MempoolMsg>,
     manager: StageRef<ManagerMessage>,
+    /// Listen port to advertise. The bearer's local IP is read from the socket.
+    /// `None` when this node is not listening.
+    listen_port: Option<u16>,
 }
 
 pub use amaru_ouroboros::LocalUse;
@@ -495,12 +511,31 @@ async fn register_responders(mut s: Established, params: &Params, eff: &Effects<
         register_blockfetch_responder(&s.muxer, *peer, eff, ConnectionMessage::ChildDied(ChildId::Responder)).await,
     );
     if s.version_data.is_advertisable() {
+        let own_address = own_share_address(params, eff).await;
         s.peer_sharing_responder = Some(
-            register_peer_sharing_responder(&s.muxer, *peer, eff, ConnectionMessage::ChildDied(ChildId::Responder))
-                .await,
+            register_peer_sharing_responder(
+                &s.muxer,
+                *peer,
+                own_address,
+                eff,
+                ConnectionMessage::ChildDied(ChildId::Responder),
+            )
+            .await,
         );
     }
     s
+}
+
+/// Address to put in a share reply for this bearer: the connected socket's IP and the listen port.
+///
+/// The socket port is ephemeral on an outbound bearer, so it is not used. An unspecified
+/// address (a wildcard bind that never became a concrete source) is not shared. No listener
+/// means this node has nothing to advertise.
+async fn own_share_address(params: &Params, eff: &Effects<ConnectionMessage>) -> Option<std::net::SocketAddr> {
+    let port = params.listen_port?;
+    let local = Network::new(eff).local_addr(params.conn_id).await.ok()?;
+    let ip = local.ip();
+    if ip.is_unspecified() { None } else { Some(std::net::SocketAddr::new(ip, port)) }
 }
 
 async fn converge_use(mut s: Established, params: &Params, eff: &Effects<ConnectionMessage>) -> Established {
@@ -932,6 +967,7 @@ mod tests {
                 era_history: Arc::new(PREPROD_ERA_HISTORY.clone()),
                 mempool_stage: StageRef::blackhole(),
                 manager: StageRef::blackhole(),
+                listen_port: None,
             },
             state: State::Established(Established {
                 desired_use: LocalUse::None,
@@ -968,6 +1004,7 @@ mod tests {
                 era_history: Arc::new(PREPROD_ERA_HISTORY.clone()),
                 mempool_stage: StageRef::blackhole(),
                 manager: StageRef::blackhole(),
+                listen_port: None,
             },
             state,
         }

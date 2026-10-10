@@ -156,6 +156,8 @@ pub struct Manager {
     era_history: Arc<EraHistory>,
     chain_sync: StageRef<ChainSyncInitiatorMsg>,
     mempool: StageRef<MempoolMsg>,
+    /// Port from the bound listener. The wildcard IP is not kept.
+    listen_port: Option<u16>,
 }
 
 #[derive(Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -205,6 +207,7 @@ impl Manager {
             era_history,
             chain_sync,
             mempool,
+            listen_port: None,
         }
     }
 
@@ -366,6 +369,7 @@ impl Manager {
         match network.listen(listen_addr).await {
             Ok(listen_addr) => {
                 info!(protocols::manager::listen::STARTED, listen_addr = listen_addr.to_string());
+                self.listen_port = Some(listen_addr.port());
                 let accept_stage = eff.stage("accept", accept::stage).await;
                 let accept_stage = eff.supervise(accept_stage, ManagerMessage::Listen(listen_addr));
                 let accept_stage =
@@ -417,6 +421,7 @@ impl Manager {
                     self.era_history.clone(),
                     self.mempool.clone(),
                     eff.me(), // manager itself to receive HandshakeComplete
+                    self.listen_port,
                 ),
             )
             .await;

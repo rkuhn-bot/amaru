@@ -66,6 +66,7 @@ impl PeerPerformance {
                     continue;
                 }
             };
+            self.remember_requester_listen_address(from, peer);
             let candidate = PeerCandidate::from(peer);
             if &peer == from
                 || self.static_peers.contains(&candidate)
@@ -87,6 +88,20 @@ impl PeerPerformance {
             self.bump_generation();
         }
         SharedIngestResult { added, dropped, total }
+    }
+
+    /// Same-IP address in a reply from `from`: the listen address that donor put in the reply.
+    ///
+    /// The connection peer itself is already the listen address on an outbound bearer.
+    fn remember_requester_listen_address(&mut self, from: &Peer, peer: Peer) {
+        if &peer == from || peer.ip() != from.ip() {
+            return;
+        }
+        self.listen_addresses.entry(*from).or_default().insert(peer);
+    }
+
+    pub(super) fn requester_listen_addresses(&self, requester: &Peer) -> Option<&BTreeSet<Peer>> {
+        self.listen_addresses.get(requester)
     }
 
     pub fn is_static_peer(&self, peer: &Peer) -> bool {

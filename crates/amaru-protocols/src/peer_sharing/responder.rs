@@ -25,7 +25,7 @@ use amaru_pure_stage::{DeserializerGuards, Effects, StageRef, Void};
 
 use crate::{
     mux::MuxMessage,
-    peer_sharing::{State, messages::Message},
+    peer_sharing::{SHARE_POLICY_MAX, State, messages::Message},
     peer_tracking_effects::PeerTrack,
     protocol::{
         Inputs, Miniprotocol, Outcome, PROTO_N2N_PEER_SHARE, ProtocolState, Responder, StageState, miniprotocol,
@@ -52,12 +52,13 @@ pub fn responder() -> Miniprotocol<State, PeerSharingResponder, Responder> {
 pub async fn register_peer_sharing_responder<M: amaru_pure_stage::SendData>(
     muxer: &StageRef<MuxMessage>,
     peer: Peer,
+    own_address: Option<SocketAddr>,
     eff: &Effects<M>,
     tombstone: M,
 ) -> StageRef<Void> {
     use crate::{mux::Frame, protocol::ingress_limit};
 
-    let (state, stage) = PeerSharingResponder::new(muxer.clone(), peer);
+    let (state, stage) = PeerSharingResponder::new(muxer.clone(), peer, own_address);
     let ps = eff.stage("peer_sharing-responder", responder()).await;
     let ps = eff.supervise(ps, tombstone);
     let ps = eff.wire_up(ps, (state, stage)).await;
@@ -78,12 +79,41 @@ pub async fn register_peer_sharing_responder<M: amaru_pure_stage::SendData>(
 pub struct PeerSharingResponder {
     muxer: StageRef<MuxMessage>,
     peer: Peer,
+    /// This bearer's local IP with the listen port. Absent when the node is not listening
+    /// or the local IP is unspecified.
+    own_address: Option<SocketAddr>,
 }
 
 impl PeerSharingResponder {
-    pub fn new(muxer: StageRef<MuxMessage>, peer: Peer) -> (State, Self) {
-        (State::Idle, Self { muxer, peer })
+    pub fn new(muxer: StageRef<MuxMessage>, peer: Peer, own_address: Option<SocketAddr>) -> (State, Self) {
+        (State::Idle, Self { muxer, peer, own_address })
     }
+}
+
+/// Append `own` to a share sample without exceeding `amount` or [`SHARE_POLICY_MAX`].
+///
+/// A full sample drops its last address to make room. An unspecified address, the
+/// requester, or a missing address is left out. An address already in the sample is
+/// not repeated.
+fn include_own_address(
+    mut peers: Vec<SocketAddr>,
+    own: Option<SocketAddr>,
+    amount: u8,
+    requester: SocketAddr,
+) -> Vec<SocketAddr> {
+    let cap = usize::from(amount.min(SHARE_POLICY_MAX));
+    peers.truncate(cap);
+    let Some(own) = own.filter(|addr| !addr.ip().is_unspecified() && *addr != requester) else {
+        return peers;
+    };
+    if cap == 0 || peers.contains(&own) {
+        return peers;
+    }
+    if peers.len() >= cap {
+        peers.pop();
+    }
+    peers.push(own);
+    peers
 }
 
 impl StageState<State, Responder> for PeerSharingResponder {
@@ -111,7 +141,12 @@ impl StageState<State, Responder> for PeerSharingResponder {
                     let peer = self.peer;
                     let now = eff.clock().await;
                     let track = PeerTrack::new(eff);
-                    let peers = track.query_share_peers(peer, amount, now).await;
+                    let peers = include_own_address(
+                        track.query_share_peers(peer, amount, now).await,
+                        self.own_address,
+                        amount,
+                        SocketAddr::from(peer),
+                    );
                     if peers.len() > usize::from(amount) {
                         anyhow::bail!("cannot share {} peers when only {amount} were requested", peers.len());
                     }
@@ -201,5 +236,45 @@ pub mod tests {
             Message::SharePeers { peers } => Some(ResponderAction::SharePeers { peers: peers.clone() }),
             Message::ShareRequest { .. } | Message::Done => None,
         });
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn own_address_is_appended_inside_the_requested_amount() {
+        let own = addr(3000);
+        let peers = include_own_address(vec![addr(1), addr(2)], Some(own), 4, addr(9));
+        assert_eq!(peers, vec![addr(1), addr(2), own]);
+    }
+
+    #[test]
+    fn own_address_replaces_the_last_sample_when_the_reply_is_full() {
+        let own = addr(3000);
+        let sampled = (1..=10).map(addr).collect();
+        let peers = include_own_address(sampled, Some(own), 20, addr(9));
+        assert_eq!(peers.len(), usize::from(SHARE_POLICY_MAX));
+        assert_eq!(peers.last().copied(), Some(own));
+        assert!(!peers.contains(&addr(10)));
+        assert!(peers.contains(&addr(1)));
+    }
+
+    #[test]
+    fn own_address_is_omitted_when_absent_unspecified_or_the_requester() {
+        let sampled = vec![addr(1)];
+        assert_eq!(include_own_address(sampled.clone(), None, 10, addr(9)), sampled);
+        let wildcard = SocketAddr::from(([0, 0, 0, 0], 3000));
+        assert_eq!(include_own_address(sampled.clone(), Some(wildcard), 10, addr(9)), sampled);
+        let requester = addr(9);
+        assert_eq!(include_own_address(sampled.clone(), Some(requester), 10, requester), sampled);
+        assert_eq!(include_own_address(vec![addr(1)], Some(addr(3000)), 0, addr(9)), Vec::<SocketAddr>::new());
+    }
+
+    #[test]
+    fn own_address_already_in_the_sample_is_not_repeated() {
+        let own = addr(3000);
+        let peers = include_own_address(vec![addr(1), own], Some(own), 10, addr(9));
+        assert_eq!(peers, vec![addr(1), own]);
     }
 }

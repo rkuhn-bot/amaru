@@ -77,7 +77,7 @@ pub(crate) enum PeerOp {
     EvictRecords { effect: EvictRecordsEffect },
     OutboundInputs { excluded: BTreeSet<PeerCandidate>, reply: oneshot::Sender<OutboundInputs> },
     QueryPeerView { since_generation: u64, reply: oneshot::Sender<Option<PeerView>> },
-    ShareReplyCandidates { now: Instant, reply: oneshot::Sender<Vec<ShareCandidate>> },
+    ShareReplyCandidates { requester: Peer, now: Instant, reply: oneshot::Sender<Vec<ShareCandidate>> },
     IsStaticPeer { effect: IsStaticPeerEffect, reply: oneshot::Sender<bool> },
     NoteDial { effect: NoteDialEffect },
     SharedContains { effect: SharedContainsEffect, reply: oneshot::Sender<bool> },
@@ -219,8 +219,8 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
             let result = peers.query_peer_view(since_generation);
             let _ = reply.send(result);
         }
-        PeerOp::ShareReplyCandidates { now, reply } => {
-            let result = peers.share_reply_candidates(now);
+        PeerOp::ShareReplyCandidates { requester, now, reply } => {
+            let result = peers.share_reply_candidates(&requester, now);
             let _ = reply.send(result);
         }
         PeerOp::IsStaticPeer { effect, reply } => {

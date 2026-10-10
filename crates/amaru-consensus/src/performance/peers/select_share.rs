@@ -23,18 +23,16 @@ use std::{
 };
 
 use amaru_kernel::Peer;
+pub use amaru_protocols::peer_sharing::SHARE_POLICY_MAX;
 use amaru_pure_stage::Instant;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::PeerPerformance;
 
-/// Upper bound on peers returned in one share response.
-pub const SHARE_POLICY_MAX: u8 = 10;
-
 /// One pool member copied off the worker for a share reply.
 ///
-/// `shareable` is false when the peer has a performance row and fails the share checks.
-/// A pool member with no row is shareable.
+/// `shareable` is false unless the peer has a performance row and passes the share checks.
+/// A pool member with no row is not shareable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShareCandidate {
     pub peer: Peer,
@@ -68,12 +66,17 @@ pub fn sample_share_peers(requester: &Peer, amount: u8, candidates: &[ShareCandi
 }
 
 impl PeerPerformance {
-    /// Copy the fields a share reply needs. Does not sort or sample.
-    pub fn share_reply_candidates(&self, now: Instant) -> Vec<ShareCandidate> {
+    /// Copy the fields a share reply to `requester` needs. Does not sort or sample.
+    ///
+    /// Shareable means [`Self::ok_for_sharing`]: a row exists, the peer has connected, it is
+    /// advertisable, and it is not adversarial. A listen address this requester advertised
+    /// (same IP as its connection peer, other port) is left out.
+    pub fn share_reply_candidates(&self, requester: &Peer, now: Instant) -> Vec<ShareCandidate> {
+        let listen = self.requester_listen_addresses(requester);
         self.share_candidate_pool()
             .into_iter()
             .map(|peer| {
-                let shareable = !self.peers.contains_key(&peer) || self.ok_for_sharing(&peer, now);
+                let shareable = self.ok_for_sharing(&peer, now) && listen.is_none_or(|known| !known.contains(&peer));
                 ShareCandidate { peer, address: SocketAddr::from(peer), shareable }
             })
             .collect()
@@ -83,7 +86,7 @@ impl PeerPerformance {
     ///
     /// Stage effects copy the candidate rows on the worker and sample after that copy returns.
     pub fn select_share_peers(&self, requester: &Peer, amount: u8, now: Instant) -> Vec<SocketAddr> {
-        sample_share_peers(requester, amount, &self.share_reply_candidates(now), share_reply_seed(requester))
+        sample_share_peers(requester, amount, &self.share_reply_candidates(requester, now), share_reply_seed(requester))
     }
 }
 
