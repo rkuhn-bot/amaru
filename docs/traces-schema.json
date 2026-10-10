@@ -8025,6 +8025,9 @@
         },
         "full_duplex": {
           "type": "boolean"
+        },
+        "local_use": {
+          "type": "string"
         }
       },
       "required": [
@@ -8032,14 +8035,15 @@
         "conn_id",
         "direction",
         "full_duplex_capable",
-        "full_duplex"
+        "full_duplex",
+        "local_use"
       ],
       "optional": [],
       "additionalProperties": false,
       "name": "connected",
       "level": "TRACE",
       "target": "amaru::protocols::peer_selection::peer",
-      "description": "A connection has been established and the handshake completed successfully.",
+      "description": "A connection has been established and the handshake completed successfully. local_use ∈ {none, maintenance, diffusion}.",
       "public": true
     },
     "amaru::protocols::peer_selection::peer::DEMOTED": {
@@ -8122,7 +8126,7 @@
       "name": "remote_use",
       "level": "TRACE",
       "target": "amaru::protocols::peer_selection::peer",
-      "description": "The derived remote temperature of a bearer changed.",
+      "description": "The derived remote temperature of a bearer changed. remote_use ∈ {none, maintenance, diffusion}.",
       "public": true
     },
     "amaru::protocols::peer_selection::peer::REMOVED": {

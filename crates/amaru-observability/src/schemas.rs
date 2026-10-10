@@ -2169,14 +2169,17 @@ define_schemas! {
             peer_selection {
                 peer {
                     /// A connection has been established and the handshake completed successfully.
+                    /// local_use ∈ {none, maintenance, diffusion}.
                     public CONNECTED {
                         required peer: %amaru_kernel::Peer
                         required conn_id: u64
                         required direction: String
                         required full_duplex_capable: bool
                         required full_duplex: bool
+                        required local_use: String
                     }
                     /// The derived remote temperature of a bearer changed.
+                    /// remote_use ∈ {none, maintenance, diffusion}.
                     public REMOTE_USE {
                         required peer: %amaru_kernel::Peer
                         required conn_id: u64

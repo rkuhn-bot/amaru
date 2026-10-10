@@ -3098,10 +3098,10 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | `add_skipped` | `TRACE` | public | A peer was not added to the outbound set. Reason ∈ {already_added}. | peer, reason |  |
 | `added` | `TRACE` | public | A peer was added to the outbound set | peer, was_banned |  |
 | `address_rejected` | `TRACE` | public | A candidate address was rejected and will not be used as a Peer. | address, reason |  |
-| `connected` | `TRACE` | public | A connection has been established and the handshake completed successfully. | peer, conn_id, direction, full_duplex_capable, full_duplex |  |
+| `connected` | `TRACE` | public | A connection has been established and the handshake completed successfully. local_use ∈ {none, maintenance, diffusion}. | peer, conn_id, direction, full_duplex_capable, full_duplex, local_use |  |
 | `demoted` | `TRACE` | public | Local use dropped to Maintenance. Reason ∈ {churn, uninteresting}. | peer, conn_id, reason |  |
 | `disconnected` | `TRACE` | public | A connection has been terminated (graceful disconnect, error, handshake refusal, or network error). | peer, conn_id, direction | reason |
-| `remote_use` | `TRACE` | public | The derived remote temperature of a bearer changed. | peer, conn_id, remote_use |  |
+| `remote_use` | `TRACE` | public | The derived remote temperature of a bearer changed. remote_use ∈ {none, maintenance, diffusion}. | peer, conn_id, remote_use |  |
 | `removed` | `TRACE` | public | A peer was removed after behaving adversarially | peer, direction, peer_state, is_static |  |
 | `resolve_failed` | `TRACE` | public | Name resolution for a bootstrap candidate failed (no viable address). | candidate, reason |  |
 | `resolved` | `TRACE` | public | A selected bootstrap name resolved to a single peer, ready to dial. | candidate, origin, peer |  |
@@ -3142,6 +3142,7 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | `direction` | `string` | ✓ |
 | `full_duplex_capable` | `boolean` | ✓ |
 | `full_duplex` | `boolean` | ✓ |
+| `local_use` | `string` | ✓ |
 
 </details>
 
