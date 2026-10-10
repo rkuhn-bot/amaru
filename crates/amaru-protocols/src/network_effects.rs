@@ -373,10 +373,8 @@ impl ExternalEffectAPI for LocalAddrEffect {
     fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
         self.wrap(|this| async move {
             #[expect(clippy::expect_used)]
-            let resource = resources
-                .get::<ConnectionsResource>()
-                .expect("LocalAddrEffect requires a ConnectionsResource")
-                .clone();
+            let resource =
+                resources.get::<ConnectionsResource>().expect("LocalAddrEffect requires a ConnectionsResource").clone();
             resource.local_addr(this.conn).await.map_err(|e| LocalAddrError { conn: this.conn, error: format!("{e}") })
         })
     }

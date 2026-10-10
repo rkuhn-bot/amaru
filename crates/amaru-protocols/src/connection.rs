@@ -28,6 +28,7 @@ use crate::{
     keepalive::{self, register_keepalive},
     manager::{ManagerConfig, ManagerMessage},
     mux::{self, MuxMessage},
+    network_effects::{Network, NetworkOps},
     peer_sharing::{PeerSharingMessage, register_peer_sharing_initiator, register_peer_sharing_responder},
     protocol::{
         Erased, Inputs, PROTO_HANDSHAKE, PROTO_N2N_BLOCK_FETCH, PROTO_N2N_CHAIN_SYNC, PROTO_N2N_KEEP_ALIVE,
@@ -37,7 +38,6 @@ use crate::{
         handshake::HandshakeResult, version_data::VersionData, version_number::VersionNumber,
         version_table::VersionTable,
     },
-    network_effects::{Network, NetworkOps},
     store_effects::Store,
     tx_submission::{self, register_tx_submission},
 };

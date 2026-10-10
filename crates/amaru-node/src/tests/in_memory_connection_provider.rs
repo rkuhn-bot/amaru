@@ -289,10 +289,7 @@ impl ConnectionProvider for InMemoryConnectionProvider {
     fn local_addr(&self, conn: ConnectionId) -> BoxFuture<'static, std::io::Result<SocketAddr>> {
         let _ = (self, conn);
         Box::pin(async {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "in-memory connection has no local address",
-            ))
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "in-memory connection has no local address"))
         })
     }
 }

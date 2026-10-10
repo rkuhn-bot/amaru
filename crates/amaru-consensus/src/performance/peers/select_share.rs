@@ -23,12 +23,11 @@ use std::{
 };
 
 use amaru_kernel::Peer;
+pub use amaru_protocols::peer_sharing::SHARE_POLICY_MAX;
 use amaru_pure_stage::Instant;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::PeerPerformance;
-
-pub use amaru_protocols::peer_sharing::SHARE_POLICY_MAX;
 
 /// One pool member copied off the worker for a share reply.
 ///

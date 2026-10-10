@@ -684,8 +684,6 @@ impl ConnectionProvider for WorldConnectionProvider {
 
     fn local_addr(&self, conn: ConnectionId) -> BoxFuture<'static, std::io::Result<SocketAddr>> {
         let _ = conn;
-        Box::pin(async {
-            Err(std::io::Error::new(ErrorKind::NotFound, "simulated connection has no local address"))
-        })
+        Box::pin(async { Err(std::io::Error::new(ErrorKind::NotFound, "simulated connection has no local address")) })
     }
 }
