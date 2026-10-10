@@ -804,6 +804,7 @@ impl PeerSelection {
                     direction = ConnectionDirection::Inbound,
                     full_duplex_capable = conn.full_duplex_capable,
                     full_duplex = conn.full_duplex,
+                    local_use = conn.local_use.as_str(),
                 )
                 .entered();
             }
@@ -827,6 +828,7 @@ impl PeerSelection {
             direction = ConnectionDirection::Outbound,
             full_duplex_capable = conn.full_duplex_capable,
             full_duplex = conn.full_duplex,
+            local_use = conn.local_use.as_str(),
         )
         .entered();
     }

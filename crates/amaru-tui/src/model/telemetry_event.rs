@@ -32,12 +32,14 @@ pub enum TelemetryEvent {
     GovernanceRatifying,
     HeaderLifecycle,
     KeepaliveRoundTrip,
+    LocalUseApplied,
     MempoolStateUpdate,
     NewGovernanceUpdates,
     PeerConnected,
     PeerDisconnected,
     PeerResolved,
     PotsDump,
+    RemoteUse,
     ProposalActive,
     ProposalDrop,
     ProposalSkip,
@@ -95,6 +97,10 @@ impl TelemetryEvent {
             Some(Self::KeepaliveRoundTrip)
         } else if protocols::peer_selection::peer::CONNECTED::matches(&record.target, &record.name) {
             Some(Self::PeerConnected)
+        } else if protocols::manager::peer::LOCAL_USE_APPLIED::matches(&record.target, &record.name) {
+            Some(Self::LocalUseApplied)
+        } else if protocols::peer_selection::peer::REMOTE_USE::matches(&record.target, &record.name) {
+            Some(Self::RemoteUse)
         } else if protocols::peer_selection::peer::DISCONNECTED::matches(&record.target, &record.name) {
             Some(Self::PeerDisconnected)
         } else if protocols::peer_selection::peer::RESOLVED::matches(&record.target, &record.name) {

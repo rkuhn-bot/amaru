@@ -28,12 +28,10 @@ use super::super::{
         panel_padding, panel_title, render_scrollbar, scroll_panel_border, scroll_panel_border_type, table_body_area,
     },
     format::{format_count, format_micros},
-    theme::{
-        accent_primary, emphasis_primary, emphasis_white_color, muted_color, striped_row_style, table_header_style,
-    },
+    theme::{emphasis_primary, emphasis_white_color, muted_color, striped_row_style, table_header_style},
 };
 use crate::{
-    model::{InteractionMode, Model, PeerState, ScrollFocus},
+    model::{InteractionMode, Model, PeerState, PeerUse, ScrollFocus},
     ui::Views,
 };
 
@@ -85,10 +83,10 @@ pub(in crate::ui) fn render_peers_table(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(6),
             Constraint::Fill(4),
-            Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Length(1),
@@ -100,7 +98,7 @@ pub(in crate::ui) fn render_peers_table(
         ],
     )
     .header(
-        Row::new(vec!["", "Dir", "Peer", "Duplex?", "RTT", "Observe", "→", "Select", "→", "Fetch", "→", "Adopt"])
+        Row::new(vec!["up", "dn", "in/out", "Peer", "RTT", "Observe", "→", "Select", "→", "Fetch", "→", "Adopt"])
             .style(table_header_style(model.interaction_mode)),
     )
     .column_spacing(1)
@@ -113,39 +111,19 @@ fn peer_toggle_label(model: &Model) -> &'static str {
     if model.peer_pane_mode.is_maximized() { "-" } else { "+" }
 }
 
-fn peer_row(index: usize, peer: &PeerState, mode: InteractionMode) -> Row<'static> {
-    let direction = if peer.full_duplex == Some(true) {
-        "↕"
-    } else {
-        match (peer.inbound, peer.outbound) {
-            (true, true) => "▲▼",
-            (true, false) => "▲",
-            (false, true) => "▼",
-            (false, false) => "-",
-        }
-    };
-    let state_dot = " ●";
+fn peer_row(index: usize, peer: &PeerState, _mode: InteractionMode) -> Row<'static> {
     let rtt =
         peer.last_rtt_micros.map(|value| format!("{:.1} ms", value as f64 / 1_000.0)).unwrap_or_else(|| "—".into());
     let slot_start_to_header = peer.mean_slot_start_to_header_micros().map(format_micros).unwrap_or_else(|| "—".into());
     let query_header = peer.mean_query_header_micros().map(format_micros).unwrap_or_else(|| "—".into());
     let get_block = peer.mean_get_block_micros().map(format_micros).unwrap_or_else(|| "—".into());
     let adopt_block = peer.mean_adopt_block_micros().map(format_micros).unwrap_or_else(|| "—".into());
-    let can_duplex = match peer.full_duplex_capable {
-        Some(true) => "yes",
-        Some(false) => "no",
-        None => "—",
-    };
 
     Row::new(vec![
-        Cell::from(state_dot).style(Style::default().fg(if peer.connected {
-            accent_primary(mode)
-        } else {
-            Color::Rgb(244, 86, 86)
-        })),
-        Cell::from(direction).style(Style::default().fg(accent_primary(mode))),
+        use_cell(peer.local_use),
+        use_cell(peer.remote_use),
+        Cell::from(dial_label(peer)).style(Style::default().fg(muted_color())),
         Cell::from(peer_address_line(peer)),
-        Cell::from(can_duplex).style(Style::default().fg(muted_color())),
         Cell::from(rtt).style(Style::default().fg(emphasis_white_color())),
         Cell::from(slot_start_to_header).style(Style::default().fg(emphasis_white_color())),
         Cell::from("→"),
@@ -158,6 +136,24 @@ fn peer_row(index: usize, peer: &PeerState, mode: InteractionMode) -> Row<'stati
     .style(striped_row_style(index))
 }
 
+fn dial_label(peer: &PeerState) -> &'static str {
+    match (peer.inbound, peer.outbound) {
+        (true, true) => "in out",
+        (true, false) => "in",
+        (false, true) => "out",
+        (false, false) => "-",
+    }
+}
+
+fn use_cell(use_of: PeerUse) -> Cell<'static> {
+    let (symbol, color) = match use_of {
+        PeerUse::None => ("-", muted_color()),
+        PeerUse::Maintenance => ("●", Color::Yellow),
+        PeerUse::Diffusion => ("●", Color::Rgb(110, 228, 150)),
+    };
+    Cell::from(symbol).style(Style::default().fg(color))
+}
+
 fn peer_address_line(peer: &PeerState) -> Line<'static> {
     let address = Span::styled(peer.address.clone(), Style::default().fg(emphasis_white_color()));
     match peer.candidate_label() {
@@ -165,5 +161,97 @@ fn peer_address_line(peer: &PeerState) -> Line<'static> {
             Line::from(vec![address, Span::styled(format!(" ({candidate})"), Style::default().fg(muted_color()))])
         }
         None => Line::from(address),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    use super::*;
+    use crate::{
+        config::Config,
+        model::Model,
+        startup::{ProcessInfo, StartupContext},
+        ui::Views,
+    };
+
+    fn startup() -> StartupContext {
+        StartupContext {
+            process: ProcessInfo {
+                pid: 1,
+                network: "preview".into(),
+                software_version: "test".into(),
+                target: "linux".into(),
+            },
+            protocol_version: "10".into(),
+            mempool_max_bytes: 1,
+            epoch_length: 1,
+            active_slot_coeff_inverse: 1,
+            consensus_security_param: 1,
+            max_lovelace_supply: 1,
+            system_start_millis: 0,
+            era_history: None,
+            runtime_sections: Vec::new(),
+            protocol_sections: Vec::new(),
+        }
+    }
+
+    fn sample_peer(address: &str, local_use: PeerUse, remote_use: PeerUse, inbound: bool) -> PeerState {
+        let mut peer = PeerState::new(address.to_string(), Instant::now());
+        peer.connected = true;
+        peer.inbound = inbound;
+        peer.outbound = !inbound;
+        peer.local_use = local_use;
+        peer.remote_use = remote_use;
+        peer.last_rtt_micros = Some(12_300);
+        peer
+    }
+
+    #[test]
+    fn peers_table_shows_up_dn_and_who_dialed() {
+        let mut model = Model::new(Config::default(), startup());
+        model.peers.insert(
+            "10.1.1.1:3001".into(),
+            sample_peer("10.1.1.1:3001", PeerUse::Maintenance, PeerUse::Diffusion, true),
+        );
+        model.peers.insert("10.2.2.2:3001".into(), sample_peer("10.2.2.2:3001", PeerUse::None, PeerUse::None, false));
+
+        let area = Rect::new(0, 0, 110, 6);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut views = Views::default();
+        terminal.draw(|frame| render_peers_table(frame, area, &model, &mut views, Instant::now())).expect("draw");
+        let snapshot: String = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| terminal.backend().buffer().cell((x, y)).map(|cell| cell.symbol()).unwrap_or(""))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            snapshot,
+            "\
+┌─ Peers (2) ──────────────────────────────────────────────────────────────────────────────────────── [ + ] ─┐
+│up dn in/out Peer                                  RTT        Observe   → Select    → Fetch      → Adopt    │
+│●  ●  in     10.1.1.1:3001                         12.3 ms    —         → —         → —          → —        │
+│-  -  out    10.2.2.2:3001                         12.3 ms    —         → —         → —          → —        │
+│                                                                                                            │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
+        );
+
+        let dots: Vec<_> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "●")
+            .map(|cell| cell.fg)
+            .collect();
+        assert_eq!(dots, vec![Color::Yellow, Color::Rgb(110, 228, 150)], "{snapshot}");
     }
 }

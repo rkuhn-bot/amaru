@@ -76,6 +76,8 @@ impl Model {
             TelemetryEvent::HeaderLifecycle => self.update_peer_header_lifecycle(record),
             TelemetryEvent::KeepaliveRoundTrip => self.update_peer_rtt(record),
             TelemetryEvent::PeerConnected => self.update_peer_connected(record),
+            TelemetryEvent::LocalUseApplied => self.update_local_use(record),
+            TelemetryEvent::RemoteUse => self.update_remote_use(record),
             TelemetryEvent::PeerDisconnected => self.update_peer_disconnected(record),
             TelemetryEvent::PeerResolved => self.update_peer_resolved(record),
             TelemetryEvent::GovernanceActivityUpdate => {
@@ -249,6 +251,22 @@ impl Model {
         self.resolved_candidates.insert(address.to_string(), candidate.to_string());
         if let Some(peer) = self.peers.get_mut(address) {
             peer.candidate = Some(candidate.to_string());
+        }
+    }
+
+    fn update_local_use(&mut self, record: &TelemetryRecord) {
+        let address = protocols::manager::peer::LOCAL_USE_APPLIED::peer(record);
+        let label = protocols::manager::peer::LOCAL_USE_APPLIED::local_use(record);
+        if let Some(peer) = self.peers.get_mut(address) {
+            peer.set_local_use(record, label);
+        }
+    }
+
+    fn update_remote_use(&mut self, record: &TelemetryRecord) {
+        let address = protocols::peer_selection::peer::REMOTE_USE::peer(record);
+        let label = protocols::peer_selection::peer::REMOTE_USE::remote_use(record);
+        if let Some(peer) = self.peers.get_mut(address) {
+            peer.set_remote_use(record, label);
         }
     }
 
