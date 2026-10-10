@@ -873,9 +873,7 @@ fn test_peer_share_reply_addresses() {
 
     let mut world = WorldLoop::new(run.provider.clone(), graphs).with_injector(0, injector_shared.expect("injector"));
     world.schedule_reveals(headers.iter().map(IsHeader::hash));
-    world.run_until_horizon_with(SHARE_HORIZON_NANOS, Duration::from_secs(30), |world| {
-        eprintln!("peer-share sim {} seed={:#x}", format_sim_nanos(world.now_nanos()), run.seed);
-    });
+    world.run_until_horizon(SHARE_HORIZON_NANOS);
 
     let mut allowed = vec![hub_addr, leaf_a_addr, leaf_b_addr];
     allowed.extend(injector_addrs.iter().copied());
@@ -887,6 +885,8 @@ fn test_peer_share_reply_addresses() {
     let inbound_ports = {
         let mut ports = outbound_ports.clone();
         ports.push(leaf_a_addr);
+        // The hub may have learned leaf B's listen address from leaf B's own reply.
+        ports.push(leaf_b_addr);
         ports
     };
 
@@ -935,7 +935,9 @@ fn test_peer_share_reply_addresses() {
             let ports = inbound_ports.clone();
             tm_share_reply("hub inbound bearer", move |effect| {
                 SocketAddr::from(effect.from) == hub_addr
-                    && share_reply_is_hub_listen(effect, hub_addr, leaf_b_addr, &ports)
+                    && effect.addrs.len() == usize::from(SHARE_POLICY_MAX)
+                    && effect.addrs.contains(&hub_addr)
+                    && effect.addrs.iter().all(|addr| ports.contains(addr) && !addr.ip().is_unspecified())
             }) == *entry
         }),
         "leaf B must record the hub listen address from the inbound bearer; seed={:#x}",

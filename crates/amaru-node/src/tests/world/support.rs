@@ -85,6 +85,7 @@ pub(super) fn fragment_trace_guards() -> amaru_pure_stage::DeserializerGuards {
     guards.push(register_effect_deserializer::<amaru_consensus::performance::QueryPeerViewEffect>().boxed());
     guards.push(register_data_deserializer::<amaru_consensus::performance::PeerView>().boxed());
     guards.push(register_data_deserializer::<Option<amaru_consensus::performance::PeerView>>().boxed());
+    guards.push(register_effect_deserializer::<RecordSharedPeersEffect>().boxed());
     guards
 }
 
