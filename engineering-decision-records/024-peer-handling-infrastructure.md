@@ -18,10 +18,10 @@ Most of these aspects are internal to a node while some others are observable to
 
 The most important externally observable connection management behaviours are the following:
 
-- a connection can be cold, warm, or hot regarding how the local node will use it:
-  - **cold** means no mini-protocols will be run in initiator mode (all other states will always run `keepalive`, `peersharing`)
-  - **warm** means that `blockfetch`, `txsubmission` will be run in initiator mode
-  - **hot** means that in addition to the warm protocols `chainsync` will be run in initiator mode
+- a connection can be cold, warm, or hot regarding how the local node will use it, matching the Haskell `NodeToNode` `TemperatureBundle`:
+  - **cold** means no mini-protocols are run in initiator mode
+  - **warm** runs keep-alive and peer-sharing in initiator mode, and does not run block-fetch or tx-submission
+  - **hot** runs chain-sync, block-fetch, and tx-submission in initiator mode, in addition to keep-alive and peer-sharing
 - demoting hot → warm → cold will gracefully shut down the mini-protocols by transitioning into `StDone`, expecting that a later promotion is possible by sending any message that is allowed from the initial state of the respective mini-protocol
 - a unidirectional connection (i.e. with `initiatorOnlyMode == true` in the handshake) will be terminated when demoted to cold
 - a bidirectional connection will be terminated when the local intent is cold and the remote activity is judged to indicate cold state as well (no mini-protocols active for some time)

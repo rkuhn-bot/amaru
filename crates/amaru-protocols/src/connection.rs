@@ -639,7 +639,7 @@ async fn on_expected_stop(
 }
 
 async fn start_initiators(mut s: Established, params: &Params, eff: &Effects<ConnectionMessage>) -> Established {
-    let Params { peer, conn_id, role, config, pipeline, mempool_stage, era_history, .. } = params;
+    let Params { peer, conn_id, config, pipeline, mempool_stage, era_history, .. } = params;
     if s.desired_use >= LocalUse::Maintenance {
         if s.keepalive_initiator.is_none() {
             s.keepalive_initiator = register_keepalive(
@@ -652,7 +652,7 @@ async fn start_initiators(mut s: Established, params: &Params, eff: &Effects<Con
             )
             .await;
         }
-        if s.peer_sharing_initiator.is_none() && *role == Role::Initiator && s.version_data.is_advertisable() {
+        if s.peer_sharing_initiator.is_none() && s.version_data.is_advertisable() {
             s.peer_sharing_initiator = Some(
                 register_peer_sharing_initiator(
                     &s.muxer,
@@ -740,6 +740,7 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::*;
+    use crate::protocol_messages::version_data::PeerSharing;
 
     /// Limits installed for each mini-protocol id, initiator and responder.
     ///
@@ -864,6 +865,85 @@ mod tests {
         };
         assert_eq!(mux::MUX_MAILBOX_SIZE, 24);
         assert_eq!(*mailbox_size, mux::MUX_MAILBOX_SIZE);
+    }
+
+    /// An established duplex bearer promoted to maintenance starts keep-alive and, when the
+    /// peer is advertisable, the peer-sharing initiator. That holds for an inbound bearer as
+    /// well as an outbound one. Block-fetch and tx-submission stay off until diffusion.
+    #[test]
+    fn maintenance_starts_peer_sharing_on_an_advertisable_bearer() {
+        for role in [Role::Initiator, Role::Responder] {
+            let established = promote(role, true, LocalUse::Maintenance);
+            assert!(established.keepalive_initiator.is_some(), "{role:?} keep-alive");
+            assert!(established.peer_sharing_initiator.is_some(), "{role:?} peer-sharing");
+            assert!(established.chainsync_initiator.is_none(), "{role:?} chain-sync");
+            assert!(established.blockfetch_initiator.is_none(), "{role:?} block-fetch");
+            assert!(established.tx_submission_initiator.is_none(), "{role:?} tx-submission");
+            assert_eq!(established.actual_use, LocalUse::Maintenance);
+        }
+    }
+
+    #[test]
+    fn maintenance_skips_peer_sharing_when_the_peer_is_not_advertisable() {
+        let established = promote(Role::Responder, false, LocalUse::Maintenance);
+        assert!(established.keepalive_initiator.is_some());
+        assert!(established.peer_sharing_initiator.is_none());
+        assert_eq!(established.actual_use, LocalUse::Maintenance);
+    }
+
+    fn promote(role: Role, advertisable: bool, desired: LocalUse) -> Established {
+        let mut network = SimulationBuilder::default();
+        let connection = network.stage("connection", stage);
+        let connection = network.wire_up(connection, established_connection(role, advertisable));
+        network.preload(&connection, [ConnectionMessage::SetLocalUse(desired)]).unwrap();
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::default()).assert_sleeping();
+        let state = running.get_state(&connection).expect("connection still running").state.clone();
+        let State::Established(established) = state else {
+            panic!("connection left the established state");
+        };
+        established
+    }
+
+    fn established_connection(role: Role, advertisable: bool) -> Connection {
+        let version_data = VersionData::new(
+            NetworkMagic::PREPROD,
+            false,
+            if advertisable { PeerSharing::Enabled } else { PeerSharing::Disabled },
+            false,
+        );
+        Connection {
+            params: Params {
+                peer: Peer::for_test(3009),
+                conn_id: ConnectionId::initial(),
+                role,
+                config: ManagerConfig::default(),
+                magic: NetworkMagic::PREPROD,
+                pipeline: StageRef::blackhole(),
+                era_history: Arc::new(PREPROD_ERA_HISTORY.clone()),
+                mempool_stage: StageRef::blackhole(),
+                manager: StageRef::blackhole(),
+            },
+            state: State::Established(Established {
+                desired_use: LocalUse::None,
+                actual_use: LocalUse::None,
+                duplex: true,
+                version_number: VersionNumber::new(14),
+                version_data,
+                muxer: StageRef::blackhole(),
+                handshake: StageRef::blackhole(),
+                keepalive_initiator: None,
+                tx_submission_initiator: None,
+                chainsync_initiator: None,
+                blockfetch_initiator: None,
+                peer_sharing_initiator: None,
+                chainsync_responder: None,
+                blockfetch_responder: None,
+                peer_sharing_responder: None,
+                stopping: BTreeSet::new(),
+            }),
+        }
     }
 
     // HELPERS
