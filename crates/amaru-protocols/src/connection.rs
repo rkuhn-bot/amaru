@@ -900,7 +900,12 @@ mod tests {
         let mut running = network.run(rt.handle());
         match running.run(Run::default()) {
             Blocked::Idle | Blocked::Sleeping { .. } => {}
-            blocked => panic!("promotion did not settle: {blocked:?}"),
+            blocked @ (Blocked::Deadlock(_)
+            | Blocked::Breakpoint(_)
+            | Blocked::Busy { .. }
+            | Blocked::Terminated(_)) => {
+                panic!("promotion did not settle: {blocked:?}");
+            }
         }
         let state = running.get_state(&connection).expect("connection still running").state.clone();
         let State::Established(established) = state else {
