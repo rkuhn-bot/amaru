@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 
 use amaru_kernel::Peer;
 use amaru_observability::{Instrument, debug_span, info};
+use amaru_ouroboros::{ConnectionId, RemoteProtocol};
 use amaru_pure_stage::{DeserializerGuards, Effects, StageRef, Void};
 
 use crate::{
@@ -52,13 +53,14 @@ pub fn responder() -> Miniprotocol<State, PeerSharingResponder, Responder> {
 pub async fn register_peer_sharing_responder<M: amaru_pure_stage::SendData>(
     muxer: &StageRef<MuxMessage>,
     peer: Peer,
+    conn_id: ConnectionId,
     own_address: Option<SocketAddr>,
     eff: &Effects<M>,
     tombstone: M,
 ) -> StageRef<Void> {
     use crate::{mux::Frame, protocol::ingress_limit};
 
-    let (state, stage) = PeerSharingResponder::new(muxer.clone(), peer, own_address);
+    let (state, stage) = PeerSharingResponder::new(muxer.clone(), peer, conn_id, own_address);
     let ps = eff.stage("peer_sharing-responder", responder()).await;
     let ps = eff.supervise(ps, tombstone);
     let ps = eff.wire_up(ps, (state, stage)).await;
@@ -79,14 +81,20 @@ pub async fn register_peer_sharing_responder<M: amaru_pure_stage::SendData>(
 pub struct PeerSharingResponder {
     muxer: StageRef<MuxMessage>,
     peer: Peer,
+    conn_id: ConnectionId,
     /// This bearer's local IP with the listen port. Absent when the node is not listening
     /// or the local IP is unspecified.
     own_address: Option<SocketAddr>,
 }
 
 impl PeerSharingResponder {
-    pub fn new(muxer: StageRef<MuxMessage>, peer: Peer, own_address: Option<SocketAddr>) -> (State, Self) {
-        (State::Idle, Self { muxer, peer, own_address })
+    pub fn new(
+        muxer: StageRef<MuxMessage>,
+        peer: Peer,
+        conn_id: ConnectionId,
+        own_address: Option<SocketAddr>,
+    ) -> (State, Self) {
+        (State::Idle, Self { muxer, peer, conn_id, own_address })
     }
 }
 
@@ -138,6 +146,9 @@ impl StageState<State, Responder> for PeerSharingResponder {
             ResponderResult::ShareRequest { amount } => {
                 let span = debug_span!(protocols::peer_sharing::responder::PEER_SHARING_RESPONDER_STAGE, amount);
                 async move {
+                    PeerTrack::new(eff)
+                        .note_remote_protocol(self.peer, self.conn_id, RemoteProtocol::PeerSharing, true)
+                        .await;
                     let peer = self.peer;
                     let now = eff.clock().await;
                     let track = PeerTrack::new(eff);
@@ -165,7 +176,12 @@ impl StageState<State, Responder> for PeerSharingResponder {
                 .instrument(span)
                 .await
             }
-            ResponderResult::Done => Ok((None, self)),
+            ResponderResult::Done => {
+                PeerTrack::new(eff)
+                    .note_remote_protocol(self.peer, self.conn_id, RemoteProtocol::PeerSharing, false)
+                    .await;
+                Ok((None, self))
+            }
         }
     }
 
@@ -197,7 +213,7 @@ impl ProtocolState<Responder> for State {
             (Idle, Message::ShareRequest { amount }) => {
                 (outcome().result(ResponderResult::ShareRequest { amount }), Busy)
             }
-            (Idle, Message::Done) => (outcome().want_next(), Idle),
+            (Idle, Message::Done) => (outcome().result(ResponderResult::Done).want_next(), Idle),
             (this, input) => anyhow::bail!("invalid state: {:?} <- {:?}", this, input),
         })
     }

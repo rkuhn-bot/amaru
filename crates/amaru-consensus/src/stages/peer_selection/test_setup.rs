@@ -18,7 +18,9 @@ use std::{
 };
 
 use amaru_kernel::{Peer, PeerCandidate, Point};
-use amaru_ouroboros::{ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking};
+use amaru_ouroboros::{
+    ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking, RemoteInitiators,
+};
 use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{
     DeserializerGuards, Instant, ScheduleId, StageGraph, StageRef,
@@ -187,6 +189,8 @@ fn setup_preload_with_mode(
                         full_duplex: false,
                         advertisable: false,
                         local_use: LocalUse::Diffusion,
+                        remote_initiators: RemoteInitiators::default(),
+                        remote_use: LocalUse::None,
                         established_at: observed,
                     },
                     observed,

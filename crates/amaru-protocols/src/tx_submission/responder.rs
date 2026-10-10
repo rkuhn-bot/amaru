@@ -23,12 +23,16 @@ use ProtocolError::*;
 use TerminationCause::*;
 use amaru_kernel::{EraHistory, Peer, Transaction, TransactionId, cbor::WithOriginalBytes, to_cbor};
 use amaru_observability::{Instrument, debug, debug_span, error, trace, warn};
-use amaru_ouroboros::{MempoolInsertResult, MempoolMsg, MempoolSeqNo, TxInsertResult, TxOrigin, TxRejectReason};
+use amaru_ouroboros::{
+    ConnectionId, MempoolInsertResult, MempoolMsg, MempoolSeqNo, RemoteProtocol, TxInsertResult, TxOrigin,
+    TxRejectReason,
+};
 use amaru_pure_stage::{DeserializerGuards, Effects, ScheduleId, StageRef, Void};
 
 use crate::{
     mempool_effects::{AsyncMempool, MemoryPool},
     mux::MuxMessage,
+    peer_tracking_effects::PeerTrack,
     protocol::{
         Inputs, Miniprotocol, Outcome, PROTO_N2N_TX_SUB, ProtocolState, Responder, StageState, TX_SUBMISSION_INGRESS,
         miniprotocol, outcome,
@@ -140,6 +144,9 @@ impl StageState<State, Responder> for TxSubmissionResponder {
             let action = match input {
                 ResponderResult::Init => {
                     trace!(protocols::tx_submission::INITIALIZED);
+                    PeerTrack::new(eff)
+                        .note_remote_protocol(self.peer, self.conn_id, RemoteProtocol::TxSubmission, true)
+                        .await;
                     let action = self.initialize_state(&mempool).await;
                     if let Some(action) = &action {
                         self.schedule_inflight_timeout(action, eff).await;
@@ -167,7 +174,12 @@ impl StageState<State, Responder> for TxSubmissionResponder {
                     }
                     action
                 }
-                ResponderResult::Done => None,
+                ResponderResult::Done => {
+                    PeerTrack::new(eff)
+                        .note_remote_protocol(self.peer, self.conn_id, RemoteProtocol::TxSubmission, false)
+                        .await;
+                    None
+                }
             };
             Ok((action, self))
         }
@@ -207,7 +219,7 @@ impl ProtocolState<Responder> for State {
                 let txs = tagged_txs.into_iter().map(|t| t.tx).collect();
                 (outcome().result(ResponderResult::ReplyTxs(txs)), State::Idle)
             }
-            (State::TxIdsBlocking, Message::Done) => (outcome().want_next(), State::Init),
+            (State::TxIdsBlocking, Message::Done) => (outcome().result(ResponderResult::Done).want_next(), State::Init),
             (this, input) => anyhow::bail!("invalid state: {:?} <- {:?}", this, input),
         })
     }
@@ -293,6 +305,7 @@ impl Display for ResponderResult {
 pub struct TxSubmissionResponder {
     /// The connected peer, sending transactions.
     peer: Peer,
+    conn_id: ConnectionId,
     /// Responder parameters: batch sizes, window sizes, etc.
     params: ResponderParams,
     /// Sequence of tx_ids advertised by the peer in arrival order. May contain duplicates: a
@@ -339,6 +352,7 @@ pub struct TxStateEntry {
 impl TxSubmissionResponder {
     pub fn new(
         peer: Peer,
+        conn_id: ConnectionId,
         muxer: StageRef<MuxMessage>,
         params: ResponderParams,
         origin: TxOrigin,
@@ -349,6 +363,7 @@ impl TxSubmissionResponder {
             State::Init,
             Self {
                 peer,
+                conn_id,
                 params,
                 unacked: VecDeque::new(),
                 tx_states: BTreeMap::new(),
@@ -1232,6 +1247,7 @@ mod tests {
     fn responder_with(params: ResponderParams) -> TxSubmissionResponder {
         TxSubmissionResponder::new(
             Peer::for_test(3006),
+            ConnectionId::initial(),
             StageRef::<MuxMessage>::blackhole(),
             params,
             TxOrigin::Local,
@@ -1312,6 +1328,9 @@ mod tests {
     fn timeout_harness(rt: &Runtime) -> TimeoutHarness {
         let mut network = SimulationBuilder::default();
         network.resources().put::<ResourceMempool<Transaction>>(Arc::new(InMemoryMempool::default()));
+        network
+            .resources()
+            .put::<amaru_ouroboros::PeerTrackingResource>(Arc::new(crate::peer_tracking::InMemoryPeerTracking::new()));
 
         let muxer = network.stage("muxer", async |state: (), msg: MuxMessage, eff| {
             match msg {
@@ -1345,6 +1364,7 @@ mod tests {
 
         let (proto, stage_state) = TxSubmissionResponder::new(
             Peer::for_test(3006),
+            ConnectionId::initial(),
             muxer.clone().without_state(),
             test_params(),
             TxOrigin::Local,
@@ -1561,6 +1581,7 @@ mod tests {
         let era_history = Arc::new(EraHistory::default());
         let (_state, mut responder) = TxSubmissionResponder::new(
             Peer::for_test(3006),
+            ConnectionId::initial(),
             muxer,
             test_params(),
             TxOrigin::Local,
@@ -1588,6 +1609,7 @@ mod tests {
         let era_history = Arc::new(EraHistory::default());
         let (_state, mut responder) = TxSubmissionResponder::new(
             Peer::for_test(3006),
+            ConnectionId::initial(),
             muxer,
             test_params(),
             TxOrigin::Local,
@@ -1657,6 +1679,7 @@ mod tests {
         run_stage_and_return_state_with(
             TxSubmissionResponder::new(
                 Peer::for_test(3006),
+                ConnectionId::initial(),
                 StageRef::named_for_tests("muxer"),
                 test_params(),
                 TxOrigin::Local,

@@ -21,7 +21,7 @@
 use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
 use amaru_kernel::{Peer, PeerCandidate};
-use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt};
+use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, RemoteProtocol};
 use amaru_pure_stage::Instant;
 use tokio::sync::oneshot;
 
@@ -55,42 +55,157 @@ pub(crate) enum PerformanceOp {
 }
 
 pub(crate) enum PeerOp {
-    RecordIntersection { effect: RecordIntersectionEffect },
-    RecordHeaderAnnouncement { effect: RecordHeaderAnnouncementEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordBlockDelivery { effect: RecordBlockDeliveryEffect, reply: oneshot::Sender<Vec<HeaderTelemetry>> },
-    RecordFetchFailure { effect: RecordFetchFailureEffect },
-    RecordKeepaliveRtt { effect: RecordKeepaliveRttEffect },
-    RecordAdvertisability { effect: RecordAdvertisabilityEffect },
-    RecordConnectionFailure { effect: RecordConnectionFailureEffect },
-    ClearPeerAvailability { effect: ClearPeerAvailabilityEffect },
-    PeerAdversarial { effect: PeerAdversarialEffect },
-    SelectPeersForFetch { effect: SelectPeersForFetchEffect, reply: oneshot::Sender<FetchPeerSet> },
-    PeerCoversFragment { effect: PeerCoversFragmentEffect, reply: oneshot::Sender<bool> },
-    DirectClaimants { effect: DirectClaimantsEffect, reply: oneshot::Sender<Vec<(Peer, Instant, ClaimKind)>> },
-    FirstAnnouncedAt { effect: FirstAnnouncedAtEffect, reply: oneshot::Sender<Option<(Peer, Instant)>> },
-    RankPeersForChurn { effect: RankPeersForChurnEffect, reply: oneshot::Sender<Vec<ChurnInput>> },
-    Scores { effect: ScoresEffect, reply: oneshot::Sender<PeerScores> },
-    ShareFlags { effect: ShareFlagsEffect, reply: oneshot::Sender<Option<PeerShareFlags>> },
-    Snapshot { effect: SnapshotEffect, reply: oneshot::Sender<Option<PeerSnapshot>> },
-    OkForSharing { effect: OkForSharingEffect, reply: oneshot::Sender<bool> },
-    SetLedgerCandidates { effect: SetLedgerCandidatesEffect },
-    EvictRecords { effect: EvictRecordsEffect },
-    OutboundInputs { excluded: BTreeSet<PeerCandidate>, reply: oneshot::Sender<OutboundInputs> },
-    QueryPeerView { since_generation: u64, reply: oneshot::Sender<Option<PeerView>> },
-    ShareReplyCandidates { now: Instant, reply: oneshot::Sender<Vec<ShareCandidate>> },
-    IsStaticPeer { effect: IsStaticPeerEffect, reply: oneshot::Sender<bool> },
-    NoteDial { effect: NoteDialEffect },
-    SharedContains { effect: SharedContainsEffect, reply: oneshot::Sender<bool> },
-    SourceCounts { effect: SourceCountsEffect, reply: oneshot::Sender<SourceCounts> },
-    RecordRollback { effect: RecordRollbackEffect },
-    RecordConnectionEstablished { conn: ConnectionRecord, at: ObservedAt },
-    RecordConnectionClosed { peer: Peer, conn_id: ConnectionId, reason: CloseReason, at: ObservedAt },
-    RecordConnectFailed { peer: Peer, at: ObservedAt },
-    RecordLocalUseApplied { peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt },
-    RecordKeepaliveSample { peer: Peer, rtt: Duration, at: ObservedAt },
-    RecordSharedPeers { from: Peer, addrs: Vec<SocketAddr>, at: ObservedAt, reply: oneshot::Sender<SharedIngestResult> },
-    RecordShareRequestServed { requester: Peer, amount: u8, at: ObservedAt },
-    RecordUninteresting { peer: Peer, conn_id: ConnectionId, after_rollback: bool, at: ObservedAt },
+    RecordIntersection {
+        effect: RecordIntersectionEffect,
+    },
+    RecordHeaderAnnouncement {
+        effect: RecordHeaderAnnouncementEffect,
+        reply: oneshot::Sender<Vec<HeaderTelemetry>>,
+    },
+    RecordBlockDelivery {
+        effect: RecordBlockDeliveryEffect,
+        reply: oneshot::Sender<Vec<HeaderTelemetry>>,
+    },
+    RecordFetchFailure {
+        effect: RecordFetchFailureEffect,
+    },
+    RecordKeepaliveRtt {
+        effect: RecordKeepaliveRttEffect,
+    },
+    RecordAdvertisability {
+        effect: RecordAdvertisabilityEffect,
+    },
+    RecordConnectionFailure {
+        effect: RecordConnectionFailureEffect,
+    },
+    ClearPeerAvailability {
+        effect: ClearPeerAvailabilityEffect,
+    },
+    PeerAdversarial {
+        effect: PeerAdversarialEffect,
+    },
+    SelectPeersForFetch {
+        effect: SelectPeersForFetchEffect,
+        reply: oneshot::Sender<FetchPeerSet>,
+    },
+    PeerCoversFragment {
+        effect: PeerCoversFragmentEffect,
+        reply: oneshot::Sender<bool>,
+    },
+    DirectClaimants {
+        effect: DirectClaimantsEffect,
+        reply: oneshot::Sender<Vec<(Peer, Instant, ClaimKind)>>,
+    },
+    FirstAnnouncedAt {
+        effect: FirstAnnouncedAtEffect,
+        reply: oneshot::Sender<Option<(Peer, Instant)>>,
+    },
+    RankPeersForChurn {
+        effect: RankPeersForChurnEffect,
+        reply: oneshot::Sender<Vec<ChurnInput>>,
+    },
+    Scores {
+        effect: ScoresEffect,
+        reply: oneshot::Sender<PeerScores>,
+    },
+    ShareFlags {
+        effect: ShareFlagsEffect,
+        reply: oneshot::Sender<Option<PeerShareFlags>>,
+    },
+    Snapshot {
+        effect: SnapshotEffect,
+        reply: oneshot::Sender<Option<PeerSnapshot>>,
+    },
+    OkForSharing {
+        effect: OkForSharingEffect,
+        reply: oneshot::Sender<bool>,
+    },
+    SetLedgerCandidates {
+        effect: SetLedgerCandidatesEffect,
+    },
+    EvictRecords {
+        effect: EvictRecordsEffect,
+    },
+    OutboundInputs {
+        excluded: BTreeSet<PeerCandidate>,
+        reply: oneshot::Sender<OutboundInputs>,
+    },
+    QueryPeerView {
+        since_generation: u64,
+        reply: oneshot::Sender<Option<PeerView>>,
+    },
+    ShareReplyCandidates {
+        now: Instant,
+        reply: oneshot::Sender<Vec<ShareCandidate>>,
+    },
+    IsStaticPeer {
+        effect: IsStaticPeerEffect,
+        reply: oneshot::Sender<bool>,
+    },
+    NoteDial {
+        effect: NoteDialEffect,
+    },
+    SharedContains {
+        effect: SharedContainsEffect,
+        reply: oneshot::Sender<bool>,
+    },
+    SourceCounts {
+        effect: SourceCountsEffect,
+        reply: oneshot::Sender<SourceCounts>,
+    },
+    RecordRollback {
+        effect: RecordRollbackEffect,
+    },
+    RecordConnectionEstablished {
+        conn: ConnectionRecord,
+        at: ObservedAt,
+    },
+    RecordConnectionClosed {
+        peer: Peer,
+        conn_id: ConnectionId,
+        reason: CloseReason,
+        at: ObservedAt,
+    },
+    RecordConnectFailed {
+        peer: Peer,
+        at: ObservedAt,
+    },
+    RecordLocalUseApplied {
+        peer: Peer,
+        conn_id: ConnectionId,
+        local_use: LocalUse,
+        at: ObservedAt,
+    },
+    RecordRemoteUse {
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+        at: ObservedAt,
+        reply: oneshot::Sender<Option<LocalUse>>,
+    },
+    RecordKeepaliveSample {
+        peer: Peer,
+        rtt: Duration,
+        at: ObservedAt,
+    },
+    RecordSharedPeers {
+        from: Peer,
+        addrs: Vec<SocketAddr>,
+        at: ObservedAt,
+        reply: oneshot::Sender<SharedIngestResult>,
+    },
+    RecordShareRequestServed {
+        requester: Peer,
+        amount: u8,
+        at: ObservedAt,
+    },
+    RecordUninteresting {
+        peer: Peer,
+        conn_id: ConnectionId,
+        after_rollback: bool,
+        at: ObservedAt,
+    },
 }
 
 pub(crate) enum HeaderOp {
@@ -252,6 +367,10 @@ fn dispatch_peer(peers: &mut PeerPerformance, headers: &mut HeaderPerformance, o
         }
         PeerOp::RecordLocalUseApplied { peer, conn_id, local_use, at } => {
             peers.record_local_use_applied(peer, conn_id, local_use, at);
+        }
+        PeerOp::RecordRemoteUse { peer, conn_id, protocol, active, at, reply } => {
+            let changed = peers.record_remote_use(peer, conn_id, protocol, active, at);
+            let _ = reply.send(changed);
         }
         PeerOp::RecordKeepaliveSample { peer, rtt, at } => {
             peers.record_keepalive_sample(peer, rtt, at);

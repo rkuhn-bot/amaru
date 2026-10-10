@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, net::SocketAddr, num::NonZeroU8, sync::Arc, tim
 
 use amaru_kernel::{EraHistory, NetworkMagic, Peer, Point};
 use amaru_observability::{Instrument, TraceContext, debug, debug_span, error, info};
-use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, MempoolMsg};
+use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, MempoolMsg, RemoteInitiators};
 use amaru_pure_stage::{DeserializerGuards, Effects, Instant, StageRef, register_data_deserializer};
 
 use crate::{
@@ -777,6 +777,8 @@ async fn record_established(
         full_duplex,
         advertisable,
         local_use: handshake_local_use(direction),
+        remote_initiators: RemoteInitiators::default(),
+        remote_use: LocalUse::None,
         established_at: observed_at(at),
     };
     PeerTrack::new(eff).record_connection_established(conn, at).await;

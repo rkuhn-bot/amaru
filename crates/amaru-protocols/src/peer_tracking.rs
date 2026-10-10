@@ -18,6 +18,7 @@
 //! can assert what an effect wrote, and it returns a scripted share reply.
 
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -26,6 +27,7 @@ use std::{
 use amaru_kernel::Peer;
 use amaru_ouroboros::{
     CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, PeerTracking, PeerTrackingFuture,
+    RemoteInitiators, RemoteProtocol,
 };
 use amaru_pure_stage::Instant;
 
@@ -48,6 +50,7 @@ struct Log {
     uninteresting: Vec<(Peer, ConnectionId, bool, ObservedAt)>,
     queries: Vec<(Peer, u8, ObservedAt)>,
     share_reply: Vec<SocketAddr>,
+    remote: BTreeMap<ConnectionId, (Peer, RemoteInitiators, LocalUse)>,
 }
 
 /// Call recorder. Share replies are whatever [`Self::set_share_reply`] last set (empty by default).
@@ -145,6 +148,30 @@ impl PeerTracking for InMemoryPeerTracking {
 
     fn record_uninteresting(&self, peer: Peer, conn_id: ConnectionId, after_rollback: bool, at: ObservedAt) {
         self.lock().uninteresting.push((peer, conn_id, after_rollback, at));
+    }
+
+    fn record_remote_use(
+        &self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+        at: ObservedAt,
+    ) -> PeerTrackingFuture<Option<LocalUse>> {
+        let _ = at;
+        let changed = {
+            let mut log = self.lock();
+            let entry = log.remote.entry(conn_id).or_insert((peer, RemoteInitiators::default(), LocalUse::None));
+            if entry.0 != peer || !entry.1.set(protocol, active) {
+                None
+            } else {
+                let next = entry.1.derived();
+                let prev = entry.2;
+                entry.2 = next;
+                (prev != next).then_some(next)
+            }
+        };
+        Box::pin(async move { changed })
     }
 
     fn query_share_peers(&self, requester: Peer, amount: u8, now: ObservedAt) -> PeerTrackingFuture<Vec<SocketAddr>> {

@@ -26,6 +26,7 @@ use amaru_kernel::{BlockHeight, HeaderHash, Peer, Point, Slot};
 use amaru_observability::{CborConsoleEventFormat, console_field_formatter, debug, info};
 use amaru_ouroboros::{
     CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, PeerTrackingResource,
+    RemoteInitiators, RemoteProtocol,
 };
 use amaru_pure_stage::{ExternalEffect, Instant, Resources};
 use tracing_subscriber::{EnvFilter, prelude::*};
@@ -1073,6 +1074,8 @@ fn connection_record(peer: Peer, conn_id: ConnectionId, at: ObservedAt, advertis
         full_duplex: false,
         advertisable,
         local_use: LocalUse::None,
+        remote_initiators: RemoteInitiators::default(),
+        remote_use: LocalUse::None,
         established_at: at,
     }
 }
@@ -1419,6 +1422,60 @@ fn lifecycle_writes_bump_generation() {
 
     peers.record_connection_closed(alice, id, CloseReason::BearerEnded, observed(5, 0));
     assert_eq!(peers.generation(), 4, "a close for an unknown bearer is not a write");
+}
+
+#[test]
+fn remote_initiator_bits_derive_temperature_and_move_generation_only_on_change() {
+    let mut peers = PeerPerformance::new();
+    let alice = peer("alice");
+    let bob = peer("bob");
+    let at = observed(1, 0);
+    let (id, other) = conn_ids();
+
+    assert!(peers.record_remote_use(alice, id, RemoteProtocol::ChainSync, true, at).is_none());
+    assert_eq!(peers.generation(), 0);
+
+    peers.record_connection_established(connection_record(alice, id, at, true), at);
+    let established = peers.generation();
+    assert!(peers.record_remote_use(bob, id, RemoteProtocol::KeepAlive, true, at).is_none());
+    assert_eq!(peers.generation(), established);
+
+    assert_eq!(
+        peers.record_remote_use(alice, id, RemoteProtocol::ChainSync, true, observed(2, 0)),
+        Some(LocalUse::Diffusion),
+    );
+    assert_eq!(peers.record_remote_use(alice, id, RemoteProtocol::BlockFetch, true, observed(3, 0)), None,);
+    assert_eq!(peers.record_remote_use(alice, id, RemoteProtocol::TxSubmission, true, observed(4, 0)), None,);
+    let hot = peers.generation();
+    assert_eq!(hot, established + 3);
+
+    assert!(peers.record_remote_use(alice, id, RemoteProtocol::KeepAlive, true, observed(5, 0)).is_none());
+    assert_eq!(peers.generation(), hot + 1);
+    let with_keepalive = peers.generation();
+    assert!(peers.record_remote_use(alice, id, RemoteProtocol::KeepAlive, true, observed(6, 0)).is_none());
+    assert_eq!(peers.generation(), with_keepalive);
+
+    assert_eq!(peers.record_remote_use(alice, id, RemoteProtocol::ChainSync, false, observed(7, 0)), None,);
+    assert_eq!(peers.record_remote_use(alice, id, RemoteProtocol::BlockFetch, false, observed(8, 0)), None,);
+    assert_eq!(
+        peers.record_remote_use(alice, id, RemoteProtocol::TxSubmission, false, observed(9, 0)),
+        Some(LocalUse::Maintenance),
+    );
+    assert_eq!(
+        peers.record_remote_use(alice, id, RemoteProtocol::KeepAlive, false, observed(10, 0)),
+        Some(LocalUse::None),
+    );
+
+    peers.record_remote_use(alice, id, RemoteProtocol::PeerSharing, true, observed(11, 0));
+    let view = peers.query_peer_view(0).expect("writes moved the generation");
+    let conn = view.connections.iter().find(|conn| conn.conn_id == id).expect("bearer");
+    assert_eq!(conn.remote_use, LocalUse::Maintenance);
+    assert!(conn.remote_initiators.peer_sharing);
+    assert!(!conn.remote_initiators.chainsync);
+
+    let generation = peers.generation();
+    assert!(peers.record_remote_use(alice, other, RemoteProtocol::KeepAlive, true, observed(12, 0)).is_none());
+    assert_eq!(peers.generation(), generation);
 }
 
 #[test]

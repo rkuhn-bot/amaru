@@ -485,6 +485,7 @@ async fn register_responders(mut s: Established, params: &Params, eff: &Effects<
     let _ = register_tx_submission(
         Role::Responder,
         *peer,
+        *conn_id,
         s.muxer.clone(),
         eff,
         TxOrigin::Remote(*peer),
@@ -508,7 +509,8 @@ async fn register_responders(mut s: Established, params: &Params, eff: &Effects<
         .await,
     );
     s.blockfetch_responder = Some(
-        register_blockfetch_responder(&s.muxer, *peer, eff, ConnectionMessage::ChildDied(ChildId::Responder)).await,
+        register_blockfetch_responder(&s.muxer, *peer, *conn_id, eff, ConnectionMessage::ChildDied(ChildId::Responder))
+            .await,
     );
     if s.version_data.is_advertisable() {
         let own_address = own_share_address(params, eff).await;
@@ -516,6 +518,7 @@ async fn register_responders(mut s: Established, params: &Params, eff: &Effects<
             register_peer_sharing_responder(
                 &s.muxer,
                 *peer,
+                *conn_id,
                 own_address,
                 eff,
                 ConnectionMessage::ChildDied(ChildId::Responder),
@@ -733,6 +736,7 @@ async fn start_initiators(mut s: Established, params: &Params, eff: &Effects<Con
             s.tx_submission_initiator = register_tx_submission(
                 Role::Initiator,
                 *peer,
+                *conn_id,
                 s.muxer.clone(),
                 eff,
                 TxOrigin::Remote(*peer),

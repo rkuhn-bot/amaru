@@ -2176,6 +2176,12 @@ define_schemas! {
                         required full_duplex_capable: bool
                         required full_duplex: bool
                     }
+                    /// The derived remote temperature of a bearer changed.
+                    public REMOTE_USE {
+                        required peer: %amaru_kernel::Peer
+                        required conn_id: u64
+                        required remote_use: String
+                    }
                     /// A connection has been terminated (graceful disconnect, error, handshake refusal,
                     /// or network error).
                     public DISCONNECTED {
