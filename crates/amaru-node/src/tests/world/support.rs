@@ -210,7 +210,7 @@ pub(super) fn tm_share_reply(
             let Some(Effect::External { effect, .. }) = src.suspend() else {
                 return false;
             };
-            effect.cast_ref::<RecordSharedPeersEffect>().is_some_and(|typed| pred(typed))
+            effect.cast_ref::<RecordSharedPeersEffect>().is_some_and(&pred)
         }),
         format!("share reply ({label})"),
     )
