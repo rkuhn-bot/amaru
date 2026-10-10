@@ -689,7 +689,7 @@ impl TxSubmissionResponder {
         match proto {
             State::TxIdsNonBlocking => Some(ResponderAction::Error(TxIdsTimeout)),
             State::Txs if self.has_inflight() => Some(ResponderAction::Error(TxFetchTimeout)),
-            _ => None,
+            State::Init | State::Idle | State::Done | State::Txs | State::TxIdsBlocking => None,
         }
     }
 
