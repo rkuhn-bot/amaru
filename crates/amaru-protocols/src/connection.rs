@@ -735,7 +735,7 @@ mod tests {
     use amaru_kernel::PREPROD_ERA_HISTORY;
     use amaru_pure_stage::{
         Effect, StageGraph,
-        simulation::{Run, SimulationBuilder},
+        simulation::{Blocked, Run, SimulationBuilder},
     };
     use tokio::runtime::Runtime;
 
@@ -898,7 +898,10 @@ mod tests {
         network.preload(&connection, [ConnectionMessage::SetLocalUse(desired)]).unwrap();
         let rt = Runtime::new().unwrap();
         let mut running = network.run(rt.handle());
-        running.run(Run::default()).assert_sleeping();
+        match running.run(Run::default()) {
+            Blocked::Idle | Blocked::Sleeping { .. } => {}
+            blocked => panic!("promotion did not settle: {blocked:?}"),
+        }
         let state = running.get_state(&connection).expect("connection still running").state.clone();
         let State::Established(established) = state else {
             panic!("connection left the established state");
