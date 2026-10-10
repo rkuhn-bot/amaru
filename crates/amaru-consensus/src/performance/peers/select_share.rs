@@ -28,8 +28,7 @@ use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 
 use super::PeerPerformance;
 
-/// Upper bound on peers returned in one share response.
-pub const SHARE_POLICY_MAX: u8 = 10;
+pub use amaru_protocols::peer_sharing::SHARE_POLICY_MAX;
 
 /// One pool member copied off the worker for a share reply.
 ///
