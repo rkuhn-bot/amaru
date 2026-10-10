@@ -1233,6 +1233,9 @@ fn shared_peers_and_share_requests_are_recorded() {
     peers.record_shared_peers(&donor, &[addr], at);
     assert!(peers.shared_contains(&other));
     assert_eq!(peers.last_shared_at(&donor), Some(at));
+    assert!(peers.query_share_peers(&asker, 1, at).is_empty(), "a learned address with no row is not shared");
+    let (id, _) = conn_ids();
+    peers.record_connection_established(connection_record(other, id, at, true), at);
     assert_eq!(peers.query_share_peers(&asker, 1, at), vec![addr]);
     assert!(peers.query_share_peers(&asker, 0, at).is_empty());
 
@@ -1249,6 +1252,39 @@ fn shared_peers_and_share_requests_are_recorded() {
             previous_window: 0,
         })
     );
+}
+
+#[test]
+fn share_reply_omits_a_listen_address_a_missing_row_and_an_adversarial_peer() {
+    use std::collections::BTreeSet;
+
+    use amaru_kernel::PeerCandidate;
+
+    use super::PeerMix;
+
+    let requester = Peer::for_test(6100);
+    let listen = Peer::for_test(9703);
+    let other = Peer::for_test(6102);
+    let adversary = Peer::for_test(6103);
+    let ghost = Peer::for_test(6104);
+    let static_peers =
+        BTreeSet::from([PeerCandidate::from(other), PeerCandidate::from(adversary), PeerCandidate::from(listen)]);
+    let mix = PeerMix::parse("static~3@1s").expect("mix");
+    let mut peers = PeerPerformance::with_sources(static_peers, BTreeSet::new(), BTreeSet::new(), mix);
+    let at = observed(1, 0);
+    let mut ids = ConnectionId::initial();
+    for peer in [other, adversary, listen] {
+        peers.record_connection_established(connection_record(peer, ids.get_and_increment(), at, true), at);
+    }
+    peers.record_shared_peers(&requester, &[SocketAddr::from(listen)], at);
+    peers.record_shared_peers(&other, &[SocketAddr::from(ghost)], at);
+    peers.mark_adversarial(&adversary, t(1));
+
+    let reply = peers.select_share_peers(&requester, 10, t(4_000));
+    assert_eq!(reply, vec![SocketAddr::from(other)]);
+    assert!(!reply.contains(&SocketAddr::from(listen)));
+    assert!(!reply.contains(&SocketAddr::from(ghost)));
+    assert!(!reply.contains(&SocketAddr::from(adversary)));
 }
 
 #[test]
@@ -1336,9 +1372,11 @@ fn observations_do_not_change_fetch_or_share_replies() {
     let asker = Peer::for_test(4003);
     let at = observed(2, 0);
     peers.record_shared_peers(&donor, &[SocketAddr::from(other), SocketAddr::from(donor)], at);
+    let (id, _) = conn_ids();
+    peers.record_connection_established(connection_record(other, id, at, true), at);
     let now = t(2);
     let reply_before = peers.select_share_peers(&asker, 10, now);
-    assert!(!reply_before.is_empty());
+    assert_eq!(reply_before, vec![SocketAddr::from(other)]);
     for step in 0..5 {
         let when =
             ObservedAt::new(at.elapsed + SHARE_REQUEST_WINDOW.saturating_mul(step as u32), at.global_epoch_offset);
@@ -1620,6 +1658,13 @@ fn a_remote_share_request_keeps_the_same_addresses() {
     let mut direct =
         PeerPerformance::with_sources(static_peers.clone(), BTreeSet::new(), ledger_candidates.clone(), mix.clone());
     direct.record_connect_failed(failed, at);
+    let mut ids = ConnectionId::initial();
+    for port in 5001..=5011 {
+        direct.record_connection_established(
+            connection_record(Peer::for_test(port), ids.get_and_increment(), at, true),
+            at,
+        );
+    }
     let before = direct.select_share_peers(&requester, 20, now);
 
     let resources = Resources::default();
@@ -1627,6 +1672,13 @@ fn a_remote_share_request_keeps_the_same_addresses() {
         Performance::with_peer_sources(static_peers, BTreeSet::new(), ledger_candidates, mix).install(&resources);
     let tracking = resources.get::<PeerTrackingResource>().expect("peer tracking").clone();
     tracking.record_connect_failed(failed, at);
+    let mut ids = ConnectionId::initial();
+    for port in 5001..=5011 {
+        tracking.record_connection_established(
+            connection_record(Peer::for_test(port), ids.get_and_increment(), at, true),
+            at,
+        );
+    }
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
     let after = rt.block_on(tracking.query_share_peers(requester, 20, at));
     let again = rt.block_on(tracking.query_share_peers(requester, 20, at));

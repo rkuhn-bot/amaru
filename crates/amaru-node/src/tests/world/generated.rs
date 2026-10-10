@@ -25,7 +25,7 @@ use std::{cmp::Ordering, env::var, net::SocketAddr, num::NonZeroU8, sync::Arc, t
 
 use amaru_consensus::{
     effects::{GenerateRandomSeed, ValidateBlockEffect, ValidateHeaderEffect},
-    stages::select_chain::cmp_tip,
+    stages::{peer_selection::PeerSelectionMsg, select_chain::cmp_tip},
 };
 use amaru_kernel::{
     BlockHeight, Hash, Header, IsHeader, NetworkPoint, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer, Point,
@@ -42,7 +42,7 @@ use amaru_protocols::{
     store_effects::{ResourceHeaderStore, ResourceParameters},
 };
 use amaru_pure_stage::{
-    assert_trace_contains, assert_trace_does_not_contain,
+    Name, StageRef, assert_trace_contains, assert_trace_does_not_contain,
     simulation::{SimulationRunning, running::OverrideResult},
     trace_buffer::TraceBuffer,
 };
@@ -796,24 +796,31 @@ async fn test_injector_reveal_gates_chainsync() {
 /// Listen addresses advertised in a share reply, plus one address nobody binds.
 ///
 /// Eleven injectors and leaf A are upstream of the hub, so a reply has more eligible peers than
-/// [`SHARE_POLICY_MAX`]. Leaf B dials the hub. The dark port is configured and never accepts.
+/// [`SHARE_POLICY_MAX`]. Leaf C dials the hub. The dark port is configured and never accepts.
 const SHARE_INJECTORS: usize = 11;
 const SHARE_DARK_PORT: u16 = 9700;
 const SHARE_HUB_PORT: u16 = 9701;
 const SHARE_LEAF_A_PORT: u16 = 9702;
 const SHARE_LEAF_B_PORT: u16 = 9703;
+const SHARE_LEAF_C_PORT: u16 = 9704;
+const SHARE_SMALL_PORT: u16 = 9705;
+const SHARE_DONOR_PORT: u16 = 9706;
+const SHARE_GHOST_PORT: u16 = 9707;
+const SHARE_ADVERSARY_PORT: u16 = 9708;
 const SHARE_INJECTOR_PORT: u16 = 9710;
-/// Leaf B answers the hub before its own request, so that reply is drawn from the one peer it dialed.
+/// Leaf B and leaf C answer before their own requests, so those replies name only themselves.
 const SHARE_LEAF_B_INITIAL_DELAY: Duration = Duration::from_secs(360);
-/// Production initial delay is 300s. The horizon covers leaf B's later request and not the 900s repeat.
+/// Handshake is done. The adversarial mark is applied here, before the 300s share requests.
+const SHARE_MARK_NANOS: u64 = 60_000_000_000;
+/// Production initial delay is 300s. The horizon covers the 360s requests and not the 900s repeat.
 const SHARE_HORIZON_NANOS: u64 = 380_000_000_000;
 
 /// Share replies name listen addresses taken from the trace.
 ///
-/// The hub's outbound bearer (leaf A asked) and inbound bearer (leaf B asked) both advertise
-/// `hub_ip:listen_port`. Leaf A is the inbound bearer on that node; leaf B is the outbound bearer.
-/// Replies stay within the requested amount and [`SHARE_POLICY_MAX`], omit the requester, the dark
-/// port, ephemeral source ports, and unspecified addresses.
+/// The hub's outbound bearer (leaf A asked) and inbound bearer (leaf C asked) both advertise
+/// `hub_ip:listen_port`. A smaller node answers leaf B. That reply is drawn from a pool small
+/// enough that a ghost address, an adversarial peer, or leaf B's listen address would be present
+/// if the corresponding filter were absent.
 #[test]
 fn test_peer_share_reply_addresses() {
     let run = SyncRun::new("peer_share_replies");
@@ -821,6 +828,11 @@ fn test_peer_share_reply_addresses() {
     let hub_addr = loopback(SHARE_HUB_PORT);
     let leaf_a_addr = loopback(SHARE_LEAF_A_PORT);
     let leaf_b_addr = loopback(SHARE_LEAF_B_PORT);
+    let leaf_c_addr = loopback(SHARE_LEAF_C_PORT);
+    let small_addr = loopback(SHARE_SMALL_PORT);
+    let donor_addr = loopback(SHARE_DONOR_PORT);
+    let ghost_addr = loopback(SHARE_GHOST_PORT);
+    let adversary_addr = loopback(SHARE_ADVERSARY_PORT);
     let injector_addrs: Vec<SocketAddr> =
         (0..SHARE_INJECTORS).map(|i| loopback(SHARE_INJECTOR_PORT + i as u16)).collect();
     let (store, headers) = injector_linear_store(1, run.seed);
@@ -834,6 +846,10 @@ fn test_peer_share_reply_addresses() {
         }
         graphs.push(sim);
     }
+    let (ghost, _) = run.spawn_injector(store.clone(), ghost_addr);
+    graphs.push(ghost);
+    let (adversary, _) = run.spawn_injector(store.clone(), adversary_addr);
+    graphs.push(adversary);
 
     let mut upstream: Vec<Peer> = injector_addrs.iter().copied().map(peer_at).collect();
     upstream.push(peer_at(leaf_a_addr));
@@ -855,9 +871,37 @@ fn test_peer_share_reply_addresses() {
             .with_trace_buffer(trace()),
         &headers[0],
     );
-    let leaf_b = with_ancestor(
-        generated_node(run.seed, 2, leaf_b_addr)
+    let leaf_c = with_ancestor(
+        generated_node(run.seed, 2, leaf_c_addr)
             .with_upstream_peer(peer_at(hub_addr))
+            .with_target_upstream_peers(1)
+            .with_peer_mix("static~1")
+            .with_share_request_initial_delay(SHARE_LEAF_B_INITIAL_DELAY)
+            .with_trace_buffer(trace()),
+        &headers[0],
+    );
+    let donor = with_ancestor(
+        generated_node(run.seed, 3, donor_addr)
+            .with_upstream_peer(peer_at(ghost_addr))
+            .with_target_upstream_peers(1)
+            .with_peer_mix("static~1")
+            .with_trace_buffer(trace()),
+        &headers[0],
+    );
+    // Static half-life is 1s so the adversarial malus has decayed before the share reply.
+    // Shared peers are not in the mix, so the ghost address is learned and never dialed.
+    // One inbound slot lets this node ask leaf B and learn leaf B's listen address.
+    let small = with_ancestor(
+        generated_node(run.seed, 4, small_addr)
+            .with_upstream_peers(vec![peer_at(donor_addr), peer_at(adversary_addr), peer_at(leaf_b_addr)])
+            .with_target_upstream_peers(4)
+            .with_peer_mix("inbound!1, static~3@1s")
+            .with_trace_buffer(trace()),
+        &headers[0],
+    );
+    let leaf_b = with_ancestor(
+        generated_node(run.seed, 5, leaf_b_addr)
+            .with_upstream_peer(peer_at(small_addr))
             .with_target_upstream_peers(1)
             .with_peer_mix("static~1")
             .with_share_request_initial_delay(SHARE_LEAF_B_INITIAL_DELAY)
@@ -868,14 +912,24 @@ fn test_peer_share_reply_addresses() {
     graphs.push(run.spawn_catch_up(0, hub));
     let leaf_a_index = graphs.len();
     graphs.push(run.spawn_catch_up(1, leaf_a));
+    let leaf_c_index = graphs.len();
+    graphs.push(run.spawn_catch_up(2, leaf_c));
+    graphs.push(run.spawn_catch_up(3, donor));
+    let small_index = graphs.len();
+    graphs.push(run.spawn_catch_up(4, small));
     let leaf_b_index = graphs.len();
-    graphs.push(run.spawn_catch_up(2, leaf_b));
+    graphs.push(run.spawn_catch_up(5, leaf_b));
 
     let mut world = WorldLoop::new(run.provider.clone(), graphs).with_injector(0, injector_shared.expect("injector"));
     world.schedule_reveals(headers.iter().map(IsHeader::hash));
+    world.run_until_horizon(SHARE_MARK_NANOS);
+    let selection = Name::from("peer_selection-2");
+    assert!(world.graph(small_index).contains_stage(&selection), "small node has peer_selection-2");
+    let stage: StageRef<PeerSelectionMsg> = StageRef::named_for_tests("peer_selection-2");
+    world.enqueue(small_index, &stage, [PeerSelectionMsg::adversarial(peer_at(adversary_addr))]);
     world.run_until_horizon(SHARE_HORIZON_NANOS);
 
-    let mut allowed = vec![hub_addr, leaf_a_addr, leaf_b_addr];
+    let mut allowed = vec![hub_addr, leaf_a_addr, leaf_b_addr, leaf_c_addr, small_addr, donor_addr];
     allowed.extend(injector_addrs.iter().copied());
     let outbound_ports = {
         let mut ports = vec![hub_addr];
@@ -885,12 +939,12 @@ fn test_peer_share_reply_addresses() {
     let inbound_ports = {
         let mut ports = outbound_ports.clone();
         ports.push(leaf_a_addr);
-        // The hub may have learned leaf B's listen address from leaf B's own reply.
-        ports.push(leaf_b_addr);
+        // The hub may have learned leaf C's listen address from leaf C's own reply.
+        ports.push(leaf_c_addr);
         ports
     };
 
-    for index in [hub_index, leaf_a_index, leaf_b_index] {
+    for index in [hub_index, leaf_a_index, leaf_c_index, leaf_b_index] {
         let allowed = allowed.clone();
         assert_trace_does_not_contain(
             world.graph(index),
@@ -899,6 +953,10 @@ fn test_peer_share_reply_addresses() {
             })],
         );
     }
+    assert_trace_does_not_contain(
+        world.graph(leaf_b_index),
+        &[tm_share_reply("leaf B listen address echoed to leaf B", move |effect| effect.addrs.contains(&leaf_b_addr))],
+    );
     assert!(
         peer_trace(&world, hub_index).iter().any(|entry| {
             tm_share_reply("leaf A inbound bearer", move |effect| effect.addrs == vec![leaf_a_addr]) == *entry
@@ -908,9 +966,9 @@ fn test_peer_share_reply_addresses() {
     );
     assert!(
         peer_trace(&world, hub_index).iter().any(|entry| {
-            tm_share_reply("leaf B outbound bearer", move |effect| effect.addrs == vec![leaf_b_addr]) == *entry
+            tm_share_reply("leaf C outbound bearer", move |effect| effect.addrs == vec![leaf_c_addr]) == *entry
         }),
-        "hub must record leaf B's listen address and not itself; seed={:#x}",
+        "hub must record leaf C's listen address and not itself; seed={:#x}",
         run.seed
     );
     for injector in &injector_addrs {
@@ -931,7 +989,7 @@ fn test_peer_share_reply_addresses() {
         })],
     );
     assert!(
-        peer_trace(&world, leaf_b_index).iter().any(|entry| {
+        peer_trace(&world, leaf_c_index).iter().any(|entry| {
             let ports = inbound_ports.clone();
             tm_share_reply("hub inbound bearer", move |effect| {
                 SocketAddr::from(effect.from) == hub_addr
@@ -940,7 +998,23 @@ fn test_peer_share_reply_addresses() {
                     && effect.addrs.iter().all(|addr| ports.contains(addr) && !addr.ip().is_unspecified())
             }) == *entry
         }),
-        "leaf B must record the hub listen address from the inbound bearer; seed={:#x}",
+        "leaf C must record the hub listen address from the inbound bearer; seed={:#x}",
+        run.seed
+    );
+    assert!(
+        peer_trace(&world, leaf_b_index).iter().any(|entry| {
+            tm_share_reply("small inbound bearer", move |effect| {
+                SocketAddr::from(effect.from) == small_addr
+                    && effect.addrs.contains(&small_addr)
+                    && effect.addrs.contains(&donor_addr)
+                    && !effect.addrs.contains(&leaf_b_addr)
+                    && !effect.addrs.contains(&ghost_addr)
+                    && !effect.addrs.contains(&adversary_addr)
+                    && effect.addrs.len() <= usize::from(SHARE_POLICY_MAX)
+                    && effect.addrs.iter().all(|addr| !addr.ip().is_unspecified())
+            }) == *entry
+        }),
+        "leaf B must record the small node's listen address and not itself, the ghost, or the adversary; seed={:#x}",
         run.seed
     );
     world.stop();

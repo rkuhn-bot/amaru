@@ -148,6 +148,17 @@ impl WorldLoop {
         &self.graphs[index]
     }
 
+    /// Put `msgs` on a stage mailbox and wake that graph if it can run now.
+    pub fn enqueue<Msg: SendData>(
+        &mut self,
+        graph: usize,
+        stage: &amaru_pure_stage::StageRef<Msg>,
+        msgs: impl IntoIterator<Item = Msg>,
+    ) {
+        self.graphs[graph].enqueue_msg(stage, msgs);
+        self.schedule_graph_if_needed(graph);
+    }
+
     /// Borrow the node graphs owned by this world.
     pub fn graphs(&self) -> &[SimulationRunning] {
         &self.graphs

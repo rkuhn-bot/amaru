@@ -74,7 +74,7 @@
 //! | `source_counts` | peer selection | peer selection | C8 | on demand |
 //! | `evict_records` | peer selection | retention | C8 | recorded immediately, every five minutes; pops the dead sets only; does not bump generation |
 //! | `select_share_peers` | same sample as `query_share_peers` | peer-sharing reply | C9 | worker copies candidates; caller samples |
-//! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates; caller samples |
+//! | `query_share_peers` | peer-sharing responder | peer-sharing reply | C9 | worker copies candidates for this requester; a peer with no row, or a listen address that requester advertised, is omitted; caller samples |
 //! | `record_shared_peers` | peer-sharing initiator | outbound pools | C9 | awaited; the initiator logs the ingest; newcomers past the learned-address cap are dropped; new candidates bump generation |
 //! | `record_share_request_served` | peer-sharing responder | `share_requests` | C9 | recorded immediately; count, last answer, current and previous window; a new row is dropped at the record cap; not enforced |
 //! | `ingest_shared_peers` | `record_shared_peers` | outbound pools | C9 | drops newcomers at the learned-address cap; a repeat does not refresh the learned instant |
