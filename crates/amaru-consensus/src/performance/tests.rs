@@ -1416,7 +1416,7 @@ fn install_shares_one_worker_and_a_later_query_sees_the_write() {
 
     let alice = peer("alice");
     let at = observed(4, 1);
-    let (id, _) = conn_ids();
+    let (id, other_id) = conn_ids();
     tracking.record_connection_established(connection_record(alice, id, at, true), at);
 
     let donor = Peer::for_test(4101);
@@ -1424,6 +1424,8 @@ fn install_shares_one_worker_and_a_later_query_sees_the_write() {
     let asker = Peer::for_test(4103);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
     rt.block_on(tracking.record_shared_peers(donor, vec![SocketAddr::from(other)], at));
+    // A learned address is shared only after it has connected. Both writes have to be visible.
+    tracking.record_connection_established(connection_record(other, other_id, at, true), at);
     let flags_response = rt.block_on(Box::new(Performance::share_flags(alice)).run(resources));
     let flags = *flags_response.cast::<Option<PeerShareFlags>>().expect("share flags");
     assert_eq!(
