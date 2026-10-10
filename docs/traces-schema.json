@@ -8099,6 +8099,32 @@
       "description": "A connection has been terminated (graceful disconnect, error, handshake refusal, or network error).",
       "public": true
     },
+    "amaru::protocols::peer_selection::peer::REMOTE_USE": {
+      "type": "object",
+      "properties": {
+        "peer": {
+          "type": "string"
+        },
+        "conn_id": {
+          "type": "integer"
+        },
+        "remote_use": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "peer",
+        "conn_id",
+        "remote_use"
+      ],
+      "optional": [],
+      "additionalProperties": false,
+      "name": "remote_use",
+      "level": "TRACE",
+      "target": "amaru::protocols::peer_selection::peer",
+      "description": "The derived remote temperature of a bearer changed.",
+      "public": true
+    },
     "amaru::protocols::peer_selection::peer::REMOVED": {
       "type": "object",
       "properties": {

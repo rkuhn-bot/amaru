@@ -17,6 +17,7 @@ use std::sync::Arc;
 use amaru_kernel::{NetworkMagic, PREPROD_ERA_HISTORY, Peer};
 use amaru_ouroboros::{
     CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, PeerTrackingResource,
+    RemoteInitiators,
 };
 use amaru_pure_stage::{
     Effect, StageGraph, StageRef,
@@ -111,6 +112,8 @@ fn record_for(
         full_duplex: false,
         advertisable,
         local_use,
+        remote_initiators: RemoteInitiators::default(),
+        remote_use: LocalUse::None,
         established_at: at,
     }
 }

@@ -23,7 +23,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use amaru_kernel::Peer;
 use amaru_ouroboros::{
     CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, PeerTracking, PeerTrackingFuture,
-    PeerTrackingResource,
+    PeerTrackingResource, RemoteProtocol,
 };
 use amaru_pure_stage::Resources;
 use tokio::sync::oneshot;
@@ -62,6 +62,23 @@ impl PeerTracking for Performance {
 
     fn record_local_use_applied(&self, peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt) {
         self.submit(PerformanceOp::Peer(PeerOp::RecordLocalUseApplied { peer, conn_id, local_use, at }));
+    }
+
+    fn record_remote_use(
+        &self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+        at: ObservedAt,
+    ) -> PeerTrackingFuture<Option<LocalUse>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let (reply, rx) = oneshot::channel();
+            this.submit(PerformanceOp::Peer(PeerOp::RecordRemoteUse { peer, conn_id, protocol, active, at, reply }));
+            #[expect(clippy::expect_used)]
+            rx.await.expect("performance worker dropped remote-use record")
+        })
     }
 
     fn record_keepalive_rtt(&self, peer: Peer, rtt: Duration, at: ObservedAt) {

@@ -19,7 +19,9 @@ use std::{
 
 use amaru_kernel::PeerCandidate;
 use amaru_observability::tracing::Level;
-use amaru_ouroboros::{CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking};
+use amaru_ouroboros::{
+    CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, ObservedAt, PeerTracking, RemoteInitiators,
+};
 use amaru_protocols::{connection::LocalUse, manager::ManagerMessage};
 use amaru_pure_stage::{Effect, simulation::SimulationRunning, trace_buffer::TraceEntry};
 
@@ -49,6 +51,8 @@ fn view_conn(peer: Peer, conn_id: ConnectionId, direction: ConnectionDirection, 
         full_duplex: direction == ConnectionDirection::Inbound,
         advertisable: false,
         local_use,
+        remote_initiators: RemoteInitiators::default(),
+        remote_use: LocalUse::None,
     }
 }
 
@@ -158,6 +162,8 @@ fn connect_and_close_between_ticks_resolves_on_the_next_round() {
             full_duplex: false,
             advertisable: false,
             local_use: LocalUse::None,
+            remote_initiators: RemoteInitiators::default(),
+            remote_use: LocalUse::None,
             established_at: at,
         },
         at,

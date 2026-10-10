@@ -19,12 +19,14 @@
 //! outbound attempt, and applied local use. The peer-sharing responder queries a reply and
 //! records that it served the request. The initiator records addresses learned from a reply.
 //! track_peers records an intersection miss. The keep-alive initiator records each matching
-//! round trip. The peer-sharing responder records each inbound request it answers.
+//! round trip. The peer-sharing responder records each inbound request it answers. The five
+//! responders record which remote initiator protocols are open on the bearer.
 
 use std::{net::SocketAddr, time::Duration};
 
 use amaru_kernel::Peer;
-use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, PeerTrackingResource};
+use amaru_observability::info;
+use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, PeerTrackingResource, RemoteProtocol};
 use amaru_pure_stage::{BoxFuture, DeserializerGuards, Effects, ExternalEffectAPI, Instant, Resources, SendData};
 
 use crate::peer_tracking::observed_at;
@@ -35,6 +37,8 @@ pub fn register_deserializers() -> DeserializerGuards {
         amaru_pure_stage::register_data_deserializer::<RecordConnectionClosedEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordConnectFailedEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordLocalUseAppliedEffect>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<RecordRemoteUseEffect>().boxed(),
+        amaru_pure_stage::register_data_deserializer::<Option<LocalUse>>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordKeepaliveRttEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<RecordSharedPeersEffect>().boxed(),
         amaru_pure_stage::register_data_deserializer::<amaru_ouroboros::SharedPeersRecorded>().boxed(),
@@ -86,6 +90,38 @@ impl<T> PeerTrack<'_, T> {
         at: Instant,
     ) -> BoxFuture<'static, ()> {
         self.0.external(RecordLocalUseAppliedEffect { peer, conn_id, local_use, at })
+    }
+
+    pub fn record_remote_use(
+        &self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+        at: Instant,
+    ) -> BoxFuture<'static, Option<LocalUse>> {
+        self.0.external(RecordRemoteUseEffect { peer, conn_id, protocol, active, at })
+    }
+
+    /// Record one remote-initiator bit and emit [`protocols::peer_selection::peer::REMOTE_USE`]
+    /// when the derived temperature changes.
+    pub async fn note_remote_protocol(
+        &self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+    ) {
+        let at = self.0.clock().await;
+        let Some(remote_use) = self.record_remote_use(peer, conn_id, protocol, active, at).await else {
+            return;
+        };
+        info!(
+            protocols::peer_selection::peer::REMOTE_USE,
+            peer,
+            conn_id = conn_id.as_u64(),
+            remote_use = remote_use.as_str(),
+        );
     }
 
     pub fn record_keepalive_rtt(&self, peer: Peer, rtt: Duration, at: Instant) -> BoxFuture<'static, ()> {
@@ -193,6 +229,26 @@ impl ExternalEffectAPI for RecordLocalUseAppliedEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RecordRemoteUseEffect {
+    pub peer: Peer,
+    pub conn_id: ConnectionId,
+    pub protocol: RemoteProtocol,
+    pub active: bool,
+    pub at: Instant,
+}
+
+impl ExternalEffectAPI for RecordRemoteUseEffect {
+    type Response = Option<LocalUse>;
+
+    fn run(self: Box<Self>, resources: Resources) -> BoxFuture<'static, Box<dyn SendData>> {
+        let tracking = require_tracking(&resources);
+        self.wrap(move |this| async move {
+            tracking.record_remote_use(this.peer, this.conn_id, this.protocol, this.active, observed_at(this.at)).await
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordKeepaliveRttEffect {
     pub peer: Peer,
     pub rtt: Duration,
@@ -290,6 +346,7 @@ mod tests {
     use amaru_kernel::Peer;
     use amaru_ouroboros::{
         CloseReason, ConnectionDirection, ConnectionId, ConnectionRecord, LocalUse, PeerTrackingResource,
+        RemoteInitiators,
     };
     use amaru_pure_stage::{ExternalEffect, Instant, Resources};
 
@@ -327,6 +384,8 @@ mod tests {
             full_duplex: true,
             advertisable: true,
             local_use: LocalUse::Maintenance,
+            remote_initiators: RemoteInitiators::default(),
+            remote_use: LocalUse::None,
             established_at: seen,
         };
         let addr = SocketAddr::from(Peer::for_test(3203));

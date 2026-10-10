@@ -21,7 +21,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use amaru_kernel::Peer;
-use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt};
+use amaru_ouroboros::{CloseReason, ConnectionId, ConnectionRecord, LocalUse, ObservedAt, RemoteProtocol};
 use amaru_pure_stage::Instant;
 
 use super::{PEER_RECORD_CAP, PeerPerformance};
@@ -137,6 +137,30 @@ impl PeerPerformance {
         live.use_applied_at = Some(at);
         self.touch(peer, instant_of(at));
         self.bump_generation();
+    }
+
+    /// Returns the new derived temperature when it changed.
+    pub fn record_remote_use(
+        &mut self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+        at: ObservedAt,
+    ) -> Option<LocalUse> {
+        let live = self.connections.get_mut(&conn_id)?;
+        if live.record.peer != peer {
+            return None;
+        }
+        if !live.record.remote_initiators.set(protocol, active) {
+            return None;
+        }
+        let next = live.record.remote_initiators.derived();
+        let prev = live.record.remote_use;
+        live.record.remote_use = next;
+        self.touch(peer, instant_of(at));
+        self.bump_generation();
+        (prev != next).then_some(next)
     }
 
     pub fn record_keepalive_sample(&mut self, peer: Peer, rtt: Duration, at: ObservedAt) {

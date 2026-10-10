@@ -3101,6 +3101,7 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | `connected` | `TRACE` | public | A connection has been established and the handshake completed successfully. | peer, conn_id, direction, full_duplex_capable, full_duplex |  |
 | `demoted` | `TRACE` | public | Local use dropped to Maintenance. Reason ∈ {churn, uninteresting}. | peer, conn_id, reason |  |
 | `disconnected` | `TRACE` | public | A connection has been terminated (graceful disconnect, error, handshake refusal, or network error). | peer, conn_id, direction | reason |
+| `remote_use` | `TRACE` | public | The derived remote temperature of a bearer changed. | peer, conn_id, remote_use |  |
 | `removed` | `TRACE` | public | A peer was removed after behaving adversarially | peer, direction, peer_state, is_static |  |
 | `resolve_failed` | `TRACE` | public | Name resolution for a bootstrap candidate failed (no viable address). | candidate, reason |  |
 | `resolved` | `TRACE` | public | A selected bootstrap name resolved to a single peer, ready to dial. | candidate, origin, peer |  |
@@ -3162,6 +3163,16 @@ For information on how to use and filter these spans, see [monitoring/README.md]
 | `conn_id` | `integer` | ✓ |
 | `direction` | `string` | ✓ |
 | `reason` | `string` |  |
+
+</details>
+
+<details><summary>span: `remote_use`</summary>
+
+| field | type | required |
+| --- | --- | --- |
+| `peer` | `string` | ✓ |
+| `conn_id` | `integer` | ✓ |
+| `remote_use` | `string` | ✓ |
 
 </details>
 

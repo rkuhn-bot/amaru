@@ -61,6 +61,7 @@
 //! | `record_connection_closed` | manager | peer selection | C8 | recorded immediately |
 //! | `record_connect_failed` | manager | malus, sharing filters | C8 | recorded immediately |
 //! | `record_local_use_applied` | manager | peer selection | C8 | recorded immediately |
+//! | `record_remote_use` | keep-alive, peer-sharing, chain-sync, block-fetch, and tx-submission responders | peer selection | C8 | awaited; generation moves only when the bit changes; the span fires only when the derived temperature changes |
 //! | `record_advertisability` | manager (inside established) and peer selection | sharing filters | C8 | recorded immediately |
 //! | `record_connection_failure` | manager (inside connect-failed) | malus, sharing filters | C8 | recorded immediately |
 //! | `clear_peer_availability` | peer selection, track_peers | fetch selection | C8 | recorded immediately |

@@ -63,6 +63,60 @@ impl LocalUse {
     }
 }
 
+/// One remote initiator protocol observed on a bearer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemoteProtocol {
+    KeepAlive,
+    PeerSharing,
+    ChainSync,
+    BlockFetch,
+    TxSubmission,
+}
+
+/// Which remote initiator protocols are currently open on a bearer.
+///
+/// A bit is set by the first message of that protocol and cleared by `MsgDone` or
+/// `ClientDone`. [`RemoteInitiators::derived`] is the temperature those bits imply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct RemoteInitiators {
+    pub keepalive: bool,
+    pub peer_sharing: bool,
+    pub chainsync: bool,
+    pub block_fetch: bool,
+    pub tx_submission: bool,
+}
+
+impl RemoteInitiators {
+    /// Diffusion if any hot protocol is open, otherwise maintenance if keep-alive or
+    /// peer-sharing is open, otherwise none.
+    pub fn derived(self) -> LocalUse {
+        if self.chainsync || self.block_fetch || self.tx_submission {
+            LocalUse::Diffusion
+        } else if self.keepalive || self.peer_sharing {
+            LocalUse::Maintenance
+        } else {
+            LocalUse::None
+        }
+    }
+
+    /// Set or clear one bit. Returns whether the bit changed.
+    pub fn set(&mut self, protocol: RemoteProtocol, active: bool) -> bool {
+        let slot = match protocol {
+            RemoteProtocol::KeepAlive => &mut self.keepalive,
+            RemoteProtocol::PeerSharing => &mut self.peer_sharing,
+            RemoteProtocol::ChainSync => &mut self.chainsync,
+            RemoteProtocol::BlockFetch => &mut self.block_fetch,
+            RemoteProtocol::TxSubmission => &mut self.tx_submission,
+        };
+        if *slot == active {
+            false
+        } else {
+            *slot = active;
+            true
+        }
+    }
+}
+
 /// Why a live bearer ended.
 ///
 /// A failed dial is [`PeerTracking::record_connect_failed`], not a close.
@@ -86,6 +140,10 @@ pub struct ConnectionRecord {
     pub full_duplex: bool,
     pub advertisable: bool,
     pub local_use: LocalUse,
+    pub remote_initiators: RemoteInitiators,
+    /// [`RemoteInitiators::derived`] of `remote_initiators`. Stored so a reader does not
+    /// reimplement the rule.
+    pub remote_use: LocalUse,
     pub established_at: ObservedAt,
 }
 
@@ -119,6 +177,20 @@ pub trait PeerTracking: Send + Sync + 'static {
 
     /// The connection task applied `local_use` on an established bearer.
     fn record_local_use_applied(&self, peer: Peer, conn_id: ConnectionId, local_use: LocalUse, at: ObservedAt);
+
+    /// Set or clear one remote-initiator bit on an established bearer.
+    ///
+    /// `Some(remote_use)` when the derived temperature changed. `None` when the bit was
+    /// already in that state, the bearer is unknown, or the temperature stayed the same.
+    /// The generation moves only when the bit changes.
+    fn record_remote_use(
+        &self,
+        peer: Peer,
+        conn_id: ConnectionId,
+        protocol: RemoteProtocol,
+        active: bool,
+        at: ObservedAt,
+    ) -> PeerTrackingFuture<Option<LocalUse>>;
 
     /// One keep-alive round trip.
     fn record_keepalive_rtt(&self, peer: Peer, rtt: Duration, at: ObservedAt);
