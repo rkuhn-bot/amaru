@@ -15,6 +15,7 @@
 //! Shared trace matchers for `generated` and `real_data` world tests.
 
 use amaru_kernel::IsHeader;
+use amaru_protocols::peer_tracking_effects::RecordSharedPeersEffect;
 use amaru_pure_stage::{
     Effect, TraceMatch, register_data_deserializer, register_effect_deserializer, tm_external_effect_any,
     trace_buffer::TraceEntry,
@@ -193,6 +194,25 @@ pub(super) fn tm_chainsync_roll_forward() -> TraceMatch<'static> {
 
 pub(super) fn tm_validate_header() -> TraceMatch<'static> {
     tm_external_effect_any::<amaru_consensus::effects::ValidateHeaderEffect>()
+}
+
+/// A peer-sharing reply recorded by the initiator (`RecordSharedPeersEffect`).
+///
+/// `label` is the failure text. `pred` sees the responder identity (`from`) and the address list.
+pub(super) fn tm_share_reply(
+    label: impl Into<String>,
+    pred: impl Fn(&RecordSharedPeersEffect) -> bool + Send + 'static,
+) -> TraceMatch<'static> {
+    let label = label.into();
+    TraceMatch::Property(
+        Box::new(move |src| {
+            let Some(Effect::External { effect, .. }) = src.suspend() else {
+                return false;
+            };
+            effect.cast_ref::<RecordSharedPeersEffect>().is_some_and(|typed| pred(typed))
+        }),
+        format!("share reply ({label})"),
+    )
 }
 
 pub(super) fn entry_is_validate_header_of(entry: &TraceEntry, hash: &amaru_kernel::HeaderHash) -> bool {

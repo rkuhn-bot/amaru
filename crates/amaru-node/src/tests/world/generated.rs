@@ -36,8 +36,13 @@ use amaru_metrics::LedgerMetrics;
 use amaru_ouroboros::{
     BaseReadChainStore, ConnectionsResource, Nonces, WriteChainStore, in_memory_chain_store::InMemoryChainStore,
 };
-use amaru_protocols::store_effects::{ResourceHeaderStore, ResourceParameters};
+use amaru_protocols::{
+    peer_sharing::{SHARE_POLICY_MAX, SHARE_REQUEST_AMOUNT},
+    peer_tracking_effects::RecordSharedPeersEffect,
+    store_effects::{ResourceHeaderStore, ResourceParameters},
+};
 use amaru_pure_stage::{
+    assert_trace_contains, assert_trace_does_not_contain,
     simulation::{SimulationRunning, running::OverrideResult},
     trace_buffer::TraceBuffer,
 };
@@ -48,7 +53,7 @@ use super::{
     WorldConnectionProvider, WorldLoop, build_injector, build_injector_peer, build_world_node,
     support::{
         derive_seed, draw_test_seed, fragment_trace_guards, peer_saw_roll_forward, peer_trace, seed_bytes, test_seeds,
-        tm_chainsync_roll_forward, tm_chainsync_roll_forward_of, tm_validate_header,
+        tm_chainsync_roll_forward, tm_chainsync_roll_forward_of, tm_share_reply, tm_validate_header,
     },
 };
 use crate::tests::configuration::NodeTestConfig;
@@ -786,4 +791,178 @@ async fn test_injector_reveal_gates_chainsync() {
         peer_trace(&world, 1).iter().any(|entry| tm_chainsync_roll_forward_of(headers[1].hash()) == *entry),
         "ChainSync may RollForward the second revealed header"
     );
+}
+
+/// Listen addresses advertised in a share reply, plus one address nobody binds.
+///
+/// Eleven injectors and leaf A are upstream of the hub, so a reply has more eligible peers than
+/// [`SHARE_POLICY_MAX`]. Leaf B dials the hub. The dark port is configured and never accepts.
+const SHARE_INJECTORS: usize = 11;
+const SHARE_DARK_PORT: u16 = 9700;
+const SHARE_HUB_PORT: u16 = 9701;
+const SHARE_LEAF_A_PORT: u16 = 9702;
+const SHARE_LEAF_B_PORT: u16 = 9703;
+const SHARE_INJECTOR_PORT: u16 = 9710;
+/// Leaf B answers the hub before its own request, so that reply is drawn from the one peer it dialed.
+const SHARE_LEAF_B_INITIAL_DELAY: Duration = Duration::from_secs(360);
+/// Production initial delay is 300s. The horizon covers leaf B's later request and not the 900s repeat.
+const SHARE_HORIZON_NANOS: u64 = 380_000_000_000;
+
+/// Share replies name listen addresses taken from the trace.
+///
+/// The hub's outbound bearer (leaf A asked) and inbound bearer (leaf B asked) both advertise
+/// `hub_ip:listen_port`. Leaf A is the inbound bearer on that node; leaf B is the outbound bearer.
+/// Replies stay within the requested amount and [`SHARE_POLICY_MAX`], omit the requester, the dark
+/// port, ephemeral source ports, and unspecified addresses.
+#[test]
+fn test_peer_share_reply_addresses() {
+    let run = SyncRun::new("peer_share_replies");
+    let dark = loopback(SHARE_DARK_PORT);
+    let hub_addr = loopback(SHARE_HUB_PORT);
+    let leaf_a_addr = loopback(SHARE_LEAF_A_PORT);
+    let leaf_b_addr = loopback(SHARE_LEAF_B_PORT);
+    let injector_addrs: Vec<SocketAddr> =
+        (0..SHARE_INJECTORS).map(|i| loopback(SHARE_INJECTOR_PORT + i as u16)).collect();
+    let (store, headers) = injector_linear_store(1, run.seed);
+
+    let mut graphs = Vec::new();
+    let mut injector_shared = None;
+    for (i, listen) in injector_addrs.iter().enumerate() {
+        let (sim, shared) = run.spawn_injector(store.clone(), *listen);
+        if i == 0 {
+            injector_shared = Some(shared);
+        }
+        graphs.push(sim);
+    }
+
+    let mut upstream: Vec<Peer> = injector_addrs.iter().copied().map(peer_at).collect();
+    upstream.push(peer_at(leaf_a_addr));
+    upstream.push(peer_at(dark));
+    let trace = || TraceBuffer::new_shared(0, 32_000_000);
+    let hub = with_ancestor(
+        generated_node(run.seed, 0, hub_addr)
+            .with_upstream_peers(upstream)
+            .with_target_upstream_peers(16)
+            .with_peer_mix("inbound!1, static~13")
+            .with_trace_buffer(trace()),
+        &headers[0],
+    );
+    let leaf_a = with_ancestor(
+        generated_node(run.seed, 1, leaf_a_addr)
+            .with_no_upstream_peers()
+            .with_target_upstream_peers(1)
+            .with_peer_mix("inbound~1")
+            .with_trace_buffer(trace()),
+        &headers[0],
+    );
+    let leaf_b = with_ancestor(
+        generated_node(run.seed, 2, leaf_b_addr)
+            .with_upstream_peer(peer_at(hub_addr))
+            .with_target_upstream_peers(1)
+            .with_peer_mix("static~1")
+            .with_share_request_initial_delay(SHARE_LEAF_B_INITIAL_DELAY)
+            .with_trace_buffer(trace()),
+        &headers[0],
+    );
+    let hub_index = graphs.len();
+    graphs.push(run.spawn_catch_up(0, hub));
+    let leaf_a_index = graphs.len();
+    graphs.push(run.spawn_catch_up(1, leaf_a));
+    let leaf_b_index = graphs.len();
+    graphs.push(run.spawn_catch_up(2, leaf_b));
+
+    let mut world = WorldLoop::new(run.provider.clone(), graphs).with_injector(0, injector_shared.expect("injector"));
+    world.schedule_reveals(headers.iter().map(IsHeader::hash));
+    world.run_until_horizon_with(SHARE_HORIZON_NANOS, Duration::from_secs(30), |world| {
+        eprintln!("peer-share sim {} seed={:#x}", format_sim_nanos(world.now_nanos()), run.seed);
+    });
+
+    let mut allowed = vec![hub_addr, leaf_a_addr, leaf_b_addr];
+    allowed.extend(injector_addrs.iter().copied());
+    let outbound_ports = {
+        let mut ports = vec![hub_addr];
+        ports.extend(injector_addrs.iter().copied());
+        ports
+    };
+    let inbound_ports = {
+        let mut ports = outbound_ports.clone();
+        ports.push(leaf_a_addr);
+        ports
+    };
+
+    for index in [hub_index, leaf_a_index, leaf_b_index] {
+        let allowed = allowed.clone();
+        assert_trace_does_not_contain(
+            world.graph(index),
+            &[tm_share_reply("ineligible, unspecified, ephemeral, or over the cap", move |effect| {
+                share_reply_is_forbidden(effect, &allowed, dark)
+            })],
+        );
+    }
+    assert!(
+        peer_trace(&world, hub_index).iter().any(|entry| {
+            tm_share_reply("leaf A inbound bearer", move |effect| effect.addrs == vec![leaf_a_addr]) == *entry
+        }),
+        "hub must record leaf A's listen address; seed={:#x}",
+        run.seed
+    );
+    assert!(
+        peer_trace(&world, hub_index).iter().any(|entry| {
+            tm_share_reply("leaf B outbound bearer", move |effect| effect.addrs == vec![leaf_b_addr]) == *entry
+        }),
+        "hub must record leaf B's listen address and not itself; seed={:#x}",
+        run.seed
+    );
+    for injector in &injector_addrs {
+        let injector = *injector;
+        assert!(
+            peer_trace(&world, hub_index).iter().any(|entry| {
+                tm_share_reply("injector inbound bearer", move |effect| effect.addrs == vec![injector]) == *entry
+            }),
+            "hub must record injector {injector}; seed={:#x}",
+            run.seed
+        );
+    }
+    assert_trace_contains(
+        world.graph(leaf_a_index),
+        &[tm_share_reply("hub outbound bearer", move |effect| {
+            SocketAddr::from(effect.from) != hub_addr
+                && share_reply_is_hub_listen(effect, hub_addr, leaf_a_addr, &outbound_ports)
+        })],
+    );
+    assert!(
+        peer_trace(&world, leaf_b_index).iter().any(|entry| {
+            let ports = inbound_ports.clone();
+            tm_share_reply("hub inbound bearer", move |effect| {
+                SocketAddr::from(effect.from) == hub_addr
+                    && share_reply_is_hub_listen(effect, hub_addr, leaf_b_addr, &ports)
+            }) == *entry
+        }),
+        "leaf B must record the hub listen address from the inbound bearer; seed={:#x}",
+        run.seed
+    );
+    world.stop();
+}
+
+fn share_reply_is_forbidden(effect: &RecordSharedPeersEffect, allowed: &[SocketAddr], dark: SocketAddr) -> bool {
+    let n = effect.addrs.len();
+    n == 0
+        || n > usize::from(SHARE_POLICY_MAX)
+        || n > usize::from(SHARE_REQUEST_AMOUNT)
+        || effect.addrs.contains(&dark)
+        || effect.addrs.iter().any(|addr| addr.ip().is_unspecified() || !allowed.contains(addr))
+}
+
+/// Hub listen address, within the cap, and not `requester` or any port outside `ports`.
+fn share_reply_is_hub_listen(
+    effect: &RecordSharedPeersEffect,
+    hub: SocketAddr,
+    requester: SocketAddr,
+    ports: &[SocketAddr],
+) -> bool {
+    effect.addrs.len() == usize::from(SHARE_POLICY_MAX)
+        && effect.addrs.len() <= usize::from(SHARE_REQUEST_AMOUNT)
+        && effect.addrs.contains(&hub)
+        && !effect.addrs.contains(&requester)
+        && effect.addrs.iter().all(|addr| ports.contains(addr) && !addr.ip().is_unspecified())
 }

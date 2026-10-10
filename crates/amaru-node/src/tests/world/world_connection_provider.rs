@@ -290,6 +290,8 @@ struct ConnectionEndpoint {
     inbox: VecDeque<Bytes>,
     read_buffer: BytesMut,
     peer_conn_id: ConnectionId,
+    /// This socket's local address. Outbound bearers use the ephemeral source; inbound bearers use the listener.
+    local_addr: SocketAddr,
 }
 
 impl WorldConnectionProvider {
@@ -590,6 +592,7 @@ fn install_handshake_locked(inner: &mut WorldInner, listener: SocketAddr) -> Opt
 fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> ConnectionId {
     let initiator_conn = inner.next_conn_id.get_and_increment();
     let responder_conn = inner.next_conn_id.get_and_increment();
+    let initiator_addr = SocketAddr::from(([127, 0, 0, 1], 5000 + initiator_conn.as_u64() as u16));
 
     inner.endpoints.insert(
         initiator_conn,
@@ -597,6 +600,7 @@ fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> Conne
             inbox: VecDeque::new(),
             read_buffer: BytesMut::with_capacity(65536),
             peer_conn_id: responder_conn,
+            local_addr: initiator_addr,
         },
     );
     inner.endpoints.insert(
@@ -605,14 +609,12 @@ fn pair_connect_locked(inner: &mut WorldInner, target_addr: SocketAddr) -> Conne
             inbox: VecDeque::new(),
             read_buffer: BytesMut::with_capacity(65536),
             peer_conn_id: initiator_conn,
+            local_addr: target_addr,
         },
     );
 
     let listener = inner.listeners.get_mut(&target_addr).expect("pair_connect requires a listener");
-    listener.pending_handshakes.push_back(PendingHandshake {
-        responder_conn,
-        initiator_addr: SocketAddr::from(([127, 0, 0, 1], 5000 + initiator_conn.as_u64() as u16)),
-    });
+    listener.pending_handshakes.push_back(PendingHandshake { responder_conn, initiator_addr });
 
     initiator_conn
 }
@@ -683,7 +685,9 @@ impl ConnectionProvider for WorldConnectionProvider {
     }
 
     fn local_addr(&self, conn: ConnectionId) -> BoxFuture<'static, std::io::Result<SocketAddr>> {
-        let _ = conn;
-        Box::pin(async { Err(std::io::Error::new(ErrorKind::NotFound, "simulated connection has no local address")) })
+        let found = self.inner.lock().endpoints.get(&conn).map(|endpoint| endpoint.local_addr);
+        let result =
+            found.ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "simulated connection has no local address"));
+        Box::pin(async move { result })
     }
 }
