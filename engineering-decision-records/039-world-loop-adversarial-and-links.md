@@ -11,7 +11,7 @@ Extends [EDR-011](./011-deterministic-simulation-testing.md).
 
 The world loop is the discrete-event network from [EDR-011](./011-deterministic-simulation-testing.md). `WorldConnectionProvider` owns the `(time, sequence)` heap, and `WorldLoop` is the only popper (`world_connection_provider.rs:127-133`, `world_loop.rs:55-60`). Line numbers are from `rk/tui-up-dn` at `57af57c39` unless noted.
 
-A `send` completes at the current simulated time and schedules a `Deliver` of the whole buffer (`world_connection_provider.rs:659-671`). The inbox is unbounded (`world_connection_provider.rs:290`). Delay is a seeded sample chosen at construction, independent of size (`world_connection_provider.rs:535-541`), and a later `Deliver` on the same connection waits behind the previous one (`world_connection_provider.rs:544-549`). A connect to an address with no listener is refused when the 1–5ms handshake hop pops (`world_loop.rs:472-506`). `close` fails both halves at once (`world_loop.rs:563-572`). The production provider shuts down the write half (`crates/amaru-network/src/connection.rs:357-365`). `local_addr` on this branch returns `NotFound` (`world_connection_provider.rs:685-688`).
+A `send` completes at the current simulated time and schedules a `Deliver` of the whole buffer (`world_connection_provider.rs:659-671`). The inbox is unbounded (`world_connection_provider.rs:290`). Delay is a seeded sample chosen at construction, independent of size (`world_connection_provider.rs:535-541`), and a later `Deliver` on the same connection waits behind the previous one (`world_connection_provider.rs:544-549`). A connect to an address with no listener is refused when the 1–5ms handshake hop pops (`world_loop.rs:472-506`), the round trip a TCP RST takes after the SYN. `close` fails both halves at once (`world_loop.rs:563-572`). The production provider shuts down the write half (`crates/amaru-network/src/connection.rs:357-365`). `local_addr` on this branch returns `NotFound` (`world_connection_provider.rs:685-688`).
 
 `SimulationRunning::breakpoint` takes `Fn(&Effect) -> bool` (`crates/amaru-pure-stage/src/simulation/running/mod.rs:241-243`). `run_effect` pauses before interpreting a match (`running/mod.rs:1045-1051`). `WorldLoop::new` installs `world_external` on every `Effect::External` (`world_loop.rs:117-119`) and treats every `Blocked::Breakpoint` as that hook (`world_loop.rs:361-363`).
 
@@ -59,7 +59,7 @@ The receiving node classifies a peer from the bytes it reads. The scenario produ
 
 - A send completes when its bytes fit in the send buffer. A full receive window parks further sends in that direction.
 - Orderly close shuts down one write half. Data already accepted on that half is still delivered. Reset, once that effect exists, fails both halves and discards buffered bytes.
-- `connect` to an address with no listener fails at the current simulated time. A full listen backlog waits, then refuses or times out.
+- Once the listen backlog is full, a further connect is refused or times out.
 - `pending_handshakes` is bounded. Handshakes past the cap are refused.
 - An established bearer has a concrete local address. The outbound port comes from a deterministic ephemeral allocator. The inbound local address is the listener. `local_addr` returns that socket, and the peer identity uses the same address.
 
