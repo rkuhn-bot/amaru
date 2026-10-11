@@ -99,7 +99,7 @@ Fn(&Effect, Instant /* now */, usize /* node index */) -> Option<(Vec<WorldEffec
 
 `None` is not a hit.
 `Some` is a hit, including `Some((vec![], keep))`, which pauses, records the name, and applies no world effect.
-The `Option` is what keeps “not a hit” distinct from “hit, nothing to do” in a single call, so the world does not run the closure twice.
+The `Option` keeps “not a hit” distinct from “hit, nothing to do”.
 
 The name is the label the execution trace highlights when the breakpoint hits.
 The same name can be installed on any number of simulated nodes.
@@ -118,10 +118,18 @@ Every current caller passes a closure of the old shape: `world_loop.rs:118`, `cr
 Each of those closures gains an `Instant` it does not read.
 The node index is not a pure-stage argument.
 One `SimulationRunning` is one node.
-`WorldLoop` installs, on each chosen node, a wrapper that closes over that graph index, calls the scenario closure once with `(effect, now, index)`, returns false on `None`, and on `Some` stashes the `Vec` and the `Keep` and returns true.
+`WorldLoop` installs, on each chosen node, a wrapper that closes over that graph index and calls the scenario closure as the pure-stage predicate.
+That call uses `is_some()`: `None` returns false and the run does not pause, and `Some` returns true.
+The `Vec` and the `Keep` from this first call are discarded.
 
-On a hit the world applies the stashed `Vec` in order, and records the breakpoint name, the paused effect, and each `WorldEffect` in the trace.
+When the world handles the resulting `Blocked::Breakpoint`, it calls the same closure again with the same effect, the same time, and the same node index, and uses that second result.
+There is no second call when the first returned `None`.
+The world applies the second `Vec` in order, and records the breakpoint name, the paused effect, and each `WorldEffect` in the trace.
 It then `interpret_breakpoint` (`running/mod.rs:938-941`), so the paused effect still runs.
+
+The closure is required to be pure.
+The same effect, time, and node index must produce the same `Option`.
+The two evaluations are how a hit both pauses the run and then supplies the effects, and they have nothing to remember between the calls.
 `Keep::Detach` removes the breakpoint from the node that paused.
 `Keep::Attach` leaves it installed.
 One-shot versus standing is that return value, decided on each hit.
@@ -160,7 +168,11 @@ enum WorldEffect {
 impl WorldLoop {
     /// `name` is chosen by the scenario and highlighted in the trace on a hit.
     /// The same `name` may be installed on any number of `nodes` (graph indexes).
-    /// `None` is not a hit. `Some` is a hit; the `Vec` is applied in order.
+    ///
+    /// `on_hit` runs twice per hit. The pure-stage predicate is `on_hit(effect, now, index).is_some()`:
+    /// `None` does not pause, and there is no second call. On `Some`, the run pauses, and handling
+    /// `Blocked::Breakpoint` calls `on_hit` again with the same arguments to obtain the `Vec` and `Keep`.
+    /// The closure must be pure: same inputs, same output.
     pub fn breakpoint<F>(&mut self, name: &str, nodes: impl IntoIterator<Item = usize>, on_hit: F)
     where
         F: Fn(&Effect, Instant, usize) -> Option<(Vec<WorldEffect>, Keep)> + Send + 'static,
@@ -245,6 +257,7 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 - A world fault is a named breakpoint or a time checkpoint returning a `Vec<WorldEffect>`.
   It does not grow a `named_for_tests` call site per stage.
   One external effect on one node stays an `override_external_effect`.
+- The world-breakpoint closure is pure. A hit evaluates it twice, with the same effect, time, and node index.
 - Backpressure, half-close, refusal, and backlog become things a world test can observe, because the production socket already behaves that way and the sim currently does not.
 - Silent peers, loss, and a cold link are three settings of one delay formula.
   A test reads them back from the trace instead of inferring them from a missing `Deliver`.
@@ -264,9 +277,9 @@ World behaviour is a named breakpoint on the nodes the scenario lists.
 
 ### Separate predicate and action closures
 
-A bool predicate plus a second closure that builds the `WorldEffect` splits one decision across two calls.
-The two can disagree, and the action closure runs only after the pause, so it sees a later clock than the predicate did.
-`Option<(Vec<WorldEffect>, Keep)>` is one call: `None` does not pause, `Some` is the hit and the effects.
+A bool predicate plus a different closure that builds the `WorldEffect` can disagree about what a hit is.
+The world breakpoint is one closure. A hit evaluates it twice, first as `is_some()` and then for the `Vec` and the `Keep`, with the same arguments both times.
+Purity is what makes those two results the same hit.
 
 ### A `WorldView` struct
 
