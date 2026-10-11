@@ -136,11 +136,25 @@ One-shot versus standing is that return value, decided on each hit.
 Other nodes that carry the same name are left as they are.
 
 A link is the directed pair of node indices `from` and `to`.
-`WorldEffect::SetLink { from, to, delay, rate }` sets delay and rate for every connection in that direction, both connections that already exist and connections opened later.
+`WorldEffect::SetLink { from, to, delay, rate, apply }` sets delay and rate for every connection in that direction, both connections that already exist and connections opened later.
 The other direction is a different link.
+`apply` says what happens to sends that have not been delivered yet.
+`Apply::Prospective` is the default: only sends issued after the change use the new delay and rate, and in-flight sends keep the arrival they were given.
+That is how a scenario writes “it worked until here, and then the network failed”.
+`Apply::Retroactive` re-times every not-yet-delivered send on that direction.
+Corking sets a delay past the horizon and holds the queued sends; uncorking sets a delay inside the horizon and releases them, still in FIFO order.
+
+### Adversarial classification
+
+The node under test is what classifies a peer as adversarial.
+A scenario does not construct `PeerSelectionMsg::adversarial` and does not enqueue it.
+It changes bytes that peer sends, so the receiving node detects the misbehaviour itself.
+`override_external_effect` with `replaced` substitutes the send on the sending node.
+A world breakpoint on that node is the other substitution: the closure matches the send, the trace records the hit, and the bytes the receiver reads are the ones the scenario put in its place.
+The receiver's own checks then set the mark.
 
 `WorldEffect` is a small enum.
-The sketch starts with `SetLink` and `CloseConnection`.
+The sketch starts with `SetLink { from, to, delay, rate, apply }` and `CloseConnection`.
 Later variants extend it.
 The exact starting set is open; see Discussion points.
 An empty `Vec` is how a hit applies nothing.
@@ -158,10 +172,20 @@ enum Keep {
     Detach,
 }
 
+/// How a `SetLink` treats sends not delivered yet.
+/// `Prospective` is the default.
+enum Apply {
+    /// Sends issued after the change use the new delay and rate.
+    /// In-flight sends keep their scheduled arrival.
+    Prospective,
+    /// Re-time every not-yet-delivered send on this from->to direction.
+    Retroactive,
+}
+
 /// `from` and `to` are node indexes. One direction: every connection from `from` to `to`,
 /// existing and opened later. The opposite direction is a separate link.
 enum WorldEffect {
-    SetLink { from: usize, to: usize, delay: Duration, rate: u64 },
+    SetLink { from: usize, to: usize, delay: Duration, rate: u64, apply: Apply },
     CloseConnection { conn: ConnectionId },
 }
 
@@ -224,11 +248,20 @@ arrival = base_delay + size / rate
 queued so it cannot pass an earlier message on the same link.
 The current `max(hop, last_deliver_at)` rule is that queue, with `base_delay + size / rate` in place of the seeded hop sample.
 
-A link is the directed pair of node indices. `WorldEffect::SetLink { from, to, delay, rate }` covers every connection in that direction, existing and new.
+A link is the directed pair of node indices. `WorldEffect::SetLink { from, to, delay, rate, apply }` covers every connection in that direction, existing and new.
 The scenario changes those parameters by returning that effect from a world breakpoint, or by a time checkpoint that applies the same effect.
 A breakpoint hit records the name, the paused effect, and each `WorldEffect` in the returned `Vec`, in order.
 A time checkpoint records each effect in its `Vec`.
 A rewrite of one message on one node stays on `override_external_effect`.
+
+`Apply::Prospective` leaves each in-flight send on the arrival it already has.
+A later send, even one issued under a faster delay or rate, still cannot overtake an earlier one: the direction queue and per-connection FIFO push its arrival out to at least the previous send's arrival.
+`Apply::Retroactive` is the cork and the uncork.
+The world keeps, per direction, the sends not yet delivered.
+Each entry holds the base send time, the size, and the extra-delay factor that send was given (`max(1, W_full / max(w, W0))` at send time).
+A retroactive change recomputes `sent_at + delay + (size / rate) * extra` with the new delay and rate, then walks the queue in order and sets each arrival to at least the previous one, so FIFO holds.
+Corking is a retroactive delay past the horizon: nothing in that queue is delivered, and the peer sees no close.
+Uncorking is a later retroactive `SetLink` whose delay is inside the horizon: the same queue is re-timed and then delivered in the original order.
 
 Packet loss is added delay on that message.
 There is no separate drop-from-the-link event.
@@ -261,13 +294,19 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 - Backpressure, half-close, refusal, and backlog become things a world test can observe, because the production socket already behaves that way and the sim currently does not.
 - Silent peers, loss, and a cold link are three settings of one delay formula.
   A test reads them back from the trace instead of inferring them from a missing `Deliver`.
-- In-order delivery means a message scheduled past the horizon holds every later message on that link behind it.
-  Restoring the link is a later trigger that lowers the delay.
-  That interaction is called out under Discussion points.
+- `Apply::Prospective` is how a link fails from a point in time onward. In-flight sends still arrive; later sends do not overtake them.
+  `Apply::Retroactive` is how a cork holds every queued send and an uncork releases them in order.
+- An adversarial mark is the receiving node's own classification. The scenario changes the sender's bytes; it does not enqueue `PeerSelectionMsg::adversarial`.
 - Implementing the provider and the link model is a behaviour change for every existing world test.
   The migration section names the first two callers.
 
 ## Alternatives considered
+
+### Direct `PeerSelectionMsg::adversarial`
+
+Enqueueing the adversarial variant marks the peer without anything on the wire for the receiver to judge.
+The share scenario on `rk/share-own-address` does that (`generated.rs:925-929`).
+The decision drops it. The receiver classifies the peer from the bytes it reads, after the scenario has modified what the sender transmitted.
 
 ### Per-node stage enqueue
 
@@ -295,8 +334,8 @@ The decision keeps the name the scenario chooses, and that name is what the trac
 
 ### Rewrite one delivery as a world effect
 
-Dropping or rewriting the bytes of one delivery could have been a `WorldEffect`.
-That job is already `override_external_effect` on the one `SimulationRunning` (`running/mod.rs:255-268`, `:1639-1654`).
+Dropping or rewriting the bytes of one delivery could have been a `WorldEffect` variant.
+It is not. `override_external_effect` replaces one external effect (`running/mod.rs:255-268`, `:1639-1654`), and a world breakpoint matches that send so the receiver reads the substituted bytes.
 `WorldEffect` stays the world-scoped operations: link delay and rate, closing a connection, and later extensions.
 
 ### Simulate a congestion window
@@ -321,22 +360,13 @@ The scenario exists to assert those.
 These are open.
 The decision above does not settle them.
 
-- Whether bytes already queued on a link are re-timed when `SetLink` changes its delay or rate.
-  A link is the directed node pair `from` → `to`, and the new parameters apply to every connection in that direction, existing and new.
-  What is open is the queue: each byte already given an arrival time can keep it, or the world can recompute those arrivals from the new delay and rate.
 - The exact starting set of `WorldEffect`.
-  The sketch has `SetLink { from, to, delay, rate }` and `CloseConnection`.
+  The sketch has `SetLink { from, to, delay, rate, apply }` and `CloseConnection`.
   Which of those ship first, and whether close is orderly or reset, is open.
 - Name uniqueness, and collision with `world_external`.
   One author-chosen name may be installed on many nodes.
   Whether two registrations may reuse a name for different closures, and whether `world_external` is reserved, is open.
   `run_graph_until_clock` currently treats every `Blocked::Breakpoint` as the network hook (`world_loop.rs:361-363`).
-- Whether an adversarial mark should be the result of behaviour the peer can actually commit (a bad header on the wire, for example) rather than a direct `PeerSelectionMsg`.
-  The trigger is a world breakpoint or a time checkpoint either way.
-  Which `WorldEffect` or override the share scenario uses is part of the migration, not fixed here.
-- In-order recovery.
-  Because a late message blocks the rest of that direction, a silent link stays silent for later messages until a later `SetLink` or `at` brings the delay back under the horizon.
-  Whether that second update also re-times bytes already queued is the open point above.
 - Which work lands first.
   TCP realism (buffers, half-close, refusal, backlog, local addresses) and the link model (rate, warmth, mid-run updates) touch the same `send` / `Deliver` path.
   Doing either one alone still leaves the other half of the review undone.
@@ -344,8 +374,9 @@ The decision above does not settle them.
 ## Migration
 
 1. Rewrite `test_peer_share_reply_addresses` as about twenty chainless nodes.
-   The adversarial peer is a named world breakpoint, installed on the nodes that should hit it, or a time checkpoint that applies a `Vec<WorldEffect>`.
-   A rewrite of one send on one node, if the scenario still needs one, is `override_external_effect` on that node.
+   The adversarial peer sends bytes the receiver classifies itself.
+   The scenario modifies those bytes with `override_external_effect` on the sending node, or with a world breakpoint on that send.
+   It does not enqueue `PeerSelectionMsg::adversarial`.
    The never-connected address and the listen-address check stay assertions on the trace.
    The injector store, `with_injector`, and `schedule_reveals` leave this scenario.
 2. After `WorldEffect::SetLink` exists, use a world breakpoint or a time checkpoint in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of the directed node pair, not only of a fixed wire delay and a `PeerDisconnect` storm.
