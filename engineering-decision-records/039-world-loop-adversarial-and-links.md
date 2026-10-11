@@ -78,27 +78,90 @@ Chain-sync stays in the sync scenarios that already use `spawn_injector` and `wo
 
 ### Adversarial behaviour
 
-Faults are configuration supplied when the world is built.
-The configuration is a list of triggers and actions.
-A test does not enqueue a stage message by name.
+Two different jobs.
 
-A behaviour change, such as a node becoming adversarial, is triggered by a Simulation breakpoint or by a simulated-time checkpoint.
-It is not triggered by a predicate over a wire message.
+Single-node tinkering rewrites one external effect on one `SimulationRunning`.
+That is the existing override, not a world action.
+`override_external_effect` takes a remaining count and a transform (`crates/amaru-pure-stage/src/simulation/running/mod.rs:255-268`).
+`usize::MAX` keeps the override; any smaller count is removed after that many applications (`running/mod.rs:257-258`, `:1702-1708`).
+`OverrideResult::no_match` passes the effect on, `handled` substitutes the stage response, and `replaced` substitutes another effect of the same response type (`running/mod.rs:1639-1654`, enum at `:1674-1680`).
+The running simulation applies that when it is about to run an `Effect::External` (`running/mod.rs:1301-1310`).
+Rewriting one message send is one such override with `remaining: 1` and `replaced`.
+The world breakpoint does not do it.
 
-- A time checkpoint is an instant on the world clock.
-- A Simulation breakpoint is the existing `SimulationRunning::breakpoint` (`running/mod.rs:241-243`).
-  The predicate reads one `&Effect`.
-  The run pauses before that effect is interpreted, on `Blocked::Breakpoint`.
+World behaviour is a named breakpoint plus time checkpoints.
 
-The two compose.
-“After time T, the next effect that matches P” arms the breakpoint when the clock passes T.
-It is not a matcher over decoded messages.
+A world breakpoint is an author-chosen name, a predicate over `&Effect`, and a closure:
 
-When a time checkpoint fires, the world applies the action at that instant and keeps running.
-When a Simulation breakpoint fires, the world applies the action at the pause, records the breakpoint name and the action in the trace, then `interpret_breakpoint` so the effect itself still runs.
-`world_external` stays the network hook.
-A scenario breakpoint is another name on that node's `SimulationRunning`.
-`run_graph_until_clock` has to tell the two apart: a scenario name applies the behaviour change, and `world_external` keeps today's `on_external` path.
+```rust
+fn on_hit(effect: &Effect, view: &WorldView) -> (WorldEffect, Keep)
+```
+
+The name is the label the execution trace highlights when the breakpoint hits.
+The same name can be installed on any number of simulated nodes.
+The predicate is the one `SimulationRunning::breakpoint` already takes (`running/mod.rs:241-243`): the run pauses on `Blocked::Breakpoint` before the effect is interpreted.
+`run_graph_until_clock` tells this name apart from `world_external` (`world_loop.rs:361-363`).
+`world_external` stays the network hook (`world_loop.rs:117-119`, `:378-385`).
+
+On a hit the world calls the closure, applies the returned `WorldEffect`, and records the breakpoint name, the paused effect, and the `WorldEffect` in the trace.
+It then `interpret_breakpoint` (`running/mod.rs:938-941`), so the paused effect still runs.
+`Keep::Detach` removes the breakpoint from the node that paused.
+`Keep::Attach` leaves it installed.
+One-shot versus standing is that return value, decided on each hit.
+Other nodes that carry the same name are left as they are.
+
+`WorldView` starts with only the current simulated time.
+Fields are added when a closure needs them.
+
+`WorldEffect` is a small enum.
+The first variants cover “do nothing”, “set a link’s delay and rate”, and “close a connection”.
+Later variants extend the enum.
+The exact starting set is open; see Discussion points.
+
+A time checkpoint is the other trigger.
+When simulated time reaches it, the world applies a `WorldEffect` and records that in the trace.
+There is no paused effect.
+“After time T, the next effect that matches P” arms the named breakpoint when the clock passes T.
+
+```rust
+/// Decided on each hit. Detach removes the breakpoint from the node that paused.
+enum Keep {
+    Attach,
+    Detach,
+}
+
+/// What the closure may read. Starts as the clock; grows on demand.
+struct WorldView {
+    now: Instant,
+}
+
+/// Applied by the world at a breakpoint hit or a time checkpoint.
+/// The link selector and the exact variant list are open.
+enum WorldEffect {
+    None,
+    SetLinkDelayAndRate { delay: Duration, rate: u64 },
+    CloseConnection { conn: ConnectionId },
+}
+
+impl WorldLoop {
+    /// `name` is chosen by the scenario and highlighted in the trace on a hit.
+    /// The same `name` may be installed on any number of `nodes` (graph indexes).
+    pub fn breakpoint<P, F>(
+        &mut self,
+        name: &str,
+        nodes: impl IntoIterator<Item = usize>,
+        predicate: P,
+        on_hit: F,
+    ) where
+        P: Fn(&Effect) -> bool + Send + 'static,
+        F: Fn(&Effect, &WorldView) -> (WorldEffect, Keep) + Send + 'static,
+    {
+    }
+
+    /// Other trigger: apply `effect` when simulated time reaches `at`.
+    pub fn at(&mut self, at: Instant, effect: WorldEffect) {}
+}
+```
 
 ### Connection-provider realism
 
@@ -140,14 +203,10 @@ arrival = base_delay + size / rate
 queued so it cannot pass an earlier message on the same link.
 The current `max(hop, last_deliver_at)` rule is that queue, with `base_delay + size / rate` in place of the seeded hop sample.
 
-The scenario can change a link's base delay and rate while the run is going, through an API on the world.
-That change is a behaviour of the link, triggered the same way as a node behaviour change: a time checkpoint, or a Simulation breakpoint.
-The change is written to the trace.
-
-Dropping or rewriting exactly one delivery is a link action.
-Its trigger is a time checkpoint or a Simulation breakpoint on the effect whose bytes are about to go out.
-The action applies to that one delivery.
-A node behaviour change is only the action described above, armed by a Simulation breakpoint or a time checkpoint.
+The scenario changes a link's base delay and rate while the run is going by returning `WorldEffect::SetLinkDelayAndRate` from a world breakpoint, or by a time checkpoint that applies the same effect.
+A breakpoint hit records the name, the paused effect, and that `WorldEffect`.
+A time checkpoint records the `WorldEffect` at that instant.
+A rewrite of one message on one node stays on `override_external_effect`.
 
 Packet loss is added delay on that message.
 There is no separate drop-from-the-link event.
@@ -173,8 +232,9 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 ## Consequences
 
 - Gossip tests stop carrying a chain, an injector, and a reveal schedule whose only job is to make `spawn_catch_up` construct a node.
-- A new fault is a trigger plus an action in the scenario.
+- A world fault is a named breakpoint or a time checkpoint returning a `WorldEffect`.
   It does not grow a `named_for_tests` call site per stage.
+  One external effect on one node stays an `override_external_effect`.
 - Backpressure, half-close, refusal, and backlog become things a world test can observe, because the production socket already behaves that way and the sim currently does not.
 - Silent peers, loss, and a cold link are three settings of one delay formula.
   A test reads them back from the trace instead of inferring them from a missing `Deliver`.
@@ -186,18 +246,23 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 
 ## Alternatives considered
 
-### Keep injecting stage messages
+### Per-node stage enqueue
 
 `WorldLoop::enqueue` plus `StageRef::named_for_tests("peer_selection-2")` is enough for one adversarial flag.
 The review rejected it as the general mechanism: each new fault learns another stage name and another message type, and the injection is invisible to the network trace.
+World behaviour is a named breakpoint on the nodes the scenario lists.
 
-### Match a wire message to change behaviour
+### Auto-generated breakpoint names
 
-A predicate such as “the first `MsgShareRequest` from A to B” would fire a behaviour change without pausing the stage graph.
-The correction rejects that trigger.
-`SimulationRunning::breakpoint` already pauses on the effect, before interpretation, and the world loop already stops there for `world_external`.
-Behaviour changes use that pause.
-Matching one delivery remains a link action only.
+The world could mint a name when the scenario registers a predicate.
+The trace would then highlight an identifier the author did not write.
+The decision keeps the name the scenario chooses, and that name is what the trace shows on a hit.
+
+### Rewrite one delivery as a world effect
+
+Dropping or rewriting the bytes of one delivery could have been a `WorldEffect`.
+That job is already `override_external_effect` on the one `SimulationRunning` (`running/mod.rs:255-268`, `:1639-1654`).
+`WorldEffect` stays the world-scoped operations: link delay and rate, closing a connection, and later extensions.
 
 ### Simulate a congestion window
 
@@ -224,23 +289,17 @@ The decision above does not settle them.
 - What a link is.
   One direction of one connection, the pair of directions, a node pair across connections, or a node's uplink.
   And whether a mid-run change applies to bearers that already exist, to bearers opened afterwards, or to both.
-- How a scenario declares a Simulation breakpoint per node at startup.
-  `breakpoint` takes a Rust closure (`running/mod.rs:241`).
-  The scenario config has to name the node, the breakpoint name, and the predicate without each test calling `enqueue` at the pause.
-- Determinism of that predicate and of the behaviour-change action.
-  The pause is already fixed: `run_effect` checks installed predicates in order and stops before `handle_effect` (`running/mod.rs:1045-1051`).
-  A replay needs the same effect to match, and the action to be a pure function of that effect and the simulated clock.
-  What the action is allowed to read besides the effect is open.
-- Whether a scenario breakpoint stays installed.
-  `run_effect` tests every installed predicate on every later effect until `clear_breakpoint` (`running/mod.rs:250-253`, `:1045-1051`).
-  A one-shot behaviour change and a standing one are different policies on top of that.
-- How a link action rewrites exactly one delivery.
-  The breakpoint holds the original effect and then either interprets it or discards it (`running/mod.rs:931-941`).
-  A byte rewrite is not one of those two operations.
-  Dropping the delivery and changing later behaviour are different actions.
+  `WorldEffect::SetLinkDelayAndRate` needs that selector.
+- The exact starting set of `WorldEffect`.
+  The sketch has `None`, a link delay and rate, and close-connection.
+  Which of those ship first, and whether close is orderly or reset, is open.
+- Name uniqueness, and collision with `world_external`.
+  One author-chosen name may be installed on many nodes.
+  Whether two registrations may reuse a name for different predicates, and whether `world_external` is reserved, is open.
+  `run_graph_until_clock` currently treats every `Blocked::Breakpoint` as the network hook (`world_loop.rs:361-363`).
 - Whether an adversarial mark should be the result of behaviour the peer can actually commit (a bad header on the wire, for example) rather than a direct `PeerSelectionMsg`.
-  The trigger is a Simulation breakpoint or a time checkpoint either way.
-  Which action the share scenario uses is part of the migration, not fixed here.
+  The trigger is a world breakpoint or a time checkpoint either way.
+  Which `WorldEffect` or override the share scenario uses is part of the migration, not fixed here.
 - In-order recovery.
   Because a late message blocks the rest of the link, a silent link stays silent for later messages until a trigger sets the delay back under the horizon.
   The API has to allow that second update, including for bytes already queued.
@@ -251,10 +310,11 @@ The decision above does not settle them.
 ## Migration
 
 1. Rewrite `test_peer_share_reply_addresses` as about twenty chainless nodes.
-   The adversarial peer is a behaviour change armed by a Simulation breakpoint or a time checkpoint on that node.
+   The adversarial peer is a named world breakpoint, installed on the nodes that should hit it, or a time checkpoint that applies a `WorldEffect`.
+   A rewrite of one send on one node, if the scenario still needs one, is `override_external_effect` on that node.
    The never-connected address and the listen-address check stay assertions on the trace.
    The injector store, `with_injector`, and `schedule_reveals` leave this scenario.
-2. After the link API exists, use it in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of the links between those stages' bearers, not only of a fixed wire delay and a `PeerDisconnect` storm.
+2. After `WorldEffect::SetLinkDelayAndRate` exists, use a world breakpoint or a time checkpoint in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of those links, not only of a fixed wire delay and a `PeerDisconnect` storm.
 
 ## References
 
