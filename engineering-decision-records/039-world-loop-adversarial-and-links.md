@@ -6,383 +6,167 @@ status: proposed
 # Adversarial behaviour and network faults in world-loop tests
 
 Extends [EDR-011](./011-deterministic-simulation-testing.md).
-Status is proposed. This record comes from the 2026-10-11 design review of `test_peer_share_reply_addresses` on `rk/share-own-address` ([#41](https://github.com/rkuhn-bot/amaru/pull/41)).
-
-Line numbers below are from `rk/tui-up-dn` at `57af57c39` unless the citation says `rk/share-own-address` (`7673dc2cf`). The share scenario and `WorldLoop::enqueue` exist only on that branch.
 
 ## Context
 
-[EDR-011](./011-deterministic-simulation-testing.md) runs a network of nodes on one discrete-event heap so a failing seed can be replayed.
-The world loop is that simulator: `WorldConnectionProvider` owns the `(time, sequence)` heap, and `WorldLoop` is the only popper (`world_connection_provider.rs:127-133`, `world_loop.rs:55-60`).
+The world loop is the discrete-event network from [EDR-011](./011-deterministic-simulation-testing.md). `WorldConnectionProvider` owns the `(time, sequence)` heap, and `WorldLoop` is the only popper (`world_connection_provider.rs:127-133`, `world_loop.rs:55-60`). Line numbers are from `rk/tui-up-dn` at `57af57c39` unless noted.
 
-Peer sharing was the first gossip scenario hung on that harness.
-`test_peer_share_reply_addresses` (`generated.rs:825` on `rk/share-own-address`) builds eleven chain injectors (`SHARE_INJECTORS`, `generated.rs:800` and `:842-847`), two further injectors standing in for a never-dialed address and an adversarial peer (`generated.rs:849-852`), and six nodes through `spawn_catch_up` (`generated.rs:912-921`).
-The first injector is attached with `with_injector`, and `schedule_reveals` publishes a one-header chain (`generated.rs:838`, `:923-924`).
-Those injectors, and the reveal path, are the sync-test helpers `spawn_injector`, `world_with_injector`, and `spawn_catch_up` (`generated.rs:144-167` and `:206-208` on this branch; `generated.rs:149-172` and `:211-213` on `rk/share-own-address`).
-A search of `crates/amaru-node/src/tests/world` on both branches finds no ejector.
-The assertions read share replies, so chain-sync is not the behaviour under test.
+A `send` completes at the current simulated time and schedules a `Deliver` of the whole buffer (`world_connection_provider.rs:659-671`). The inbox is unbounded (`world_connection_provider.rs:290`). Delay is a seeded sample chosen at construction, independent of size (`world_connection_provider.rs:535-541`), and a later `Deliver` on the same connection waits behind the previous one (`world_connection_provider.rs:544-549`). A connect to an address with no listener is refused when the 1–5ms handshake hop pops (`world_loop.rs:472-506`). `close` fails both halves at once (`world_loop.rs:563-572`). The production provider shuts down the write half (`crates/amaru-network/src/connection.rs:357-365`). `local_addr` on this branch returns `NotFound` (`world_connection_provider.rs:685-688`).
 
-The same scenario marks a live peer adversarial by putting `PeerSelectionMsg::adversarial` on a mailbox the test names itself.
-After 60s of simulated time it looks up `peer_selection-2` and calls `WorldLoop::enqueue` with `StageRef::named_for_tests` (`generated.rs:925-929` on `rk/share-own-address`).
-`enqueue` is `world_loop.rs:152-160` on that branch and is absent from `rk/tui-up-dn`.
-The stage graph constructs the stage as `"peer_selection"` (`build_stage_graph.rs:91`); the test then has to know the suffixed name the running graph actually has.
-That couples every future fault to a stage name and a message variant.
+`SimulationRunning::breakpoint` takes `Fn(&Effect) -> bool` (`crates/amaru-pure-stage/src/simulation/running/mod.rs:241-243`). `run_effect` pauses before interpreting a match (`running/mod.rs:1045-1051`). `WorldLoop::new` installs `world_external` on every `Effect::External` (`world_loop.rs:117-119`) and treats every `Blocked::Breakpoint` as that hook (`world_loop.rs:361-363`).
 
-The provider under both branches is a delayed byte pipe, not a TCP stack.
+`override_external_effect` replaces or handles one external effect, counted by `remaining` (`running/mod.rs:255-268`, `:1639-1654`).
 
-- A `send` whose peer endpoint still exists schedules `SendAck` at the current simulated time and a `Deliver` of the whole buffer (`world_connection_provider.rs:659-671`).
-  The inbox is an unbounded `VecDeque` (`world_connection_provider.rs:290`).
-  Nothing in that path consults how much the peer has already read.
-- `Deliver` times are a seeded sample in a range chosen when the provider is built (`world_connection_provider.rs:300-313`, `:535-541`).
-  The sample does not depend on the number of bytes.
-  The long-tail bucket is capped at `HONEST_PAYLOAD_DELAY_MAX_NANOS`, five preprod slots (`world_connection_provider.rs:36-41`).
-- One destination stays in order: a later `Deliver` is pushed out to `max(hop, last_deliver_at)` (`world_connection_provider.rs:270-272`, `:544-549`).
-- `connect` always enqueues a handshake hop in the 1–5ms wire range, plus a timeout (`world_connection_provider.rs:644-656`, `:531-532`).
-  Refusal is decided when that hop pops: no listener yields `"connection refused"` (`world_loop.rs:472-506`).
-  The refusal therefore waits out the wire delay.
-- `listen` stores an unbounded `pending_handshakes` queue (`world_connection_provider.rs:281-282`, `:621-629`).
-- The peer address of an outbound bearer is synthesised as `127.0.0.1:(5000 + connection id)` at pair time (`world_connection_provider.rs:614`; the same formula is `tests.rs:78-79`).
-  On this branch `local_addr` returns `NotFound` for every connection (`world_connection_provider.rs:685-688`).
-  On `rk/share-own-address` the endpoint stores that ephemeral address for the initiator and the listener address for the responder, and `local_addr` returns it (`world_connection_provider.rs:293-294`, `:593-613`, `:687-691` on that branch).
-- `close` schedules `Close` with a zero delay (`world_connection_provider.rs:680-682`).
-  The loop removes the endpoint, fails in-flight sends and recvs on both halves, and schedules `Close` for the peer.
-  The comment on that arm calls the result an RST visible on both halves at once (`world_loop.rs:563-572`).
-  `ConnectionProvider` exposes `close` and no separate write shutdown (`crates/amaru-ouroboros-traits/src/connections/connection_provider.rs:40`).
-  The production provider shuts down the write half (`crates/amaru-network/src/connection.rs:357-365`).
-- Abrupt faults are a different heap event. `schedule_peer_disconnects` plants `PeerDisconnect` hops, and popping one picks a live pair and runs the same `Close` path (`world_connection_provider.rs:162`, `:455-479`; `world_loop.rs:575-577`).
-- A hop whose time is past the horizon is left on the heap (`world_connection_provider.rs:349-355`).
-  There is no per-link delay the scenario can change after `new`.
-
-`SimulationRunning::breakpoint` installs a named predicate `Fn(&Effect) -> bool` (`crates/amaru-pure-stage/src/simulation/running/mod.rs:241-243`).
-`run` stops before the matching effect is interpreted (`running/mod.rs:66-68`, `:1045-1051`) and returns `Blocked::Breakpoint` (`crates/amaru-pure-stage/src/simulation/blocked.rs:28-30`).
-The caller inspects the effect with `breakpoint_effect` (`running/mod.rs:921-924`), then either `interpret_breakpoint` (`running/mod.rs:938-941`) or `discard_breakpoint` (`running/mod.rs:931-933`).
-`WorldLoop::new` installs one such breakpoint, `world_external`, matching every `Effect::External` (`world_loop.rs:117-119`).
-`run_graph_until_clock` treats every `Blocked::Breakpoint` as that network hook and interprets it immediately (`world_loop.rs:361-363`, `:378-385`).
-No scenario action runs at that pause.
-
-The manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37), `rk/repro-manager-peerselection-deadlock`) is the other caller this work has to serve.
-It drives one node against many injectors, holds wire delay fixed, and uses one timestamp of `PeerDisconnect` to close most connections together (`crates/amaru-node/src/tests/world/deadlock.rs:15-27` on that branch).
-That file is not on `rk/tui-up-dn`.
+`test_peer_share_reply_addresses` on `rk/share-own-address` (`7673dc2cf`, `generated.rs:825`) builds the share scenario from chain injectors and marks a peer adversarial by enqueueing `PeerSelectionMsg::adversarial` onto `peer_selection-2` (`generated.rs:925-929`).
 
 ## Decision
 
-Gossip scenarios and network faults stay inside the world loop.
-They stay deterministic, and every trigger and action is visible in the traces the tests already read: the heap log (`HeapLogEntry`) and the stage trace.
+### Scenarios
 
-### Scenario shape
+A peer-sharing scenario, and any gossip scenario of the same kind, is about twenty real nodes with no chain and no injectors. Chain-sync scenarios keep `spawn_injector` and `world_with_injector`.
 
-A peer-sharing scenario, and any later gossip scenario of the same kind, is a set of real nodes with no chain.
-About twenty nodes is the size we are aiming at.
-The scenario does not spawn injectors or ejectors, and it does not reveal headers.
-Chain-sync stays in the sync scenarios that already use `spawn_injector` and `world_with_injector`.
+### One node
 
-### Adversarial behaviour
+Rewriting one external effect on one node is `override_external_effect`. One send is `remaining: 1` and `OverrideResult::replaced`.
 
-Two different jobs.
+### World breakpoint
 
-Single-node tinkering rewrites one external effect on one `SimulationRunning`.
-That is the existing override, not a world action.
-`override_external_effect` takes a remaining count and a transform (`crates/amaru-pure-stage/src/simulation/running/mod.rs:255-268`).
-`usize::MAX` keeps the override; any smaller count is removed after that many applications (`running/mod.rs:257-258`, `:1702-1708`).
-`OverrideResult::no_match` passes the effect on, `handled` substitutes the stage response, and `replaced` substitutes another effect of the same response type (`running/mod.rs:1639-1654`, enum at `:1674-1680`).
-The running simulation applies that when it is about to run an `Effect::External` (`running/mod.rs:1301-1310`).
-Rewriting one message send is one such override with `remaining: 1` and `replaced`.
-The world breakpoint does not do it.
-
-World behaviour is a named breakpoint plus time checkpoints.
-
-A world breakpoint is an author-chosen name and one closure:
+A world breakpoint has a name chosen by the scenario and one closure:
 
 ```rust
-Fn(&Effect, Instant /* now */, usize /* node index */) -> Option<(Vec<WorldEffect>, Keep)>
+Fn(&Effect, Instant, usize) -> Option<(Vec<WorldEffect>, Keep)>
 ```
 
-`None` is not a hit.
-`Some` is a hit, including `Some((vec![], keep))`, which pauses, records the name, and applies no world effect.
-The `Option` keeps “not a hit” distinct from “hit, nothing to do”.
+The trace highlights that name on a hit. The same name may be installed on any number of nodes. Registering a name that is already in use panics. `world_external` is reserved for the world loop, and reusing it panics too.
 
-The name is the label the execution trace highlights when the breakpoint hits.
-The same name can be installed on any number of simulated nodes.
-`run_graph_until_clock` tells this name apart from `world_external` (`world_loop.rs:361-363`).
-`world_external` stays the network hook (`world_loop.rs:117-119`, `:378-385`).
+`SimulationRunning::breakpoint` takes `Fn(&Effect, Instant) -> bool`, passing `self.now()` (`running/mod.rs:320-321`). Callers of today's `Fn(&Effect) -> bool` take that `Instant`. The node index comes from a wrapper `WorldLoop` builds for each installed node.
 
-`SimulationRunning::breakpoint` today takes `Fn(&Effect) -> bool` (`running/mod.rs:241-243`), stored as that function type (`running/mod.rs:84`).
-`run_effect` calls it with the effect alone and, on true, pauses before interpretation (`running/mod.rs:1045-1051`).
-That predicate gains the current simulated time, `self.now()` (`running/mod.rs:320-321`):
+The closure runs twice on a hit. The wrapper's predicate is `on_hit(effect, now, index).is_some()`. `None` leaves the run going, and the closure is not called again. On `Some`, handling `Blocked::Breakpoint` calls `on_hit` again with the same arguments and uses that `Vec` and `Keep`. The closure is pure: the same inputs return the same `Option`.
 
-```rust
-Fn(&Effect, Instant) -> bool
-```
+The world applies the `Vec` in order, records the name, the paused effect, and each `WorldEffect`, then `interpret_breakpoint` (`running/mod.rs:938-941`). `Keep::Detach` removes the breakpoint from the node that paused. `Keep::Attach` leaves it. Other nodes that carry the same name stay as they are.
 
-Every current caller passes a closure of the old shape: `world_loop.rs:118`, `crates/amaru-node/src/tests/node.rs:81`, and the protocol and pure-stage tests in `mux.rs`, `connection.rs`, `chainsync/mod.rs`, `blockfetch/initiator.rs`, `handshake/tests.rs`, `manager/tests.rs`, `manager/connector.rs`, and `amaru-pure-stage/tests/simulation.rs`.
-Each of those closures gains an `Instant` it does not read.
-The node index is not a pure-stage argument.
-One `SimulationRunning` is one node.
-`WorldLoop` installs, on each chosen node, a wrapper that closes over that graph index and calls the scenario closure as the pure-stage predicate.
-That call uses `is_some()`: `None` returns false and the run does not pause, and `Some` returns true.
-The `Vec` and the `Keep` from this first call are discarded.
+`at(Instant, Vec<WorldEffect>)` applies that vector, in order, when simulated time reaches the instant, and records each effect.
 
-When the world handles the resulting `Blocked::Breakpoint`, it calls the same closure again with the same effect, the same time, and the same node index, and uses that second result.
-There is no second call when the first returned `None`.
-The world applies the second `Vec` in order, and records the breakpoint name, the paused effect, and each `WorldEffect` in the trace.
-It then `interpret_breakpoint` (`running/mod.rs:938-941`), so the paused effect still runs.
-
-The closure is required to be pure.
-The same effect, time, and node index must produce the same `Option`.
-The two evaluations are how a hit both pauses the run and then supplies the effects, and they have nothing to remember between the calls.
-`Keep::Detach` removes the breakpoint from the node that paused.
-`Keep::Attach` leaves it installed.
-One-shot versus standing is that return value, decided on each hit.
-Other nodes that carry the same name are left as they are.
-
-A link is the directed pair of node indices `from` and `to`.
-`WorldEffect::SetLink { from, to, delay, rate, apply }` sets delay and rate for every connection in that direction, both connections that already exist and connections opened later.
-The other direction is a different link.
-`apply` says what happens to sends that have not been delivered yet.
-`Apply::Prospective` is the default: only sends issued after the change use the new delay and rate, and in-flight sends keep the arrival they were given.
-That is how a scenario writes “it worked until here, and then the network failed”.
-`Apply::Retroactive` re-times every not-yet-delivered send on that direction.
-Corking sets a delay past the horizon and holds the queued sends; uncorking sets a delay inside the horizon and releases them, still in FIFO order.
+`WorldEffect` gains variants as scenarios need them. The initial variants are `SetLink` and `CloseConnection`. `CloseConnection` is an orderly close, the write shutdown the production provider already performs. A reset effect is added later, on the real network and on the simulated one.
 
 ### Adversarial classification
 
-The node under test is what classifies a peer as adversarial.
-A scenario does not construct `PeerSelectionMsg::adversarial` and does not enqueue it.
-It changes bytes that peer sends, so the receiving node detects the misbehaviour itself.
-`override_external_effect` with `replaced` substitutes the send on the sending node.
-A world breakpoint on that node is the other substitution: the closure matches the send, the trace records the hit, and the bytes the receiver reads are the ones the scenario put in its place.
-The receiver's own checks then set the mark.
+The receiving node classifies a peer from the bytes it reads. The scenario produces those bytes with an effect override on the sending node, or with a world breakpoint on that send.
 
-`WorldEffect` is a small enum.
-The sketch starts with `SetLink { from, to, delay, rate, apply }` and `CloseConnection`.
-Later variants extend it.
-The exact starting set is open; see Discussion points.
-An empty `Vec` is how a hit applies nothing.
-There is no `None` variant.
+### Connection provider
 
-A time checkpoint is the other trigger.
-`at(Instant, Vec<WorldEffect>)` applies that vector, in order, when simulated time reaches the instant, and records each effect.
-There is no paused effect.
-A closure that should fire only after time T returns `None` until `now` passes T.
+`WorldConnectionProvider` follows TCP/IP for the behaviours below. Per-connection FIFO stays.
+
+- A send completes when its bytes fit in the send buffer. A full receive window parks further sends in that direction.
+- Orderly close shuts down one write half. Data already accepted on that half is still delivered. Reset, once that effect exists, fails both halves and discards buffered bytes.
+- `connect` to an address with no listener fails at the current simulated time. A full listen backlog waits, then refuses or times out.
+- `pending_handshakes` is bounded. Handshakes past the cap are refused.
+- An established bearer has a concrete local address. The outbound port comes from a deterministic ephemeral allocator. The inbound local address is the listener. `local_addr` returns that socket, and the peer identity uses the same address.
+
+### Links
+
+A link is every connection from node index `from` to node index `to`, those that already exist and those opened later. The opposite direction is another link.
+
+Arrival of a send is
+
+```text
+base + (size / rate) * max(1, W_full / max(w, W0))
+```
+
+queued so it cannot pass an earlier send on the same link. `w` is a decaying exponential moving average of bytes recently sent on the link. `W0` is about ten segments, about 14 KB. `w` resets after about one retransmission timeout of idle. The update runs when the heap pops the send. A scenario that leaves a link unconfigured keeps the seeded hop the provider already draws.
+
+Packet loss is added delay. A delay past the scenario horizon delivers nothing and shows no close. The delay value may exceed the horizon. `PeerDisconnect` remains an abrupt close of a live pair.
+
+`Apply::Prospective` is the default. Sends issued after the change use the new delay and rate. Sends already scheduled keep their arrival. A later send still waits behind an earlier one: its arrival is at least the previous send's.
+
+`Apply::Retroactive` re-times every not-yet-delivered send on that direction. The world keeps, per direction, a queue of those sends, each with its base send time, size, and the extra-delay factor it was given. A change recomputes `sent_at + delay + (size / rate) * extra` with the new parameters, then walks the queue in order and raises each arrival to at least the previous one. A retroactive delay past the horizon holds the queue. A later retroactive `SetLink` inside the horizon releases it in that order.
 
 ```rust
-/// Decided on each hit. Detach removes the breakpoint from the node that paused.
 enum Keep {
     Attach,
     Detach,
 }
 
-/// How a `SetLink` treats sends not delivered yet.
 /// `Prospective` is the default.
 enum Apply {
-    /// Sends issued after the change use the new delay and rate.
     /// In-flight sends keep their scheduled arrival.
     Prospective,
     /// Re-time every not-yet-delivered send on this from->to direction.
     Retroactive,
 }
 
-/// `from` and `to` are node indexes. One direction: every connection from `from` to `to`,
-/// existing and opened later. The opposite direction is a separate link.
 enum WorldEffect {
     SetLink { from: usize, to: usize, delay: Duration, rate: u64, apply: Apply },
+    /// Orderly close. Reset is a later variant, on the real network and the simulated one.
     CloseConnection { conn: ConnectionId },
 }
 
 impl WorldLoop {
-    /// `name` is chosen by the scenario and highlighted in the trace on a hit.
-    /// The same `name` may be installed on any number of `nodes` (graph indexes).
+    /// `name` is highlighted in the trace on a hit.
+    /// A name already in use panics. `world_external` is reserved and panics if reused.
     ///
-    /// `on_hit` runs twice per hit. The pure-stage predicate is `on_hit(effect, now, index).is_some()`:
-    /// `None` does not pause, and there is no second call. On `Some`, the run pauses, and handling
-    /// `Blocked::Breakpoint` calls `on_hit` again with the same arguments to obtain the `Vec` and `Keep`.
-    /// The closure must be pure: same inputs, same output.
+    /// `on_hit` runs twice per hit. The predicate is `on_hit(effect, now, index).is_some()`.
+    /// `None` leaves the run going. On `Some`, handling `Blocked::Breakpoint` calls `on_hit`
+    /// again with the same arguments. The closure is pure.
     pub fn breakpoint<F>(&mut self, name: &str, nodes: impl IntoIterator<Item = usize>, on_hit: F)
     where
         F: Fn(&Effect, Instant, usize) -> Option<(Vec<WorldEffect>, Keep)> + Send + 'static,
     {
     }
 
-    /// Other trigger: apply `effects` in order when simulated time reaches `at`.
     pub fn at(&mut self, at: Instant, effects: Vec<WorldEffect>) {}
 }
 ```
 
-### Connection-provider realism
-
-`WorldConnectionProvider` grows the TCP/IP behaviour the production socket already has, still as one deterministic heap.
-Per-connection FIFO stays (`last_deliver_at`).
-
-- Backpressure.
-  Each direction has a send buffer and a receive window.
-  A `send` completes when its bytes fit in the send buffer.
-  A slow `recv` leaves the window closed, and further `send`s on that direction stay parked.
-  The unbounded inbox and the immediate `SendAck` go away.
-- Orderly close and reset.
-  Orderly close is a write shutdown of one half, matching `writer.shutdown()` on the production provider.
-  Data already accepted on that half is still delivered.
-  Reset fails both halves and discards buffered bytes, which is what `NetworkEvent::Close` does today.
-- Immediate connection refused.
-  A `connect` whose target has no listener fails in the `connect` call, at the current simulated time.
-  It does not wait for the 1–5ms wire hop.
-  A listener that exists and whose backlog is full is a different outcome (the attempt waits, then refuses or times out).
-- Bounded listen backlog.
-  `pending_handshakes` has a finite cap.
-  Handshakes past the cap are refused.
-- Local addresses.
-  An established bearer has a concrete local socket.
-  The outbound port is an ephemeral port drawn from a deterministic allocator.
-  The inbound local address is the listener.
-  `local_addr` returns that socket.
-  The hard-coded `127.0.0.1:(5000 + connection id)` used as the initiator's peer address today is replaced by the same allocator, so the peer identity and `local_addr` stay one value.
-
-### Link model
-
-On top of that pipe, each link has a base delay and a rate, set by the scenario.
-Arrival time of a message is
-
-```text
-arrival = base_delay + size / rate
-```
-
-queued so it cannot pass an earlier message on the same link.
-The current `max(hop, last_deliver_at)` rule is that queue, with `base_delay + size / rate` in place of the seeded hop sample.
-
-A link is the directed pair of node indices. `WorldEffect::SetLink { from, to, delay, rate, apply }` covers every connection in that direction, existing and new.
-The scenario changes those parameters by returning that effect from a world breakpoint, or by a time checkpoint that applies the same effect.
-A breakpoint hit records the name, the paused effect, and each `WorldEffect` in the returned `Vec`, in order.
-A time checkpoint records each effect in its `Vec`.
-A rewrite of one message on one node stays on `override_external_effect`.
-
-`Apply::Prospective` leaves each in-flight send on the arrival it already has.
-A later send, even one issued under a faster delay or rate, still cannot overtake an earlier one: the direction queue and per-connection FIFO push its arrival out to at least the previous send's arrival.
-`Apply::Retroactive` is the cork and the uncork.
-The world keeps, per direction, the sends not yet delivered.
-Each entry holds the base send time, the size, and the extra-delay factor that send was given (`max(1, W_full / max(w, W0))` at send time).
-A retroactive change recomputes `sent_at + delay + (size / rate) * extra` with the new delay and rate, then walks the queue in order and sets each arrival to at least the previous one, so FIFO holds.
-Corking is a retroactive delay past the horizon: nothing in that queue is delivered, and the peer sees no close.
-Uncorking is a later retroactive `SetLink` whose delay is inside the horizon: the same queue is re-timed and then delivered in the original order.
-
-Packet loss is added delay on that message.
-There is no separate drop-from-the-link event.
-A delay past the scenario horizon is a silent link: `pop_at_or_before` never delivers it, and the peer sees no close.
-The delay API accepts values beyond the horizon.
-`PeerDisconnect` remains the abrupt-close fault.
-Silence is not a second fault type.
-
-Slow start is a warmth term, not a congestion window.
-Each link keeps `w`, a decaying exponential moving average of bytes recently sent.
-The extra delay grows when `w` is small:
-
-```text
-delay = base_delay + (size / rate) * max(1, W_full / max(w, W0))
-```
-
-`W0` is about ten segments, about 14 KB.
-`w` resets after about one retransmission timeout of idle, by analogy with Linux `tcp_slow_start_after_idle`.
-The update runs when the heap pops the send, so the same seed produces the same `w`.
-There is no per-segment scoreboard.
-A scenario that does not configure a link keeps the seeded hop the provider already draws.
-
 ## Consequences
 
-- Gossip tests stop carrying a chain, an injector, and a reveal schedule whose only job is to make `spawn_catch_up` construct a node.
-- A world fault is a named breakpoint or a time checkpoint returning a `Vec<WorldEffect>`.
-  It does not grow a `named_for_tests` call site per stage.
-  One external effect on one node stays an `override_external_effect`.
-- The world-breakpoint closure is pure. A hit evaluates it twice, with the same effect, time, and node index.
-- Backpressure, half-close, refusal, and backlog become things a world test can observe, because the production socket already behaves that way and the sim currently does not.
-- Silent peers, loss, and a cold link are three settings of one delay formula.
-  A test reads them back from the trace instead of inferring them from a missing `Deliver`.
-- `Apply::Prospective` is how a link fails from a point in time onward. In-flight sends still arrive; later sends do not overtake them.
-  `Apply::Retroactive` is how a cork holds every queued send and an uncork releases them in order.
-- An adversarial mark is the receiving node's own classification. The scenario changes the sender's bytes; it does not enqueue `PeerSelectionMsg::adversarial`.
-- Implementing the provider and the link model is a behaviour change for every existing world test.
-  The migration section names the first two callers.
+- Gossip scenarios are nodes. The chain, the injectors, and the reveal schedule stay with chain-sync.
+- A hit is recorded under the name the scenario chose, with the paused effect and each `WorldEffect`.
+- A world-breakpoint closure returns the same value for the same effect, time, and node index, because a hit evaluates it twice.
+- `Apply::Prospective` leaves in-flight arrivals in place, and FIFO keeps a later send behind them. `Apply::Retroactive` moves the whole pending queue.
+- The receiver's classification is the adversarial mark. The share scenario's adversary is a sender whose bytes were modified.
+- `CloseConnection` matches production write shutdown. Reset is its own later effect on both networks.
+- A duplicate breakpoint name, including `world_external`, panics at registration.
 
 ## Alternatives considered
 
-### Direct `PeerSelectionMsg::adversarial`
+### Enqueue `PeerSelectionMsg::adversarial`
 
-Enqueueing the adversarial variant marks the peer without anything on the wire for the receiver to judge.
-The share scenario on `rk/share-own-address` does that (`generated.rs:925-929`).
-The decision drops it. The receiver classifies the peer from the bytes it reads, after the scenario has modified what the sender transmitted.
+`test_peer_share_reply_addresses` does this (`generated.rs:925-929` on `rk/share-own-address`). The mark then exists with no bytes for the receiver to judge. The receiver classifies the peer from the bytes the scenario arranged.
 
-### Per-node stage enqueue
+### Stage-name injection
 
-`WorldLoop::enqueue` plus `StageRef::named_for_tests("peer_selection-2")` is enough for one adversarial flag.
-The review rejected it as the general mechanism: each new fault learns another stage name and another message type, and the injection is invisible to the network trace.
-World behaviour is a named breakpoint on the nodes the scenario lists.
+`WorldLoop::enqueue` with `StageRef::named_for_tests("peer_selection-2")` ties each fault to a stage name. Faults are world breakpoints and time checkpoints.
 
-### Separate predicate and action closures
+### Two closures
 
-A bool predicate plus a different closure that builds the `WorldEffect` can disagree about what a hit is.
-The world breakpoint is one closure. A hit evaluates it twice, first as `is_some()` and then for the `Vec` and the `Keep`, with the same arguments both times.
-Purity is what makes those two results the same hit.
+A predicate and a separate action closure can disagree, and they observe the clock at different moments. One closure is evaluated twice, and purity makes both results the same hit.
 
-### A `WorldView` struct
+### `WorldView`
 
-A struct whose only field is the simulated time adds a type that every closure has to thread, and the node index does not belong on `SimulationRunning` because that value is one node.
-Time is an `Instant` argument, next to the effect.
-The node index is an argument the `WorldLoop` wrapper supplies.
+Time and the node index are arguments. The node index is closed over by the per-node wrapper.
 
-### Auto-generated breakpoint names
+### Generated names
 
-The world could mint a name when the scenario registers a predicate.
-The trace would then highlight an identifier the author did not write.
-The decision keeps the name the scenario chooses, and that name is what the trace shows on a hit.
+The trace shows the name the scenario wrote.
 
-### Rewrite one delivery as a world effect
+### Byte rewrite as a `WorldEffect`
 
-Dropping or rewriting the bytes of one delivery could have been a `WorldEffect` variant.
-It is not. `override_external_effect` replaces one external effect (`running/mod.rs:255-268`, `:1639-1654`), and a world breakpoint matches that send so the receiver reads the substituted bytes.
-`WorldEffect` stays the world-scoped operations: link delay and rate, closing a connection, and later extensions.
+One external effect is `override_external_effect`. A world breakpoint matches the send whose bytes the receiver will read. `WorldEffect` starts as link delay and rate, and orderly close.
 
-### Simulate a congestion window
+### A congestion window
 
-A per-segment window, loss detection, and retransmission would reproduce TCP more closely.
-The review rejected that state.
-Warmth `w` gives a cold link a larger delay, stays deterministic, and keeps a single FIFO queue per link.
+Warmth `w` is the slow-start term, with one FIFO queue per link.
 
-### A separate silent-failure event
+### A silent-failure event
 
-A heap event that means “this link is down, deliver nothing, emit no close” duplicates what a delay beyond the horizon already does via `pop_at_or_before`.
-The review keeps one knob.
-`PeerDisconnect` is unchanged, because an RST is a close the peer observes.
+A delay past the horizon leaves the hop undelivered and unclosed (`world_connection_provider.rs:349-355`). `PeerDisconnect` is the abrupt close.
 
-### Give gossip tests a smaller fake peer
+### A stub peer for gossip
 
-A stub that answers share requests without a node would avoid the injector, and it would also skip the bearer, the share initiator, and the performance row.
-The scenario exists to assert those.
-
-## Discussion points
-
-These are open.
-The decision above does not settle them.
-
-- The exact starting set of `WorldEffect`.
-  The sketch has `SetLink { from, to, delay, rate, apply }` and `CloseConnection`.
-  Which of those ship first, and whether close is orderly or reset, is open.
-- Name uniqueness, and collision with `world_external`.
-  One author-chosen name may be installed on many nodes.
-  Whether two registrations may reuse a name for different closures, and whether `world_external` is reserved, is open.
-  `run_graph_until_clock` currently treats every `Blocked::Breakpoint` as the network hook (`world_loop.rs:361-363`).
-- Which work lands first.
-  TCP realism (buffers, half-close, refusal, backlog, local addresses) and the link model (rate, warmth, mid-run updates) touch the same `send` / `Deliver` path.
-  Doing either one alone still leaves the other half of the review undone.
-
-## Migration
-
-1. Rewrite `test_peer_share_reply_addresses` as about twenty chainless nodes.
-   The adversarial peer sends bytes the receiver classifies itself.
-   The scenario modifies those bytes with `override_external_effect` on the sending node, or with a world breakpoint on that send.
-   It does not enqueue `PeerSelectionMsg::adversarial`.
-   The never-connected address and the listen-address check stay assertions on the trace.
-   The injector store, `with_injector`, and `schedule_reveals` leave this scenario.
-2. After `WorldEffect::SetLink` exists, use a world breakpoint or a time checkpoint in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of the directed node pair, not only of a fixed wire delay and a `PeerDisconnect` storm.
+A stub that answers share requests skips the bearer and the performance row the scenario asserts.
 
 ## References
 
 - [EDR-011](./011-deterministic-simulation-testing.md)
 - `test_peer_share_reply_addresses` on `rk/share-own-address` ([#41](https://github.com/rkuhn-bot/amaru/pull/41))
-- Manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37))
