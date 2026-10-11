@@ -91,37 +91,57 @@ The world breakpoint does not do it.
 
 World behaviour is a named breakpoint plus time checkpoints.
 
-A world breakpoint is an author-chosen name, a predicate over `&Effect`, and a closure:
+A world breakpoint is an author-chosen name and one closure:
 
 ```rust
-fn on_hit(effect: &Effect, view: &WorldView) -> (WorldEffect, Keep)
+Fn(&Effect, Instant /* now */, usize /* node index */) -> Option<(Vec<WorldEffect>, Keep)>
 ```
+
+`None` is not a hit.
+`Some` is a hit, including `Some((vec![], keep))`, which pauses, records the name, and applies no world effect.
+The `Option` is what keeps “not a hit” distinct from “hit, nothing to do” in a single call, so the world does not run the closure twice.
 
 The name is the label the execution trace highlights when the breakpoint hits.
 The same name can be installed on any number of simulated nodes.
-The predicate is the one `SimulationRunning::breakpoint` already takes (`running/mod.rs:241-243`): the run pauses on `Blocked::Breakpoint` before the effect is interpreted.
 `run_graph_until_clock` tells this name apart from `world_external` (`world_loop.rs:361-363`).
 `world_external` stays the network hook (`world_loop.rs:117-119`, `:378-385`).
 
-On a hit the world calls the closure, applies the returned `WorldEffect`, and records the breakpoint name, the paused effect, and the `WorldEffect` in the trace.
+`SimulationRunning::breakpoint` today takes `Fn(&Effect) -> bool` (`running/mod.rs:241-243`), stored as that function type (`running/mod.rs:84`).
+`run_effect` calls it with the effect alone and, on true, pauses before interpretation (`running/mod.rs:1045-1051`).
+That predicate gains the current simulated time, `self.now()` (`running/mod.rs:320-321`):
+
+```rust
+Fn(&Effect, Instant) -> bool
+```
+
+Every current caller passes a closure of the old shape: `world_loop.rs:118`, `crates/amaru-node/src/tests/node.rs:81`, and the protocol and pure-stage tests in `mux.rs`, `connection.rs`, `chainsync/mod.rs`, `blockfetch/initiator.rs`, `handshake/tests.rs`, `manager/tests.rs`, `manager/connector.rs`, and `amaru-pure-stage/tests/simulation.rs`.
+Each of those closures gains an `Instant` it does not read.
+The node index is not a pure-stage argument.
+One `SimulationRunning` is one node.
+`WorldLoop` installs, on each chosen node, a wrapper that closes over that graph index, calls the scenario closure once with `(effect, now, index)`, returns false on `None`, and on `Some` stashes the `Vec` and the `Keep` and returns true.
+
+On a hit the world applies the stashed `Vec` in order, and records the breakpoint name, the paused effect, and each `WorldEffect` in the trace.
 It then `interpret_breakpoint` (`running/mod.rs:938-941`), so the paused effect still runs.
 `Keep::Detach` removes the breakpoint from the node that paused.
 `Keep::Attach` leaves it installed.
 One-shot versus standing is that return value, decided on each hit.
 Other nodes that carry the same name are left as they are.
 
-`WorldView` starts with only the current simulated time.
-Fields are added when a closure needs them.
+A link is the directed pair of node indices `from` and `to`.
+`WorldEffect::SetLink { from, to, delay, rate }` sets delay and rate for every connection in that direction, both connections that already exist and connections opened later.
+The other direction is a different link.
 
 `WorldEffect` is a small enum.
-The first variants cover “do nothing”, “set a link’s delay and rate”, and “close a connection”.
-Later variants extend the enum.
+The sketch starts with `SetLink` and `CloseConnection`.
+Later variants extend it.
 The exact starting set is open; see Discussion points.
+An empty `Vec` is how a hit applies nothing.
+There is no `None` variant.
 
 A time checkpoint is the other trigger.
-When simulated time reaches it, the world applies a `WorldEffect` and records that in the trace.
+`at(Instant, Vec<WorldEffect>)` applies that vector, in order, when simulated time reaches the instant, and records each effect.
 There is no paused effect.
-“After time T, the next effect that matches P” arms the named breakpoint when the clock passes T.
+A closure that should fire only after time T returns `None` until `now` passes T.
 
 ```rust
 /// Decided on each hit. Detach removes the breakpoint from the node that paused.
@@ -130,36 +150,25 @@ enum Keep {
     Detach,
 }
 
-/// What the closure may read. Starts as the clock; grows on demand.
-struct WorldView {
-    now: Instant,
-}
-
-/// Applied by the world at a breakpoint hit or a time checkpoint.
-/// The link selector and the exact variant list are open.
+/// `from` and `to` are node indexes. One direction: every connection from `from` to `to`,
+/// existing and opened later. The opposite direction is a separate link.
 enum WorldEffect {
-    None,
-    SetLinkDelayAndRate { delay: Duration, rate: u64 },
+    SetLink { from: usize, to: usize, delay: Duration, rate: u64 },
     CloseConnection { conn: ConnectionId },
 }
 
 impl WorldLoop {
     /// `name` is chosen by the scenario and highlighted in the trace on a hit.
     /// The same `name` may be installed on any number of `nodes` (graph indexes).
-    pub fn breakpoint<P, F>(
-        &mut self,
-        name: &str,
-        nodes: impl IntoIterator<Item = usize>,
-        predicate: P,
-        on_hit: F,
-    ) where
-        P: Fn(&Effect) -> bool + Send + 'static,
-        F: Fn(&Effect, &WorldView) -> (WorldEffect, Keep) + Send + 'static,
+    /// `None` is not a hit. `Some` is a hit; the `Vec` is applied in order.
+    pub fn breakpoint<F>(&mut self, name: &str, nodes: impl IntoIterator<Item = usize>, on_hit: F)
+    where
+        F: Fn(&Effect, Instant, usize) -> Option<(Vec<WorldEffect>, Keep)> + Send + 'static,
     {
     }
 
-    /// Other trigger: apply `effect` when simulated time reaches `at`.
-    pub fn at(&mut self, at: Instant, effect: WorldEffect) {}
+    /// Other trigger: apply `effects` in order when simulated time reaches `at`.
+    pub fn at(&mut self, at: Instant, effects: Vec<WorldEffect>) {}
 }
 ```
 
@@ -203,9 +212,10 @@ arrival = base_delay + size / rate
 queued so it cannot pass an earlier message on the same link.
 The current `max(hop, last_deliver_at)` rule is that queue, with `base_delay + size / rate` in place of the seeded hop sample.
 
-The scenario changes a link's base delay and rate while the run is going by returning `WorldEffect::SetLinkDelayAndRate` from a world breakpoint, or by a time checkpoint that applies the same effect.
-A breakpoint hit records the name, the paused effect, and that `WorldEffect`.
-A time checkpoint records the `WorldEffect` at that instant.
+A link is the directed pair of node indices. `WorldEffect::SetLink { from, to, delay, rate }` covers every connection in that direction, existing and new.
+The scenario changes those parameters by returning that effect from a world breakpoint, or by a time checkpoint that applies the same effect.
+A breakpoint hit records the name, the paused effect, and each `WorldEffect` in the returned `Vec`, in order.
+A time checkpoint records each effect in its `Vec`.
 A rewrite of one message on one node stays on `override_external_effect`.
 
 Packet loss is added delay on that message.
@@ -232,7 +242,7 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 ## Consequences
 
 - Gossip tests stop carrying a chain, an injector, and a reveal schedule whose only job is to make `spawn_catch_up` construct a node.
-- A world fault is a named breakpoint or a time checkpoint returning a `WorldEffect`.
+- A world fault is a named breakpoint or a time checkpoint returning a `Vec<WorldEffect>`.
   It does not grow a `named_for_tests` call site per stage.
   One external effect on one node stays an `override_external_effect`.
 - Backpressure, half-close, refusal, and backlog become things a world test can observe, because the production socket already behaves that way and the sim currently does not.
@@ -251,6 +261,18 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 `WorldLoop::enqueue` plus `StageRef::named_for_tests("peer_selection-2")` is enough for one adversarial flag.
 The review rejected it as the general mechanism: each new fault learns another stage name and another message type, and the injection is invisible to the network trace.
 World behaviour is a named breakpoint on the nodes the scenario lists.
+
+### Separate predicate and action closures
+
+A bool predicate plus a second closure that builds the `WorldEffect` splits one decision across two calls.
+The two can disagree, and the action closure runs only after the pause, so it sees a later clock than the predicate did.
+`Option<(Vec<WorldEffect>, Keep)>` is one call: `None` does not pause, `Some` is the hit and the effects.
+
+### A `WorldView` struct
+
+A struct whose only field is the simulated time adds a type that every closure has to thread, and the node index does not belong on `SimulationRunning` because that value is one node.
+Time is an `Instant` argument, next to the effect.
+The node index is an argument the `WorldLoop` wrapper supplies.
 
 ### Auto-generated breakpoint names
 
@@ -286,23 +308,22 @@ The scenario exists to assert those.
 These are open.
 The decision above does not settle them.
 
-- What a link is.
-  One direction of one connection, the pair of directions, a node pair across connections, or a node's uplink.
-  And whether a mid-run change applies to bearers that already exist, to bearers opened afterwards, or to both.
-  `WorldEffect::SetLinkDelayAndRate` needs that selector.
+- Whether bytes already queued on a link are re-timed when `SetLink` changes its delay or rate.
+  A link is the directed node pair `from` → `to`, and the new parameters apply to every connection in that direction, existing and new.
+  What is open is the queue: each byte already given an arrival time can keep it, or the world can recompute those arrivals from the new delay and rate.
 - The exact starting set of `WorldEffect`.
-  The sketch has `None`, a link delay and rate, and close-connection.
+  The sketch has `SetLink { from, to, delay, rate }` and `CloseConnection`.
   Which of those ship first, and whether close is orderly or reset, is open.
 - Name uniqueness, and collision with `world_external`.
   One author-chosen name may be installed on many nodes.
-  Whether two registrations may reuse a name for different predicates, and whether `world_external` is reserved, is open.
+  Whether two registrations may reuse a name for different closures, and whether `world_external` is reserved, is open.
   `run_graph_until_clock` currently treats every `Blocked::Breakpoint` as the network hook (`world_loop.rs:361-363`).
 - Whether an adversarial mark should be the result of behaviour the peer can actually commit (a bad header on the wire, for example) rather than a direct `PeerSelectionMsg`.
   The trigger is a world breakpoint or a time checkpoint either way.
   Which `WorldEffect` or override the share scenario uses is part of the migration, not fixed here.
 - In-order recovery.
-  Because a late message blocks the rest of the link, a silent link stays silent for later messages until a trigger sets the delay back under the horizon.
-  The API has to allow that second update, including for bytes already queued.
+  Because a late message blocks the rest of that direction, a silent link stays silent for later messages until a later `SetLink` or `at` brings the delay back under the horizon.
+  Whether that second update also re-times bytes already queued is the open point above.
 - Which work lands first.
   TCP realism (buffers, half-close, refusal, backlog, local addresses) and the link model (rate, warmth, mid-run updates) touch the same `send` / `Deliver` path.
   Doing either one alone still leaves the other half of the review undone.
@@ -310,11 +331,11 @@ The decision above does not settle them.
 ## Migration
 
 1. Rewrite `test_peer_share_reply_addresses` as about twenty chainless nodes.
-   The adversarial peer is a named world breakpoint, installed on the nodes that should hit it, or a time checkpoint that applies a `WorldEffect`.
+   The adversarial peer is a named world breakpoint, installed on the nodes that should hit it, or a time checkpoint that applies a `Vec<WorldEffect>`.
    A rewrite of one send on one node, if the scenario still needs one, is `override_external_effect` on that node.
    The never-connected address and the listen-address check stay assertions on the trace.
    The injector store, `with_injector`, and `schedule_reveals` leave this scenario.
-2. After `WorldEffect::SetLinkDelayAndRate` exists, use a world breakpoint or a time checkpoint in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of those links, not only of a fixed wire delay and a `PeerDisconnect` storm.
+2. After `WorldEffect::SetLink` exists, use a world breakpoint or a time checkpoint in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of the directed node pair, not only of a fixed wire delay and a `PeerDisconnect` storm.
 
 ## References
 
