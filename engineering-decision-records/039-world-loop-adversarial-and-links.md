@@ -53,9 +53,12 @@ The provider under both branches is a delayed byte pipe, not a TCP stack.
 - A hop whose time is past the horizon is left on the heap (`world_connection_provider.rs:349-355`).
   There is no per-link delay the scenario can change after `new`.
 
-`WorldLoop::new` also installs a pure-stage breakpoint named `world_external` that matches every `Effect::External` (`world_loop.rs:117-119`).
-That stops the simulator on external effects.
-It is not a scenario action, and it does not record a fault in the heap log.
+`SimulationRunning::breakpoint` installs a named predicate `Fn(&Effect) -> bool` (`crates/amaru-pure-stage/src/simulation/running/mod.rs:241-243`).
+`run` stops before the matching effect is interpreted (`running/mod.rs:66-68`, `:1045-1051`) and returns `Blocked::Breakpoint` (`crates/amaru-pure-stage/src/simulation/blocked.rs:28-30`).
+The caller inspects the effect with `breakpoint_effect` (`running/mod.rs:921-924`), then either `interpret_breakpoint` (`running/mod.rs:938-941`) or `discard_breakpoint` (`running/mod.rs:931-933`).
+`WorldLoop::new` installs one such breakpoint, `world_external`, matching every `Effect::External` (`world_loop.rs:117-119`).
+`run_graph_until_clock` treats every `Blocked::Breakpoint` as that network hook and interprets it immediately (`world_loop.rs:361-363`, `:378-385`).
+No scenario action runs at that pause.
 
 The manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37), `rk/repro-manager-peerselection-deadlock`) is the other caller this work has to serve.
 It drives one node against many injectors, holds wire delay fixed, and uses one timestamp of `PeerDisconnect` to close most connections together (`crates/amaru-node/src/tests/world/deadlock.rs:15-27` on that branch).
@@ -79,23 +82,23 @@ Faults are configuration supplied when the world is built.
 The configuration is a list of triggers and actions.
 A test does not enqueue a stage message by name.
 
-Two triggers:
+A behaviour change, such as a node becoming adversarial, is triggered by a Simulation breakpoint or by a simulated-time checkpoint.
+It is not triggered by a predicate over a wire message.
 
-- A time checkpoint, in simulated time.
-- A breakpoint: a predicate that matches exactly one simulated message or request.
-  The example from the review is “the first `MsgShareRequest` from A to B”.
+- A time checkpoint is an instant on the world clock.
+- A Simulation breakpoint is the existing `SimulationRunning::breakpoint` (`running/mod.rs:241-243`).
+  The predicate reads one `&Effect`.
+  The run pauses before that effect is interpreted, on `Blocked::Breakpoint`.
 
-Triggers compose.
-“After time T, the next message that matches P” is one trigger, not two unrelated ones.
+The two compose.
+“After time T, the next effect that matches P” arms the breakpoint when the clock passes T.
+It is not a matcher over decoded messages.
 
-Three actions, applied to the matched message or from the matched instant onward:
-
-- Drop that one message.
-- Modify that one message.
-- Change a node's behaviour from that point on.
-
-`graph.breakpoint("world_external", …)` stays the simulator's external-effect stop.
-Scenario breakpoints are a separate list on the world, evaluated in heap order, and each firing appends a trace record that names the trigger, the matched message, and the action.
+When a time checkpoint fires, the world applies the action at that instant and keeps running.
+When a Simulation breakpoint fires, the world applies the action at the pause, records the breakpoint name and the action in the trace, then `interpret_breakpoint` so the effect itself still runs.
+`world_external` stays the network hook.
+A scenario breakpoint is another name on that node's `SimulationRunning`.
+`run_graph_until_clock` has to tell the two apart: a scenario name applies the behaviour change, and `world_external` keeps today's `on_external` path.
 
 ### Connection-provider realism
 
@@ -138,8 +141,13 @@ queued so it cannot pass an earlier message on the same link.
 The current `max(hop, last_deliver_at)` rule is that queue, with `base_delay + size / rate` in place of the seeded hop sample.
 
 The scenario can change a link's base delay and rate while the run is going, through an API on the world.
-The change is itself an action of the trigger language above: a time checkpoint, or a message breakpoint.
+That change is a behaviour of the link, triggered the same way as a node behaviour change: a time checkpoint, or a Simulation breakpoint.
 The change is written to the trace.
+
+Dropping or rewriting exactly one delivery is a link action.
+Its trigger is a time checkpoint or a Simulation breakpoint on the effect whose bytes are about to go out.
+The action applies to that one delivery.
+A node behaviour change is only the action described above, armed by a Simulation breakpoint or a time checkpoint.
 
 Packet loss is added delay on that message.
 There is no separate drop-from-the-link event.
@@ -183,6 +191,14 @@ A scenario that does not configure a link keeps the seeded hop the provider alre
 `WorldLoop::enqueue` plus `StageRef::named_for_tests("peer_selection-2")` is enough for one adversarial flag.
 The review rejected it as the general mechanism: each new fault learns another stage name and another message type, and the injection is invisible to the network trace.
 
+### Match a wire message to change behaviour
+
+A predicate such as “the first `MsgShareRequest` from A to B” would fire a behaviour change without pausing the stage graph.
+The correction rejects that trigger.
+`SimulationRunning::breakpoint` already pauses on the effect, before interpretation, and the world loop already stops there for `world_external`.
+Behaviour changes use that pause.
+Matching one delivery remains a link action only.
+
 ### Simulate a congestion window
 
 A per-segment window, loss detection, and retransmission would reproduce TCP more closely.
@@ -208,16 +224,23 @@ The decision above does not settle them.
 - What a link is.
   One direction of one connection, the pair of directions, a node pair across connections, or a node's uplink.
   And whether a mid-run change applies to bearers that already exist, to bearers opened afterwards, or to both.
-- Which layer a breakpoint predicate sees.
-  Bytes on the pipe, mux frames, mini-protocol messages, or stage effects.
-  Decoding at a higher layer costs a parse on every candidate message and can see messages the pipe has not delivered yet.
-- How `modify` is written down so a replay is determined by the scenario text, and so the trace shows both the original message and the message that was delivered.
-- Whether a breakpoint fires before delivery or after it, and whether it fires once or on every later match.
-  The share-request example wants the first match only.
-  A standing fault wants every match after T.
+- How a scenario declares a Simulation breakpoint per node at startup.
+  `breakpoint` takes a Rust closure (`running/mod.rs:241`).
+  The scenario config has to name the node, the breakpoint name, and the predicate without each test calling `enqueue` at the pause.
+- Determinism of that predicate and of the behaviour-change action.
+  The pause is already fixed: `run_effect` checks installed predicates in order and stops before `handle_effect` (`running/mod.rs:1045-1051`).
+  A replay needs the same effect to match, and the action to be a pure function of that effect and the simulated clock.
+  What the action is allowed to read besides the effect is open.
+- Whether a scenario breakpoint stays installed.
+  `run_effect` tests every installed predicate on every later effect until `clear_breakpoint` (`running/mod.rs:250-253`, `:1045-1051`).
+  A one-shot behaviour change and a standing one are different policies on top of that.
+- How a link action rewrites exactly one delivery.
+  The breakpoint holds the original effect and then either interprets it or discards it (`running/mod.rs:931-941`).
+  A byte rewrite is not one of those two operations.
+  Dropping the delivery and changing later behaviour are different actions.
 - Whether an adversarial mark should be the result of behaviour the peer can actually commit (a bad header on the wire, for example) rather than a direct `PeerSelectionMsg`.
-  The trigger language can carry either action.
-  Which one the share scenario uses is part of the migration, not fixed here.
+  The trigger is a Simulation breakpoint or a time checkpoint either way.
+  Which action the share scenario uses is part of the migration, not fixed here.
 - In-order recovery.
   Because a late message blocks the rest of the link, a silent link stays silent for later messages until a trigger sets the delay back under the horizon.
   The API has to allow that second update, including for bytes already queued.
@@ -227,8 +250,9 @@ The decision above does not settle them.
 
 ## Migration
 
-1. Rewrite `test_peer_share_reply_addresses` as about twenty chainless nodes, configured with the trigger list.
-   The adversarial peer, the never-connected address, and the listen-address check become triggers and actions in that list.
+1. Rewrite `test_peer_share_reply_addresses` as about twenty chainless nodes.
+   The adversarial peer is a behaviour change armed by a Simulation breakpoint or a time checkpoint on that node.
+   The never-connected address and the listen-address check stay assertions on the trace.
    The injector store, `with_injector`, and `schedule_reveals` leave this scenario.
 2. After the link API exists, use it in the manager/peer-selection repro ([#37](https://github.com/rkuhn-bot/amaru/pull/37)) so the stall is a property of the links between those stages' bearers, not only of a fixed wire delay and a `PeerDisconnect` storm.
 
