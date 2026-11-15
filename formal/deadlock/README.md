@@ -225,8 +225,9 @@ for a send the actor did not itself perform.
   lists, and `tokens` is what has not been spent. `l1_fit` and
   `l1_park_unreachable` show that, when `OccInv` and `TyOk` hold, a Lemma-1
   mailbox holds at most `capBulk` messages and the park branch of
-  `enqueueOrPark` is unreachable. `OccInv` is not yet proved at `initWorld` or
-  under `apply`. The check is not known to be unsound: a terminable template
+  `enqueueOrPark` is unreachable. `occ_init` holds at `initWorld` when template
+  names are unique. Preservation under `apply` is not proved. The check is not
+  known to be unsound: a terminable template
   cannot bulk-send, so a dead instance does not keep credit a replacement
   would count again. That missing preservation is why `¬ Deadlock` is not
   claimed yet.
@@ -303,4 +304,4 @@ From `#print axioms` (Lean 4.35.0), no `sorryAx`:
 | `not_stuck_effect_assumed`, `not_stuck_peer_assumed`, `compat_group_closed` | `propext` |
 | `checkBool_sound`, `groupTargets_cooccur`, `execRun_preserves_other_run` | `propext`, `Quot.sound` |
 | `projects`, `ty_reachable`, `inv_reachable`, `step_inv`, `findTr_mem` | `propext`, `Classical.choice`, `Quot.sound` |
-| `live_le_occ`, `l1_fit`, `l1_park_unreachable` | `propext`, `Classical.choice`, `Quot.sound` |
+| `live_le_occ`, `l1_fit`, `l1_park_unreachable`, `occ_init` | `propext`, `Classical.choice`, `Quot.sound` |

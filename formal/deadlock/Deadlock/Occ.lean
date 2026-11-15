@@ -810,4 +810,319 @@ theorem l1_park_unreachable (I : Impl) (hL : LocalOk I) (w : World) (hO : OccInv
   refine ⟨hpark, ?_⟩
   exact Nat.lt_of_succ_le hbox
 
+theorem name_lines (D : Description) (hG : GraphOk D) : nameFails D = [] := by
+  have h := hG.struct
+  unfold structLines at h
+  exact append_nil_left (append_nil_left (append_nil_left (append_nil_left
+    (append_nil_left (append_nil_left (append_nil_left (append_nil_left h)))))))
+
+theorem accum_fresh {α : Type} [DecidableEq α] (acc xs : List α) (hacc : acc.Nodup)
+    (h : (xs.foldl (fun acc x => if acc.elem x then acc else acc ++ [x]) acc).length =
+      acc.length + xs.length) :
+    xs.Nodup ∧ ∀ x ∈ xs, x ∉ acc := by
+  induction xs generalizing acc with
+  | nil =>
+    simp at h
+    exact ⟨List.nodup_nil, fun _ hmem => by cases hmem⟩
+  | cons x xs ih =>
+    simp only [List.foldl_cons, List.length_cons] at h
+    cases hx : acc.elem x
+    · simp only [hx, Bool.false_eq_true, ite_false] at h
+      have hacc' : (acc ++ [x]).Nodup := nodup_snoc hacc (by
+        intro hin
+        have := List.elem_iff.mpr hin
+        rw [hx] at this
+        cases this)
+      have hlen : (acc ++ [x]).length = acc.length + 1 := by simp [List.length_append]
+      have h' : (xs.foldl (fun acc x => if acc.elem x then acc else acc ++ [x]) (acc ++ [x])).length =
+          (acc ++ [x]).length + xs.length := by
+        rw [hlen]
+        omega
+      obtain ⟨hxs, hfresh⟩ := ih (acc ++ [x]) hacc' h'
+      refine ⟨?_, ?_⟩
+      · refine (List.nodup_cons).mpr ⟨?_, hxs⟩
+        intro hin
+        exact hfresh x hin (List.mem_append_right _ (List.Mem.head _))
+      · intro y hy
+        rcases List.mem_cons.mp hy with rfl | hy
+        · intro hin
+          have := List.elem_iff.mpr hin
+          rw [hx] at this
+          cases this
+        · intro hin
+          exact hfresh y hy (List.mem_append_left _ hin)
+    · simp only [hx, ite_true] at h
+      have hle := foldDedup_len_le acc xs
+      omega
+
+theorem nodup_of_dedup_len {α : Type} [DecidableEq α] (xs : List α) (h : (dedup xs).length = xs.length) :
+    xs.Nodup := by
+  have h0 : (xs.foldl (fun acc x => if acc.elem x then acc else acc ++ [x]) ([] : List α)).length =
+      ([] : List α).length + xs.length := by simpa [dedup, Nat.zero_add] using h
+  exact (accum_fresh [] xs List.nodup_nil h0).1
+
+theorem names_nodup (D : Description) (hG : GraphOk D) : (D.templates.map (·.name)).Nodup :=
+  nodup_of_dedup_len _ (nameFails_len D (name_lines D hG))
+
+theorem core_filter_nodup (xs : List Template) (h : (xs.map (·.name)).Nodup) :
+    (xs.filterMap fun t => if t.multiplicity == .one then some (InstId.core t.name) else none).Nodup := by
+  induction xs with
+  | nil => simp
+  | cons t ts ih =>
+    have hcons := (List.nodup_cons).mp h
+    rw [List.filterMap_cons]
+    by_cases hb : (t.multiplicity == .one) = true
+    · simp only [hb, ite_true]
+      refine (List.nodup_cons).mpr ⟨?_, ih hcons.2⟩
+      intro hin
+      have hname : t.name ∈ ts.map (·.name) := by
+        rw [List.mem_filterMap] at hin
+        obtain ⟨u, hu, hif⟩ := hin
+        cases hub : u.multiplicity == .one <;> rw [hub] at hif
+        · simp at hif
+        · simp at hif
+          exact List.mem_map.mpr ⟨u, hu, hif⟩
+      exact hcons.1 hname
+    · have hf : (t.multiplicity == .one) = false := by
+        cases hbb : t.multiplicity == .one <;> simp_all
+      simp only [hf, ite_false]
+      exact ih hcons.2
+
+theorem coreRoster_nodup (D : Description) (hG : GraphOk D) : (coreRoster D).Nodup := by
+  simpa [coreRoster] using core_filter_nodup D.templates (names_nodup D hG)
+
+theorem find_named (xs : List Template) (t : Template) (ht : t ∈ xs) (h : (xs.map (·.name)).Nodup) :
+    xs.findSome? (fun u => if u.name == t.name then some u else none) = some t := by
+  induction xs with
+  | nil => cases ht
+  | cons u us ih =>
+    have hcons := (List.nodup_cons).mp h
+    rw [List.findSome?_cons]
+    rcases List.mem_cons.mp ht with rfl | ht
+    · simp
+    · have hdiff : (u.name == t.name) = false := by
+        by_cases hn : u.name = t.name
+        · exact absurd (by
+            have : t.name ∈ us.map (·.name) := List.mem_map.mpr ⟨t, ht, rfl⟩
+            simpa [hn] using this) hcons.1
+        · cases hbb : u.name == t.name <;> simp_all [beq_iff_eq]
+      simp only [hdiff, ite_false]
+      exact ih ht hcons.2
+
+theorem core_template (D : Description) (id : InstId) (hG : GraphOk D) (h : id ∈ coreRoster D) :
+    ∃ t, templateOf D (tname id) = some t ∧ t.multiplicity = .one ∧ id = InstId.core t.name := by
+  rw [coreRoster, List.mem_filterMap] at h
+  obtain ⟨t, hmem, hif⟩ := h
+  cases hb : t.multiplicity == .one <;> simp [hb] at hif
+  cases hif
+  have hone : t.multiplicity = .one := by
+    cases hm : t.multiplicity with
+    | one => rfl
+    | perPeer =>
+      rw [hm] at hb
+      have hfalse : (Multiplicity.perPeer == Multiplicity.one) = false := by decide
+      rw [hfalse] at hb
+      cases hb
+  refine ⟨t, ?_, hone, rfl⟩
+  simpa [templateOf, tname] using find_named D.templates t hmem (names_nodup D hG)
+
+theorem fold_cell_roster (reader : InstId) (labels : List String) (w : World) :
+    ((labels.foldl (fun w label =>
+        let c := w.cell (tname reader) label
+        let w := setCell w (tname reader) label { c with dirty := false }
+        setObserved w reader label c.value) w).roster) = w.roster := by
+  induction labels generalizing w with
+  | nil => rfl
+  | cons label labels ih =>
+    simp only [List.foldl_cons]
+    rw [ih]
+    simp [setCell, setObserved]
+
+theorem readCells_roster (D : Description) (w : World) (id : InstId) :
+    (readCells D w id).roster = w.roster := by
+  simpa [readCells] using fold_cell_roster id (cellLabels D (tname id)) w
+
+theorem fold_read_roster (D : Description) (ids : List InstId) (w : World) :
+    ((ids.foldl (fun w id => readCells D w id) w).roster) = w.roster := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons id ids ih =>
+    rw [List.foldl_cons, ih (readCells D w id), readCells_roster]
+
+theorem fold_cell_N (reader : InstId) (labels : List String) (w : World) :
+    ((labels.foldl (fun w label =>
+        let c := w.cell (tname reader) label
+        let w := setCell w (tname reader) label { c with dirty := false }
+        setObserved w reader label c.value) w).N) = w.N := by
+  induction labels generalizing w with
+  | nil => rfl
+  | cons label labels ih =>
+    simp only [List.foldl_cons]
+    rw [ih]
+    simp [setCell, setObserved]
+
+theorem readCells_N (D : Description) (w : World) (id : InstId) : (readCells D w id).N = w.N := by
+  simpa [readCells] using fold_cell_N id (cellLabels D (tname id)) w
+
+theorem fold_read_N (D : Description) (ids : List InstId) (w : World) :
+    ((ids.foldl (fun w id => readCells D w id) w).N) = w.N := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons id ids ih =>
+    rw [List.foldl_cons, ih (readCells D w id), readCells_N]
+
+theorem init_roster (I : Impl) (N : Nat) : (initWorld I N).roster = coreRoster I.desc := by
+  unfold initWorld
+  simpa using fold_read_roster I.desc (coreRoster I.desc)
+    { N := N, roster := coreRoster I.desc, nextIx := fun _ => 0,
+      st := fun id => if (coreRoster I.desc).contains id then initActor I.desc id else absentActor,
+      cell := fun _ _ => cleanCell, observed := fun _ _ => 0 }
+
+theorem init_N (I : Impl) (N : Nat) : (initWorld I N).N = N := by
+  unfold initWorld
+  simpa using fold_read_N I.desc (coreRoster I.desc)
+    { N := N, roster := coreRoster I.desc, nextIx := fun _ => 0,
+      st := fun id => if (coreRoster I.desc).contains id then initActor I.desc id else absentActor,
+      cell := fun _ _ => cleanCell, observed := fun _ _ => 0 }
+
+theorem init_box (I : Impl) (N : Nat) (id : InstId) :
+    ((initWorld I N).st id).box = [] ∧ ((initWorld I N).st id).parked = [] := by
+  rw [init_base_st]
+  split
+  · cases ht : templateOf I.desc (tname id) with
+    | none => simp [initActor, ht, absentActor]
+    | some _ => simp [initActor, ht, withTokens]
+  · simp [absentActor]
+
+theorem init_tokens (I : Impl) (hG : GraphOk I.desc) (N : Nat) (id : InstId)
+    (h : id ∈ (initWorld I N).roster) (d : String) :
+    ((initWorld I N).st id).tokens d = budget I.desc (tname id) d := by
+  have hmem : id ∈ coreRoster I.desc := by simpa [init_roster] using h
+  have hcont : (coreRoster I.desc).contains id = true := List.contains_iff_mem.mpr hmem
+  rw [init_base_st, if_pos hcont]
+  obtain ⟨t, ht, _, _⟩ := core_template I.desc id hG hmem
+  simp [initActor, ht, withTokens]
+
+theorem init_alive (I : Impl) (hG : GraphOk I.desc) (N : Nat) (id : InstId)
+    (h : id ∈ (initWorld I N).roster) : ((initWorld I N).st id).life = .alive := by
+  have hmem : id ∈ coreRoster I.desc := by simpa [init_roster] using h
+  have hcont : (coreRoster I.desc).contains id = true := List.contains_iff_mem.mpr hmem
+  rw [init_base_st, if_pos hcont]
+  obtain ⟨t, ht, _, _⟩ := core_template I.desc id hG hmem
+  simp [initActor, ht, withTokens]
+
+theorem init_bit (I : Impl) (hG : GraphOk I.desc) (N : Nat) (template : String) (id : InstId)
+    (h : id ∈ coreRoster I.desc) :
+    aliveBit (initWorld I N).st template id = if id = InstId.core template then 1 else 0 := by
+  obtain ⟨t, ht, _, hid⟩ := core_template I.desc id hG h
+  have hcont : (coreRoster I.desc).contains id = true := List.contains_iff_mem.mpr h
+  have halive : ((initWorld I N).st id).life = .alive := by
+    rw [init_base_st, if_pos hcont]
+    simp [initActor, ht, withTokens]
+  unfold aliveBit
+  by_cases hn : tname id = template
+  · have hid' : id = InstId.core template := by
+      rw [hid]
+      have hname : t.name = template := by simpa [tname, hid] using hn
+      rw [hname]
+    have hb1 : (tname id == template) = true := by simpa [beq_iff_eq] using hn
+    have hb2 : (((initWorld I N).st id).life == .alive) = true := by simpa [beq_iff_eq] using halive
+    simp only [hid']
+    rw [← hid']
+    simp only [hb1, hb2, Bool.and_self, ite_true]
+  · have hb1 : (tname id == template) = false := by
+      cases hbb : tname id == template <;> simp_all [beq_iff_eq]
+    have hdiff : id ≠ InstId.core template := by
+      intro heq
+      apply hn
+      rw [hid] at heq
+      cases heq
+      simp [tname, hid]
+    simp [hb1, hdiff]
+
+/-- Every initial core is alive, idle, and holding exactly its send budget. -/
+theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorld I N) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · simpa [init_roster] using coreRoster_nodup I.desc hG
+  · intro id hl
+    rw [init_base_st] at hl
+    simp only [List.contains_iff_mem] at hl
+    by_cases hmem : id ∈ coreRoster I.desc
+    · simpa [init_roster] using hmem
+    · rw [ite_eq_right hmem] at hl
+      simp [absentActor] at hl
+  · intro template i hi
+    have hmem : InstId.peer template i ∈ coreRoster I.desc := by simpa [init_roster] using hi
+    have hcont := List.contains_iff_mem.mpr hmem
+    rw [peer_not_roster] at hcont
+    cases hcont
+  · intro template ⟨t, ht, hone⟩
+    rw [aliveCount_sum, init_roster]
+    have hfun : ∀ id ∈ coreRoster I.desc,
+        aliveBit (initWorld I N).st template id = if id = InstId.core template then 1 else 0 :=
+      fun id hid => init_bit I hG N template id hid
+    have hflip : ∀ id ∈ coreRoster I.desc,
+        (if id = InstId.core template then 1 else 0) = if InstId.core template = id then 1 else 0 := by
+      intro id _
+      by_cases heq : id = InstId.core template
+      · simp [heq]
+      · have hne : InstId.core template ≠ id := fun h => heq h.symm
+        simp [heq, hne]
+    rw [sum_congr _ _ _ hfun, sum_congr _ _ _ hflip,
+      sum_hit (InstId.core template) (coreRoster I.desc) (coreRoster_nodup I.desc hG)]
+    by_cases hmem : InstId.core template ∈ coreRoster I.desc <;> simp [hmem]
+  · intro template ⟨t, ht, hpeer⟩
+    rw [aliveCount_sum, init_roster, init_N]
+    have hzero : sumFold (aliveBit (initWorld I N).st template) (coreRoster I.desc) = 0 := by
+      refine (sum_congr _ _ _ ?_).trans (sum_zero _)
+      intro id hid
+      obtain ⟨u, hu, hone, hidc⟩ := core_template I.desc id hG hid
+      unfold aliveBit
+      by_cases hn : tname id = template
+      · have hsame : u = t := by
+          have : templateOf I.desc template = some u := by simpa [hn] using hu
+          rw [ht] at this
+          cases this
+          rfl
+        have hbad : t.multiplicity = .one := by rw [← hsame]; exact hone
+        rw [hpeer] at hbad
+        cases hbad
+      · simp [hn, beq_iff_eq]
+    rw [hzero]
+    exact Nat.zero_le _
+  · intro id hnin
+    have hmem : id ∉ coreRoster I.desc := by simpa [init_roster] using hnin
+    have hcont : (coreRoster I.desc).contains id = false := by
+      rw [Bool.eq_false_iff]
+      intro ht
+      exact hmem (List.contains_iff_mem.mp ht)
+    rw [init_base_st, hcont]
+    simp [absentActor]
+  · intro id m hm
+    have hempty := (init_box I N id).1
+    simp [hempty] at hm
+  · intro id p hp
+    have hempty := (init_box I N id).2
+    simp [hempty] at hp
+  · intro id p hp
+    have hempty := (init_box I N id).2
+    simp [hempty] at hp
+  · intro s d hs
+    have hzero := owed_zero_of_empty (initWorld I N).st d s (initWorld I N).roster
+      (fun id _ => init_box I N id)
+    rw [hzero, Nat.zero_add]
+    exact init_tokens I hG N s hs d
+  · intro s d hs _hl
+    have hph := init_phase I N s
+    have hpend : pending ((initWorld I N).st s) d = 0 := by
+      simp [pending, contRest, hph, sendsTo]
+    rw [hpend, Nat.add_zero, init_tokens I hG N s hs]
+    exact floor_le_budget I.desc (tname s) ((initWorld I N).st s).typestate d
+  · intro s d hs _hterm
+    exact owed_zero_of_empty (initWorld I N).st d s (initWorld I N).roster (fun id _ => init_box I N id)
+  · intro s d hs _hdead
+    exact owed_zero_of_empty (initWorld I N).st d s (initWorld I N).roster (fun id _ => init_box I N id)
+  · intro id _hl1
+    exact (init_box I N id).2
+
 end Deadlock
