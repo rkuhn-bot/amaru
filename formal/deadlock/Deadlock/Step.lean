@@ -183,4 +183,30 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
       refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2, ?_⟩
       exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
 
+theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : String) (es : List Eff)
+    (hS : SemInv I w) (hM : MailInv w)
+    (hphase : (w.st id).phase = .run { k with rest := .selfSchedule label :: es })
+    (hprog : effectsOk I.desc (tname id) (w.st id).typestate (.selfSchedule label :: es) = true) :
+    SemInv I (execRun I w id (w.st id) { k with rest := .selfSchedule label :: es }) ∧
+      MailInv (execRun I w id (w.st id) { k with rest := .selfSchedule label :: es }) := by
+  have hty : (w.st id).typestate = k.toState := by simpa [contTy, hphase] using hS.cont id
+  have htail : effectsOk I.desc (tname id) (w.st id).typestate es = true := head_rest _ _ _ _ es hprog
+  have hfree : notParked (w.st id).phase := run_not_parked w id _ hphase
+  simp [execRun]
+  split
+  · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .selfSchedule label :: es })
+      (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
+    refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2,
+      mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)⟩
+  · split
+    · let bumped : Actor :=
+        { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } }
+      have hp := proceed_ok I.desc id bumped (afterHead { k with rest := .selfSchedule label :: es })
+        (by simp [bumped, afterHead, hty]) (by simpa [bumped, afterHead] using htail)
+      refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2,
+        mail_set_free w id _ hM hfree (proceed_not_parked _ _) (by simp [proceed_parked, bumped])⟩
+    · refine ⟨sem_set I w id { (w.st id) with phase := .crashed } hS rfl rfl
+        (by simp [contTy]) (by simp [programOk]) (by simp [waitEdge]),
+        mail_set_free w id { (w.st id) with phase := .crashed } hM hfree (by simp [notParked]) rfl⟩
+
 end Deadlock
