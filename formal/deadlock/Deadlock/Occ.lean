@@ -2381,4 +2381,133 @@ theorem occ_bulk (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (
         have hc : contTy (wC.st p.sender) := (contTy_match _ _ hph hty).mpr (hS.cont p.sender)
         simpa [wC, admitted] using occ_resume I wC p.sender p.isCall id hO1 hc
 
+theorem sends_drop_le (d : String) (e : Eff) (es : List Eff) : sendsTo d es ≤ sendsTo d (e :: es) := by
+  cases e <;> simp [sendsTo] <;> omega
+
+theorem occ_keep (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I w)
+    (hlife : a.life = (w.st id).life) (hbox : a.box = (w.st id).box) (hpark : a.parked = (w.st id).parked)
+    (htok : ∀ d, a.tokens d = (w.st id).tokens d) (hty : a.typestate = (w.st id).typestate)
+    (hpend : ∀ d, pending a d ≤ pending (w.st id) d) : OccInv I (setActor w id a) := by
+  apply occ_set I w id a hO hlife hbox hpark htok
+  intro d hl
+  have hl0 : (w.st id).life = .alive := by rw [← hlife]; exact hl
+  have hold := hO.slack id d (hO.aliveIn id hl0) hl0
+  rw [hty]
+  have htokd := htok d
+  rw [htokd]
+  exact Nat.le_trans (Nat.add_le_add_left (hpend d) _) hold
+
+theorem proceed_tail (a : Actor) (k : Cont) (d : String) (hty : a.typestate = k.toState)
+    (hrest : contRest a.phase = k.rest) :
+    pending (proceed a (afterHead k)) d ≤ pending a d ∧ (proceed a (afterHead k)).typestate = a.typestate := by
+  simp only [afterHead]
+  constructor
+  · unfold proceed pending
+    cases h : k.rest.tail with
+    | nil =>
+      cases hk : k.rest with
+      | nil => simp [contRest, hk, hrest, sendsTo]
+      | cons e es =>
+        cases es with
+        | nil =>
+          simp [contRest, hk, hrest, sendsTo]
+        | cons _ _ =>
+          simp [hk] at h
+    | cons e es =>
+      rw [hrest]
+      cases hk : k.rest with
+      | nil =>
+        simp [hk, List.tail_nil] at h
+      | cons e0 es0 =>
+        simp [hk, List.tail_cons] at h
+        simp [h, contRest]
+        exact sends_drop_le d e0 (e :: es)
+  · unfold proceed
+    cases h : k.rest.tail <;> simp [h, hty]
+
+theorem occ_cell_st (w : World) (dst label : String) (c : Cell) (i : InstId) :
+    (setCell w dst label c).st i = w.st i := by
+  simp [setCell]
+
+theorem occ_cell_roster (w : World) (dst label : String) (c : Cell) :
+    (setCell w dst label c).roster = w.roster ∧ (setCell w dst label c).N = w.N := by
+  simp [setCell]
+
+theorem occ_cell_ix (w : World) (dst label : String) (c : Cell) (n : String) :
+    (setCell w dst label c).nextIx n = w.nextIx n := by
+  simp [setCell]
+
+theorem occ_try_wake (I : Impl) (w : World) (dstId : InstId) (label : String) (writer : InstId)
+    (hO : OccInv I w) : OccInv I (tryWake I.desc w dstId label writer) := by
+  unfold tryWake
+  by_cases hif : ((w.st dstId).life == .alive && (w.st dstId).prio.length < capPrio I.desc w.N dstId &&
+      !((w.st dstId).prio.any (fun p => p.label == label))) = true
+  · rw [if_pos hif]
+    let wake : Msg := ⟨label, writer, none⟩
+    have ha : ({ (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake } : Actor) =
+        { (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake } := rfl
+    exact occ_keep I w dstId ({ (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake }) hO
+      rfl rfl rfl (fun _ => rfl) rfl (fun _ => Nat.le_refl _)
+  · rw [if_neg hif]
+    exact hO
+
+theorem occ_wakes (I : Impl) (ids : List InstId) (w : World) (dst label : String) (writer : InstId)
+    (hO : OccInv I w) :
+    OccInv I ((ids.foldl (fun w id => tryWake I.desc w id label writer) w)) := by
+  induction ids generalizing w with
+  | nil => simpa using hO
+  | cons id ids ih =>
+    rw [List.foldl_cons]
+    exact ih _ (occ_try_wake I w id label writer hO)
+
+theorem occ_advance (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : OccInv I w)
+    (hty : (w.st id).typestate = k.toState) (hph : (w.st id).phase = .run k) :
+    OccInv I (setActor w id (proceed (w.st id) (afterHead k))) := by
+  apply occ_keep I w id (proceed (w.st id) (afterHead k)) hO (proceed_life _ _) (proceed_box _ _)
+    (proceed_parked _ _) (proceed_tokens _ _)
+  · exact (proceed_tail (w.st id) k "" hty (by simp [contRest, hph])).2
+  · intro d
+    exact (proceed_tail (w.st id) k d hty (by simp [contRest, hph])).1
+
+theorem occ_reply (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : OccInv I w) (hS : SemInv I w)
+    (hph : (w.st id).phase = .run k) : OccInv I (performReply w id k) := by
+  have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
+  unfold performReply
+  cases hr : k.replyTo with
+  | none =>
+    simpa [hr] using occ_advance I w id k hO hty hph
+  | some caller =>
+    simp [hr]
+    cases hcall : (w.st caller).phase with
+    | awaitReply dst ck =>
+      by_cases hd : dst = id
+      · have htyC : (w.st caller).typestate = ck.toState := by
+          simpa [contTy, hcall] using hS.cont caller
+        have hO1 := occ_keep I w caller (proceed (w.st caller) ck) hO (proceed_life _ _)
+          (proceed_box _ _) (proceed_parked _ _) (proceed_tokens _ _)
+          (by
+            unfold proceed
+            cases hk : ck.rest <;> simp [hk, htyC])
+          (by
+            intro d
+            unfold proceed pending
+            cases hk : ck.rest <;> simp [contRest, hcall, hk])
+        have hne : caller ≠ id := by
+          intro hc
+          rw [hc] at hcall
+          rw [hcall] at hph
+          cases hph
+        have hstep := occ_advance I (setActor w caller (proceed (w.st caller) ck)) id k hO1
+          (by rw [setActor_other w caller id _ (fun h => hne h.symm), hty])
+          (by rw [setActor_other w caller id _ (fun h => hne h.symm), hph])
+        simpa [hd] using hstep
+      · simpa [hd] using occ_advance I w id k hO hty hph
+    | idle => exact occ_advance I w id k hO hty hph
+    | run _ => exact occ_advance I w id k hO hty hph
+    | parked _ _ _ => exact occ_advance I w id k hO hty hph
+    | awaitEffect _ => exact occ_advance I w id k hO hty hph
+    | awaitPeer _ => exact occ_advance I w id k hO hty hph
+    | crashed => exact occ_advance I w id k hO hty hph
+
 end Deadlock
+
