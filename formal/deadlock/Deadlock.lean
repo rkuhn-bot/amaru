@@ -107,3 +107,7 @@ import Deadlock.Rank
 #print axioms Deadlock.queue_place
 #print axioms Deadlock.recv_closer
 #print axioms Deadlock.alive_queue
+#print axioms Deadlock.step_index
+#print axioms Deadlock.index_mono
+#print axioms Deadlock.queued_forever_false
+#print axioms Deadlock.terminate_unblocks
