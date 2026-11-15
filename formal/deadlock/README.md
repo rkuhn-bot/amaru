@@ -342,9 +342,12 @@ for a send the actor did not itself perform.
   `callFrom` is not stray there either. It holds in the initial world, and
   `finish`, `spawn`, and priority receive preserve it. A priority message has
   `callFrom = none`, so the receive only transports the tag. At most one bulk
-  message names a caller. Bulk receive, `exec`, the delivery walk, the handler
-  reply, `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance
-  lift are not proved.
+  message names a caller. `install_plain` drops a non-call bulk head,
+  `admit_phase` rewrites a parked call into `awaitReply` on the same
+  continuation, and `credit_tag` ignores a token refund. Wiring those through
+  `recvBulk` and `exec`, then the delivery walk, the handler reply,
+  `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift,
+  is not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
