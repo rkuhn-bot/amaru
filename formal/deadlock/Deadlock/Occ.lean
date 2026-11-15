@@ -3735,5 +3735,81 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
   · rw [enqueue_dead w I.desc sender dst msg isCall (afterHead k) hlive]
     exact occ_advance I w sender k hO hty hph
 
+theorem occ_schedule (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (label : String)
+    (hO : OccInv I w) (ha : a = w.st id) (hph : a.phase = .run k) (hty : a.typestate = k.toState) :
+    OccInv I
+      (let cap := capPrio I.desc w.N id
+      let msg : Msg := { label := label, sender := id, callFrom := none }
+      let k' := afterHead k
+      if a.prio.any (fun p => p.label == label) then setActor w id (proceed a k')
+      else if a.prio.length < cap then
+        setActor w id (proceed { a with prio := upsertPrio a.prio msg } k')
+      else setActor w id { a with phase := .crashed }) := by
+  let msg : Msg := { label := label, sender := id, callFrom := none }
+  cases hb : a.prio.any (fun p => p.label == label) with
+  | true =>
+    simp [hb, ha]
+    exact occ_advance I w id k hO (by simpa [ha] using hty) (by simpa [ha] using hph)
+  | false =>
+    by_cases hlen : a.prio.length < capPrio I.desc w.N id
+    · simp [hb, hlen]
+      let base : Actor := { a with prio := upsertPrio a.prio msg }
+      let aS : Actor := proceed base (afterHead k)
+      suffices OccInv I (setActor w id aS) by simpa [aS, base, msg] using this
+      apply occ_keep I w id aS hO
+      · simp [aS, base, proceed_life, ha]
+      · simp [aS, base, proceed_box, ha]
+      · simp [aS, base, proceed_parked, ha]
+      · intro d; simp [aS, base, proceed_tokens, ha]
+      · have hbase : base.typestate = (afterHead k).toState := by
+          simp [base, afterHead]
+          exact hty
+        have htyS : aS.typestate = a.typestate := by
+          simpa [aS, base] using proceed_ty_keep base (afterHead k) hbase
+        simpa [ha] using htyS
+      · intro d
+        have htyb : base.typestate = k.toState := by simp [base]; exact hty
+        have hrest : contRest base.phase = k.rest := by simp [base, contRest, hph]
+        have htail := proceed_tail base k d htyb hrest
+        have hbpend : pending base d = pending (w.st id) d := by
+          simp [pending, base, contRest, hph, ha]
+        simpa [aS, hbpend] using htail.1
+    · simp [hb, hlen]
+      apply occ_keep I w id ({ a with phase := .crashed }) hO
+      · simp [ha]
+      · simp [ha]
+      · simp [ha]
+      · intro d; simp [ha]
+      · simp [ha]
+      · intro d
+        rw [ha] at hph
+        simp [pending, contRest, hph]
+        exact Nat.zero_le _
+
+theorem occ_cell (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label : String) (value : Nat)
+    (hO : OccInv I w) (hph : (w.st id).phase = .run k) (hty : (w.st id).typestate = k.toState) :
+    OccInv I
+      (let previous := w.cell dst label
+      let written := max previous.value value
+      let w := setCell w dst label { value := written, dirty := true }
+      let w := setActor w id (proceed (w.st id) (afterHead k))
+      if previous.dirty then w else wakeReaders I.desc w dst label id) := by
+  let previous := w.cell dst label
+  let written := max previous.value value
+  let w1 := setCell w dst label { value := written, dirty := true }
+  have hO1 := occ_same I w w1 hO (fun i => occ_cell_st w dst label { value := written, dirty := true } i)
+    (occ_cell_roster w dst label { value := written, dirty := true }).1
+    (occ_cell_roster w dst label { value := written, dirty := true }).2
+    (fun n => occ_cell_ix w dst label { value := written, dirty := true } n)
+  have hO2 := occ_advance I w1 id k hO1
+    (by simpa [w1, occ_cell_st] using hty) (by simpa [w1, occ_cell_st] using hph)
+  let w2 := setActor w1 id (proceed (w1.st id) (afterHead k))
+  have hO2' : OccInv I w2 := by simpa [w2] using hO2
+  cases hdirty : previous.dirty with
+  | true => simpa [previous, written, w1, w2, hdirty] using hO2'
+  | false =>
+    simpa [previous, written, w1, w2, hdirty, wakeReaders] using
+      occ_wakes I (readersOf w2 dst) w2 dst label id hO2'
+
 end Deadlock
 
