@@ -172,7 +172,7 @@ theorem phase_refundP (w : World) (dst : String) (ps : List Parked) (i : InstId)
     ((refundParked w dst ps).st i).phase = (w.st i).phase :=
   (refundP_life w dst ps i).2.2.1
 
-theorem bulk_finish (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w) (hS : SemInv I w)
+theorem bulk_finish (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w)
     (h : finishWait w id = some w') : BulkFree I w' := by
   apply bulk_or I w w' hB
   intro i ht
@@ -217,5 +217,414 @@ theorem bulk_spawn (I : Impl) (w w' : World) (template : String) (hB : BulkFree 
       · simpa [readCells_st, setActor, hi, withTokens, contRest] using Or.inl nobulk_empty
       · simpa [readCells_st, setActor, hi] using Or.inr rfl
     · simp [hif] at h
+
+theorem release_bulk (I : Impl) (w : World) (id : InstId) (ps : List Parked)
+    (hB : BulkFree I w) : BulkFree I (releaseParked w id ps) := by
+  induction ps generalizing w with
+  | nil => simpa [releaseParked] using hB
+  | cons p ps ih =>
+    unfold releaseParked
+    simp only [List.foldl_cons]
+    by_cases hskip : p.isCall = true ∨ p.sender = id
+    · simp [hskip]
+      simpa [releaseParked] using ih w hB
+    · simp [hskip]
+      have hB' : BulkFree I (setActor w p.sender (resumeSender (w.st p.sender) false id)) := by
+        apply bulk_or I w _ hB
+        intro i ht
+        by_cases hi : i = p.sender
+        · rw [hi] at ht ⊢
+          simp [setActor]
+          exact Or.inl (resume_nobulk (w.st p.sender) false id (hB p.sender ht))
+        · simp [setActor, hi]
+      simpa [releaseParked] using ih _ hB'
+
+theorem try_wake_phase (D : Description) (w : World) (dstId : InstId) (label : String) (writer i : InstId) :
+    ((tryWake D w dstId label writer).st i).phase = (w.st i).phase := by
+  by_cases hif : ((w.st dstId).life == .alive &&
+      decide ((w.st dstId).prio.length < capPrio D w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · simp [tryWake, hif, setActor]
+    by_cases hi : i = dstId <;> simp [hi]
+  · simp [tryWake, hif]
+
+theorem wakes_phase (ids : List InstId) (D : Description) (w : World) (dst label : String)
+    (writer i : InstId) :
+    ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).phase = (w.st i).phase := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    rw [ih, try_wake_phase]
+
+theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree I w)
+    (hph : (w.st id).phase = .run k) : BulkFree I (execRun I w id (w.st id) k) := by
+  apply bulk_or I w _ hB
+  intro i ht
+  cases k with
+  | mk rest toState replyTo =>
+    cases hrest : rest with
+    | nil =>
+      by_cases hi : i = id
+      · rw [hi] at ht ⊢
+        simp [execRun, hrest, setActor, contRest, nobulk_empty]
+      · simp [execRun, hrest, setActor, hi]
+    | cons e es =>
+      cases e with
+      | send dst label hint =>
+        by_cases hi : i = id
+        · rw [hi] at ht
+          have hbad := hB id ht
+          simp [contRest, hph, hrest, noBulkSend] at hbad
+        · simp [execRun, hrest]
+          cases hr : route w I.desc dst hint with
+          | none => simp [hr, setActor, hi]
+          | some dstId =>
+            simp [hr]
+            exact Or.inr (enqueue_phase_other w I.desc id dstId ⟨label, id, none⟩ false
+              ⟨es, toState, replyTo⟩ i hi)
+      | call dst label hint =>
+        by_cases hi : i = id
+        · rw [hi] at ht
+          have hbad := hB id ht
+          simp [contRest, hph, hrest, noBulkSend] at hbad
+        · simp [execRun, hrest]
+          cases hr : route w I.desc dst hint with
+          | none => simp [hr, setActor, hi]
+          | some dstId =>
+            simp [hr]
+            exact Or.inr (enqueue_phase_other w I.desc id dstId ⟨label, id, some id⟩ true
+              ⟨es, toState, replyTo⟩ i hi)
+      | trySend dst label hint =>
+        by_cases hi : i = id
+        · rw [hi] at ht
+          have hbad := hB id ht
+          simp [contRest, hph, hrest, noBulkSend] at hbad
+        · simp [execRun, hrest]
+          cases hr : route w I.desc dst hint with
+          | none => simp [hr, setActor, hi]
+          | some dstId =>
+            simp [hr]
+            split
+            · next hcond =>
+              simp [setActor, hi, chargeSender, bumpToken]
+              by_cases hsame : dstId = id <;> by_cases hid : i = dstId <;> simp [hsame, hid, hi]
+            · simp [setActor, hi]
+      | reply =>
+        simp [execRun, hrest]
+        unfold performReply
+        cases hto : replyTo with
+        | none =>
+          simp [hto, setActor]
+          by_cases hi : i = id
+          · rw [hi] at ht ⊢
+            simp [setActor]
+            exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, none⟩
+              (by simpa [contRest, hph, hrest] using hB id ht))
+          · simp [hi]
+        | some caller =>
+          simp [hto]
+          cases hcall : (w.st caller).phase with
+          | awaitReply dst ck =>
+            by_cases hd : dst = id
+            · simp [hd, setActor]
+              by_cases hi : i = id
+              · rw [hi] at ht ⊢
+                simp [setActor]
+                exact Or.inl (after_nobulk
+                  (if id = caller then proceed (w.st caller) ck else w.st id)
+                  ⟨.reply :: es, toState, some caller⟩
+                  (by simpa [contRest, hph, hrest] using hB id ht))
+              · by_cases hc : i = caller
+                · by_cases hself : caller = id
+                  · exact absurd (hc.trans hself) hi
+                  · rw [hc] at ht ⊢
+                    simp [setActor, hi, hself]
+                    have hold : noBulkSend ck.rest = true := by simpa [contRest, hcall] using hB caller ht
+                    cases hk : ck.rest with
+                    | nil =>
+                      simp [proceed, hk, contRest]
+                      exact Or.inl nobulk_empty
+                    | cons _ _ =>
+                      simp [proceed, hk, contRest]
+                      exact Or.inl (by simpa [hk] using hold)
+                · simp [setActor, hi, hc]
+            · simp [hd, setActor]
+              by_cases hi : i = id
+              · rw [hi] at ht ⊢
+                simp [setActor]
+                exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                  (by simpa [contRest, hph, hrest] using hB id ht))
+              · simp [hi]
+          | idle =>
+            simp [setActor]
+            by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor]
+              exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                (by simpa [contRest, hph, hrest] using hB id ht))
+            · simp [hi]
+          | run ck =>
+            simp [setActor]
+            by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor]
+              exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                (by simpa [contRest, hph, hrest] using hB id ht))
+            · simp [hi]
+          | parked dst b ck =>
+            simp [setActor]
+            by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor]
+              exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                (by simpa [contRest, hph, hrest] using hB id ht))
+            · simp [hi]
+          | awaitEffect ck =>
+            simp [setActor]
+            by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor]
+              exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                (by simpa [contRest, hph, hrest] using hB id ht))
+            · simp [hi]
+          | awaitPeer ck =>
+            simp [setActor]
+            by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor]
+              exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                (by simpa [contRest, hph, hrest] using hB id ht))
+            · simp [hi]
+          | crashed =>
+            simp [setActor]
+            by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor]
+              exact Or.inl (after_nobulk (w.st id) ⟨.reply :: es, toState, some caller⟩
+                (by simpa [contRest, hph, hrest] using hB id ht))
+            · simp [hi]
+      | selfSchedule label =>
+        simp only [execRun, hrest]
+        split
+        · by_cases hi : i = id
+          · rw [hi] at ht ⊢
+            have htail := noBulk_tail (.selfSchedule label) es
+              (by simpa [contRest, hph, hrest] using hB id ht)
+            cases hes : es with
+            | nil => simp [setActor, proceed, afterHead, hes, contRest, nobulk_empty]
+            | cons _ _ =>
+              simp [setActor, proceed, afterHead, hes, contRest]
+              exact Or.inl (by simpa [hes] using htail)
+          · simp [setActor, hi]
+        · split
+          · by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              have htail := noBulk_tail (.selfSchedule label) es
+                (by simpa [contRest, hph, hrest] using hB id ht)
+              cases hes : es with
+              | nil => simp [setActor, proceed, afterHead, hes, contRest, nobulk_empty]
+              | cons _ _ =>
+                simp [setActor, proceed, afterHead, hes, contRest]
+                exact Or.inl (by simpa [hes] using htail)
+            · simp [setActor, hi]
+          · by_cases hi : i = id
+            · rw [hi] at ht ⊢
+              simp [setActor, contRest, nobulk_empty]
+            · simp [setActor, hi]
+      | cell dst label value =>
+        simp only [execRun, hrest]
+        split
+        · by_cases hi : i = id
+          · rw [hi] at ht ⊢
+            have htail := noBulk_tail (.cell dst label value) es
+              (by simpa [contRest, hph, hrest] using hB id ht)
+            cases hes : es with
+            | nil => simp [setCell, setActor, proceed, afterHead, hes, contRest, nobulk_empty]
+            | cons _ _ =>
+              simp [setCell, setActor, proceed, afterHead, hes, contRest]
+              exact Or.inl (by simpa [hes] using htail)
+          · simp [setCell, setActor, hi]
+        · simp only [wakeReaders]
+          rw [wakes_phase (readersOf _ dst) I.desc _ dst label id i]
+          by_cases hi : i = id
+          · rw [hi] at ht ⊢
+            have htail := noBulk_tail (.cell dst label value) es
+              (by simpa [contRest, hph, hrest] using hB id ht)
+            cases hes : es with
+            | nil => simp [setCell, setActor, proceed, afterHead, hes, contRest, nobulk_empty]
+            | cons _ _ =>
+              simp [setCell, setActor, proceed, afterHead, hes, contRest]
+              exact Or.inl (by simpa [hes] using htail)
+          · simp [setCell, setActor, hi]
+      | internal =>
+        by_cases hi : i = id
+        · rw [hi] at ht ⊢
+          have htail := noBulk_tail (.internal) es
+            (by simpa [contRest, hph, hrest] using hB id ht)
+          simp [execRun, hrest, setActor, contRest]
+          exact Or.inl htail
+        · simp [execRun, hrest, setActor, hi]
+      | peer =>
+        by_cases hi : i = id
+        · rw [hi] at ht ⊢
+          have htail := noBulk_tail (.peer) es
+            (by simpa [contRest, hph, hrest] using hB id ht)
+          simp [execRun, hrest, setActor, contRest]
+          exact Or.inl htail
+        · simp [execRun, hrest, setActor, hi]
+      | terminate =>
+        simp [execRun, hrest]
+        cases htpl : templateOf I.desc (tname id) with
+        | none => simp [htpl]
+        | some t =>
+          by_cases hkill : t.terminable = true ∧ hasParkedCall (w.st id).parked = false
+          · simp [htpl, hkill]
+            let wR := readCells I.desc w id
+            let wM := refundMsgs wR (tname id) (w.st id).box
+            let wP := refundParked wM (tname id) (w.st id).parked
+            let dead : Actor :=
+              { wP.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+            have hpre : BulkFree I (setActor wP id dead) := by
+              apply bulk_or I w _ hB
+              intro j _
+              by_cases hj : j = id
+              · rw [hj]
+                simp [setActor, dead, contRest, nobulk_empty]
+              · have hphj : (wP.st j).phase = (w.st j).phase := by
+                  simp [wP, wM, wR, phase_refundP, phase_refund, readCells_st]
+                simp [setActor, hj, hphj]
+            exact Or.inl ((release_bulk I (setActor wP id dead) id (w.st id).parked hpre) i ht)
+          · simp [htpl, hkill]
+
+theorem bulk_head (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w)
+    (h : execHead I w id = some w') : BulkFree I w' := by
+  unfold execHead at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h
+      cases h
+      exact bulk_exec I w id k hB hph
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
+
+theorem place_bulk (I : Impl) (w w1 : World) (id : InstId) (a1 : Actor) (dst : String) (sender : InstId)
+    (hn : terminableName I.desc (tname id) → noBulkSend (contRest a1.phase) = true)
+    (hst : ∀ i, w1.st i = w.st i) (hB : BulkFree I w) :
+    BulkFree I (creditSender (setActor w1 id a1) dst sender) := by
+  apply bulk_or I w _ hB
+  intro i ht
+  by_cases hi : i = id
+  · rw [hi] at ht ⊢
+    simp [phase_credit, setActor]
+    exact Or.inl (hn ht)
+  · simp [phase_credit, setActor, hi, hst i]
+
+theorem place_actor (I : Impl) (w w1 : World) (id : InstId) (a1 : Actor)
+    (hn : terminableName I.desc (tname id) → noBulkSend (contRest a1.phase) = true)
+    (hst : ∀ i, w1.st i = w.st i) (hB : BulkFree I w) :
+    BulkFree I (setActor w1 id a1) := by
+  apply bulk_or I w _ hB
+  intro i ht
+  by_cases hi : i = id
+  · rw [hi] at ht ⊢
+    simp [setActor]
+    exact Or.inl (hn ht)
+  · simp [setActor, hi, hst i]
+
+theorem resume_bulk (I : Impl) (w : World) (sender : InstId) (b : Bool) (dst : InstId)
+    (hB : BulkFree I w) :
+    BulkFree I (setActor w sender (resumeSender (w.st sender) b dst)) := by
+  apply bulk_or I w _ hB
+  intro i ht
+  by_cases hi : i = sender
+  · rw [hi] at ht ⊢
+    simp [setActor]
+    exact Or.inl (resume_nobulk (w.st sender) b dst (hB sender ht))
+  · simp [setActor, hi]
+
+theorem bulk_recv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (hB : BulkFree I w)
+    (h : receiveBulk I w id = some w') : BulkFree I w' := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hplace := place_bulk I w w1 id a1 (tname id) p.msg.sender
+            (deliver_nobulk I hL w id _ p.msg w1 a1 hdel)
+            (fun i => deliver_st I w id _ p.msg w1 a1 i hdel) hB
+          exact resume_bulk I _ p.sender p.isCall id hplace
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          exact place_bulk I w w1 id a1 (tname id) m.sender
+            (deliver_nobulk I hL w id _ m w1 a1 hdel)
+            (fun i => deliver_st I w id _ m w1 a1 i hdel) hB
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          let admitted := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hph : admitted.phase = a1.phase := by simp [admitted]
+          have hplace := place_bulk I w w1 id admitted (tname id) m.sender
+            (fun ht => by simpa [hph] using deliver_nobulk I hL w id _ m w1 a1 hdel ht)
+            (fun i => deliver_st I w id _ m w1 a1 i hdel) hB
+          simpa [admitted] using resume_bulk I _ p.sender p.isCall id hplace
+
+theorem bulk_prio (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (hB : BulkFree I w)
+    (h : receivePrio I w id = some w') : BulkFree I w' := by
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      exact place_actor I w w1 id a1
+        (deliver_nobulk I hL w id _ m w1 a1 hdel)
+        (fun i => deliver_st I w id _ m w1 a1 i hdel) hB
+
+theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB : BulkFree I w)
+    (h : apply I a w = some w') : BulkFree I w' := by
+  cases a with
+  | recvBulk id => simpa [apply] using bulk_recv I hL w w' id hB h
+  | recvPrio id => simpa [apply] using bulk_prio I hL w w' id hB h
+  | exec id => simpa [apply] using bulk_head I w w' id hB h
+  | finish id => simpa [apply] using bulk_finish I w w' id hB h
+  | spawn template => simpa [apply] using bulk_spawn I w w' template hB h
+
+theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : Inv2 I w := by
+  induction hR with
+  | init => exact inv2_init I hL hG N
+  | step w w' a hw happly ih =>
+    rcases ih with ⟨hI, hO, hT, hB⟩
+    exact ⟨step_inv I hL w w' ⟨a, happly⟩ hI, occ_apply I hL hG a w w' hO hI.1 hI.2.1 hT hB happly,
+      ty_step I hL hG N w w' a hw happly hT, bulk_apply I hL a w w' hB happly⟩
 
 end Deadlock

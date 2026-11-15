@@ -242,10 +242,11 @@ for a send the actor did not itself perform.
   it owes nothing, and `occ_release` resumes the parked senders.
   `occ_exec` covers every head of a running actor, including a killing
   `terminate`. `Inv2` packages the step invariant, occupancy, typestate, and
-  the terminable-continuation restriction, and holds at `initWorld`.
-  `occ_apply` keeps occupancy for every action. Preservation of the
-  terminable-continuation restriction, and therefore `inv2_reachable`, is not
-  proved yet. Charging a send requires the sender's template not
+  the terminable-continuation restriction. It holds at `initWorld`, and
+  `inv2_reachable` keeps it at every reachable world: a suffix of a program
+  with no bulk send still has none, delivery of a terminable actor installs
+  such a program, and `bulk_apply` covers every action. `occ_apply` keeps
+  occupancy for every action. Charging a send requires the sender's template not
   to be terminable, and `OccInv.still` keeps a terminable actor's owed count
   at zero. That is narrower than Amaru: a per-peer stage, such as a chainsync
   initiator, terminates when its peer disconnects and does send to shared
@@ -257,8 +258,8 @@ for a send the actor did not itself perform.
   description does not have, the check is defined with the lift. The present
   check is not known to be unsound for the restricted model: a terminable
   template cannot bulk-send, so a dead instance does not keep credit a
-  replacement would count again. That missing preservation, and the missing
-  `execRun` theorem, are why `¬ Deadlock` is not claimed yet.
+  replacement would count again. `¬ Deadlock` is not claimed yet: a stuck
+  blocking send or call reply still has to descend the residual rank.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
