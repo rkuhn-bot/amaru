@@ -3915,4 +3915,109 @@ theorem reachable_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) 
     exact apply_not_crashed I hL hG a w w' ih (lane_reachable I hL hG N w prev)
       (prog_src_reachable I N w prev) happ
 
+theorem proceed_wait_none (a : Actor) (k : Cont) : waitKind (proceed a k) = none := by
+  cases hk : k.rest <;> simp [proceed, waitKind, hk]
+
+/-- Resuming a blocking send leaves the sender running or idle. -/
+theorem resume_send_clears (a : Actor) (dst : InstId) (k : Cont)
+    (h : a.phase = .parked dst false k) : waitKind (resumeSender a false dst) = none := by
+  simp [resumeSender, h]
+  exact proceed_wait_none a k
+
+/-- Resuming a parked call is the caller's `awaitReply`. The wait kind stays a call reply. -/
+theorem resume_call_waits (a : Actor) (dst : InstId) (k : Cont)
+    (h : a.phase = .parked dst true k) : (resumeSender a true dst).phase = .awaitReply dst k := by
+  simp [resumeSender, h]
+
+/-- Installing the receiver and crediting some sender leaves a different actor's phase. -/
+theorem install_sender_phase (w w1 : World) (id : InstId) (installed : Actor) (who sender : InstId)
+    (hne : sender ≠ id) (hst : w1.st sender = w.st sender) :
+    ((creditSender (setActor w1 id installed) (tname id) who).st sender).phase =
+      (w.st sender).phase := by
+  rw [phase_credit, setActor_other w1 id sender installed hne, hst]
+
+theorem bulk_resumes_send (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk I w id = some w')
+    (p : Parked) (ps : List Parked) (hp : (w.st id).parked = p :: ps) (s : InstId)
+    (hs : s = p.sender) (hne : s ≠ id) (k : Cont)
+    (hph : (w.st s).phase = .parked id false k) (hc : p.isCall = false) :
+    waitKind (w'.st s) = none := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        have hst := deliver_st I w id _ p.msg w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id a1 p.msg.sender s (by simpa [hs] using hne) hst
+        rw [hs] at hpre hph ⊢
+        simp only [setActor_self]
+        rw [hc]
+        exact resume_send_clears _ id k (hpre.trans hph)
+    | cons m ms =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+        have hst := deliver_st I w id _ m w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id admitted m.sender s (by simpa [hs] using hne) hst
+        rw [hs] at hpre hph ⊢
+        simp only [setActor_self, admitted]
+        rw [hc]
+        exact resume_send_clears _ id k (hpre.trans hph)
+
+theorem bulk_admits_call (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk I w id = some w')
+    (p : Parked) (ps : List Parked) (hp : (w.st id).parked = p :: ps) (s : InstId)
+    (hs : s = p.sender) (hne : s ≠ id) (k : Cont)
+    (hph : (w.st s).phase = .parked id true k) (hc : p.isCall = true) :
+    (w'.st s).phase = .awaitReply id k := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        have hst := deliver_st I w id _ p.msg w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id a1 p.msg.sender s (by simpa [hs] using hne) hst
+        rw [hs] at hpre hph ⊢
+        simp only [setActor_self]
+        rw [hc]
+        exact resume_call_waits _ id k (hpre.trans hph)
+    | cons m ms =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+        have hst := deliver_st I w id _ m w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id admitted m.sender s (by simpa [hs] using hne) hst
+        rw [hs] at hpre hph ⊢
+        simp only [setActor_self, admitted]
+        rw [hc]
+        exact resume_call_waits _ id k (hpre.trans hph)
+
+/-- That resume is not the same wait: a blocking send at the parked head is over. -/
+theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
+    (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
+    (hp : (w.st id).parked = p :: ps) (s : InstId) (hs : s = p.sender) (hne : s ≠ id)
+    (k : Cont) (hph : (w.st s).phase = .parked id false k) (hc : p.isCall = false) :
+    ¬ SameWait (w.st s) (w'.st s) := by
+  intro hsame
+  have hwas : waitKind (w.st s) = some (.blockingSend id) := by simp [waitKind, hph]
+  have hnow := bulk_resumes_send I w w' id h p ps hp s hs hne k hph hc
+  have heq := hsame.1
+  simp [hwas, hnow] at heq
+
 end Deadlock

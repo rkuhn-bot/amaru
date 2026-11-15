@@ -98,3 +98,8 @@ import Deadlock.Rank
 #print axioms Deadlock.prog_src_reachable
 #print axioms Deadlock.schedule_not_crashed
 #print axioms Deadlock.lane_schedule
+#print axioms Deadlock.lane_reachable
+#print axioms Deadlock.reachable_not_crashed
+#print axioms Deadlock.bulk_resumes_send
+#print axioms Deadlock.bulk_admits_call
+#print axioms Deadlock.recv_clears_head_send

@@ -298,8 +298,12 @@ for a send the actor did not itself perform.
   `lane_reachable` says every reachable world keeps that lane: receive, finish,
   spawn, and every exec head, including a cell wake into a reader's lane.
   `reachable_not_crashed` follows: the only write of `.crashed` is the overflow
-  branch, and it is not taken. A `Fair.bulk` delivery, `CellFresh`, and the
-  dead-instance lift are not proved.
+  branch, and it is not taken. `bulk_resumes_send` says a bulk receive whose
+  parked list is nonempty resumes a blocking send at the head, and
+  `bulk_admits_call` says the same receive puts a parked call into
+  `awaitReply`. What is not proved is that fairness eventually performs that
+  receive while the waiter is still the head, the handler's single reply, the
+  rank induction, `CellFresh`, and the dead-instance lift.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
