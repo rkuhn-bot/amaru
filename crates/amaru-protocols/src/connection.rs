@@ -908,6 +908,71 @@ mod tests {
         assert_eq!(*mailbox_size, mux::MUX_MAILBOX_SIZE);
     }
 
+    /// Eleven FetchBlocks / NewTip / SetLocalUse messages during handshake must be retained, not
+    /// panic once the priority mailbox (`PRIORITY_MAILBOX_SIZE`) fills.
+    #[test]
+    fn test_slow_handshake_accepts_eleven_reschedules() {
+        use std::panic::AssertUnwindSafe;
+
+        use amaru_pure_stage::PRIORITY_MAILBOX_SIZE;
+
+        let mut network = SimulationBuilder::default();
+        let connection = network.stage("connection", stage);
+        let handshake = State::Handshake { muxer: StageRef::blackhole(), handshake: StageRef::blackhole() };
+        let connection = network.wire_up(connection, test_connection(handshake.clone()));
+        let (blocks_output, _rx) = network.output::<Blocks>("blocks_output", 16);
+
+        let mut queued = Vec::new();
+        for id in 0..4u64 {
+            queued.push(ConnectionMessage::FetchBlocks {
+                from: Point::Origin,
+                through: Point::Origin,
+                id,
+                cr: blocks_output.clone(),
+            });
+        }
+        for _ in 0..4 {
+            queued.push(ConnectionMessage::new_tip(Point::Origin));
+        }
+        queued.push(ConnectionMessage::SetLocalUse(LocalUse::Diffusion));
+        queued.push(ConnectionMessage::SetLocalUse(LocalUse::Maintenance));
+        assert_eq!(queued.len(), PRIORITY_MAILBOX_SIZE);
+
+        network.preload(&connection, queued).unwrap();
+        let rt = Runtime::new().unwrap();
+        let mut running = network.run(rt.handle());
+        running.run(Run::default()).assert_sleeping();
+
+        running.enqueue_msg(&connection, [ConnectionMessage::SetLocalUse(LocalUse::None)]);
+        let resumed = std::panic::catch_unwind(AssertUnwindSafe(|| running.run(Run::default())));
+        match resumed {
+            Ok(blocked) => {
+                let state = running.get_state(&connection).expect("connection still running");
+                assert_eq!(
+                    state.state,
+                    handshake,
+                    "handshake must still be in progress after {} rescheduled messages; blocked={blocked:?}",
+                    PRIORITY_MAILBOX_SIZE + 1
+                );
+            }
+            Err(payload) => {
+                panic!(
+                    "a slow handshake must accept {} FetchBlocks/NewTip/SetLocalUse messages without overflowing the priority mailbox ({PRIORITY_MAILBOX_SIZE}): {}",
+                    PRIORITY_MAILBOX_SIZE + 1,
+                    panic_payload(&payload)
+                );
+            }
+        }
+    }
+
+    fn panic_payload(payload: &Box<dyn std::any::Any + Send>) -> String {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|msg| (*msg).to_string()))
+            .unwrap_or_else(|| "non-string panic".to_string())
+    }
+
     // HELPERS
 
     fn test_connection(state: State) -> Connection {
