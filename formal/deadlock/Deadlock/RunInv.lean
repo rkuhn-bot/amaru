@@ -16,11 +16,24 @@ def programOk (D : Description) (id : InstId) (a : Actor) : Prop :=
   | .awaitPeer k => effectsOk D (tname id) a.typestate k.rest = true
   | _ => True
 
+/-- The effect that parked this actor, or the call it is awaiting, is still an
+edge out of the typestate it moved to before blocking. The continuation no
+longer contains that effect. -/
+def waitEdge (D : Description) (id : InstId) (a : Actor) : Prop :=
+  match a.phase with
+  | .parked dst isCall _ =>
+    ∃ label, hasEdge D (tname id) a.typestate (tname dst)
+      (if isCall then .call else .send) .blocking label = true
+  | .awaitReply dst _ =>
+    ∃ label, hasEdge D (tname id) a.typestate (tname dst) .call .blocking label = true
+  | _ => True
+
 structure SemInv (I : Impl) (w : World) : Prop where
   compat : CompatInv I.desc w
   live : ∀ g ∈ compatGroups I.desc.compatibility, groupLive w g
   cont : ∀ id, contTy (w.st id)
   prog : ∀ id, programOk I.desc id (w.st id)
+  waited : ∀ id, waitEdge I.desc id (w.st id)
 
 theorem effectsOk_tail (D : Description) (template state : String) (e : Eff) (es : List Eff)
     (h : effectsOk D template state (e :: es) = true) : effectsOk D template state es = true := by
