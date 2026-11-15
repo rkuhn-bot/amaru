@@ -330,9 +330,14 @@ for a send the actor did not itself perform.
   both the parked call and the later `awaitReply`. `idle_when_free` says an
   actor that stays alive, and whose wait kind keeps changing, later reaches
   idle: each change drops `phaseFuel`, and a call uses the frozen continuation
-  so the drop is against the fuel at the start of the wait. The pointwise rank
-  induction, the callee's idle visits, the handler reply, `never_stuck`,
-  `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not proved.
+  so the drop is against the fuel at the start of the wait.   `send_stuck_false`
+  and `call_parked_stuck_false` are the two queue contradictions under that
+  hypothesis: a receiver that stays strictly below the waiter, alive, and idle
+  with mail infinitely often cannot leave the waiter parked. `call_admitted`
+  uses the second one: a stuck call reaches `awaitReply` on the same
+  continuation and stays there. The handler's reply after that admission, the
+  pointwise rank induction, `never_stuck`, `deadlock_freedom`, `CellFresh`,
+  and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

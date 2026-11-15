@@ -7920,6 +7920,154 @@ theorem idle_when_free (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Na
       obtain ⟨j2, hj2, hq⟩ := ih _ hlt j (Nat.le_trans ht (Nat.le_of_lt hltj)) (Nat.le_refl _)
       exact ⟨j2, Nat.le_trans (Nat.le_of_lt hltj) hj2, hq⟩
 
+/-- A blocking send does not last forever when every actor strictly below the sender
+stays idle infinitely often while it remains below. -/
+theorem send_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ)
+    (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
+    (s dst : InstId) (i : Nat) (hS : Stuck ρ s i)
+    (hkind : waitKind ((ρ.cfg i).st s) = some (.blockingSend dst))
+    (hlower : ∀ (t : Nat) (x : InstId), rankAt hs (ρ.cfg t) x < rankAt hs (ρ.cfg i) s →
+      (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
+      (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < rankAt hs (ρ.cfg i) s) →
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x) : False := by
+  have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some (.blockingSend dst) := by
+    intro j hj
+    exact ((hkind.symm.trans (hS.2 j hj).1).symm)
+  obtain ⟨k, hph⟩ := blocking_parked ((ρ.cfg i).st s) dst hkind
+  have hstay : ∀ t, i ≤ t → ∃ k, ((ρ.cfg t).st s).phase = .parked dst false k := by
+    intro t ht
+    have hfreeze := blocking_stays I hL ρ s dst k i (t - i) hph
+      (fun u hu1 _ => hall u hu1)
+    exact ⟨k, by simpa [Nat.add_sub_of_le ht] using hfreeze⟩
+  have hM := (inv_reachable I N (ρ.cfg i) hL (cfg_reachable ρ i)).2.1
+  obtain ⟨p, hp, hps, _⟩ := hM.bwd s dst false k hph
+  have hmail : ((ρ.cfg i).st dst).parked ≠ [] := by
+    intro hempty
+    simp [hempty] at hp
+  have hl0 := mailbox_alive I hL N (ρ.cfg i) (cfg_reachable ρ i) dst hmail
+  have halive := alive_while_send I hL hG ρ s dst i hstay hl0
+  have hbelow : ∀ u, i ≤ u → rankAt hs (ρ.cfg u) dst < rankAt hs (ρ.cfg i) s := by
+    intro u hu
+    have hht := send_height_below I hL hG ρ hs hok s dst k i (u - i) hph
+      (fun t ht1 _ => hall t ht1)
+      (fun t ht1 _ => halive t ht1)
+    simpa [Nat.add_sub_of_le hu] using hht.2
+  have hidle := hlower i dst (hbelow i (Nat.le_refl _)) halive hbelow
+  have hcan : ∀ t, ∃ j, t ≤ j ∧ CanReceive (ρ.cfg j) dst := by
+    intro t
+    let u := max t i
+    obtain ⟨j, hj, hId⟩ := hidle u (Nat.le_max_right _ _)
+    have hj' : i ≤ j := Nat.le_trans (Nat.le_max_right t i) hj
+    obtain ⟨k', hk'⟩ := hstay j hj'
+    have hMj := (inv_reachable I N (ρ.cfg j) hL (cfg_reachable ρ j)).2.1
+    obtain ⟨p', hp', _, _⟩ := hMj.bwd s dst false k' hk'
+    have hbox : ((ρ.cfg j).st dst).parked ≠ [] := by
+      intro hempty
+      simp [hempty] at hp'
+    exact ⟨j, Nat.le_trans (Nat.le_max_left _ _) hj, ⟨hId, Or.inr hbox⟩⟩
+  have hidx := parkIndex_of_mem ((ρ.cfg i).st dst).parked s ⟨p, hp, hps⟩
+  exact parked_forever_false I hL hG ρ hF s dst false (parkIndex ((ρ.cfg i).st dst).parked s) i
+    hstay halive (Nat.le_refl _) hidx hcan
+
+/-- A call that stays parked does not last forever when every actor strictly below
+the caller stays idle infinitely often while it remains below. -/
+theorem call_parked_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ)
+    (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
+    (s dst : InstId) (k : Cont) (i : Nat)
+    (hph : ((ρ.cfg i).st s).phase = .parked dst true k)
+    (hkind : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some (.callReply dst))
+    (hstay : ∀ t, i ≤ t → ∃ k, ((ρ.cfg t).st s).phase = .parked dst true k)
+    (hlower : ∀ (t : Nat) (x : InstId), rankAt hs (ρ.cfg t) x < rankAt hs (ρ.cfg i) s →
+      (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
+      (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < rankAt hs (ρ.cfg i) s) →
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x) : False := by
+  have hM := (inv_reachable I N (ρ.cfg i) hL (cfg_reachable ρ i)).2.1
+  obtain ⟨p, hp, hps, _⟩ := hM.bwd s dst true k hph
+  have hmail : ((ρ.cfg i).st dst).parked ≠ [] := by
+    intro hempty
+    simp [hempty] at hp
+  have hl0 := mailbox_alive I hL N (ρ.cfg i) (cfg_reachable ρ i) dst hmail
+  have halive : ∀ t, i ≤ t → ((ρ.cfg t).st dst).life = .alive := by
+    intro t ht
+    have hgot := call_callee_alive I hL hG ρ s dst k i (t - i) (Or.inl hph)
+      (fun u hu1 _ => hkind u hu1) hl0
+    simpa [Nat.add_sub_of_le ht] using hgot
+  have hbelow : ∀ u, i ≤ u → rankAt hs (ρ.cfg u) dst < rankAt hs (ρ.cfg i) s := by
+    intro u hu
+    have hht := call_height_below I hL hG ρ hs hok s dst k i (u - i) (Or.inl hph)
+      (fun t ht1 _ => hkind t ht1) hl0
+    simpa [Nat.add_sub_of_le hu] using hht.2
+  have hidle := hlower i dst (hbelow i (Nat.le_refl _)) halive hbelow
+  have hcan : ∀ t, ∃ j, t ≤ j ∧ CanReceive (ρ.cfg j) dst := by
+    intro t
+    let u := max t i
+    obtain ⟨j, hj, hId⟩ := hidle u (Nat.le_max_right _ _)
+    have hj' : i ≤ j := Nat.le_trans (Nat.le_max_right t i) hj
+    obtain ⟨k', hk'⟩ := hstay j hj'
+    have hMj := (inv_reachable I N (ρ.cfg j) hL (cfg_reachable ρ j)).2.1
+    obtain ⟨p', hp', _, _⟩ := hMj.bwd s dst true k' hk'
+    have hbox : ((ρ.cfg j).st dst).parked ≠ [] := by
+      intro hempty
+      simp [hempty] at hp'
+    exact ⟨j, Nat.le_trans (Nat.le_max_left _ _) hj, ⟨hId, Or.inr hbox⟩⟩
+  have hidx := parkIndex_of_mem ((ρ.cfg i).st dst).parked s ⟨p, hp, hps⟩
+  exact parked_forever_false I hL hG ρ hF s dst true (parkIndex ((ρ.cfg i).st dst).parked s) i
+    hstay halive (Nat.le_refl _) hidx hcan
+
+/-- A stuck call is admitted. It cannot stay parked, so some later phase is
+`awaitReply` on the same continuation, and it stays there while the kind lasts. -/
+theorem call_admitted (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ)
+    (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
+    (s dst : InstId) (i : Nat) (hS : Stuck ρ s i)
+    (hkind : waitKind ((ρ.cfg i).st s) = some (.callReply dst))
+    (hlower : ∀ (t : Nat) (x : InstId), rankAt hs (ρ.cfg t) x < rankAt hs (ρ.cfg i) s →
+      (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
+      (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < rankAt hs (ρ.cfg i) s) →
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x) :
+    ∃ j k, i ≤ j ∧ ((ρ.cfg j).st s).phase = .awaitReply dst k ∧
+      ∀ t, j ≤ t → ((ρ.cfg t).st s).phase = .awaitReply dst k := by
+  have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some (.callReply dst) := by
+    intro j hj
+    exact ((hkind.symm.trans (hS.2 j hj).1).symm)
+  rcases call_parked_or_await ((ρ.cfg i).st s) dst hkind with ⟨k, hpark⟩ | ⟨k, hawait⟩
+  · have hnot : ¬ ∀ t, i ≤ t → ∃ k, ((ρ.cfg t).st s).phase = .parked dst true k := by
+      intro hstay
+      exact call_parked_stuck_false I hL hG ρ hF hs hok s dst k i hpark hall hstay hlower
+    have hex : ∃ t, i ≤ t ∧ ∀ k, ((ρ.cfg t).st s).phase ≠ .parked dst true k := by
+      cases Classical.em (∃ t, i ≤ t ∧ ∀ k, ((ρ.cfg t).st s).phase ≠ .parked dst true k) with
+      | inl h => exact h
+      | inr hno =>
+        exact False.elim (hnot (by
+          intro t ht
+          cases Classical.em (∃ k, ((ρ.cfg t).st s).phase = .parked dst true k) with
+          | inl h => exact h
+          | inr hnp =>
+            exact absurd ⟨t, ht, fun k hk => hnp ⟨k, hk⟩⟩ hno))
+    obtain ⟨t0, ht0, hnp⟩ := hex
+    obtain ⟨t, ht, hpT, _⟩ := earliest
+      (fun t => i ≤ t ∧ ∀ k, ((ρ.cfg t).st s).phase ≠ .parked dst true k) t0 i ht0 ⟨ht0, hnp⟩
+    obtain ⟨_, hnpT⟩ := hpT
+    have hphase := call_stays I hL ρ s dst k i (t - i) (Or.inl hpark)
+      (fun u hu1 _ => hall u hu1)
+    have hidx : i + (t - i) = t := Nat.add_sub_of_le ht
+    have hhere : CallPhase dst k (((ρ.cfg t).st s).phase) := by simpa [hidx] using hphase
+    have hawait : ((ρ.cfg t).st s).phase = .awaitReply dst k := by
+      rcases hhere with hpk | haw
+      · exact absurd hpk (hnpT k)
+      · exact haw
+    refine ⟨t, k, ht, hawait, ?_⟩
+    intro u hu
+    have hfreeze := await_stays I hL ρ s dst k t (u - t) hawait
+      (fun v hv1 _ => hall v (Nat.le_trans ht hv1))
+    simpa [Nat.add_sub_of_le hu] using hfreeze
+  · refine ⟨i, k, Nat.le_refl _, hawait, ?_⟩
+    intro u hu
+    have hfreeze := await_stays I hL ρ s dst k i (u - i) hawait (fun v hv1 _ => hall v hv1)
+    simpa [Nat.add_sub_of_le hu] using hfreeze
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)

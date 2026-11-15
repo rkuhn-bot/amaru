@@ -133,3 +133,6 @@ import Deadlock.Rank
 #print axioms Deadlock.call_height_below
 #print axioms Deadlock.call_callee_alive
 #print axioms Deadlock.idle_when_free
+#print axioms Deadlock.send_stuck_false
+#print axioms Deadlock.call_parked_stuck_false
+#print axioms Deadlock.call_admitted
