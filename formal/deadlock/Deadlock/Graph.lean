@@ -174,7 +174,7 @@ def compatGroups : CompatMode → List CompatGroup
   | _ => []
 
 def lookupRole (t : List RoleState) (role : String) : Option String :=
-  t.findSome? fun rs => if rs.role == role then some rs.state else none
+  t.findSome? fun rs => if rs.role = role then some rs.state else none
 
 def tupleMem (allowed : List (List RoleState)) (t : List RoleState) : Bool :=
   allowed.any fun a =>
@@ -182,7 +182,7 @@ def tupleMem (allowed : List (List RoleState)) (t : List RoleState) : Bool :=
       a.all (fun rs => lookupRole t rs.role == some rs.state)
 
 def substRole (t : List RoleState) (role state : String) : List RoleState :=
-  t.map fun rs => if rs.role == role then { rs with state } else rs
+  t.map fun rs => if rs.role = role then { rs with state := state } else rs
 
 def fmtTuple (t : List RoleState) : String :=
   "(" ++ String.intercalate ", " (t.map fun rs => s!"{rs.role}: {rs.state}") ++ ")"
@@ -488,8 +488,15 @@ def groupWellformed (D : Description) (g : CompatGroup) : List String :=
         | some t => t.multiplicity == .perPeer
         | none => false
       if !perPeer.isEmpty then
-        [s!"fail: compatibility group {g.name} role {perPeer.head?.getD "?"} must have multiplicity one in this check"]
+        [s!"fail: compatibility group {g.name} role {perPeer.head?.getD "?"} has multiplicity perPeer; this check does not certify every instance count N"]
       else
+        let terminable := g.roles.filter fun r =>
+          match templateOf D r with
+          | some t => t.terminable
+          | none => false
+        if !terminable.isEmpty then
+          [s!"fail: compatibility group {g.name} role {terminable.head?.getD "?"} is terminable; a dead role is not a state in the tuple"]
+        else
         g.allowed.filterMap fun tup =>
           if tup.length != g.roles.length then
             some s!"fail: compatibility group {g.name} tuple {fmtTuple tup} does not cover every role"
@@ -518,8 +525,9 @@ def groupClosure (D : Description) (g : CompatGroup) : List String :=
     let initFail :=
       if tupleMem g.allowed init then []
       else [s!"fail: compatibility group {g.name} rejects the initial tuple\n  tuple: {fmtTuple init}"]
-    initFail ++ D.steps.flatMap (stepBreaks g · false) ++
-      (restartSteps D g).flatMap (stepBreaks g · true)
+    -- Only real typestate steps. In-place restart is not a step of this semantics;
+    -- a dead role leaves the product instead of being read as `initial`.
+    initFail ++ D.steps.flatMap (stepBreaks g · false)
 
 def uncoveredEdges (D : Description) (gs : List CompatGroup) : List String :=
   D.edges.filterMap fun e =>
@@ -530,7 +538,8 @@ def uncoveredEdges (D : Description) (gs : List CompatGroup) : List String :=
 def compatFails (D : Description) : List String :=
   match D.compatibility with
   | .all => []
-  | .explicit _ => []
+  | .explicit _ =>
+    ["fail: compatibility mode explicit is not an invariance check; use groups"]
   | .groups gs =>
     gs.flatMap (fun g => groupWellformed D g ++ groupClosure D g) ++ uncoveredEdges D gs
 

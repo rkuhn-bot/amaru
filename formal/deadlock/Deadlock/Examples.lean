@@ -103,7 +103,9 @@ theorem manager_cycle : render managerPeerDesc =
 
 theorem credit_pass : render creditDesc = "pass" := by native_decide
 
-theorem token_pass : render tokenDesc = "pass" := by native_decide
+theorem token_explicit_rejected : render tokenDesc =
+    "fail: compatibility mode explicit is not an invariance check; use groups" := by
+  native_decide
 
 theorem token_ungated_cycle : render tokenUngatedDesc =
     "fail: residual cycle\n  (select_chain, holding) -> (fetch_blocks, busy) -> (select_chain, holding)" := by

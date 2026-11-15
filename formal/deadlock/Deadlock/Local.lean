@@ -118,9 +118,17 @@ def prioOk (I : Impl) : Bool :=
     let labels := prioLabels I t.name
     labels.length ≤ t.priorityBound.b && t.priorityBound.a == 0
 
+/-- Every program the semantics can fire is one of the steps the relation was closed under. -/
+def stepsCoverB (I : Impl) : Bool :=
+  I.transitions.all fun tr =>
+    I.desc.steps.any fun s =>
+      s.template == tr.template && s.fromState == tr.fromState &&
+        s.toState == tr.toState && s.label == tr.label
+
 def localOkB (I : Impl) : Bool :=
   I.transitions.all (transitionOk I) && callTotal I && targetsAll I.desc &&
-    occShape I.desc && dstClosed I && prioOk I
+    occShape I.desc && dstClosed I && prioOk I &&
+    (compatFails I.desc).isEmpty && stepsCoverB I
 
 def LocalOk (I : Impl) : Prop := localOkB I = true
 
@@ -155,9 +163,10 @@ def CellFresh {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
 
 theorem local_parts (I : Impl) (h : LocalOk I) :
     I.transitions.all (transitionOk I) = true ∧ callTotal I = true ∧ targetsAll I.desc = true ∧
-      occShape I.desc = true ∧ dstClosed I = true ∧ prioOk I = true := by
+      occShape I.desc = true ∧ dstClosed I = true ∧ prioOk I = true ∧
+      (compatFails I.desc).isEmpty = true ∧ stepsCoverB I = true := by
   simp only [LocalOk, localOkB, Bool.and_eq_true] at h
-  exact ⟨h.1.1.1.1.1, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
+  exact ⟨h.1.1.1.1.1.1.1, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
 
 theorem transitionOk_of_mem (I : Impl) (h : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions) :
     transitionOk I tr = true := by
