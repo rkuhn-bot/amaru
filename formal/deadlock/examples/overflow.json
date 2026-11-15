@@ -1,0 +1,47 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "overflow",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "producer",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    },
+    {
+      "name": "consumer",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    }
+  ],
+  "edges": [
+    {
+      "src": "producer",
+      "srcState": "idle",
+      "dst": "consumer",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "Burst",
+      "scope": "intra",
+      "occupancy": 11,
+      "repliesInDequeue": false,
+      "ingress": false
+    }
+  ]
+}

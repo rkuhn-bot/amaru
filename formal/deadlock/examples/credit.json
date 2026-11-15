@@ -1,0 +1,60 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "credit",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "client",
+      "multiplicity": "one",
+      "capacity": 1,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    },
+    {
+      "name": "server",
+      "multiplicity": "one",
+      "capacity": 1,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    }
+  ],
+  "edges": [
+    {
+      "src": "client",
+      "srcState": "idle",
+      "dst": "server",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "Request",
+      "scope": "intra",
+      "occupancy": 1,
+      "repliesInDequeue": false,
+      "ingress": false
+    },
+    {
+      "src": "server",
+      "srcState": "idle",
+      "dst": "client",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "Response",
+      "scope": "intra",
+      "occupancy": 1,
+      "repliesInDequeue": false,
+      "ingress": false
+    }
+  ]
+}

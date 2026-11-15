@@ -1,0 +1,60 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "token-pair-ungated",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "select_chain",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle", "holding"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": false
+    },
+    {
+      "name": "fetch_blocks",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle", "busy"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": false
+    }
+  ],
+  "edges": [
+    {
+      "src": "select_chain",
+      "srcState": "holding",
+      "dst": "fetch_blocks",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "NewBestTip",
+      "scope": "intra",
+      "occupancy": 11,
+      "repliesInDequeue": false,
+      "ingress": false
+    },
+    {
+      "src": "fetch_blocks",
+      "srcState": "busy",
+      "dst": "select_chain",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "ReturnToken",
+      "scope": "intra",
+      "occupancy": 11,
+      "repliesInDequeue": false,
+      "ingress": false
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "manager-peer",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "manager",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": false
+    },
+    {
+      "name": "peer_selection",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": false
+    }
+  ],
+  "edges": [
+    {
+      "src": "manager",
+      "srcState": "idle",
+      "dst": "peer_selection",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "ConnectionEvent",
+      "scope": "intra",
+      "occupancy": 11,
+      "repliesInDequeue": false,
+      "ingress": false
+    },
+    {
+      "src": "peer_selection",
+      "srcState": "idle",
+      "dst": "manager",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "AddPeer",
+      "scope": "intra",
+      "occupancy": 11,
+      "repliesInDequeue": false,
+      "ingress": false
+    }
+  ]
+}
