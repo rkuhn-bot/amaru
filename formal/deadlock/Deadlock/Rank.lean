@@ -4324,6 +4324,339 @@ theorem enqueue_queue (w : World) (D : Description) (sender dst : InstId) (msg :
     · simp [setActor, hi]
       exact Or.inl rfl
 
+theorem release_preserves_parked (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
+    ((releaseParked w id ps).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w
+    · rw [if_neg hskip]
+      have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+      have hset : ((setActor w p.sender (resumeSender (w.st p.sender) false id)).st i).parked =
+          (w.st i).parked := by
+        by_cases hi : i = p.sender
+        · rw [hi]
+          simp [setActor, resume_parked]
+        · simp [setActor, hi]
+      rw [hset] at hmid
+      exact hmid
+
+theorem refund_msgs_parked (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).parked = (w.st i).parked := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    simpa [refundMsgs, credit_parked] using ih (creditSender w dst m.sender)
+
+theorem refund_park_parked (w : World) (dst : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w dst ps).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    simpa [refundParked, credit_parked] using ih (creditSender w dst p.msg.sender)
+
+theorem try_wake_parked (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) : ((tryWake D w dstId label writer).st i).parked = (w.st i).parked := by
+  by_cases hif : ((w.st dstId).life == .alive &&
+      decide ((w.st dstId).prio.length < capPrio D w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · simp [tryWake, hif, setActor]
+    by_cases hi : i = dstId <;> simp [hi]
+  · simp [tryWake, hif]
+
+theorem wakes_parked (D : Description) (ids : List InstId) (w : World) (label : String)
+    (writer i : InstId) :
+    ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).parked = (w.st i).parked := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    exact (ih _).trans (try_wake_parked D w j label writer i)
+
+/-- Resuming a blocking send does not leave it blocked on the same partner. -/
+theorem resume_leaves_block (a : Actor) (dst : InstId) (k : Cont) (b : Bool)
+    (h : a.phase = .parked dst false k) :
+    waitKind (resumeSender a b dst) ≠ some (.blockingSend dst) := by
+  cases b
+  · simp [resumeSender, h]
+    rw [proceed_wait_none]
+    intro hc
+    cases hc
+  · simp [resumeSender, h, waitKind]
+
+theorem bulk_queue (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk I w id = some w') :
+    QueueStep ((w.st id).parked) ((w'.st id).parked) := by
+  cases hp : (w.st id).parked with
+  | nil =>
+    unfold receiveBulk at h
+    by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+    · simp [hready] at h
+    · simp [hready, hp] at h
+      cases hbox : (w.st id).box with
+      | nil => simp [hbox] at h
+      | cons m ms =>
+        simp [hbox] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hpk := deliver_parked I w id _ m w1 a1 hdel
+          simp [credit_parked, setActor_self, hpk, hp]
+          exact Or.inl rfl
+  | cons p ps =>
+    exact Or.inr (Or.inr ⟨p, ps, rfl, bulk_drops_head I w w' id h p ps hp⟩)
+
+theorem release_life_self (w : World) (id : InstId) (ps : List Parked) :
+    ((releaseParked w id ps).st id).life = (w.st id).life := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w
+    · rw [if_neg hskip]
+      have hne : p.sender ≠ id := by
+        intro h
+        have : (p.isCall || decide (p.sender = id)) = true := by simp [h]
+        simp [this] at hskip
+      have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+      have hflip : id ≠ p.sender := fun h => hne h.symm
+      rwa [setActor_other w p.sender id (resumeSender (w.st p.sender) false id) hflip] at hmid
+
+theorem queue_actor (w : World) (id : InstId) (a : Actor) (mb : InstId)
+    (h : a.parked = (w.st id).parked) :
+    QueueStep ((w.st mb).parked) ((setActor w id a).st mb).parked := by
+  by_cases hmb : mb = id
+  · rw [hmb, setActor_self, h]
+    exact Or.inl rfl
+  · rw [setActor_other w id mb a hmb]
+    exact Or.inl rfl
+
+theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
+    (hlive : ((execRun I w id (w.st id) k).st mb).life = .alive) :
+    QueueStep ((w.st mb).parked) ((execRun I w id (w.st id) k).st mb).parked := by
+  cases k with
+  | mk rest toState replyTo =>
+    cases rest with
+    | nil =>
+      simpa [execRun] using queue_actor w id { (w.st id) with phase := .idle, typestate := toState } mb rfl
+    | cons e tail =>
+      cases e with
+      | send dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using queue_actor w id (proceed (w.st id)
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+        | some dstId =>
+          simpa [hr] using enqueue_queue w I.desc id dstId
+            { label := label, sender := id, callFrom := none } false
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb
+      | call dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using queue_actor w id (proceed (w.st id)
+            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+        | some dstId =>
+          simpa [hr] using enqueue_queue w I.desc id dstId
+            { label := label, sender := id, callFrom := some id } true
+            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb
+      | internal =>
+        simpa [execRun] using queue_actor w id
+          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo⟩) }
+          mb rfl
+      | peer =>
+        simpa [execRun] using queue_actor w id
+          { (w.st id) with phase := .awaitPeer (afterHead ⟨.peer :: tail, toState, replyTo⟩) }
+          mb rfl
+      | selfSchedule label =>
+        simp only [execRun]
+        by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
+        · simpa [hany] using queue_actor w id (proceed (w.st id)
+            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+        · by_cases hlt : (w.st id).prio.length < capPrio I.desc w.N id
+          · simpa [hany, hlt] using queue_actor w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_parked])
+          · simpa [hany, hlt] using queue_actor w id { (w.st id) with phase := .crashed } mb rfl
+      | trySend dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using queue_actor w id (proceed (w.st id)
+            (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+        | some dstId =>
+          simp only [hr]
+          split
+          · by_cases hmb : mb = id
+            · rw [hmb]
+              by_cases hd : dstId = id
+              · rw [hd]
+                simp [setActor, chargeSender, bumpToken, proceed_parked]
+                exact Or.inl rfl
+              · have hflip : ¬ id = dstId := fun h => hd h.symm
+                simp [setActor, chargeSender, bumpToken, proceed_parked]
+                rw [if_neg hflip]
+                exact Or.inl rfl
+            · by_cases hd : mb = dstId
+              · rw [hd]
+                have hne : dstId ≠ id := fun h => hmb (hd.trans h)
+                simp [setActor, hne, chargeSender, bumpToken]
+                exact Or.inl rfl
+              · simp [setActor, hmb, hd]
+                exact Or.inl rfl
+          · exact queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+      | reply =>
+        simp only [execRun]
+        unfold performReply
+        cases hto : replyTo with
+        | none =>
+          simpa [hto] using queue_actor w id (proceed (w.st id)
+            (afterHead ⟨.reply :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+        | some caller =>
+          cases hcall : (w.st caller).phase with
+          | awaitReply dst ck =>
+            by_cases hd : dst = id
+            · simp [hto, hcall, hd]
+              by_cases hmb : mb = id
+              · rw [hmb]
+                by_cases hc : caller = id
+                · rw [hc]
+                  simp [setActor, proceed_parked]
+                  exact Or.inl rfl
+                · have hflip : ¬ id = caller := fun h => hc h.symm
+                  simp [setActor, proceed_parked]
+                  rw [if_neg hflip]
+                  exact Or.inl rfl
+              · by_cases hc : mb = caller
+                · rw [hc]
+                  have hne : ¬ caller = id := fun h => hmb (hc.trans h)
+                  simp [setActor, hne, proceed_parked]
+                  exact Or.inl rfl
+                · simp [setActor, hmb, hc]
+                  exact Or.inl rfl
+            · simpa [hto, hcall, hd] using queue_actor w id (proceed (w.st id)
+                (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+          | idle =>
+            simpa [hto, hcall] using queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+          | run _ =>
+            simpa [hto, hcall] using queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+          | awaitEffect _ =>
+            simpa [hto, hcall] using queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+          | awaitPeer _ =>
+            simpa [hto, hcall] using queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+          | parked _ _ _ =>
+            simpa [hto, hcall] using queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+          | crashed =>
+            simpa [hto, hcall] using queue_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_parked _ _)
+      | cell dst label value =>
+        simp only [execRun]
+        cases hdirty : (w.cell dst label).dirty
+        · simp [hdirty, wakeReaders]
+          rw [wakes_parked]
+          exact queue_actor (setCell w dst label
+            { value := max (w.cell dst label).value value, dirty := true }) id
+            (proceed ((setCell w dst label
+              { value := max (w.cell dst label).value value, dirty := true }).st id)
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+            (by simpa [setCell] using proceed_parked _ _)
+        · simp [hdirty]
+          exact queue_actor (setCell w dst label
+            { value := max (w.cell dst label).value value, dirty := true }) id
+            (proceed ((setCell w dst label
+              { value := max (w.cell dst label).value value, dirty := true }).st id)
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+            (by simpa [setCell] using proceed_parked _ _)
+      | terminate =>
+        simp only [execRun]
+        cases htpl : templateOf I.desc (tname id) with
+        | none =>
+          simp [htpl]
+          exact Or.inl rfl
+        | some t =>
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · simp [htpl, hkill]
+            by_cases hmb : mb = id
+            · exfalso
+              rw [hmb] at hlive
+              simp [execRun, htpl, hkill] at hlive
+              rw [release_life_self] at hlive
+              simp [setActor] at hlive
+            · have hbase : ∀ i, ((refundParked (refundMsgs (readCells I.desc w id) (tname id)
+                  (w.st id).box) (tname id) (w.st id).parked).st i).parked = (w.st i).parked := by
+                intro i
+                rw [refund_park_parked, refund_msgs_parked, readCells_st]
+              rw [release_preserves_parked, setActor_other _ id mb _ hmb, hbase]
+              exact Or.inl rfl
+          · simp [htpl, hkill]
+            exact Or.inl rfl
+
+theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
+    (hO : OpenSlots w) (mb : InstId) (hlive : (w'.st mb).life = .alive) :
+    QueueStep ((w.st mb).parked) ((w'.st mb).parked) := by
+  cases a with
+  | recvBulk id =>
+    by_cases hmb : mb = id
+    · rw [hmb]
+      exact bulk_queue I w w' id (by simpa [apply] using h)
+    · exact Or.inl (bulk_other_parked I w w' id mb (by simpa [apply] using h) hmb)
+  | recvPrio id =>
+    exact Or.inl (prio_parked I w w' id mb (by simpa [apply] using h))
+  | finish id =>
+    exact Or.inl (finish_parked w w' id mb (by simpa [apply] using h))
+  | exec id =>
+    simp only [apply] at h
+    unfold execHead at h
+    by_cases hliveA : (w.st id).life = .alive
+    · simp [hliveA] at h
+      cases hph : (w.st id).phase with
+      | run k =>
+        simp [hph] at h
+        cases h
+        exact exec_queue I w id k mb hlive
+      | idle => simp [hph] at h
+      | parked _ _ _ => simp [hph] at h
+      | awaitReply _ _ => simp [hph] at h
+      | awaitEffect _ => simp [hph] at h
+      | awaitPeer _ => simp [hph] at h
+      | crashed => simp [hph] at h
+    · simp [hliveA] at h
+  | spawn template =>
+    simp only [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        let nid := InstId.peer template (w.nextIx template)
+        let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n } : World)
+        let born : Actor := withTokens I.desc template { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [], tokens := fun _ => 0 }
+        have hfree := (hO template (w.nextIx template) (Nat.le_refl _)).2.2
+        by_cases hmb : mb = nid
+        · rw [hmb, hfree]
+          have hs := readCells_st I.desc (setActor wR nid born) nid nid
+          rw [hs]
+          simp [wR, setActor, born]
+          exact Or.inl rfl
+        · have hs := readCells_st I.desc (setActor wR nid born) nid mb
+          rw [hs]
+          simp [wR, setActor, hmb]
+          exact Or.inl rfl
+      · cases h
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
