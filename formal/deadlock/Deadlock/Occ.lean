@@ -5019,5 +5019,270 @@ theorem occ_release (I : Impl) (w : World) (id : InstId) (ps : List Parked) (hO 
       simpa [releaseParked] using
         ih (setActor w p.sender (resumeSender (w.st p.sender) false id)) hO1 hcont1 htail
 
+theorem term_tok (w : World) (id : InstId) (i : InstId) (d : String) :
+    let name := tname id
+    let ms := (w.st id).box
+    let ps := (w.st id).parked
+    let drained := drainPark (drainBox w id name ms) id name ps
+    let refunded := refundParked (refundMsgs w name ms) name ps
+    (drained.st i).tokens d = (refunded.st i).tokens d := by
+  intro name ms ps drained refunded
+  rw [drainP_tok (drainBox w id name ms) id name ps i d,
+    drain_tok w id name ms i d,
+    refundP_tok (refundMsgs w name ms) name ps i d,
+    refund_tok w name ms i d]
+
+theorem term_actor (w : World) (id i : InstId) :
+    let name := tname id
+    let ms := (w.st id).box
+    let ps := (w.st id).parked
+    let drained := drainPark (drainBox w id name ms) id name ps
+    let refunded := refundParked (refundMsgs w name ms) name ps
+    let died := { (drained.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+    let killed := { (refunded.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+    (setActor drained id died).st i = (setActor refunded id killed).st i := by
+  intro name ms ps drained refunded died killed
+  by_cases hi : i = id
+  · simp [setActor, hi, died, killed]
+    constructor
+    · exact (drainP_life (drainBox w id name ms) id name ps id).2.1.trans
+        ((drain_life w id name ms id).2.1.trans
+          ((refund_life w name ms id).2.1.symm.trans
+            (refundP_life (refundMsgs w name ms) name ps id).2.1.symm))
+    · funext d
+      simpa using term_tok w id id d
+  · simp [setActor, hi]
+    apply actor_fields
+    · have h1 := (drainP_life (drainBox w id name ms) id name ps i).1
+      have h2 := (drain_life w id name ms i).1
+      have h3 := (refund_life w name ms i).1
+      have h4 := (refundP_life (refundMsgs w name ms) name ps i).1
+      exact h1.trans (h2.trans (h3.symm.trans h4.symm))
+    · have h1 := (drainP_life (drainBox w id name ms) id name ps i).2.1
+      have h2 := (drain_life w id name ms i).2.1
+      have h3 := (refund_life w name ms i).2.1
+      have h4 := (refundP_life (refundMsgs w name ms) name ps i).2.1
+      exact h1.trans (h2.trans (h3.symm.trans h4.symm))
+    · have h1 := (drainP_life (drainBox w id name ms) id name ps i).2.2.1
+      have h2 := (drain_life w id name ms i).2.2.1
+      have h3 := (refund_life w name ms i).2.2.1
+      have h4 := (refundP_life (refundMsgs w name ms) name ps i).2.2.1
+      exact h1.trans (h2.trans (h3.symm.trans h4.symm))
+    · have h1 := drainP_box (drainBox w id name ms) id name ps i
+      have h2 := drain_box w id name ms i
+      have h3 := refund_box w name ms i
+      have h4 := refundP_box (refundMsgs w name ms) name ps i
+      simp [hi] at h1 h2
+      exact h1.trans (h2.trans (h3.symm.trans h4.symm))
+    · have h1 := (drainP_life (drainBox w id name ms) id name ps i).2.2.2
+      have h2 := (drain_life w id name ms i).2.2.2
+      have h3 := (refund_life w name ms i).2.2.2
+      have h4 := (refundP_life (refundMsgs w name ms) name ps i).2.2.2
+      exact h1.trans (h2.trans (h3.symm.trans h4.symm))
+    · have h1 := drainP_park (drainBox w id name ms) id name ps i
+      have h2 := drain_park w id name ms i
+      have h3 := refund_park w name ms i
+      have h4 := refundP_park (refundMsgs w name ms) name ps i
+      simp [hi] at h1 h2
+      exact h1.trans (h2.trans (h3.symm.trans h4.symm))
+    · intro d
+      simpa using term_tok w id i d
+
+theorem occ_term_kill (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
+    (hcont : ∀ i, contTy (w.st i)) (hmem : id ∈ w.roster)
+    (hterm : terminableName I.desc (tname id)) (hnocall : hasParkedCall (w.st id).parked = false)
+    (hmsg : ∀ p ∈ (w.st id).parked, p.sender = p.msg.sender) :
+    let name := tname id
+    let ms := (w.st id).box
+    let ps := (w.st id).parked
+    let drained := drainPark (drainBox w id name ms) id name ps
+    let died := setActor drained id
+      { (drained.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+    let killed := setActor (refundParked (refundMsgs w name ms) name ps) id
+      { ((refundParked (refundMsgs w name ms) name ps).st id) with
+          life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+    died = killed ∧ OccInv I (releaseParked killed id ps) := by
+  intro name ms ps drained died killed
+  have hOb := occ_drain_box I w id ms hO hmem rfl
+  have hparkB : ((drainBox w id name ms).st id).parked = ps := by
+    have hp := drain_park w id name ms id
+    simp [name, ps] at hp
+    exact hp
+  have hmemB : id ∈ (drainBox w id name ms).roster := by
+    simpa [(frame_drain w id name ms).2.1] using hmem
+  have hOp := occ_drain_park I (drainBox w id name ms) id ps hOb hmemB hparkB hmsg
+  have hmemD : id ∈ drained.roster := by
+    simpa [drained, (frame_drainP (drainBox w id name ms) id name ps).2.1] using hmemB
+  have hboxD : (drained.st id).box = [] := by
+    have hb := drain_box w id name ms id
+    have hb2 := drainP_box (drainBox w id name ms) id name ps id
+    simp at hb
+    exact hb2.trans hb
+  have hparkD : (drained.st id).parked = [] := by
+    have hp := drainP_park (drainBox w id name ms) id name ps id
+    simp [drained, name] at hp
+    exact hp
+  have hquiet : ∀ d, owed drained.st d id drained.roster = 0 := fun d => hOp.still id d hmemD hterm
+  have hOd := occ_die I drained id hOp hmemD hboxD hparkD hquiet
+  have hcontD : ∀ i, contTy (died.st i) := by
+    intro i
+    by_cases hi : i = id
+    · simp [died, setActor, hi, contTy]
+    · have hph : (died.st i).phase = (w.st i).phase := by
+        simp [died, setActor, hi]
+        exact (drainP_life (drainBox w id name ms) id name ps i).2.2.1.trans (drain_life w id name ms i).2.2.1
+      have hty : (died.st i).typestate = (w.st i).typestate := by
+        simp [died, setActor, hi]
+        exact (drainP_life (drainBox w id name ms) id name ps i).2.1.trans (drain_life w id name ms i).2.1
+      exact (contTy_match _ _ hph hty).mpr (hcont i)
+  have hrel := (occ_release I died id ps hOd hcontD hnocall).1
+  have hst : ∀ i, died.st i = killed.st i := fun i => by simpa [died, killed, drained, name, ms, ps] using term_actor w id i
+  have heq : died = killed := by
+    apply world_eq
+    · simp [died, killed, setActor, drained, (frame_drainP (drainBox w id name ms) id name ps).1,
+        (frame_drain w id name ms).1, (frame_refundP (refundMsgs w name ms) name ps).1,
+        (frame_refund w name ms).1]
+    · simp [died, killed, setActor, drained, (frame_drainP (drainBox w id name ms) id name ps).2.1,
+        (frame_drain w id name ms).2.1, (frame_refundP (refundMsgs w name ms) name ps).2.1,
+        (frame_refund w name ms).2.1]
+    · simp [died, killed, setActor, drained, (frame_drainP (drainBox w id name ms) id name ps).2.2.1,
+        (frame_drain w id name ms).2.2.1, (frame_refundP (refundMsgs w name ms) name ps).2.2.1,
+        (frame_refund w name ms).2.2.1]
+    · funext i; exact hst i
+    · simp [died, killed, setActor, drained, (frame_drainP (drainBox w id name ms) id name ps).2.2.2.1,
+        (frame_drain w id name ms).2.2.2.1, (frame_refundP (refundMsgs w name ms) name ps).2.2.2.1,
+        (frame_refund w name ms).2.2.2.1]
+    · simp [died, killed, setActor, drained, (frame_drainP (drainBox w id name ms) id name ps).2.2.2.2,
+        (frame_drain w id name ms).2.2.2.2, (frame_refundP (refundMsgs w name ms) name ps).2.2.2.2,
+        (frame_refund w name ms).2.2.2.2]
+  exact ⟨heq, by simpa [heq] using hrel⟩
+
+theorem occ_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
+    (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w)
+    (hph : (w.st id).phase = .run k) (hsender : (w.st id).life = .alive)
+    (hbulk : terminableName I.desc (tname id) → noBulkSend k.rest = true) :
+    OccInv I (execRun I w id (w.st id) k) := by
+  have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
+  have hmem := hO.aliveIn id hsender
+  cases k with
+  | mk rest toState replyTo =>
+    cases hrest : rest with
+    | nil =>
+      simp [execRun, hrest] at hph hty ⊢
+      apply occ_keep I w id ({ (w.st id) with phase := .idle, typestate := toState }) hO rfl rfl rfl
+        (fun _ => rfl) (by simp [hty])
+      intro d
+      simp [pending, contRest, sendsTo]
+    | cons e es =>
+      simp [hrest] at hph hty hbulk
+      cases e with
+      | send dst label hint =>
+        have hnot : ¬ terminableName I.desc (tname id) := by
+          intro ht
+          simp [noBulkSend] at hbulk
+          exact absurd (hbulk ht) (by decide)
+        simp [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simp [hr]
+          exact occ_advance I w id ⟨.send dst label hint :: es, toState, replyTo⟩ hO hty hph
+        | some dstId =>
+          simp [hr]
+          have hname := route_tname w I.desc dst hint dstId hr
+          exact occ_enqueue I hL w id dstId ⟨label, id, none⟩ false
+            ⟨.send dst label hint :: es, toState, replyTo⟩ (.send dst label hint) es label hint hO hT
+            hph rfl (Or.inl (by simp [hname])) rfl hty hsender hnot
+      | trySend dst label hint =>
+        have hnot : ¬ terminableName I.desc (tname id) := by
+          intro ht
+          simp [noBulkSend] at hbulk
+          exact absurd (hbulk ht) (by decide)
+        exact occ_try I hL w id ⟨.trySend dst label hint :: es, toState, replyTo⟩ dst label hint es hO hT
+          hph hty hsender hnot
+      | call dst label hint =>
+        have hnot : ¬ terminableName I.desc (tname id) := by
+          intro ht
+          simp [noBulkSend] at hbulk
+          exact absurd (hbulk ht) (by decide)
+        simp [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simp [hr]
+          exact occ_advance I w id ⟨.call dst label hint :: es, toState, replyTo⟩ hO hty hph
+        | some dstId =>
+          simp [hr]
+          have hname := route_tname w I.desc dst hint dstId hr
+          exact occ_enqueue I hL w id dstId ⟨label, id, some id⟩ true
+            ⟨.call dst label hint :: es, toState, replyTo⟩ (.call dst label hint) es label hint hO hT
+            hph rfl (Or.inr (by simp [hname])) rfl hty hsender hnot
+      | reply =>
+        exact occ_reply I w id ⟨.reply :: es, toState, replyTo⟩ hO hS hph
+      | selfSchedule label =>
+        exact occ_schedule I w id (w.st id) ⟨.selfSchedule label :: es, toState, replyTo⟩ label hO rfl hph hty
+      | cell dst label value =>
+        exact occ_cell I w id ⟨.cell dst label value :: es, toState, replyTo⟩ dst label value hO hph hty
+      | internal =>
+        simp [execRun]
+        apply occ_keep I w id ({ (w.st id) with phase := .awaitEffect ⟨es, toState, replyTo⟩ }) hO
+          rfl rfl rfl (fun _ => rfl) rfl
+        intro d
+        simp [pending, contRest, hph, afterHead, sendsTo]
+      | peer =>
+        simp [execRun]
+        apply occ_keep I w id ({ (w.st id) with phase := .awaitPeer ⟨es, toState, replyTo⟩ }) hO
+          rfl rfl rfl (fun _ => rfl) rfl
+        intro d
+        simp [pending, contRest, hph, afterHead, sendsTo]
+      | terminate =>
+        simp [execRun]
+        cases ht : templateOf I.desc (tname id) with
+        | none =>
+          simp [ht]
+          exact hO
+        | some t =>
+          by_cases hkill : t.terminable = true ∧ hasParkedCall (w.st id).parked = false
+          · simp [hkill]
+            have hterm : terminableName I.desc (tname id) := ⟨t, ht, hkill.1⟩
+            have hmsg : ∀ p ∈ (w.st id).parked, p.sender = p.msg.sender := fun p hp => hO.parkMsg id p hp
+            let wR := readCells I.desc w id
+            have hOR := occ_same I w wR hO (fun i => readCells_st I.desc w id i)
+              (read_roster I.desc w id).1 (read_roster I.desc w id).2 (fun n => read_ix I.desc w id n)
+            have hcontR : ∀ i, contTy (wR.st i) := by
+              intro i
+              have hs := readCells_st I.desc w id i
+              exact (contTy_match _ _ (congrArg Actor.phase hs) (congrArg Actor.typestate hs)).mpr (hS.cont i)
+            have hmemR : id ∈ wR.roster := by
+              have hr := (read_roster I.desc w id).1
+              simpa [wR, hr] using hmem
+            have hst := readCells_st I.desc w id id
+            have hgot := occ_term_kill I wR id hOR hcontR hmemR hterm
+              (by simpa [wR, hst] using hkill.2)
+              (by intro p hp; exact hmsg p (by simpa [wR, ← hst] using hp))
+            rw [← hst]
+            simpa [wR] using hgot.2
+          · simp [hkill]
+            exact hO
+
+theorem occ_head (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
+    (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w)
+    (h : execHead I w id = some w')
+    (hbulk : ∀ k, (w.st id).phase = .run k →
+      terminableName I.desc (tname id) → noBulkSend k.rest = true) :
+    OccInv I w' := by
+  by_cases hlive : (w.st id).life = .alive
+  · simp [execHead, hlive] at h
+    cases hphase : (w.st id).phase with
+    | run k =>
+      simp [hphase] at h
+      cases h
+      exact occ_exec I hL w id k hO hT hS hphase hlive (hbulk k hphase)
+    | idle => simp [hphase] at h
+    | parked _ _ _ => simp [hphase] at h
+    | awaitReply _ _ => simp [hphase] at h
+    | awaitEffect _ => simp [hphase] at h
+    | awaitPeer _ => simp [hphase] at h
+    | crashed => simp [hphase] at h
+  · simp [execHead, hlive] at h
+
 end Deadlock
 

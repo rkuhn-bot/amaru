@@ -238,8 +238,10 @@ for a send the actor did not itself perform.
   `drain_eq_refund` shows that refunding a box and then clearing it is the
   same world as dropping each message and crediting its sender, including a
   message the mailbox owner sent to itself; `occ_drain_box` keeps `OccInv`
-  along that second order. The parked lane, the life change, `releaseParked`,
-  and one theorem for the whole of `execRun` are not connected yet. Charging a send requires the sender's template not
+  along that second order. `occ_die` marks that actor dead once both lanes are empty and
+  it owes nothing, and `occ_release` resumes the parked senders.
+  `occ_exec` covers every head of a running actor, including a killing
+  `terminate`. Charging a send requires the sender's template not
   to be terminable, and `OccInv.still` keeps a terminable actor's owed count
   at zero. That is narrower than Amaru: a per-peer stage, such as a chainsync
   initiator, terminates when its peer disconnects and does send to shared
