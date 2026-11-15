@@ -2996,4 +2996,145 @@ theorem prog_src_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N 
   | init => exact prog_src_init I N
   | step w w' a _ h ih => exact prog_src_apply I a w w' ih h
 
+theorem lane_same (I : Impl) (w w' : World) (hLane : LaneOk I w)
+    (h : ∀ i, (w'.st i).prio = (w.st i).prio) : LaneOk I w' := by
+  intro i
+  simpa [h i] using hLane i
+
+theorem lane_set (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (a : Actor)
+    (hok : (laneLabels a.prio).Nodup ∧ ∀ m ∈ a.prio, m.label ∈ prioLabels I (tname id)) :
+    LaneOk I (setActor w id a) := by
+  intro i
+  by_cases hi : i = id
+  · rw [hi]
+    simpa [setActor] using hok
+  · simpa [setActor, hi] using hLane i
+
+theorem try_wake_lane (I : Impl) (w : World) (hLane : LaneOk I w) (dstId : InstId)
+    (label : String) (writer : InstId) (hmem : label ∈ prioLabels I (tname dstId)) :
+    LaneOk I (tryWake I.desc w dstId label writer) := by
+  by_cases hif : (((w.st dstId).life == .alive) &&
+      decide ((w.st dstId).prio.length < capPrio I.desc w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · let grown := upsertPrio (w.st dstId).prio { label := label, sender := writer, callFrom := none }
+    let a : Actor := { (w.st dstId) with prio := grown }
+    have hup := lane_upsert I w hLane dstId label writer hmem
+    have hstep : tryWake I.desc w dstId label writer = setActor w dstId a := by
+      simp [tryWake, hif, a, grown]
+    rw [hstep]
+    exact lane_set I w hLane dstId a hup
+  · simp [tryWake, hif]
+    exact hLane
+
+theorem wakes_lane (I : Impl) (ids : List InstId) (w : World) (hLane : LaneOk I w)
+    (dst label : String) (writer : InstId)
+    (hmem : ∀ id ∈ ids, tname id = dst ∧ label ∈ prioLabels I dst) :
+    LaneOk I (ids.foldl (fun w id => tryWake I.desc w id label writer) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hLane
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    have hj := hmem j (List.Mem.head _)
+    have h1 := try_wake_lane I w hLane j label writer (by simpa [hj.1] using hj.2)
+    exact ih _ h1 (fun id hid => hmem id (List.Mem.tail _ hid))
+
+theorem reader_name (w : World) (dst : String) (id : InstId) (h : id ∈ readersOf w dst) :
+    tname id = dst := by
+  simp [readersOf] at h
+  exact h.2.1
+
+theorem resume_prio (a : Actor) (b : Bool) (dst : InstId) : (resumeSender a b dst).prio = a.prio := by
+  cases h : a.phase with
+  | parked _ _ k =>
+    cases b <;> cases hk : k.rest <;> simp [resumeSender, h, hk, proceed]
+  | idle => simp [resumeSender, h]
+  | run _ => simp [resumeSender, h]
+  | awaitReply _ _ => simp [resumeSender, h]
+  | awaitEffect _ => simp [resumeSender, h]
+  | awaitPeer _ => simp [resumeSender, h]
+  | crashed => simp [resumeSender, h]
+
+theorem release_prio (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
+    ((releaseParked w id ps).st i).prio = (w.st i).prio := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w
+    · rw [if_neg hskip]
+      have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+      by_cases hi : i = p.sender
+      · have hset : ((setActor w p.sender (resumeSender (w.st p.sender) false id)).st i).prio =
+            (w.st i).prio := by
+          rw [hi]
+          simp [setActor, resume_prio]
+        exact hmid.trans hset
+      · have hset : ((setActor w p.sender (resumeSender (w.st p.sender) false id)).st i).prio =
+            (w.st i).prio := by simp [setActor, hi]
+        exact hmid.trans hset
+
+theorem src_template (I : Impl) (hL : LocalOk I) (w : World) (hS : ProgSrc I w) (id : InstId)
+    (es : List Eff) (hc : carried ((w.st id).phase) = some es) :
+    ∃ t, templateOf I.desc (tname id) = some t := by
+  obtain ⟨tr, hm, ht, _, _⟩ := hS id es hc
+  have hok := transitionOk_of_mem I hL tr hm
+  rw [← ht]
+  cases htpl : templateOf I.desc tr.template with
+  | none => simp [transitionOk, htpl] at hok
+  | some t => exact ⟨t, rfl⟩
+
+/-- A reachable actor is never crashed: the only write of `.crashed` is a priority
+lane that `lane_has_room` shows still has space. -/
+theorem schedule_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (label : String) (tail : List Eff)
+    (toState : String) (replyTo : Option InstId)
+    (hph : (w.st id).phase = .run ⟨.selfSchedule label :: tail, toState, replyTo⟩)
+    (hpre : ∀ i, (w.st i).phase ≠ .crashed) (i : InstId) :
+    ((execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩).st i).phase ≠ .crashed := by
+  have hc : carried ((w.st id).phase) = some (.selfSchedule label :: tail) := by
+    simp [carried, hph]
+  have hdecl := sched_declared I w hS id _ hc label (self_head_label label tail)
+  obtain ⟨t, ht⟩ := src_template I hL w hS id _ hc
+  simp only [execRun]
+  cases hany : ((w.st id).prio.any fun p => p.label == label)
+  · have hlt := lane_has_room I hL hG w.N w hLane id t ht label hdecl hany
+    simp [hany, hlt]
+    by_cases hi : i = id
+    · rw [hi]
+      cases htail : tail <;> simp [setActor, proceed, htail] <;> intro h <;> cases h
+    · simpa [setActor, hi] using hpre i
+  · simp [hany]
+    by_cases hi : i = id
+    · rw [hi]
+      cases htail : tail <;> simp [setActor, proceed, htail] <;> intro h <;> cases h
+    · simpa [setActor, hi] using hpre i
+
+theorem lane_schedule (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (label : String) (tail : List Eff)
+    (toState : String) (replyTo : Option InstId)
+    (hph : (w.st id).phase = .run ⟨.selfSchedule label :: tail, toState, replyTo⟩) :
+    LaneOk I (execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩) := by
+  have hc : carried ((w.st id).phase) = some (.selfSchedule label :: tail) := by simp [carried, hph]
+  have hdecl := sched_declared I w hS id _ hc label (self_head_label label tail)
+  obtain ⟨t, ht⟩ := src_template I hL w hS id _ hc
+  cases hany : ((w.st id).prio.any fun p => p.label == label)
+  · have hlt := lane_has_room I hL hG w.N w hLane id t ht label hdecl hany
+    let grown := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none }
+    let a := proceed { (w.st id) with prio := grown }
+      (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)
+    have hup := lane_upsert I w hLane id label id hdecl
+    have hok : (laneLabels a.prio).Nodup ∧ ∀ m ∈ a.prio, m.label ∈ prioLabels I (tname id) := by
+      simpa [a, proceed_prio] using hup
+    have hstep : execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩ =
+        setActor w id a := by simp [execRun, hany, hlt, a, grown]
+    rw [hstep]
+    exact lane_set I w hLane id a hok
+  · simp [execRun, hany]
+    exact lane_same I w _ hLane (fun i => by
+      by_cases hi : i = id
+      · simp [setActor, hi, proceed_prio]
+      · simp [setActor, hi])
+
 end Deadlock
