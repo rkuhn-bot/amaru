@@ -1,4 +1,5 @@
 import Deadlock.Pres
+import Deadlock.Mail
 
 set_option autoImplicit false
 
@@ -115,5 +116,71 @@ theorem exec_done_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemI
   · simp [contTy]
   · simp [programOk]
   · simp [waitEdge]
+
+theorem run_not_parked (w : World) (id : InstId) (k : Cont) (h : (w.st id).phase = .run k) :
+    notParked (w.st id).phase := by
+  simp [notParked, h]
+
+/-- A non-blocking send never parks. It preserves `SemInv` and `MailInv`. -/
+theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : String) (n : Nat)
+    (es : List Eff) (hS : SemInv I w) (hM : MailInv w)
+    (hphase : (w.st id).phase = .run { k with rest := .trySend d l n :: es })
+    (hprog : effectsOk I.desc (tname id) (w.st id).typestate (.trySend d l n :: es) = true) :
+    SemInv I (execRun I w id (w.st id) { k with rest := .trySend d l n :: es }) ∧
+      MailInv (execRun I w id (w.st id) { k with rest := .trySend d l n :: es }) := by
+  have hty : (w.st id).typestate = k.toState := by simpa [contTy, hphase] using hS.cont id
+  have htail : effectsOk I.desc (tname id) (w.st id).typestate es = true := head_rest _ _ _ _ es hprog
+  have hfree : notParked (w.st id).phase := run_not_parked w id _ hphase
+  simp [execRun]
+  cases hr : route w I.desc d n with
+  | none =>
+    simp [hr]
+    have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
+      (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
+    refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2, ?_⟩
+    exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
+  | some dstId =>
+    simp [hr]
+    split
+    · -- Room: charge, append to the box, then continue. The sender is running, so it is not parked.
+      rename_i hroom
+      have hch := charge_ok (w.st id) (tname dstId)
+      have hcontC : contTy (chargeSender (w.st id) (tname dstId)) := by
+        simpa [chargeSender, bumpToken, contTy] using hS.cont id
+      have hprogC : programOk I.desc id (chargeSender (w.st id) (tname dstId)) := by
+        simpa [chargeSender, bumpToken, programOk] using hS.prog id
+      have hwaitC : waitEdge I.desc id (chargeSender (w.st id) (tname dstId)) := by
+        simpa [chargeSender, bumpToken, waitEdge] using hS.waited id
+      have hS1 := sem_set I w id (chargeSender (w.st id) (tname dstId)) hS hch.1 hch.2.1 hcontC hprogC hwaitC
+      have hM1 := mail_set_same w id (chargeSender (w.st id) (tname dstId)) hM (charge_phase _ _) (charge_parked _ _)
+      let w1 := setActor w id (chargeSender (w.st id) (tname dstId))
+      let stored : Actor := { (w1.st dstId) with box := (w1.st dstId).box ++ [{ label := l, sender := id, callFrom := none }] }
+      have hS2 := sem_set I w1 dstId stored hS1 rfl rfl
+        (by simpa [stored, contTy] using hS1.cont dstId)
+        (by simpa [stored, programOk] using hS1.prog dstId)
+        (by simpa [stored, waitEdge] using hS1.waited dstId)
+      have hM2 := mail_set_same w1 dstId stored hM1 rfl rfl
+      let w2 := setActor w1 dstId stored
+      have hty2 : (w2.st id).typestate = k.toState := by
+        by_cases hs : id = dstId
+        · subst hs
+          simp [w2, w1, stored, setActor, hch.1, hty]
+        · simp [w2, w1, stored, setActor, hs, hch.1, hty]
+      have htail2 : effectsOk I.desc (tname id) (w2.st id).typestate es = true := by
+        rw [hty2]
+        simpa [hty] using htail
+      have hp := proceed_ok I.desc id (w2.st id) (afterHead { k with rest := .trySend d l n :: es })
+        (by simp [afterHead, hty2]) (by simpa [afterHead] using htail2)
+      have hfree2 : notParked (w2.st id).phase := by
+        by_cases hs : id = dstId
+        · subst hs
+          simp [w2, w1, stored, setActor, charge_phase, notParked, hphase]
+        · simp [w2, w1, stored, setActor, hs, charge_phase, notParked, hphase]
+      refine ⟨sem_set I w2 id _ hS2 hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2,
+        mail_set_free w2 id _ hM2 hfree2 (proceed_not_parked _ _) (proceed_parked _ _)⟩
+    · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
+        (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
+      refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2, ?_⟩
+      exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
 
 end Deadlock
