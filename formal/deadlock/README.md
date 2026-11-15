@@ -220,10 +220,16 @@ for a send the actor did not itself perform.
   `awaitReply` is a blocking edge of the description, and a live partner's
   typestate lies in `targetStates` (`projects`, from `projects_park` and
   `projects_reply`).
-- **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
-  without a proved bound that the mailbox never parks. A height argument does
-  not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a
-  missing invariant, not a counter-model.
+- **Occupancy as a run invariant.** Per-producer outstanding is already the
+  token account: `owed` counts that sender's messages in bulk boxes and parked
+  lists, and `tokens` is what has not been spent. `l1_fit` and
+  `l1_park_unreachable` show that, when `OccInv` and `TyOk` hold, a Lemma-1
+  mailbox holds at most `capBulk` messages and the park branch of
+  `enqueueOrPark` is unreachable. `OccInv` is not yet proved at `initWorld` or
+  under `apply`. The check is not known to be unsound: a terminable template
+  cannot bulk-send, so a dead instance does not keep credit a replacement
+  would count again. That missing preservation is why `¬ Deadlock` is not
+  claimed yet.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
@@ -283,6 +289,7 @@ The same strings are `native_decide`d in `Deadlock/Examples.lean`.
 - `Deadlock/Occupy.lean` — in-flight message accounting
 - `Deadlock/Proof.lean` — effect/peer progress, phase stability of a running actor
 - `Deadlock/Projects.lean` — `projects` for reachable worlds
+- `Deadlock/Occ.lean` — `OccInv`, and the Lemma-1 bound assuming it
 - `Deadlock/Compat.lean` — `compat_group_closed`
 - `Deadlock/Theorem.lean` — effect and peer non-stuckness **from `Assumptions`**
 - `Deadlock/Json.lean`, `Main.lean` — `lake exe check`
@@ -296,3 +303,4 @@ From `#print axioms` (Lean 4.35.0), no `sorryAx`:
 | `not_stuck_effect_assumed`, `not_stuck_peer_assumed`, `compat_group_closed` | `propext` |
 | `checkBool_sound`, `groupTargets_cooccur`, `execRun_preserves_other_run` | `propext`, `Quot.sound` |
 | `projects`, `ty_reachable`, `inv_reachable`, `step_inv`, `findTr_mem` | `propext`, `Classical.choice`, `Quot.sound` |
+| `live_le_occ`, `l1_fit`, `l1_park_unreachable` | `propext`, `Classical.choice`, `Quot.sound` |

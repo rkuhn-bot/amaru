@@ -11,6 +11,7 @@ import Deadlock.Pres
 import Deadlock.Step
 import Deadlock.Mail
 import Deadlock.Projects
+import Deadlock.Occ
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
@@ -53,3 +54,6 @@ import Deadlock.Projects
 #print axioms Deadlock.described_reply
 #print axioms Deadlock.projects
 #print axioms Deadlock.ty_reachable
+#print axioms Deadlock.live_le_occ
+#print axioms Deadlock.l1_fit
+#print axioms Deadlock.l1_park_unreachable
