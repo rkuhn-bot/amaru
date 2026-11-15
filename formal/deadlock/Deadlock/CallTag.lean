@@ -3425,40 +3425,43 @@ theorem parked_tail_call (w : World) (id : InstId) (p : Parked) (ps : List Parke
     · rw [hi]
       simp [setActor, hres]
       rw [(credit_same (shiftWorld w id p ps kS) name s p.sender).2.2.1]
-      exact shift_phF w id p ps kS hsnd
+      exact (shift_phF w id p ps kS hsnd).symm
     · rw [hi]
       have hb := (credit_same (shiftBase w id p ps) name s p.sender).1
       simp [setActor, hres, hb, shift_boxS w id p ps kS hsnd,
         (credit_same (shiftWorld w id p ps kS) name s p.sender).1]
+      simp [shiftBase, setActor, hsnd]
     · rw [hi]
       have hp := (credit_same (shiftBase w id p ps) name s p.sender).2.1
       simp [setActor, hres, hp, shift_parkS w id p ps kS hsnd,
         (credit_same (shiftWorld w id p ps kS) name s p.sender).2.1]
+      simp [shiftBase, setActor, hsnd]
     · rw [hi]
       have hq := (credit_same (shiftBase w id p ps) name s p.sender).2.2.2
       simp [setActor, hres, hq, shift_prioS w id p ps kS hsnd,
         (credit_same (shiftWorld w id p ps kS) name s p.sender).2.2.2]
+      simp [shiftBase, setActor, hsnd]
   · refine ⟨?_, ?_, ?_, ?_⟩
     · simp [setActor, hi, (credit_same (shiftBase w id p ps) name s i).2.2.1,
         (credit_same (shiftWorld w id p ps kS) name s i).2.2.1]
       by_cases hid : i = id
-      · simp [hid, shiftBase, shift_phId w id p ps kS hsnd]
-      · simp [hid, shiftBase, (shift_other w id p ps kS i hid hi).1]
+      · simp [setActor, hid, shiftBase, shift_phId w id p ps kS hsnd]
+      · simp [setActor, hid, shiftBase, (shift_other w id p ps kS i hid hi).1]
     · simp [setActor, hi, (credit_same (shiftBase w id p ps) name s i).1,
         (credit_same (shiftWorld w id p ps kS) name s i).1]
       by_cases hid : i = id
-      · simp [hid, shiftBase, shift_boxId w id p ps kS hsnd]
-      · simp [hid, shiftBase, (shift_other w id p ps kS i hid hi).2.1]
+      · simp [setActor, hid, shiftBase, shift_boxId w id p ps kS hsnd]
+      · simp [setActor, hid, shiftBase, (shift_other w id p ps kS i hid hi).2.1]
     · simp [setActor, hi, (credit_same (shiftBase w id p ps) name s i).2.1,
         (credit_same (shiftWorld w id p ps kS) name s i).2.1]
       by_cases hid : i = id
-      · simp [hid, shiftBase, shift_parkId w id p ps kS hsnd]
-      · simp [hid, shiftBase, (shift_other w id p ps kS i hid hi).2.2.1]
+      · simp [setActor, hid, shiftBase, shift_parkId w id p ps kS hsnd]
+      · simp [setActor, hid, shiftBase, (shift_other w id p ps kS i hid hi).2.2.1]
     · simp [setActor, hi, (credit_same (shiftBase w id p ps) name s i).2.2.2,
         (credit_same (shiftWorld w id p ps kS) name s i).2.2.2]
       by_cases hid : i = id
-      · simp [hid, shiftBase, shift_prioId w id p ps kS hsnd]
-      · simp [hid, shiftBase, (shift_other w id p ps kS i hid hi).2.2.2]
+      · simp [setActor, hid, shiftBase, shift_prioId w id p ps kS hsnd]
+      · simp [setActor, hid, shiftBase, (shift_other w id p ps kS i hid hi).2.2.2]
 
 /-- After the parked head has been appended to the box, resume a non-call sender. -/
 theorem parked_tail_send (w : World) (id : InstId) (p : Parked) (ps : List Parked)
