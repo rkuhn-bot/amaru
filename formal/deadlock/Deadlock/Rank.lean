@@ -3137,4 +3137,334 @@ theorem lane_schedule (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : Wor
       · simp [setActor, hi, proceed_prio]
       · simp [setActor, hi])
 
+theorem credit_prio (w : World) (dst : String) (sender i : InstId) :
+    ((creditSender w dst sender).st i).prio = (w.st i).prio :=
+  (credit_life w dst sender i).2.2.2
+
+theorem refund_prio (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).prio = (w.st i).prio :=
+  (refund_life w dst ms i).2.2.2
+
+theorem refundP_prio (w : World) (dst : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w dst ps).st i).prio = (w.st i).prio :=
+  (refundP_life w dst ps i).2.2.2
+
+theorem deliver_prio (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.prio = a.prio := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        rfl
+    · split at h
+      · cases h
+      · cases h
+        split <;> rfl
+
+theorem lane_finish (I : Impl) (w w' : World) (id : InstId) (hLane : LaneOk I w)
+    (h : finishWait w id = some w') : LaneOk I w' := by
+  unfold finishWait at h
+  split at h
+  · cases h
+    exact lane_same I w _ hLane (fun i => by
+      by_cases hi : i = id <;> simp [setActor, proceed_prio, hi])
+  · cases h
+    exact lane_same I w _ hLane (fun i => by
+      by_cases hi : i = id <;> simp [setActor, proceed_prio, hi])
+  · cases h
+
+theorem lane_spawn (I : Impl) (w w' : World) (template : String) (hLane : LaneOk I w)
+    (h : spawn I w template = some w') : LaneOk I w' := by
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t ht =>
+    split at h
+    · cases h
+      let nid := InstId.peer template (w.nextIx template)
+      let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n } : World)
+      have hR : LaneOk I wR := lane_same I w wR hLane (fun _ => rfl)
+      let born : Actor := withTokens I.desc template
+        { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
+          tokens := fun _ => 0 }
+      have hborn : LaneOk I (setActor wR nid born) :=
+        lane_set I wR hR nid born (by simp [born, withTokens, laneLabels])
+      have hst : ∀ i, ((readCells I.desc (setActor wR nid born) nid).st i).prio =
+          ((setActor wR nid born).st i).prio := fun i => by simp [readCells_st]
+      simpa [nid, wR, born] using lane_same I _ _ hborn hst
+    · cases h
+
+theorem lane_prio (I : Impl) (w w' : World) (id : InstId) (hLane : LaneOk I w)
+    (h : receivePrio I w id = some w') : LaneOk I w' := by
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      have hst : ∀ i, (w1.st i).prio = (w.st i).prio := fun i => by
+        simp [deliver_st I w id _ m w1 a1 i hdel]
+      have hW : LaneOk I w1 := lane_same I w w1 hLane hst
+      have hp : a1.prio = ms := by
+        have hdelp := deliver_prio I w id ({ (w.st id) with prio := ms }) m w1 a1 hdel
+        simpa using hdelp
+      have htail := lane_tail I w hLane id m ms hprio
+      exact lane_set I w1 hW id a1 (by simpa [hp] using htail)
+
+theorem lane_bulk (I : Impl) (w w' : World) (id : InstId) (hLane : LaneOk I w)
+    (h : receiveBulk I w id = some w') : LaneOk I w' := by
+  apply lane_same I w w' hLane
+  intro i
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ p.msg w1 a1 i hdel
+          have hp := deliver_prio I w id _ p.msg w1 a1 hdel
+          have hset : ((setActor w1 id a1).st i).prio = (w.st i).prio := by
+            by_cases hi : i = id
+            · rw [hi]; simp [setActor, hp]
+            · simp [setActor, hi, hst]
+          by_cases hi : i = id
+          · rw [hi]
+            by_cases hs : id = p.sender
+            · simp [setActor, hs, resume_prio, credit_prio, hp]
+            · simp [setActor, hs, credit_prio, hp]
+          · by_cases hs : i = p.sender
+            · have hne : ¬ p.sender = id := fun h => hi (by simpa [h] using hs)
+              simp [setActor, hi, hs, resume_prio, credit_prio]
+              rw [if_neg hne]
+              have hpri : (w1.st i).prio = (w.st i).prio := congrArg (·.prio) hst
+              simpa [hs] using hpri
+            · simp [setActor, hi, hs, credit_prio, hst]
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ m w1 a1 i hdel
+          have hp := deliver_prio I w id _ m w1 a1 hdel
+          rw [credit_prio]
+          by_cases hi : i = id
+          · rw [hi]; simp [setActor, hp]
+          · simp [setActor, hi, hst]
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          let admitted := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hst := deliver_st I w id _ m w1 a1 i hdel
+          have hp := deliver_prio I w id _ m w1 a1 hdel
+          have hset : ((setActor w1 id admitted).st i).prio = (w.st i).prio := by
+            by_cases hi : i = id
+            · rw [hi]; simp [admitted, setActor, hp]
+            · simp [admitted, setActor, hi, hst]
+          by_cases hi : i = id
+          · rw [hi]
+            by_cases hs : id = p.sender
+            · simp [setActor, admitted, hs, resume_prio, credit_prio, hp]
+            · simp [setActor, admitted, hs, credit_prio, hp]
+          · by_cases hs : i = p.sender
+            · have hne : ¬ p.sender = id := fun h => hi (by simpa [h] using hs)
+              simp [setActor, admitted, hi, hs, resume_prio, credit_prio]
+              rw [if_neg hne]
+              have hpri : (w1.st i).prio = (w.st i).prio := congrArg (·.prio) hst
+              simpa [hs] using hpri
+            · simp [setActor, admitted, hi, hs, credit_prio, hst]
+
+theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (k : Cont)
+    (hph : (w.st id).phase = .run k) : LaneOk I (execRun I w id (w.st id) k) := by
+  cases k with
+  | mk rest toState replyTo =>
+    cases hrest : rest with
+    | nil =>
+      exact lane_same I w _ hLane (fun i => by
+        by_cases hi : i = id <;> simp [execRun, hrest, setActor, hi])
+    | cons e tail =>
+      cases e with
+      | selfSchedule label =>
+        exact lane_schedule I hL hG w hLane hS id label tail toState replyTo (by simpa [hrest] using hph)
+      | send dst label hint =>
+        simp [execRun, hrest]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          exact lane_same I w _ hLane (fun i => by
+            by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi])
+        | some dstId =>
+          simp [hr]
+          exact lane_same I w _ hLane (fun i => enqueue_prio w I.desc id dstId _ false _ i)
+      | call dst label hint =>
+        simp [execRun, hrest]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          exact lane_same I w _ hLane (fun i => by
+            by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi])
+        | some dstId =>
+          simp [hr]
+          exact lane_same I w _ hLane (fun i => enqueue_prio w I.desc id dstId _ true _ i)
+      | internal =>
+        exact lane_same I w _ hLane (fun i => by
+          by_cases hi : i = id <;> simp [execRun, hrest, setActor, hi])
+      | peer =>
+        exact lane_same I w _ hLane (fun i => by
+          by_cases hi : i = id <;> simp [execRun, hrest, setActor, hi])
+      | trySend dst label hint =>
+        exact lane_same I w _ hLane (fun i => by
+          simp [execRun, hrest]
+          cases hr : route w I.desc dst hint with
+          | none =>
+            by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi]
+          | some dstId =>
+            simp [hr, chargeSender, bumpToken, proceed_prio]
+            split
+            · by_cases hi : i = id
+              · by_cases hdi : dstId = id
+                · simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hdi]
+                · have hflip : ¬ id = dstId := fun h => hdi h.symm
+                  simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hflip]
+              · by_cases hd : i = dstId
+                · have hne : dstId ≠ id := fun h => hi (by simpa [h, hd] using rfl)
+                  simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hd, hne]
+                · simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hd]
+            · by_cases hi : i = id <;> simp [setActor, proceed_prio, hi])
+      | reply =>
+        exact lane_same I w _ hLane (fun i => by
+          simp [execRun, hrest]
+          unfold performReply
+          cases hto : replyTo with
+          | none =>
+            by_cases hi : i = id <;> simp [hto, setActor, proceed_prio, hi]
+          | some caller =>
+            cases hcall : (w.st caller).phase with
+            | awaitReply dst ck =>
+              by_cases hd : dst = id
+              · by_cases hi : i = id
+                · by_cases hc : i = caller
+                  · have hid : id = caller := hi.symm.trans hc
+                    simp [hto, hcall, hd, setActor, proceed_prio, hi, hc, hid]
+                  · have hne : id ≠ caller := fun h => hc (hi.trans h)
+                    simp [hto, hcall, hd, setActor, proceed_prio, hi, hne]
+                · by_cases hc : i = caller
+                  · have hne : caller ≠ id := fun h => hi (hc.trans h)
+                    simp [hto, hcall, hd, setActor, proceed_prio, hi, hc, hne]
+                  · simp [hto, hcall, hd, setActor, proceed_prio, hi, hc]
+              · by_cases hi : i = id
+                · simp [hto, hcall, hd, setActor, proceed_prio, hi]
+                · by_cases hc : i = caller
+                  · have hne : caller ≠ id := fun h => hi (hc.trans h)
+                    simp [hto, hcall, hd, setActor, proceed_prio, hi, hc, hne]
+                  · simp [hto, hcall, hd, setActor, proceed_prio, hi, hc]
+            | idle =>
+              by_cases hi : i = id <;> simp [hto, hcall, setActor, proceed_prio, hi]
+            | run _ =>
+              by_cases hi : i = id <;> simp [hto, hcall, setActor, proceed_prio, hi]
+            | awaitEffect _ =>
+              by_cases hi : i = id <;> simp [hto, hcall, setActor, proceed_prio, hi]
+            | awaitPeer _ =>
+              by_cases hi : i = id <;> simp [hto, hcall, setActor, proceed_prio, hi]
+            | parked _ _ _ =>
+              by_cases hi : i = id <;> simp [hto, hcall, setActor, proceed_prio, hi]
+            | crashed =>
+              by_cases hi : i = id <;> simp [hto, hcall, setActor, proceed_prio, hi])
+      | cell dst label value =>
+        have hdecl : label ∈ prioLabels I dst := by
+          have hcar : carried ((w.st id).phase) = some (.cell dst label value :: tail) := by
+            simp [carried, hph, hrest]
+          exact wake_declared I w hS id _ hcar dst label (cell_head_label dst label value tail)
+        let base := setCell w dst label { value := max (w.cell dst label).value value, dirty := true }
+        let stepped := setActor base id
+          (proceed (base.st id) (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩))
+        have hbase := lane_same I w base hLane (fun _ => by simp [base, setCell])
+        have hstepL : LaneOk I stepped := by
+          apply lane_set I base hbase id _
+          simpa [stepped, proceed_prio, base, setCell] using hLane id
+        simp only [execRun, hrest]
+        cases hdirty : (w.cell dst label).dirty
+        · simp [hdirty, base, stepped]
+          rw [wakeReaders]
+          exact wakes_lane I (readersOf stepped dst) stepped hstepL dst label id (fun r hr =>
+            ⟨reader_name _ _ _ hr, by simpa [reader_name _ _ _ hr] using hdecl⟩)
+        · simp [hdirty]
+          apply lane_set
+          · exact lane_same I w _ hLane (fun _ => rfl)
+          · simpa [proceed_prio, setCell] using hLane id
+      | terminate =>
+        simp only [execRun, hrest]
+        cases htpl : templateOf I.desc (tname id) with
+        | none =>
+          simp [htpl]
+          exact hLane
+        | some t =>
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · simp [htpl, hkill]
+            let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+              (tname id) (w.st id).parked
+            have hbase : LaneOk I base :=
+              lane_same I w base hLane (fun i => by
+                simp [base, readCells_st, refund_prio, refundP_prio])
+            let dead : Actor :=
+              { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+            have hempty : (laneLabels dead.prio).Nodup ∧ ∀ m ∈ dead.prio, m.label ∈ prioLabels I (tname id) := by
+              simp [dead, laneLabels]
+            have hdead := lane_set I base hbase id dead hempty
+            exact lane_same I _ _ hdead (fun i => release_prio _ id (w.st id).parked i)
+          · simp [htpl, hkill]
+            exact hLane
+
+theorem lane_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : World) (id : InstId)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (h : execHead I w id = some w') : LaneOk I w' := by
+  unfold execHead at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h
+      cases h
+      exact lane_exec I hL hG w hLane hS id k hph
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
+
+theorem lane_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (h : apply I a w = some w') : LaneOk I w' := by
+  cases a with
+  | recvBulk id => exact lane_bulk I w w' id hLane (by simpa [apply] using h)
+  | recvPrio id => exact lane_prio I w w' id hLane (by simpa [apply] using h)
+  | exec id => exact lane_head I hL hG w w' id hLane hS (by simpa [apply] using h)
+  | finish id => exact lane_finish I w w' id hLane (by simpa [apply] using h)
+  | spawn template => exact lane_spawn I w w' template hLane (by simpa [apply] using h)
+
+theorem lane_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : LaneOk I w := by
+  induction hR with
+  | init => exact lane_init I N
+  | step w w' a prev h ih =>
+    exact lane_apply I hL hG a w w' ih (prog_src_reachable I N w prev) h
+
 end Deadlock
