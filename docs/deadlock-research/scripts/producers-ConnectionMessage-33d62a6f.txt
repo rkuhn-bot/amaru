@@ -1,0 +1,50 @@
+# Producers of ConnectionMessage at 33d62a6f
+
+## ChildDied
+  crates/amaru-protocols/src/connection.rs:362: let muxer = eff.supervise(muxer, ConnectionMessage::ChildDied(ChildId::Mux));
+  crates/amaru-protocols/src/connection.rs:371: let hs = eff.supervise(hs, ConnectionMessage::ChildDied(ChildId::Handshake));
+  crates/amaru-protocols/src/connection.rs:384: let hs = eff.supervise(hs, ConnectionMessage::ChildDied(ChildId::Handshake));
+  crates/amaru-protocols/src/connection.rs:509: let died = ConnectionMessage::ChildDied(ChildId::Responder);
+  crates/amaru-protocols/src/connection.rs:521: ConnectionMessage::ChildDied(ChildId::Responder),
+  crates/amaru-protocols/src/connection.rs:533: ConnectionMessage::ChildDied(ChildId::Responder),
+  crates/amaru-protocols/src/connection.rs:538: register_blockfetch_responder(&s.muxer, *peer, *conn_id, eff, ConnectionMessage::ChildDied(ChildId::Responder)
+  crates/amaru-protocols/src/connection.rs:550: ConnectionMessage::ChildDied(ChildId::Responder),
+  crates/amaru-protocols/src/connection.rs:643: ConnectionMessage::ChildDied(child),
+  crates/amaru-protocols/src/connection.rs:654: ConnectionMessage::ChildDied(child),
+  crates/amaru-protocols/src/connection.rs:665: ConnectionMessage::ChildDied(child),
+  crates/amaru-protocols/src/connection.rs:676: ConnectionMessage::ChildDied(child),
+  crates/amaru-protocols/src/connection.rs:687: ConnectionMessage::ChildDied(child),
+  crates/amaru-protocols/src/connection.rs:715: ConnectionMessage::ChildDied(ChildId::KeepAlive),
+  crates/amaru-protocols/src/connection.rs:729: ConnectionMessage::ChildDied(ChildId::PeerSharing),
+  crates/amaru-protocols/src/connection.rs:744: ConnectionMessage::ChildDied(ChildId::ChainSync),
+  crates/amaru-protocols/src/connection.rs:756: ConnectionMessage::ChildDied(ChildId::BlockFetch),
+  crates/amaru-protocols/src/connection.rs:772: ConnectionMessage::ChildDied(ChildId::TxSubmission),
+## Disconnect
+  crates/amaru-protocols/src/manager/mod.rs:604: eff.send(&pending_stage, ConnectionMessage::Disconnect).await;
+  crates/amaru-protocols/src/manager/mod.rs:606: eff.send(&reported, ConnectionMessage::Disconnect).await;
+  crates/amaru-protocols/src/manager/mod.rs:626: eff.send(&pending.stage, ConnectionMessage::Disconnect).await;
+  crates/amaru-protocols/src/manager/mod.rs:844: eff.send(&stage, ConnectionMessage::Disconnect).await;
+  crates/amaru-protocols/src/manager/mod.rs:946: eff.send(&connection.stage, ConnectionMessage::Disconnect).await;
+## FetchBlocks
+  crates/amaru-protocols/src/manager/mod.rs:776: eff.send(&conn.stage, ConnectionMessage::FetchBlocks { from, through, cr: cr.clone(), id }).await;
+  crates/amaru-protocols/src/manager/mod.rs:789: eff.send(&conn.stage, ConnectionMessage::FetchBlocks { from, through, cr: cr.clone(), id }).await;
+## Handshake
+  crates/amaru-protocols/src/connection.rs:366: let handshake_result = eff.me_ref().contramap(ConnectionMessage::Handshake);
+## Initialize
+  crates/amaru-protocols/src/manager/mod.rs:498: eff.send(&connection, ConnectionMessage::Initialize).await;
+## NewTip
+  crates/amaru-protocols/src/connection.rs:197: ConnectionMessage::NewTip(tip, TraceContext::detached())
+  crates/amaru-protocols/src/manager/mod.rs:866: eff.send(&conn.stage, ConnectionMessage::NewTip(tip, trace_context.clone())).await;
+## SetLocalUse
+  crates/amaru-protocols/src/manager/mod.rs:888: eff.send(&stage, ConnectionMessage::SetLocalUse(local_use)).await;
+## StopTimeout
+  crates/amaru-protocols/src/connection.rs:624: eff.set_timeout_at(STOP_TIMEOUT_SLOT, timeout, ConnectionMessage::StopTimeout).await;
+
+# StageRef / contramap paths
+  crates/amaru-protocols/src/connection.rs:366: let handshake_result = eff.me_ref().contramap(ConnectionMessage::Handshake);
+  crates/amaru-protocols/src/manager/mod.rs:81: stage: StageRef<ConnectionMessage>,
+  crates/amaru-protocols/src/manager/mod.rs:201: stage: StageRef<ConnectionMessage>,
+  crates/amaru-protocols/src/manager/mod.rs:214: stage: StageRef<ConnectionMessage>,
+  crates/amaru-protocols/src/manager/mod.rs:509: stage: StageRef<ConnectionMessage>,
+  crates/amaru-protocols/src/manager/mod.rs:599: pending_stage: StageRef<ConnectionMessage>,
+  crates/amaru-protocols/src/manager/mod.rs:600: reported: StageRef<ConnectionMessage>,

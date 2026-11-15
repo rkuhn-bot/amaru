@@ -1,0 +1,17 @@
+# (A) / cycle (b): mux -> handler deliveries, Lemma 1 with the ingress bound of Lemma 3.
+# FromNetwork only while wanted > 0 (mux.rs:842-862); wanted <= p_h = 1 by agency (ProtocolState::local bails off-agency);
+# Registered 1 per instance. Handler bulk = 1 + p_h + local wakes <= 4 <= 10, given the connection NewTip cell (B3)
+# extended to the chainsync responder, the WaitForAtLeast seq cell, the capacity cell, one-shot Close.
+mux -> handshake [Registered/FromNetwork]
+mux -> chainsync_responder [Registered/FromNetwork]
+mux -> blockfetch_responder [Registered/FromNetwork]
+mux -> tx_submission_initiator [Registered/FromNetwork]
+mux -> tx_submission_responder [Registered/FromNetwork]
+mux -> keepalive_initiator [Registered/FromNetwork]
+mux -> keepalive_responder [Registered/FromNetwork]
+mux -> peer_sharing_initiator [Registered/FromNetwork]
+mux -> peer_sharing_responder [Registered/FromNetwork]
+# done_trap: never sends WantNext, so FromNetwork <= wanted carried from the replaced initiator; it is a sink anyway
+mux -> done_trap [Registered/FromNetwork]
+# B3 extension: NewTip connection -> chainsync responder becomes a latest-wins cell (responder sets upstream = tip)
+connection -> chainsync_responder [NewTip]

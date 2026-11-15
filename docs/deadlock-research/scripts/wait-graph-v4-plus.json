@@ -1,0 +1,591 @@
+{
+ "commit": "33d62a6f1ccde08d77fbc202a2cfb888d0b3f7c6",
+ "note": "Blocking edges of the pure-stage wait graph on 33d62a6f. Discharge status is not stored on the edges; it lives in wait-graph-v4-discharge.json. A blocking value of false is a oneshot reply, which completes without parking on a stage mailbox. The ledger node is the rewards/ledger thread. | PLUS (added in 03 review-8 pass, not by the code agent): tx_submission_initiator <-> mempool edges found at 33d62a6f; WaitForAtLeast is a blocking eff.send (tx_submission/initiator.rs:107-110, :365-368) and the notification is a blocking eff.send to a contramap of the initiator (mempool/stage.rs:72, :187 via notify_ready_waiters).",
+ "capacities": {
+  "default_bulk": 10,
+  "priority": 10,
+  "manager_and_peer_selection": "10 + max_outbound + max_inbound",
+  "manager_and_peer_selection_at_defaults": 23,
+  "chainsync_initiator": 14,
+  "mux": 24,
+  "N_max": "max_inbound + max_outbound",
+  "N_max_at_defaults": 13,
+  "max_outbound": "target_upstream_peers (default 3)",
+  "max_inbound": "target_downstream_peers (default 10)",
+  "PIPELINE_DEPTH": 10,
+  "MAX_FETCH_PEERS": 5,
+  "MAX_MISSING_BLOCKS_PER_BATCH": 25,
+  "MAX_FETCHED_BLOCKS": 1000
+ },
+ "edges": [
+  {
+   "from": "track_peers",
+   "to": "chainsync_initiator",
+   "message": "RequestNext/Done",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:877",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:911",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:931",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:1015",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:1049",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:1063",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:1069"
+   ],
+   "note": ""
+  },
+  {
+   "from": "chainsync_initiator",
+   "to": "track_peers",
+   "message": "ChainSyncInitiatorMsg",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/chainsync/initiator.rs:169"
+   ],
+   "note": ""
+  },
+  {
+   "from": "chainsync_initiator",
+   "to": "mux",
+   "message": "WantNext/Send",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+    "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+   ],
+   "note": ""
+  },
+  {
+   "from": "mux",
+   "to": "chainsync_initiator",
+   "message": "Registered/FromNetwork",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-protocols/src/mux.rs:660",
+    "crates/amaru-protocols/src/mux.rs:846",
+    "crates/amaru-protocols/src/mux.rs:858"
+   ],
+   "note": ""
+  },
+  {
+   "from": "mux",
+   "to": "blockfetch_initiator",
+   "message": "Registered/FromNetwork",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-protocols/src/mux.rs:660",
+    "crates/amaru-protocols/src/mux.rs:846"
+   ],
+   "note": ""
+  },
+  {
+   "from": "blockfetch_initiator",
+   "to": "mux",
+   "message": "WantNext/Send",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/blockfetch/initiator.rs:288",
+    "crates/amaru-protocols/src/blockfetch/initiator.rs:346"
+   ],
+   "note": ""
+  },
+  {
+   "from": "track_peers",
+   "to": "select_chain",
+   "message": "NewTip",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:868"
+   ],
+   "note": ""
+  },
+  {
+   "from": "select_chain",
+   "to": "fetch_blocks",
+   "message": "NewBestTip",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/select_chain/mod.rs:305",
+    "crates/amaru-consensus/src/stages/select_chain/mod.rs:400",
+    "crates/amaru-consensus/src/stages/select_chain/mod.rs:478"
+   ],
+   "note": ""
+  },
+  {
+   "from": "fetch_blocks",
+   "to": "select_chain",
+   "message": "FetchNextFrom",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:396",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:407",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:652",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:750",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:758"
+   ],
+   "note": ""
+  },
+  {
+   "from": "fetch_blocks",
+   "to": "manager",
+   "message": "FetchBlocks",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:440",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:544"
+   ],
+   "note": ""
+  },
+  {
+   "from": "fetch_blocks",
+   "to": "peer_selection",
+   "message": "Adversarial",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:574"
+   ],
+   "note": ""
+  },
+  {
+   "from": "fetch_blocks",
+   "to": "validate_block",
+   "message": "DownloadedBlock",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:310",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:395",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:641"
+   ],
+   "note": ""
+  },
+  {
+   "from": "validate_block",
+   "to": "select_chain",
+   "message": "BlockValidationResult",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/validate_block/mod.rs:111",
+    "crates/amaru-consensus/src/stages/validate_block/mod.rs:142"
+   ],
+   "note": ""
+  },
+  {
+   "from": "validate_block",
+   "to": "block_source",
+   "message": "Validation",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/validate_block/mod.rs:117",
+    "crates/amaru-consensus/src/stages/validate_block/mod.rs:149"
+   ],
+   "note": ""
+  },
+  {
+   "from": "validate_block",
+   "to": "adopt_chain",
+   "message": "AdoptChain",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/validate_block/mod.rs:119"
+   ],
+   "note": ""
+  },
+  {
+   "from": "adopt_chain",
+   "to": "manager",
+   "message": "NewTip",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:266"
+   ],
+   "note": ""
+  },
+  {
+   "from": "adopt_chain",
+   "to": "block_source",
+   "message": "AdoptedTip",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:268"
+   ],
+   "note": ""
+  },
+  {
+   "from": "adopt_chain",
+   "to": "mempool",
+   "message": "NewTip",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:264"
+   ],
+   "note": ""
+  },
+  {
+   "from": "manager",
+   "to": "cleanup_replies",
+   "message": "PeersAsked/NoPeersAvailable",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-protocols/src/manager/mod.rs:795",
+    "crates/amaru-protocols/src/manager/mod.rs:798"
+   ],
+   "note": ""
+  },
+  {
+   "from": "cleanup_replies",
+   "to": "fetch_blocks",
+   "message": "Block/NoBlocks/PeersAsked/NoPeersAvailable",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:855",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:859",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:863",
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:877"
+   ],
+   "note": ""
+  },
+  {
+   "from": "cleanup_replies",
+   "to": "block_source",
+   "message": "BlockReceived",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:875"
+   ],
+   "note": ""
+  },
+  {
+   "from": "cleanup_replies",
+   "to": "peer_selection",
+   "message": "Adversarial",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:871"
+   ],
+   "note": ""
+  },
+  {
+   "from": "blockfetch_initiator",
+   "to": "cleanup_replies",
+   "message": "Block/NoBlocks/Done",
+   "blocking": true,
+   "via": "send_any",
+   "lines": [
+    "crates/amaru-protocols/src/blockfetch/initiator.rs:312",
+    "crates/amaru-protocols/src/blockfetch/initiator.rs:348",
+    "crates/amaru-protocols/src/blockfetch/initiator.rs:364"
+   ],
+   "note": ""
+  },
+  {
+   "from": "block_source",
+   "to": "peer_selection",
+   "message": "Adversarial",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/block_source/mod.rs:128",
+    "crates/amaru-consensus/src/stages/block_source/mod.rs:152"
+   ],
+   "note": ""
+  },
+  {
+   "from": "track_peers",
+   "to": "peer_selection",
+   "message": "Adversarial",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:786",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:960",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:1071"
+   ],
+   "note": ""
+  },
+  {
+   "from": "peer_selection",
+   "to": "manager",
+   "message": "AddPeer/RemovePeer/Disconnect/SetLocalUse",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:339",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:359",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:466",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:504",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:782",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:894",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:945",
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1219"
+   ],
+   "note": ""
+  },
+  {
+   "from": "peer_selection",
+   "to": "peer_selection",
+   "message": "Resolved",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-consensus/src/stages/peer_selection/mod.rs:664"
+   ],
+   "note": "detach returns immediately; Resolved is delivered into this same mailbox"
+  },
+  {
+   "from": "manager",
+   "to": "connection",
+   "message": "Initialize/Disconnect/FetchBlocks/NewTip/SetLocalUse",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/manager/mod.rs:498",
+    "crates/amaru-protocols/src/manager/mod.rs:626",
+    "crates/amaru-protocols/src/manager/mod.rs:776",
+    "crates/amaru-protocols/src/manager/mod.rs:789",
+    "crates/amaru-protocols/src/manager/mod.rs:844",
+    "crates/amaru-protocols/src/manager/mod.rs:866",
+    "crates/amaru-protocols/src/manager/mod.rs:888",
+    "crates/amaru-protocols/src/manager/mod.rs:946"
+   ],
+   "note": ""
+  },
+  {
+   "from": "manager",
+   "to": "connection",
+   "message": "HandshakeComplete reply",
+   "blocking": false,
+   "via": "oneshot",
+   "lines": [
+    "crates/amaru-protocols/src/manager/mod.rs:519",
+    "crates/amaru-protocols/src/manager/mod.rs:560"
+   ],
+   "note": "call reply is a oneshot; tokio.rs:712-718 completes it without a stage mailbox"
+  },
+  {
+   "from": "connection",
+   "to": "manager",
+   "message": "HandshakeComplete",
+   "blocking": true,
+   "via": "call",
+   "lines": [
+    "crates/amaru-protocols/src/connection.rs:454"
+   ],
+   "note": ""
+  },
+  {
+   "from": "connection",
+   "to": "track_peers",
+   "message": "Terminated",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/connection.rs:320"
+   ],
+   "note": ""
+  },
+  {
+   "from": "connection",
+   "to": "chainsync_initiator",
+   "message": "Done",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/connection.rs:594"
+   ],
+   "note": ""
+  },
+  {
+   "from": "connection",
+   "to": "blockfetch_initiator",
+   "message": "RequestRange/Close",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/connection.rs:252",
+    "crates/amaru-protocols/src/connection.rs:598"
+   ],
+   "note": ""
+  },
+  {
+   "from": "manager",
+   "to": "connector",
+   "message": "Connect",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/manager/mod.rs:359"
+   ],
+   "note": ""
+  },
+  {
+   "from": "connector",
+   "to": "manager",
+   "message": "ConnectionResult",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/manager/connector.rs:101"
+   ],
+   "note": ""
+  },
+  {
+   "from": "connector",
+   "to": "connect_worker",
+   "message": "ConnectJob",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-protocols/src/manager/connector.rs:74",
+    "crates/amaru-protocols/src/manager/connector.rs:81"
+   ],
+   "note": ""
+  },
+  {
+   "from": "connect_worker",
+   "to": "connector",
+   "message": "WorkerDone",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/manager/connector.rs:124"
+   ],
+   "note": ""
+  },
+  {
+   "from": "manager",
+   "to": "accept",
+   "message": "PullAccept",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/manager/mod.rs:442"
+   ],
+   "note": ""
+  },
+  {
+   "from": "accept",
+   "to": "manager",
+   "message": "Accepted",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/accept.rs:29"
+   ],
+   "note": ""
+  },
+  {
+   "from": "tx_submission_responder",
+   "to": "mempool",
+   "message": "InsertBatch",
+   "blocking": true,
+   "via": "call",
+   "lines": [
+    "crates/amaru-protocols/src/tx_submission/responder.rs:608"
+   ],
+   "note": "parks the responder until the mempool mailbox admits the request and the oneshot reply arrives, or the timeout fires"
+  },
+  {
+   "from": "tx_submission_responder",
+   "to": "mempool",
+   "message": "SubscribeCapacity",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/tx_submission/responder.rs:692"
+   ],
+   "note": ""
+  },
+  {
+   "from": "mempool",
+   "to": "tx_submission_responder",
+   "message": "CapacityAvailable",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-consensus/src/stages/mempool/stage.rs:195"
+   ],
+   "note": "blocking send of () into the responder mailbox; the caller is me_ref().contramap"
+  },
+  {
+   "from": "mempool",
+   "to": "tx_submission_responder",
+   "message": "InsertBatch reply",
+   "blocking": false,
+   "via": "oneshot",
+   "lines": [
+    "crates/amaru-consensus/src/stages/mempool/stage.rs:99"
+   ],
+   "note": "oneshot reply; tokio.rs:712-718 does not park the mempool"
+  },
+  {
+   "from": "ledger",
+   "to": "track_peers",
+   "message": "StakeDistUpdated",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-ledger/src/state.rs:1288",
+    "crates/amaru-node/src/stages/build_node.rs:504"
+   ],
+   "note": "rewards thread block_on of the stage send; ledger is the rewards thread, not a pure-stage actor"
+  },
+  {
+   "from": "track_peers",
+   "to": "ledger",
+   "message": "VolatileTipEffect",
+   "blocking": true,
+   "via": "effect",
+   "lines": [
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:993",
+    "crates/amaru-consensus/src/stages/track_peers/mod.rs:1086"
+   ],
+   "note": "completion depends on the ledger thread, which joins the rewards thread at epoch_transition (state.rs:418)"
+  },
+  {
+   "from": "tx_submission_initiator",
+   "to": "mempool",
+   "message": "WaitForAtLeast",
+   "blocking": true,
+   "via": "direct",
+   "lines": [
+    "crates/amaru-protocols/src/tx_submission/initiator.rs:107",
+    "crates/amaru-protocols/src/tx_submission/initiator.rs:365"
+   ],
+   "note": "added"
+  },
+  {
+   "from": "mempool",
+   "to": "tx_submission_initiator",
+   "message": "WaitForAtLeastReached",
+   "blocking": true,
+   "via": "carried-ref",
+   "lines": [
+    "crates/amaru-consensus/src/stages/mempool/stage.rs:72",
+    "crates/amaru-consensus/src/stages/mempool/stage.rs:187"
+   ],
+   "note": "added"
+  }
+ ]
+}

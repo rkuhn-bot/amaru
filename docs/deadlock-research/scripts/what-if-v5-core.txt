@@ -1,0 +1,16 @@
+# manager bulk = 4*N_max + C + 4, C = connector workers (pass-6 corrected; needs B2 cells, cap at accept, RemovePeer dedup)
+fetch_blocks -> manager [FetchBlocks]
+adopt_chain -> manager [NewTip]
+peer_selection -> manager [AddPeer/RemovePeer/Disconnect/SetLocalUse]
+connector -> manager [ConnectionResult]
+accept -> manager [Accepted]
+connection -> manager [HandshakeComplete]
+# fetch_blocks bulk = 2*(25+A+2)+3 (B6 filter + enlargement)
+cleanup_replies -> fetch_blocks [Block/NoBlocks/PeersAsked/NoPeersAvailable]
+# stake callback: M1 cell + W3 (Lemma 2), both directions (the callback no longer waits on a stage)
+ledger -> track_peers [StakeDistUpdated]
+track_peers -> ledger [VolatileTipEffect]
+# mempool bulk = max_inbound + L + 1 with L a config cap on the submit API (B4)
+tx_submission_responder -> mempool [InsertBatch]
+submit_api -> mempool [Insert]
+adopt_chain -> mempool [NewTip]

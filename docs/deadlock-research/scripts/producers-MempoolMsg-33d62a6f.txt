@@ -1,0 +1,28 @@
+# Producers of MempoolMsg at 33d62a6f
+
+## Insert
+  crates/amaru-node/src/submit_api.rs:86: |caller| MempoolMsg::Insert { tx: Box::new(tx), origin: TxOrigin::Local, caller },
+## InsertBatch
+  crates/amaru-protocols/src/tx_submission/responder.rs:610: MempoolMsg::InsertBatch { txs, origin: origin.clone(), caller }
+## NewTip
+  crates/amaru-consensus/src/stages/adopt_chain/mod.rs:264: eff.send(mempool, MempoolMsg::NewTip(msg)).await;
+## SubscribeCapacity
+  crates/amaru-protocols/src/tx_submission/responder.rs:692: eff.send(&self.mempool_stage, MempoolMsg::SubscribeCapacity { caller: self.capacity_callback.clone() }).await;
+## WaitForAtLeast
+  crates/amaru-protocols/src/tx_submission/initiator.rs:108: MempoolMsg::WaitForAtLeast { seq_no, caller: self.wait_for_at_least_callback.clone() },
+  crates/amaru-protocols/src/tx_submission/initiator.rs:365: MempoolMsg::WaitForAtLeast { seq_no: expected_seq_no, caller: self.wait_for_at_least_callback.clone() },
+
+# StageRef / contramap paths
+  crates/amaru-consensus/src/stages/adopt_chain/mod.rs:103: mempool: Option<StageRef<MempoolMsg>>,
+  crates/amaru-consensus/src/stages/adopt_chain/mod.rs:117: mempool: impl Into<Option<StageRef<MempoolMsg>>>,
+  crates/amaru-node/src/stages/build_stage_graph.rs:255: pub mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-node/src/stages/build_stage_graph.rs:267: pub fn mempool_stage(&self) -> StageRef<MempoolMsg> {
+  crates/amaru-protocols/src/connection.rs:66: mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/connection.rs:97: mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/manager/mod.rs:177: mempool: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/manager/mod.rs:225: mempool: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/tx_submission/initiator.rs:295: mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/tx_submission/initiator.rs:307: mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/tx_submission/mod.rs:86: mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/tx_submission/responder.rs:341: mempool_stage: StageRef<MempoolMsg>,
+  crates/amaru-protocols/src/tx_submission/responder.rs:361: mempool_stage: StageRef<MempoolMsg>,

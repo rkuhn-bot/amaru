@@ -1,0 +1,29 @@
+# manager bulk = 4*N_max + 2*max_outbound + 4 (B2 cells + enlargement): every edge into manager
+fetch_blocks -> manager [FetchBlocks]
+adopt_chain -> manager [NewTip]
+peer_selection -> manager [AddPeer/RemovePeer/Disconnect/SetLocalUse]
+connector -> manager [ConnectionResult]
+accept -> manager [Accepted]
+connection -> manager [HandshakeComplete]
+# fetch_blocks bulk = 2*(25+A+2)+3 (B6 filter + enlargement)
+cleanup_replies -> fetch_blocks [Block/NoBlocks/PeersAsked/NoPeersAvailable]
+# stake callback: M1 cell + W3 (Lemma 2), both directions (the callback no longer waits on a stage)
+ledger -> track_peers [StakeDistUpdated]
+track_peers -> ledger [VolatileTipEffect]
+# mempool bulk = max_inbound + L + 1 with L a config cap on the submit API (B4)
+tx_submission_responder -> mempool [InsertBatch]
+submit_api -> mempool [Insert]
+adopt_chain -> mempool [NewTip]
+# (A) / cycle (b): mux -> handler deliveries, Lemma 1 with the ingress bound of Lemma 3.
+# FromNetwork only while wanted > 0 (mux.rs:842-862); wanted <= p_h = 1 by agency (ProtocolState::local bails off-agency);
+# Registered 1 per instance. Handler bulk = 1 + p_h + local wakes <= 4 <= 10, given the connection NewTip cell (B3)
+# extended to the chainsync responder, the WaitForAtLeast seq cell, the capacity cell, one-shot Close.
+mux -> handshake [Registered/FromNetwork]
+mux -> chainsync_responder [Registered/FromNetwork]
+mux -> blockfetch_responder [Registered/FromNetwork]
+mux -> tx_submission_initiator [Registered/FromNetwork]
+mux -> tx_submission_responder [Registered/FromNetwork]
+mux -> keepalive_initiator [Registered/FromNetwork]
+mux -> keepalive_responder [Registered/FromNetwork]
+mux -> peer_sharing_initiator [Registered/FromNetwork]
+mux -> peer_sharing_responder [Registered/FromNetwork]

@@ -1,0 +1,55 @@
+# Deadlock research archive — file list
+
+Archived from the research workspace on 2026-11-15. Analysis base: pragma-org/amaru `main` at `33d62a6f`. Theorem B is shelved: see `theorem-b-shelved.md`. Helen review files are the parent agent's summaries, not verbatim reviews.
+
+* `01-definitions.md`
+* `02-survey.md`
+* `03-candidate-theory.md`
+* `cites/cr.py`
+* `helen-review-1.md`
+* `helen-review-10-requirements.md`
+* `helen-review-11-pass7.md`
+* `helen-review-2.md`
+* `helen-review-3-pass2.md`
+* `helen-review-4-g-h.md`
+* `helen-review-5-gprime.md`
+* `helen-review-6-v3.md`
+* `helen-review-7-pass4.md`
+* `helen-review-8.md`
+* `helen-review-9-mux.md`
+* `issue/body.md`
+* `issues/1-anchor.md`
+* `issues/2-timer.md`
+* `issues/3-pipeline.md`
+* `issues/4-submit.md`
+* `scripts/producers-BlockFetchMessage-33d62a6f.txt`
+* `scripts/producers-ConnectionMessage-33d62a6f.txt`
+* `scripts/producers-ManagerMessage-33d62a6f.txt`
+* `scripts/producers-MempoolMsg-33d62a6f.txt`
+* `scripts/producers.py`
+* `scripts/wait-graph-v4-plus.json`
+* `scripts/what-if-all-fixes.txt`
+* `scripts/what-if-minimal-fixes.txt`
+* `scripts/what-if-review8-fixes.txt`
+* `scripts/what-if-review8-minimal.txt`
+* `scripts/what-if-sccs.py`
+* `scripts/what-if-v5-all.txt`
+* `scripts/what-if-v5-core.txt`
+* `scripts/what-if-v5-minimal.txt`
+* `scripts/what-if-v5-mux.txt`
+* `theorem-b-shelved.md`
+* `wait-graph-inventory-v2.md`
+* `wait-graph-inventory-v3.md`
+* `wait-graph-inventory-v4.md`
+* `wait-graph-inventory-v5.md`
+* `wait-graph-inventory-v6.md`
+* `wait-graph-inventory-v7-checks.md`
+* `wait-graph-inventory.md`
+* `wait-graph-v2.json`
+* `wait-graph-v3.json`
+* `wait-graph-v4-discharge.json`
+* `wait-graph-v4.json`
+* `wait-graph-v5-discharge.json`
+* `wait-graph-v5.json`
+* `wait-graph-v6-discharge.json`
+* `wait-graph.json`

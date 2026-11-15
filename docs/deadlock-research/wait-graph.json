@@ -1,0 +1,109 @@
+{
+  "commit": "33d62a6f1ccde08d77fbc202a2cfb888d0b3f7c6",
+  "repo": "pragma-org/amaru",
+  "coverage": "representative-patterns",
+  "assumption": "Internal effects (ledger, storage, resources, worker queues, timers) are delay edges and complete without a stage, except edges tagged assumption_violation.",
+  "edge_classes": {
+    "blocking": "Unbounded bulk-mailbox send. Sender does not receive.",
+    "timeout": "Call or peer I/O that resumes when its deadline fires.",
+    "peer_unbounded": "Peer I/O with no timeout.",
+    "delay": "Internal effect or timer. Not a buffer wait.",
+    "drop": "Does not park on a mailbox.",
+    "assumption_violation": "Classified as internal but waits on a stage mailbox."
+  },
+  "mailboxes": [
+    {"id": "manager", "template": "core", "capacity": "10+upstream+downstream", "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:89"},
+    {"id": "peer_selection", "template": "core", "capacity": "10+upstream+downstream", "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:91"},
+    {"id": "track_peers", "template": "core", "capacity": 10, "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:112"},
+    {"id": "select_chain", "template": "core", "capacity": 10, "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:113"},
+    {"id": "fetch_blocks", "template": "core", "capacity": 10, "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:114"},
+    {"id": "validate_block", "template": "core", "capacity": 10, "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:115"},
+    {"id": "adopt_chain", "template": "core", "capacity": 10, "cite": "crates/amaru-node/src/stages/build_stage_graph.rs:116"},
+    {"id": "connection", "template": "per_peer", "capacity": 10, "cite": "crates/amaru-protocols/src/manager/mod.rs:474"},
+    {"id": "mux", "template": "per_peer", "capacity": 24, "cite": "crates/amaru-protocols/src/mux.rs:62"},
+    {"id": "reader", "template": "per_peer", "capacity": 10, "cite": "crates/amaru-protocols/src/mux.rs:389"},
+    {"id": "writer", "template": "per_peer", "capacity": 10, "cite": "crates/amaru-protocols/src/mux.rs:364"},
+    {"id": "chainsync_initiator", "template": "per_peer", "capacity": 14, "cite": "crates/amaru-protocols/src/chainsync/mod.rs:33"},
+    {"id": "blockfetch_initiator", "template": "per_peer", "capacity": "max(10, 2*pipeline+4)", "cite": "crates/amaru-protocols/src/blockfetch/initiator.rs:60"},
+    {"id": "handler", "template": "per_peer", "capacity": 10, "note": "mini-protocols created with Effects::stage"}
+  ],
+  "edges": [
+    {"from": "select_chain", "to": "fetch_blocks", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/select_chain/mod.rs:305"},
+    {"from": "fetch_blocks", "to": "select_chain", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:758"},
+    {"from": "fetch_blocks", "to": "validate_block", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:310"},
+    {"from": "validate_block", "to": "select_chain", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/validate_block/mod.rs:111"},
+    {"from": "validate_block", "to": "adopt_chain", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/validate_block/mod.rs:119"},
+    {"from": "peer_selection", "to": "manager", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/peer_selection/mod.rs:111", "note": "SendBudget limits count per round; each send still parks"},
+    {"from": "chainsync_initiator", "to": "track_peers", "class": "blocking", "cite": "crates/amaru-protocols/src/chainsync/initiator.rs:169", "fan_in": "one track_peers mailbox shared by every peer"},
+    {"from": "track_peers", "to": "chainsync_initiator", "class": "blocking", "cite": "crates/amaru-consensus/src/stages/track_peers/mod.rs:877"},
+    {"from": "mux", "to": "handler", "class": "blocking", "cite": "crates/amaru-protocols/src/mux.rs:846"},
+    {"from": "handler", "to": "mux", "class": "blocking", "message": "WantNext", "cite": "crates/amaru-protocols/src/protocol/miniprotocol.rs:228"},
+    {"from": "handler", "to": "mux", "class": "timeout", "message": "wire Send via call", "timeout_secs": 1, "cite": "crates/amaru-protocols/src/protocol/miniprotocol.rs:232"},
+    {"from": "connection", "to": "manager", "class": "timeout", "message": "HandshakeComplete", "timeout_secs": 10, "cite": "crates/amaru-protocols/src/connection.rs:454"},
+    {"from": "manager", "to": "connection", "class": "drop", "message": "call reply oneshot", "cite": "crates/amaru-pure-stage/src/tokio.rs:712"},
+    {"from": "reader", "to": "mux", "class": "blocking", "message": "FromNetwork", "cite": "crates/amaru-protocols/src/mux.rs:573"},
+    {"from": "mux", "to": "reader", "class": "blocking", "message": "Read", "cite": "crates/amaru-protocols/src/mux.rs:463"},
+    {"from": "reader", "to": "peer_socket", "class": "peer_unbounded", "message": "header leading byte", "cite": "crates/amaru-protocols/src/mux.rs:495"},
+    {"from": "reader", "to": "peer_socket", "class": "timeout", "message": "header rest and body", "cite": "crates/amaru-protocols/src/mux.rs:509"},
+    {"from": "writer", "to": "peer_socket", "class": "timeout", "cite": "crates/amaru-network/src/connection.rs:328"},
+    {"from": "writer", "to": "mux", "class": "blocking", "message": "Written", "cite": "crates/amaru-protocols/src/mux.rs:382"},
+    {"from": "manager", "to": "connection", "class": "blocking", "message": "Disconnect", "cite": "crates/amaru-protocols/src/manager/mod.rs:946"},
+    {"from": "track_peers", "to": "ledger_thread", "class": "delay", "message": "VolatileTipEffect", "cite": "crates/amaru-consensus/src/stages/track_peers/mod.rs:993"},
+    {"from": "ledger_thread", "to": "track_peers", "class": "assumption_violation", "message": "StakeDistUpdated during rotate_stake_distribution", "cite": "crates/amaru-node/src/stages/build_node.rs:504"},
+    {"from": "any_stage", "to": "performance_worker", "class": "delay", "cite": "crates/amaru-consensus/src/performance/effects/mod.rs:60"},
+    {"from": "any_stage", "to": "chain_store", "class": "delay", "cite": "crates/amaru-protocols/src/store_effects.rs:792"}
+  ],
+  "blocking_cycles": [
+    {
+      "id": "chain-pipeline",
+      "nodes": ["select_chain", "fetch_blocks", "validate_block"],
+      "also": ["select_chain", "fetch_blocks"]
+    },
+    {
+      "id": "mux-handler",
+      "nodes": ["mux", "handler"],
+      "note": "WantNext and FromNetwork only. Wire Send is timeout."
+    },
+    {
+      "id": "chainsync-fan-in",
+      "nodes": ["chainsync_initiator", "track_peers"],
+      "note": "N initiators, one mailbox of 10."
+    }
+  ],
+  "absent_on_this_commit": {
+    "id": "manager-peer_selection",
+    "note": "manager does not send to peer_selection. peer_selection still blocking-sends to manager."
+  },
+  "pre_1475": {
+    "fix": "dcffd9dcbbef45b2df3dd75a00416004be6d8f9a",
+    "parent": "9a4273855972f9efcfbb84579a3f63084d030eda",
+    "cycle": {
+      "class": "blocking",
+      "manager_to_peer_selection": [
+        "crates/amaru-protocols/src/manager/mod.rs:366",
+        "crates/amaru-protocols/src/manager/mod.rs:499",
+        "crates/amaru-protocols/src/manager/mod.rs:526",
+        "crates/amaru-protocols/src/manager/mod.rs:536",
+        "crates/amaru-protocols/src/manager/mod.rs:575",
+        "crates/amaru-protocols/src/manager/mod.rs:591",
+        "crates/amaru-protocols/src/manager/mod.rs:744"
+      ],
+      "peer_selection_to_manager": [
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:496",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:563",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:694",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:732",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1056",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1067",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1088",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1122"
+      ]
+    },
+    "broken_on_main_by": "lifecycle recorded on the performance worker (delay), not sent to peer_selection"
+  },
+  "typestate": {
+    "captures_send_and_call_remainders_for": ["blockfetch initiator", "blockfetch responder", "forge"],
+    "project_emits": "wire CFSM for one protocol role",
+    "project_does_not_emit": ["mailbox ids", "capacities", "blocking vs timeout", "untyped stages", "fan-in", "ledger callback"]
+  }
+}

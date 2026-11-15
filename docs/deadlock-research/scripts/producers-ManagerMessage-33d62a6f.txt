@@ -1,0 +1,50 @@
+# Producers of ManagerMessage at 33d62a6f
+
+## Accepted
+  crates/amaru-protocols/src/accept.rs:29: eff.send(&state.manager_stage, ManagerMessage::Accepted(peer, connection_id)).await;
+## AddPeer
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:359: if !budget.send(eff, &manager, ManagerMessage::AddPeer(peer)).await {
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:1219: eff.send(&state.manager, ManagerMessage::AddPeer(peer)).await;
+## ConnectionDied
+  crates/amaru-protocols/src/manager/mod.rs:479: let connection = eff.supervise(connection, ManagerMessage::ConnectionDied(peer, conn_id, role));
+## ConnectionResult
+  crates/amaru-protocols/src/manager/connector.rs:101: eff.send(&state.manager, ManagerMessage::ConnectionResult { peer, attempt, result }).await;
+## Disconnect
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:782: if budget.send(eff, &manager, ManagerMessage::Disconnect(conn.peer, conn.conn_id)).await {
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:945: if budget.send(eff, &manager, ManagerMessage::Disconnect(peer, conn_id)).await {
+## FetchBlocks
+  crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:442: ManagerMessage::FetchBlocks {
+  crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:546: ManagerMessage::FetchBlocks {
+## HandshakeComplete
+  crates/amaru-protocols/src/connection.rs:454: .call(manager, HANDSHAKE_RECORD_TIMEOUT, move |caller| ManagerMessage::HandshakeComplete {
+## Listen
+  crates/amaru-node/src/stages/build_node.rs:516: .preload(node_stages.manager_stage.clone(), [ManagerMessage::Listen(listen_address)])
+  crates/amaru-protocols/src/manager/mod.rs:439: let accept_stage = eff.supervise(accept_stage, ManagerMessage::Listen(listen_addr));
+## NewTip
+  crates/amaru-consensus/src/stages/adopt_chain/mod.rs:266: eff.send(&state.downstream, ManagerMessage::NewTip(msg, trace_context)).await;
+  crates/amaru-protocols/src/manager/mod.rs:111: ManagerMessage::NewTip(tip, TraceContext::detached())
+## RemovePeer
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:339: eff.send(&self.manager, ManagerMessage::RemovePeer(peer)).await;
+## SetLocalUse
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:466: .send(eff, &manager, ManagerMessage::SetLocalUse { peer, conn_id, local_use: MiniProtocolUse::Maintenance })
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:504: .send(eff, &manager, ManagerMessage::SetLocalUse { peer, conn_id, local_use: MiniProtocolUse::Diffusion })
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:894: if !budget.send(eff, &manager, ManagerMessage::SetLocalUse { peer, conn_id, local_use }).await {
+
+# StageRef / contramap paths
+  crates/amaru-consensus/src/stages/adopt_chain/mod.rs:101: downstream: StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/adopt_chain/mod.rs:115: downstream: StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:143: manager: StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:177: manager: StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:211: manager: StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:105: manager: &StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:183: manager: StageRef<ManagerMessage>,
+  crates/amaru-consensus/src/stages/peer_selection/mod.rs:270: manager: StageRef<ManagerMessage>,
+  crates/amaru-node/src/mithril/block_source.rs:151: let manager = source.sender().contramap(|message: ManagerMessage| match message {
+  crates/amaru-node/src/stages/build_stage_graph.rs:254: pub manager_stage: StageRef<ManagerMessage>,
+  crates/amaru-node/src/stages/build_stage_graph.rs:263: pub fn manager_stage(&self) -> StageRef<ManagerMessage> {
+  crates/amaru-protocols/src/accept.rs:48: manager_stage: StageRef<ManagerMessage>,
+  crates/amaru-protocols/src/accept.rs:55: manager_stage: StageRef<ManagerMessage>,
+  crates/amaru-protocols/src/connection.rs:67: manager: StageRef<ManagerMessage>,
+  crates/amaru-protocols/src/connection.rs:98: manager: StageRef<ManagerMessage>,
+  crates/amaru-protocols/src/manager/connector.rs:56: manager: StageRef<ManagerMessage>,
+  crates/amaru-protocols/src/manager/connector.rs:64: pub fn new(connection_timeout: Duration, manager: StageRef<ManagerMessage>) -> Self {

@@ -1,0 +1,9 @@
+# Producers of BlockFetchMessage at 33d62a6f
+
+## Close
+  crates/amaru-protocols/src/connection.rs:598: eff.send(bf, BlockFetchMessage::Close).await;
+## RequestRange
+  crates/amaru-protocols/src/connection.rs:252: eff.send(blockfetch, BlockFetchMessage::RequestRange { from, through, id, cr }).await;
+
+# StageRef / contramap paths
+  crates/amaru-protocols/src/blockfetch/initiator.rs:452: ) -> StageRef<BlockFetchMessage> {

@@ -1,0 +1,101 @@
+{
+  "commit": "33d62a6f1ccde08d77fbc202a2cfb888d0b3f7c6",
+  "cycle_a": {
+    "status": "discharged",
+    "by": "may_fetch_blocks token, state-indexed",
+    "token_set_true": "crates/amaru-consensus/src/stages/select_chain/mod.rs:489"
+  },
+  "obligations": {
+    "1_residual_path": {
+      "peer_selection_or_block_source_reaches_select_chain_or_fetch_blocks": false,
+      "idle_adversarial": {
+        "site": "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:574",
+        "before_missing_check": true,
+        "sent_when_missing_is_none": true
+      },
+      "cleanup_replies": {
+        "to_block_source": "BlockReceived always, fetch_blocks/mod.rs:875",
+        "to_peer_selection": "Adversarial on decode failure, fetch_blocks/mod.rs:871",
+        "to_fetch_blocks": "only when id >= curr_id"
+      },
+      "block_source_blocking_sends": ["peer_selection Adversarial block_source/mod.rs:128", "peer_selection Adversarial block_source/mod.rs:152"],
+      "peer_selection_blocking_sends": ["manager AddPeer/RemovePeer/Disconnect/SetLocalUse", "ledger-check () which does not send to a stage"],
+      "manager_does_not_emit_FetchBlocks_or_NewTip_from_those": true,
+      "connection_done_and_close_do_not_reach_select_or_fetch": true,
+      "terminated_stops_at_track_peers": "connection.rs:319-329 then track_peers/mod.rs:902"
+    },
+    "2_recover_stored_blocks": {
+      "runtime_sender": false,
+      "only_production_enqueue": "build_stage_graph.rs:199-204 preload",
+      "before_first_fetch_next_from_and_new_best_tip": true
+    },
+    "3_token_creation": {
+      "only_assignment_to_true": "select_chain/mod.rs:489",
+      "initial_fetch_next_from_origin_is_the_only_creation": false,
+      "created_on_every_fetch_next_from_whose_point_equals_best_or_when_no_best": true,
+      "production_preload_of_fetch_next_from_origin": false,
+      "only_production_sender": "fetch_blocks/mod.rs:758",
+      "empty_store_recover_sends_no_fetch_next_from": "fetch_blocks/mod.rs:265-270"
+    },
+    "4_chainsync_initiator_mailbox": {
+      "capacity": "PIPELINE_DEPTH + 4 = 14",
+      "kinds": {
+        "RequestNext": {
+          "producers": ["track_peers"],
+          "at_most_one_per_received_ChainSyncInitiatorMsg": true,
+          "mailbox_cap_below_capacity": false,
+          "pipeline_depth_enforced": false
+        },
+        "Done": {
+          "producers": ["track_peers:911", "track_peers:931", "track_peers:1063", "connection.rs:594"],
+          "one_per_arm": true,
+          "unknown_intersection_does_not_purge": true
+        },
+        "FromNetwork": {
+          "producers": ["mux.rs:846", "mux.rs:858"],
+          "only_while_wanted_positive": true,
+          "roll_forward_does_not_want_next": true,
+          "initial_intersect_want_next": 1,
+          "initial_wire_request_next": 10,
+          "local_state_after_intersect": "CanAwait(1)"
+        },
+        "Registered": { "count": 1, "site": "mux.rs:660" },
+        "Timeout": 0,
+        "Pull": 0
+      },
+      "cycle_c": "real",
+      "credit_that_would_bound_request_next": "per connection, RequestNext sent minus roll results, do not send at PIPELINE_DEPTH"
+    },
+    "5_stake_dist_updated": {
+      "assigns_max_epoch": true,
+      "re_reads_volatile_tip": "track_peers/mod.rs:1086",
+      "revalidates_deferred_headers": true,
+      "can_send": ["NewTip to select_chain", "RequestNext", "Adversarial"],
+      "re_reads_stake_resource_by_name": false,
+      "validate_header_observes_stake": "ledger.validate_header via ValidateHeaderEffect",
+      "init_or_restart_re_reads": false,
+      "init": "TrackPeers::new copies max_epoch and sets ledger height to 0",
+      "greater_epoch_subsumes_lesser_for_the_threshold": true,
+      "assignment_is_not_max": true,
+      "ledger_callback_blocks_on_the_stage": "build_node.rs:503-511, called from amaru-ledger state.rs:1287"
+    }
+  },
+  "mailboxes": [
+    {"name": "select_chain", "required": "unbounded; credit N+3", "current": 10, "sufficient": false},
+    {"name": "fetch_blocks", "required": "1 NewBestTip + up to 125 Block + recovery chain length", "current": 10, "sufficient": false},
+    {"name": "validate_block", "required": "unbounded without window W", "current": 10, "sufficient": false},
+    {"name": "adopt_chain", "required": 1, "current": 10, "sufficient": true},
+    {"name": "track_peers", "required": "unbounded; credit N+1", "current": 10, "sufficient": false},
+    {"name": "chainsync_initiator", "required": "PIPELINE_DEPTH+4 only with the missing credit", "current": 14, "sufficient": false},
+    {"name": "mux", "required": "24 only if one WantNext and one live Send per handler", "current": 24, "sufficient": false},
+    {"name": "reader", "required": 1, "current": 10, "sufficient": true},
+    {"name": "writer", "required": 1, "current": 10, "sufficient": true},
+    {"name": "blockfetch_handler", "required": "max(10, 2n+4) does not cover a third range", "current": "max(10, 2n+4)", "sufficient": false},
+    {"name": "manager", "required": "not bounded by U+D without a round cap; NewTip and SetLocalUse are one slot each if overwritten", "current": "10+U+D", "sufficient": false},
+    {"name": "peer_selection", "required": "distinct Adversarial peers plus one Resolved per detach; repeats of one peer are a join", "current": "10+U+D", "sufficient": false},
+    {"name": "mempool", "required": "inserts are reliable; NewTip is one slot if a later tip overwrites", "current": 10, "sufficient": false},
+    {"name": "block_source", "required": "BlockReceived per distinct point plus in-flight validation", "current": 10, "sufficient": false},
+    {"name": "forge_block", "required": 1, "current": 10, "sufficient": true},
+    {"name": "priority", "required": "schedule_at panics at 10; timeouts and tombstones are outside that counter", "current": 10, "sufficient": false}
+  ]
+}
