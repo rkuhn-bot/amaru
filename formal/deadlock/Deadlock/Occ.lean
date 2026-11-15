@@ -1125,4 +1125,128 @@ theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorl
   · intro id _hl1
     exact (init_box I N id).2
 
+theorem owed_same_queues (st : InstId → Actor) (id : InstId) (a : Actor)
+    (hbox : a.box = (st id).box) (hpark : a.parked = (st id).parked)
+    (dst : String) (sender : InstId) (ids : List InstId) :
+    owed (fun i => if i = id then a else st i) dst sender ids = owed st dst sender ids := by
+  refine owed_mail_eq _ _ _ _ ids ?_
+  intro j _
+  by_cases hj : j = id
+  · simp [hj, hbox, hpark]
+  · simp [hj]
+
+theorem aliveCount_set_life (w : World) (id : InstId) (a : Actor) (h : a.life = (w.st id).life)
+    (template : String) : aliveCount (setActor w id a) template = aliveCount w template := by
+  rw [aliveCount_sum, aliveCount_sum]
+  refine sum_congr _ _ w.roster ?_
+  intro i _
+  unfold aliveBit
+  by_cases hi : i = id
+  · simp [setActor, hi, h, beq_iff_eq]
+  · simp [setActor, hi]
+
+/-- Replacing one actor without touching its life, queues, or token vector.
+The new typestate's floor plus the new continuation must still fit in the tokens. -/
+theorem occ_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I w)
+    (hlife : a.life = (w.st id).life) (hbox : a.box = (w.st id).box) (hpark : a.parked = (w.st id).parked)
+    (htok : ∀ d, a.tokens d = (w.st id).tokens d)
+    (hslack : ∀ d, a.life = .alive →
+      floorState I.desc (tname id) a.typestate d + pending a d ≤ a.tokens d) :
+    OccInv I (setActor w id a) := by
+  have hst : (setActor w id a).st = fun i => if i = id then a else w.st i := rfl
+  have hr : (setActor w id a).roster = w.roster := rfl
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hr]
+    exact hO.nodup
+  · intro i hl
+    by_cases hi : i = id
+    · rw [hi] at hl ⊢
+      rw [setActor_self] at hl
+      rw [hlife] at hl
+      rw [hr]
+      exact hO.aliveIn id hl
+    · rw [setActor_other w id i a hi] at hl
+      exact hO.aliveIn i hl
+  · intro template i hi
+    rw [actor_ix]
+    exact hO.indexed template i (by simpa [setActor] using hi)
+  · intro template ht
+    rw [aliveCount_set_life w id a hlife template]
+    exact hO.liveOne template ht
+  · intro template ht
+    rw [aliveCount_set_life w id a hlife template]
+    exact hO.livePeer template ht
+  · intro i hnin
+    by_cases hi : i = id
+    · rw [hi] at hnin ⊢
+      have hold := hO.offEmpty id hnin
+      rw [setActor_self, hbox, hpark]
+      exact hold
+    · rw [setActor_other w id i a hi]
+      exact hO.offEmpty i hnin
+  · intro i m hm
+    by_cases hi : i = id
+    · rw [hi] at hm
+      rw [setActor_self, hbox] at hm
+      exact hO.sentFrom id m hm
+    · rw [setActor_other w id i a hi] at hm
+      exact hO.sentFrom i m hm
+  · intro i p hp
+    by_cases hi : i = id
+    · rw [hi] at hp
+      rw [setActor_self, hpark] at hp
+      exact hO.parkFrom id p hp
+    · rw [setActor_other w id i a hi] at hp
+      exact hO.parkFrom i p hp
+  · intro i p hp
+    by_cases hi : i = id
+    · rw [hi] at hp
+      rw [setActor_self, hpark] at hp
+      exact hO.parkMsg id p hp
+    · rw [setActor_other w id i a hi] at hp
+      exact hO.parkMsg i p hp
+  · intro s d hs
+    have howed := owed_same_queues w.st id a hbox hpark d s w.roster
+    rw [hr] at hs
+    rw [hst, hr, howed]
+    by_cases hs' : s = id
+    · simp [hs', htok]
+      exact hO.balance id d (by simpa [hs'] using hs)
+    · simp [hs']
+      exact hO.balance s d hs
+  · intro s d hs hl
+    by_cases hs' : s = id
+    · rw [hs'] at hl ⊢
+      rw [setActor_self] at hl ⊢
+      exact hslack d hl
+    · have hl' : (w.st s).life = .alive := by
+        rw [setActor_other w id s a hs'] at hl
+        exact hl
+      have hold := hO.slack s d hs hl'
+      rw [setActor_other w id s a hs']
+      exact hold
+  · intro s d hs hterm
+    have howed := owed_same_queues w.st id a hbox hpark d s w.roster
+    rw [hr] at hs
+    rw [hst, hr, howed]
+    exact hO.still s d hs hterm
+  · intro s d hs hdead
+    have howed := owed_same_queues w.st id a hbox hpark d s w.roster
+    rw [hr] at hs
+    rw [hst, hr, howed]
+    by_cases hs' : s = id
+    · rw [hs'] at hdead hs ⊢
+      rw [setActor_self] at hdead
+      rw [hlife] at hdead
+      exact hO.quiet id d hs hdead
+    · rw [setActor_other w id s a hs'] at hdead
+      exact hO.quiet s d hs hdead
+  · intro i hl1
+    by_cases hi : i = id
+    · rw [hi] at hl1 ⊢
+      rw [setActor_self, hpark]
+      exact hO.clear id hl1
+    · rw [setActor_other w id i a hi]
+      exact hO.clear i hl1
+
 end Deadlock

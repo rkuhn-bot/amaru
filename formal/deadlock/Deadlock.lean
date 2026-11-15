@@ -58,3 +58,4 @@ import Deadlock.Occ
 #print axioms Deadlock.l1_fit
 #print axioms Deadlock.l1_park_unreachable
 #print axioms Deadlock.occ_init
+#print axioms Deadlock.occ_set
