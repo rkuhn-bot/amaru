@@ -3224,10 +3224,10 @@ theorem shift_parkFrom (w : World) (id : InstId) (p : Parked) (ps : List Parked)
       obtain ⟨hseq, _, hk⟩ := (hT.parkFrom d q hq0 s).mp hc
       have hsame := hM.uniq d id q p hq0 (by rw [hpark]; exact List.Mem.head _) (hseq.trans hsS)
       have hqP : p ∈ ps := by
-        have hmem : q ∈ ps := by
-          rw [← hsame.1, shift_parkId w id p ps kS hsnd] at hq
-          exact hq
-        simpa [hsame.2] using hmem
+        have hq' := hq
+        rw [hsame.1] at hq'
+        rw [shift_parkId w id p ps kS hsnd] at hq'
+        simpa [hsame.2] using hq'
       have hnd := hM.once id
       rw [hpark] at hnd
       exact False.elim ((List.nodup_cons.mp hnd).1 hqP)
