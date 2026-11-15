@@ -321,4 +321,229 @@ theorem call_tag_init (I : Impl) (N : Nat) : CallTagInv (initWorld I N) := by
   · intro id m hm
     simp [init_prio_empty] at hm
 
+theorem proceed_fields (a : Actor) (k : Cont) :
+    (proceed a k).box = a.box ∧ (proceed a k).parked = a.parked ∧
+      (proceed a k).prio = a.prio ∧ (proceed a k).life = a.life := by
+  cases hk : k.rest <;> simp [proceed, hk]
+
+theorem mail_iff_lists (w w' : World)
+    (hbox : ∀ i, (w'.st i).box = (w.st i).box)
+    (hpark : ∀ i, (w'.st i).parked = (w.st i).parked) (d c : InstId) :
+    mailCall w' d c ↔ mailCall w d c := by
+  constructor
+  · intro hm
+    rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
+    · exact Or.inl ⟨m, by rw [hbox d] at hmem; exact hmem, hc⟩
+    · exact Or.inr ⟨p, by rw [hpark d] at hmem; exact hmem, hc⟩
+  · intro hm
+    rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
+    · exact Or.inl ⟨m, by rw [← hbox d] at hmem; exact hmem, hc⟩
+    · exact Or.inr ⟨p, by rw [← hpark d] at hmem; exact hmem, hc⟩
+
+theorem owes_iff_carried (ph ph' : Phase) (h : carriedCont ph' = carriedCont ph) (c : InstId) :
+    handlerOwes c ph' ↔ handlerOwes c ph := by
+  constructor
+  · intro ⟨k, hk, hs, hn⟩
+    exact ⟨k, h.symm.trans hk, hs, hn⟩
+  · intro ⟨k, hk, hs, hn⟩
+    exact ⟨k, h.trans hk, hs, hn⟩
+
+theorem pending_iff_carried (ph ph' : Phase) (h : carriedCont ph' = carriedCont ph) (c : InstId) :
+    replyPending c ph' ↔ replyPending c ph := by
+  constructor
+  · intro ⟨k, hk, hs, hn⟩
+    exact ⟨k, h.symm.trans hk, hs, hn⟩
+  · intro ⟨k, hk, hs, hn⟩
+    exact ⟨k, h.trans hk, hs, hn⟩
+
+theorem owes_empty (ph : Phase) (k : Cont) (h : carriedCont ph = some k) (hempty : k.rest = [])
+    (c : InstId) : ¬handlerOwes c ph := by
+  intro ⟨k', hk, hs, _⟩
+  have hk' : k' = k := by
+    rw [h] at hk
+    injection hk with heq
+    exact heq.symm
+  have hc := hs.2.1
+  simp [hk', hempty, replyCount] at hc
+
+theorem pending_empty (ph : Phase) (k : Cont) (h : carriedCont ph = some k) (hempty : k.rest = [])
+    (c : InstId) : ¬replyPending c ph := by
+  intro ⟨k', hk, hs, _⟩
+  have hk' : k' = k := by
+    rw [h] at hk
+    injection hk with heq
+    exact heq.symm
+  have hc := hs.2.1
+  simp [hk', hempty, replyCount] at hc
+
+/-- Resuming the continuation already carried by `id` does not move a call tag.
+`id` itself is not in `awaitReply` or parked. -/
+theorem resume_tag (w : World) (id : InstId) (k : Cont) (hT : CallTagInv w)
+    (hph : carriedCont (w.st id).phase = some k)
+    (hnotA : ∀ d kA, (w.st id).phase ≠ .awaitReply d kA)
+    (hnotP : ∀ d (b : Bool) kA, (w.st id).phase ≠ .parked d b kA) :
+    CallTagInv (setActor w id (proceed (w.st id) k)) := by
+  let w' := setActor w id (proceed (w.st id) k)
+  have hfields := proceed_fields (w.st id) k
+  apply call_tag_stable w w' hT
+  · intro d c
+    refine mail_iff_lists w w' ?_ ?_ d c
+    · intro i
+      by_cases hi : i = id <;> simp [w', setActor, hi, hfields.1]
+    · intro i
+      by_cases hi : i = id <;> simp [w', setActor, hi, hfields.2.1]
+  · intro i c
+    by_cases hi : i = id
+    · rw [hi]
+      by_cases hempty : k.rest = []
+      · have hold := owes_empty (w.st id).phase k hph hempty c
+        have hnew : ¬handlerOwes c (w'.st id).phase := by
+          simp [w', setActor, proceed, hempty, handlerOwes, carriedCont]
+        exact ⟨fun h => absurd h hnew, fun h => absurd h hold⟩
+      · have hnew : carriedCont (w'.st id).phase = some k := by
+          simp [w', setActor, proceed_carriedCont (w.st id) k hempty]
+        exact owes_iff_carried _ _ (hnew.trans hph.symm) c
+    · have hst : (w'.st i).phase = (w.st i).phase := by simp [w', setActor, hi]
+      exact owes_iff_carried _ _ (by simp [hst]) c
+  · intro i c
+    by_cases hi : i = id
+    · rw [hi]
+      by_cases hempty : k.rest = []
+      · have hold := pending_empty (w.st id).phase k hph hempty c
+        have hnew : ¬replyPending c (w'.st id).phase := by
+          simp [w', setActor, proceed, hempty, replyPending, carriedCont]
+        exact ⟨fun h => absurd h hnew, fun h => absurd h hold⟩
+      · have hnew : carriedCont (w'.st id).phase = some k := by
+          simp [w', setActor, proceed_carriedCont (w.st id) k hempty]
+        exact pending_iff_carried _ _ (hnew.trans hph.symm) c
+    · have hst : (w'.st i).phase = (w.st i).phase := by simp [w', setActor, hi]
+      exact pending_iff_carried _ _ (by simp [hst]) c
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · rw [hc] at hph'
+      simp [w', setActor, proceed] at hph'
+      cases hk : k.rest <;> simp [hk] at hph'
+    · simpa [w', setActor, hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · rw [hc] at hph'
+      exact absurd hph' (hnotA d kA)
+    · simpa [w', setActor, hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · rw [hc] at hph'
+      simp [w', setActor, proceed] at hph'
+      cases hk : k.rest <;> simp [hk] at hph'
+    · simpa [w', setActor, hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · rw [hc] at hph'
+      exact absurd hph' (hnotP d true kA)
+    · simpa [w', setActor, hc] using hph'
+  · intro i m hm
+    by_cases hi : i = id
+    · exact hT.prioPlain id m (by simpa [w', setActor, hi, hfields.2.2.1] using hm)
+    · exact hT.prioPlain i m (by simpa [w', setActor, hi] using hm)
+
+theorem finish_tag (w : World) (id : InstId) (w' : World) (hT : CallTagInv w)
+    (h : finishWait w id = some w') : CallTagInv w' := by
+  unfold finishWait at h
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [hph] at h
+    cases h
+    exact resume_tag w id k hT (by simp [carriedCont, hph])
+      (fun d kA hbad => by simp [hph] at hbad)
+      (fun d b kA hbad => by simp [hph] at hbad)
+  | awaitPeer k =>
+    simp [hph] at h
+    cases h
+    exact resume_tag w id k hT (by simp [carriedCont, hph])
+      (fun d kA hbad => by simp [hph] at hbad)
+      (fun d b kA hbad => by simp [hph] at hbad)
+  | idle => simp [hph] at h
+  | run _ => simp [hph] at h
+  | parked _ _ _ => simp [hph] at h
+  | awaitReply _ _ => simp [hph] at h
+  | crashed => simp [hph] at h
+
+/-- A freshly spawned actor is idle and empty, so it adds no call tag. -/
+theorem spawn_tag (I : Impl) (w : World) (template : String) (w' : World)
+    (hSlot : OpenSlots w) (hOcc : OccInv I w) (hT : CallTagInv w)
+    (h : spawn I w template = some w') : CallTagInv w' := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp [ht] at h
+    obtain ⟨_, heq⟩ := h
+    let nid := InstId.peer template (w.nextIx template)
+    have hnin : nid ∉ w.roster := by
+      intro hmem
+      have hix := hOcc.indexed template (w.nextIx template) hmem
+      exact absurd hix (Nat.lt_irrefl _)
+    have hopen : (w.st nid).life = .absent ∧ (w.st nid).phase = .idle ∧ (w.st nid).parked = [] := by
+      simpa [nid] using hSlot template (w.nextIx template) (Nat.le_refl _)
+    have hempty := hOcc.offEmpty nid hnin
+    have hbox : ∀ i, (w'.st i).box = (w.st i).box := by
+      rw [← heq]
+      intro i
+      by_cases hi : i = nid
+      · simp [hi, nid, readCells_st, setActor, withTokens, hempty.1]
+      · simp [readCells_st, setActor, hi, nid]
+    have hparkL : ∀ i, (w'.st i).parked = (w.st i).parked := by
+      rw [← heq]
+      intro i
+      by_cases hi : i = nid
+      · simp [hi, nid, readCells_st, setActor, withTokens, hempty.2]
+      · simp [readCells_st, setActor, hi, nid]
+    apply call_tag_stable w w' hT
+    · intro d c
+      exact mail_iff_lists w w' hbox hparkL d c
+    · intro i c
+      by_cases hi : i = nid
+      · have hold : carriedCont (w.st nid).phase = none := by simp [carriedCont, hopen.2.1]
+        have hnew : carriedCont (w'.st nid).phase = none := by
+          rw [← heq]
+          simp [nid, readCells_st, setActor, carriedCont, withTokens]
+        exact owes_iff_carried _ _ (by rw [hi]; exact hnew.trans hold.symm) c
+      · exact owes_iff_carried _ _ (by rw [← heq]; simp [nid, readCells_st, setActor, hi]) c
+    · intro i c
+      by_cases hi : i = nid
+      · have hold : carriedCont (w.st nid).phase = none := by simp [carriedCont, hopen.2.1]
+        have hnew : carriedCont (w'.st nid).phase = none := by
+          rw [← heq]
+          simp [nid, readCells_st, setActor, carriedCont, withTokens]
+        exact pending_iff_carried _ _ (by rw [hi]; exact hnew.trans hold.symm) c
+      · exact pending_iff_carried _ _ (by rw [← heq]; simp [nid, readCells_st, setActor, hi]) c
+    · intro c d k hph
+      rw [← heq] at hph
+      by_cases hc : c = nid
+      · simp [hc, nid, readCells_st, setActor, withTokens] at hph
+      · simpa [nid, readCells_st, setActor, hc] using hph
+    · intro c d k hph
+      by_cases hc : c = nid
+      · simp [hopen.2.1, hc] at hph
+      · have hst : (w'.st c).phase = (w.st c).phase := by
+          rw [← heq]
+          simp [nid, readCells_st, setActor, hc]
+        simpa [hst] using hph
+    · intro c d k hph
+      rw [← heq] at hph
+      by_cases hc : c = nid
+      · simp [hc, nid, readCells_st, setActor, withTokens] at hph
+      · simpa [nid, readCells_st, setActor, hc] using hph
+    · intro c d k hph
+      by_cases hc : c = nid
+      · simp [hopen.2.1, hc] at hph
+      · have hst : (w'.st c).phase = (w.st c).phase := by
+          rw [← heq]
+          simp [nid, readCells_st, setActor, hc]
+        simpa [hst] using hph
+    · intro i m hm
+      rw [← heq] at hm
+      by_cases hi : i = nid
+      · simp [hi, nid, readCells_st, setActor, withTokens] at hm
+      · exact hT.prioPlain i m (by simpa [nid, readCells_st, setActor, hi] using hm)
+
 end Deadlock
