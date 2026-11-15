@@ -12,6 +12,7 @@ import Deadlock.Step
 import Deadlock.Mail
 import Deadlock.Projects
 import Deadlock.Occ
+import Deadlock.Inv2
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
