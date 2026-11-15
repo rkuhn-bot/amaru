@@ -43,4 +43,25 @@ theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumpt
   exact finish_clears_peer (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
     (hall (j + 1) (Nat.le_trans hj (Nat.le_succ j)))
 
+/-- A deadlock is a send or a call that stays parked. An effect wait is taken
+by fairness, and no phase is recorded as a cell wait. -/
+theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumptions I) (hF : Fair ρ)
+    (hD : Deadlock ρ) : ∃ s i dst, Stuck ρ s i ∧
+      (waitKind ((ρ.cfg i).st s) = some (.blockingSend dst) ∨
+        waitKind ((ρ.cfg i).st s) = some (.callReply dst)) := by
+  obtain ⟨s, i, hS, hk⟩ := hD
+  cases hkind : waitKind ((ρ.cfg i).st s) with
+  | none => simp [hkind] at hk
+  | some kind =>
+    cases kind with
+    | blockingSend dst =>
+      exact ⟨s, i, dst, hS, Or.inl hkind⟩
+    | callReply dst =>
+      exact ⟨s, i, dst, hS, Or.inr hkind⟩
+    | cell =>
+      exact absurd hkind (waitKind_ne_cell _)
+    | effect =>
+      exact False.elim (not_stuck_effect_assumed ρ hA hF s i hS hkind)
+    | peer => simp [hkind] at hk
+
 end Deadlock

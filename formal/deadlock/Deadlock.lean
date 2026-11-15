@@ -73,3 +73,4 @@ import Deadlock.Inv2
 #print axioms Deadlock.occ_exec
 #print axioms Deadlock.inv2_reachable
 #print axioms Deadlock.bulk_apply
+#print axioms Deadlock.deadlock_kind

@@ -258,8 +258,10 @@ for a send the actor did not itself perform.
   description does not have, the check is defined with the lift. The present
   check is not known to be unsound for the restricted model: a terminable
   template cannot bulk-send, so a dead instance does not keep credit a
-  replacement would count again. `¬ Deadlock` is not claimed yet: a stuck
-  blocking send or call reply still has to descend the residual rank.
+  replacement would count again. `deadlock_kind` reduces a deadlock to a
+  blocking send or a call reply that stays waiting; an effect wait is taken
+  by fairness, and no phase is a cell wait. The rank descent for those two
+  waits, `CellFresh`, and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
