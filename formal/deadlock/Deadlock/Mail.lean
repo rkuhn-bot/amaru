@@ -172,4 +172,319 @@ theorem proceed_parked (a : Actor) (k : Cont) : (proceed a k).parked = a.parked 
 theorem proceed_not_parked (a : Actor) (k : Cont) : notParked (proceed a k).phase := by
   cases hk : k.rest <;> simp [proceed, notParked, hk]
 
+/-- Park the sender on its own mailbox: one actor carries both the entry and the phase. -/
+theorem mail_park_self (w : World) (sender : InstId) (a : Actor) (entry : Parked)
+    (c : Bool) (k : Cont) (hM : MailInv w) (hfree : notParked (w.st sender).phase)
+    (hphase : a.phase = .parked sender c k)
+    (hlist : a.parked = (w.st sender).parked ++ [entry])
+    (hentry : entry.sender = sender ∧ entry.isCall = c) :
+    MailInv (setActor w sender a) := by
+  have hnq := not_queued w sender hM hfree
+  refine ⟨?_, ?_, ?_⟩
+  · intro mb p hp
+    by_cases hmb : mb = sender
+    · rw [hmb, setActor_self, hlist] at hp
+      simp [List.mem_append, List.mem_singleton] at hp
+      cases hp with
+      | inl hold =>
+        have hne := hnq sender p hold
+        obtain ⟨ck, hck⟩ := hM.fwd sender p hold
+        rw [setActor_other w sender p.sender a hne, hmb]
+        exact ⟨ck, hck⟩
+      | inr hnew =>
+        rw [hnew, hentry.1, hentry.2, hmb, setActor_self, hphase]
+        exact ⟨k, rfl⟩
+    · rw [setActor_other w sender mb a hmb] at hp
+      have hne := hnq mb p hp
+      obtain ⟨ck, hck⟩ := hM.fwd mb p hp
+      rw [setActor_other w sender p.sender a hne]
+      exact ⟨ck, hck⟩
+  · intro sid dst c' k' hk
+    by_cases hs : sid = sender
+    · rw [hs, setActor_self, hphase] at hk
+      cases hk
+      refine ⟨entry, ?_, by simpa [hs] using hentry.1, hentry.2⟩
+      rw [setActor_self, hlist]
+      simp [List.mem_append]
+    · rw [setActor_other w sender sid a hs] at hk
+      obtain ⟨p, hp, hsender, hc⟩ := hM.bwd sid dst c' k' hk
+      by_cases hd : dst = sender
+      · refine ⟨p, ?_, hsender, hc⟩
+        rw [hd, setActor_self, hlist, List.mem_append]
+        exact Or.inl (by simpa [hd] using hp)
+      · exact ⟨p, by rw [setActor_other w sender dst a hd]; exact hp, hsender, hc⟩
+  · intro mb1 mb2 p1 p2 h1 h2 hsnd
+    have fresh : ∀ {mb p}, p ∈ ((setActor w sender a).st mb).parked → p.sender = sender →
+        mb = sender ∧ p = entry := by
+      intro mb p hp hsend
+      by_cases hmb : mb = sender
+      · rw [hmb, setActor_self, hlist] at hp
+        simp [List.mem_append, List.mem_singleton] at hp
+        cases hp with
+        | inl hold => exact absurd hsend (hnq sender p hold)
+        | inr hnew => exact ⟨hmb, hnew⟩
+      · rw [setActor_other w sender mb a hmb] at hp
+        exact absurd hsend (hnq mb p hp)
+    by_cases h1s : p1.sender = sender
+    · have hm1 := fresh h1 h1s
+      have hm2 := fresh h2 (hsnd.symm.trans h1s)
+      exact ⟨hm1.1.trans hm2.1.symm, hm1.2.trans hm2.2.symm⟩
+    · have hold1 : p1 ∈ (w.st mb1).parked := by
+        by_cases hmb : mb1 = sender
+        · rw [hmb, setActor_self, hlist] at h1
+          simp [List.mem_append, List.mem_singleton] at h1
+          cases h1 with
+          | inl h => simpa [hmb] using h
+          | inr h => exact absurd (by rw [h]; exact hentry.1) h1s
+        · rw [setActor_other w sender mb1 a hmb] at h1
+          exact h1
+      have h2s : p2.sender ≠ sender := fun h => h1s (hsnd.trans h)
+      have hold2 : p2 ∈ (w.st mb2).parked := by
+        by_cases hmb : mb2 = sender
+        · rw [hmb, setActor_self, hlist] at h2
+          simp [List.mem_append, List.mem_singleton] at h2
+          cases h2 with
+          | inl h => simpa [hmb] using h
+          | inr h => exact absurd (by rw [h]; exact hentry.1) h2s
+        · rw [setActor_other w sender mb2 a hmb] at h2
+          exact h2
+      exact hM.uniq _ _ _ _ hold1 hold2 hsnd
+
+/-- Park `sender` on a different mailbox. The entry and the phase are the final state. -/
+theorem mail_park_other (w : World) (dst sender : InstId) (a stored : Actor) (entry : Parked)
+    (c : Bool) (k : Cont) (hM : MailInv w) (hdiff : sender ≠ dst)
+    (hfree : notParked (w.st sender).phase) (hdstPh : stored.phase = (w.st dst).phase)
+    (hdstPk : stored.parked = (w.st dst).parked ++ [entry])
+    (hentry : entry.sender = sender ∧ entry.isCall = c)
+    (hsPh : a.phase = .parked dst c k) (hsPk : a.parked = (w.st sender).parked) :
+    MailInv (setActor (setActor w dst stored) sender a) := by
+  have hnq := not_queued w sender hM hfree
+  let final := setActor (setActor w dst stored) sender a
+  have stS : final.st sender = a := by simp [final, setActor]
+  have stD : final.st dst = stored := by
+    rw [setActor_other _ sender dst a hdiff.symm, setActor_self]
+  have stO : ∀ i, i ≠ sender → i ≠ dst → final.st i = w.st i := by
+    intro i hs hd
+    rw [setActor_other _ sender i a hs, setActor_other _ dst i stored hd]
+  refine ⟨?_, ?_, ?_⟩
+  · intro mb p hp
+    by_cases hms : mb = sender
+    · rw [hms, stS, hsPk] at hp
+      have hne := hnq sender p hp
+      obtain ⟨ck, hck⟩ := hM.fwd sender p hp
+      by_cases hd : p.sender = dst
+      · rw [hd, stD, hdstPh]
+        rw [hd] at hck
+        exact ⟨ck, by simpa [hms] using hck⟩
+      · rw [stO p.sender hne hd]
+        exact ⟨ck, by simpa [hms] using hck⟩
+    · by_cases hmd : mb = dst
+      · rw [hmd, stD, hdstPk] at hp
+        simp [List.mem_append, List.mem_singleton] at hp
+        cases hp with
+        | inl hold =>
+          have hne := hnq dst p hold
+          obtain ⟨ck, hck⟩ := hM.fwd dst p hold
+          by_cases hsnd : p.sender = sender
+          · exact absurd hsnd hne
+          · by_cases hd : p.sender = dst
+            · rw [hd, stD, hdstPh]
+              rw [hd] at hck
+              exact ⟨ck, by simpa [hmd] using hck⟩
+            · rw [stO p.sender hsnd hd]
+              exact ⟨ck, by simpa [hmd] using hck⟩
+        | inr hnew =>
+          rw [hnew, hentry.1, hentry.2, hmd, stS, hsPh]
+          exact ⟨k, rfl⟩
+      · rw [stO mb hms hmd] at hp
+        have hne := hnq mb p hp
+        obtain ⟨ck, hck⟩ := hM.fwd mb p hp
+        by_cases hsnd : p.sender = sender
+        · exact absurd hsnd hne
+        · by_cases hd : p.sender = dst
+          · rw [hd, stD, hdstPh]
+            rw [hd] at hck
+            exact ⟨ck, hck⟩
+          · rw [stO p.sender hsnd hd]
+            exact ⟨ck, hck⟩
+  · intro sid dbox isC ck hk
+    by_cases hs : sid = sender
+    · rw [hs, stS, hsPh] at hk
+      cases hk
+      refine ⟨entry, ?_, by simpa [hs] using hentry.1, hentry.2⟩
+      rw [stD, hdstPk]
+      simp [List.mem_append]
+    · have hk0 : (w.st sid).phase = .parked dbox isC ck := by
+        by_cases hd : sid = dst
+        · rw [hd, stD, hdstPh] at hk
+          simpa [hd] using hk
+        · rw [stO sid hs hd] at hk
+          exact hk
+      obtain ⟨p, hp, hsender, hc⟩ := hM.bwd sid dbox isC ck hk0
+      by_cases hd : dbox = dst
+      · refine ⟨p, ?_, hsender, hc⟩
+        rw [hd, stD, hdstPk, List.mem_append]
+        exact Or.inl (by simpa [hd] using hp)
+      · by_cases hbox : dbox = sender
+        · refine ⟨p, ?_, hsender, hc⟩
+          rw [hbox, stS, hsPk]
+          simpa [hbox] using hp
+        · refine ⟨p, ?_, hsender, hc⟩
+          rw [stO dbox hbox hd]
+          exact hp
+  · intro mb1 mb2 p1 p2 h1 h2 hsnd
+    have fresh : ∀ {mb p}, p ∈ (final.st mb).parked → p.sender = sender → mb = dst ∧ p = entry := by
+      intro mb p hp hsend
+      by_cases hms : mb = sender
+      · rw [hms, stS, hsPk] at hp
+        exact absurd hsend (hnq sender p hp)
+      · by_cases hmd : mb = dst
+        · rw [hmd, stD, hdstPk] at hp
+          simp [List.mem_append, List.mem_singleton] at hp
+          cases hp with
+          | inl hold => exact absurd hsend (hnq dst p hold)
+          | inr hnew => exact ⟨hmd, hnew⟩
+        · rw [stO mb hms hmd] at hp
+          exact absurd hsend (hnq mb p hp)
+    by_cases h1s : p1.sender = sender
+    · have hm1 := fresh h1 h1s
+      have hm2 := fresh h2 (hsnd.symm.trans h1s)
+      exact ⟨hm1.1.trans hm2.1.symm, hm1.2.trans hm2.2.symm⟩
+    · have h2s : p2.sender ≠ sender := fun h => h1s (hsnd.trans h)
+      have oldOf : ∀ {mb p}, p ∈ (final.st mb).parked → p.sender ≠ sender → p ∈ (w.st mb).parked := by
+        intro mb p hp hsend
+        by_cases hms : mb = sender
+        · rw [hms, stS, hsPk] at hp
+          simpa [hms] using hp
+        · by_cases hmd : mb = dst
+          · rw [hmd, stD, hdstPk] at hp
+            simp [List.mem_append, List.mem_singleton] at hp
+            cases hp with
+            | inl h => simpa [hmd] using h
+            | inr h => exact absurd (by rw [h]; exact hentry.1) hsend
+          · rw [stO mb hms hmd] at hp
+            exact hp
+      exact hM.uniq _ _ _ _ (oldOf h1 h1s) (oldOf h2 h2s) hsnd
+
+theorem await_not_parked (a : Actor) (dst : InstId) (k : Cont) :
+    notParked ({ a with phase := Phase.awaitReply dst k }).phase := by
+  simp [notParked]
+
+/-- A blocking enqueue, including the branch that parks, preserves `MailInv`.
+The parked entry and the sender's phase are the final state together. -/
+theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (hM : MailInv w) (hfree : notParked (w.st sender).phase) :
+    MailInv (enqueueOrPark w D sender dst msg isCall k) := by
+  unfold enqueueOrPark
+  dsimp only
+  by_cases halive : (w.st dst).life = .alive
+  · simp [halive]
+    by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · subst hsame
+        if hcall : isCall = true then
+          simp [hcall]
+          apply mail_set_free w sender _ hM hfree
+          · simp [notParked, chargeSender, bumpToken]
+          · simp [chargeSender, bumpToken]
+        else
+          have hcf : isCall = false := by cases hbb : isCall <;> simp_all
+          simp [hcf]
+          apply mail_set_free w sender _ hM hfree
+          · exact proceed_not_parked _ _
+          · simp [proceed_parked, chargeSender, bumpToken]
+      · simp [hsame]
+        rw [← halive, ← hroom.1]
+        have hM1 := mail_set_same w dst { (w.st dst) with box := (w.st dst).box ++ [msg] } hM rfl rfl
+        if hcall : isCall = true then
+          simp [hcall]
+          apply mail_set_free (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender _ hM1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hfree
+          · simp [notParked, chargeSender, bumpToken]
+          · rw [setActor_other _ dst sender _ hsame]
+            simp [chargeSender, bumpToken]
+        else
+          have hcf : isCall = false := by cases hbb : isCall <;> simp_all
+          simp [hcf]
+          apply mail_set_free (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender _ hM1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hfree
+          · exact proceed_not_parked _ _
+          · rw [setActor_other _ dst sender _ hsame]
+            simp [proceed_parked, chargeSender, bumpToken]
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · subst hsame
+        simp
+        apply mail_park_self w sender _ { sender := sender, msg := msg, isCall := isCall } isCall k hM hfree
+        · simp [chargeSender, bumpToken]
+        · simp [chargeSender, bumpToken]
+        · simp
+      · simp [hsame]
+        rw [← halive]
+        apply mail_park_other w dst sender
+          { chargeSender (w.st sender) (tname dst) with phase := .parked dst isCall k }
+          { (w.st dst) with parked := (w.st dst).parked ++ [{ sender := sender, msg := msg, isCall := isCall }] }
+          { sender := sender, msg := msg, isCall := isCall } isCall k hM hsame hfree
+        · rfl
+        · rfl
+        · simp
+        · simp [chargeSender, bumpToken]
+        · simp [chargeSender, bumpToken]
+  · simp [halive]
+    apply mail_set_free w sender _ hM hfree
+    · exact proceed_not_parked _ _
+    · exact proceed_parked _ _
+
+/-- After the queue is cleared and every former sender has left `.parked`, mail holds again. -/
+theorem mail_of_clear (w0 w : World) (id : InstId) (ps : List Parked) (hM : MailInv w0)
+    (hfree : notParked (w0.st id).phase) (hnocall : ∀ p ∈ ps, p.isCall = false)
+    (hqueue : ∀ p, p ∈ ps ↔ p ∈ (w0.st id).parked) (hidPh : (w.st id).phase = .idle)
+    (hidPk : (w.st id).parked = []) (hpk : ∀ i, i ≠ id → (w.st i).parked = (w0.st i).parked)
+    (hresume : ∀ p ∈ ps, notParked (w.st p.sender).phase)
+    (hother : ∀ i, i ≠ id → (∀ p ∈ ps, p.sender ≠ i) → (w.st i).phase = (w0.st i).phase) :
+    MailInv w := by
+  have hnq := not_queued w0 id hM hfree
+  refine ⟨?_, ?_, ?_⟩
+  · intro mb p hp
+    have hmb : mb ≠ id := by
+      intro h
+      rw [h, hidPk] at hp
+      cases hp
+    have hp0 : p ∈ (w0.st mb).parked := by simpa [hpk mb hmb] using hp
+    obtain ⟨k, hk⟩ := hM.fwd mb p hp0
+    have hsnd : p.sender ≠ id := hnq mb p hp0
+    have hnot : ∀ q ∈ ps, q.sender ≠ p.sender := by
+      intro q hq heq
+      have hq0 : q ∈ (w0.st id).parked := (hqueue q).mp hq
+      have huniq := hM.uniq id mb q p hq0 hp0 (by rw [heq])
+      exact hmb huniq.1.symm
+    rw [hother p.sender hsnd hnot]
+    exact ⟨k, hk⟩
+  · intro sid dst c k hk
+    have hsid : sid ≠ id := by
+      intro h
+      rw [h, hidPh] at hk
+      cases hk
+    have hnot : ∀ q ∈ ps, q.sender ≠ sid := by
+      intro q hq heq
+      have hbad := hresume q hq
+      rw [heq] at hbad
+      simp [notParked, hk] at hbad
+    have hk0 : (w0.st sid).phase = .parked dst c k := by
+      rw [← hother sid hsid (fun q hq he => hnot q hq he)]
+      exact hk
+    obtain ⟨p, hp, hsender, hc⟩ := hM.bwd sid dst c k hk0
+    have hdst : dst ≠ id := by
+      intro h
+      have hpq : p ∈ ps := (hqueue p).mpr (by simpa [h] using hp)
+      exact hnot p hpq hsender
+    exact ⟨p, by simpa [hpk dst hdst] using hp, hsender, hc⟩
+  · intro mb1 mb2 p1 p2 h1 h2 hs
+    have h1n : mb1 ≠ id := by intro h; rw [h, hidPk] at h1; cases h1
+    have h2n : mb2 ≠ id := by intro h; rw [h, hidPk] at h2; cases h2
+    exact hM.uniq mb1 mb2 p1 p2 (by simpa [hpk mb1 h1n] using h1) (by simpa [hpk mb2 h2n] using h2) hs
+
 end Deadlock

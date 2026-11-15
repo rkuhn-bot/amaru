@@ -29,6 +29,10 @@ import Deadlock.Mail
 #print axioms Deadlock.mail_init
 #print axioms Deadlock.mail_set_free
 #print axioms Deadlock.mail_set_same
+#print axioms Deadlock.mail_park_self
+#print axioms Deadlock.mail_park_other
+#print axioms Deadlock.enqueue_mail
+#print axioms Deadlock.mail_of_clear
 #print axioms Deadlock.exec_try_sem
 #print axioms Deadlock.exec_sched_sem
 #print axioms Deadlock.exec_reply_sem
