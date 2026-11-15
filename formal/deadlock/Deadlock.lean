@@ -30,3 +30,6 @@ import Deadlock.Mail
 #print axioms Deadlock.mail_set_free
 #print axioms Deadlock.mail_set_same
 #print axioms Deadlock.exec_try_sem
+#print axioms Deadlock.exec_sched_sem
+#print axioms Deadlock.exec_reply_sem
+#print axioms Deadlock.exec_cell_sem
