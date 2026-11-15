@@ -3811,5 +3811,380 @@ theorem occ_cell (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label : St
     simpa [previous, written, w1, w2, hdirty, wakeReaders] using
       occ_wakes I (readersOf w2 dst) w2 dst label id hO2'
 
+theorem read_roster (D : Description) (w : World) (id : InstId) :
+    (readCells D w id).roster = w.roster ∧ (readCells D w id).N = w.N := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons _ ls ih =>
+    simp only [List.foldl_cons, setCell, setObserved]
+    exact ih _
+
+theorem sum_snoc (f : InstId → Nat) (ids : List InstId) (id : InstId) :
+    sumFold f (ids ++ [id]) = sumFold f ids + f id := by
+  induction ids with
+  | nil => simp [sumFold]
+  | cons j js ih => simp [sumFold, ih, Nat.add_assoc]
+
+theorem slot_blank (st : InstId → Actor) (dstName : String) (sender id : InstId)
+    (hb : (st id).box = []) (hp : (st id).parked = []) : slot st dstName sender id = 0 := by
+  simp [slot, hb, hp, countFrom, countParked]
+
+theorem owed_snoc_blank (st : InstId → Actor) (dstName : String) (sender : InstId) (ids : List InstId)
+    (id : InstId) (hb : (st id).box = []) (hp : (st id).parked = []) :
+    owed st dstName sender (ids ++ [id]) = owed st dstName sender ids := by
+  rw [owed_append]
+  simp [slot_blank st dstName sender id hb hp]
+
+theorem countFrom_out (sender : InstId) : ∀ ms : List Msg, (∀ m ∈ ms, m.sender ≠ sender) → countFrom sender ms = 0
+  | [], _ => rfl
+  | m :: ms, h => by
+    have hm : m.sender ≠ sender := h m (List.Mem.head _)
+    have ht := countFrom_out sender ms (fun m' hm' => h m' (List.Mem.tail _ hm'))
+    simp [countFrom, hm, ht]
+
+theorem countParked_out (sender : InstId) :
+    ∀ ps : List Parked, (∀ p ∈ ps, p.sender ≠ sender) → countParked sender ps = 0
+  | [], _ => rfl
+  | p :: ps, h => by
+    have hp : p.sender ≠ sender := h p (List.Mem.head _)
+    have ht := countParked_out sender ps (fun p' hp' => h p' (List.Mem.tail _ hp'))
+    simp [countParked, hp, ht]
+
+theorem owed_out (st : InstId → Actor) (dstName : String) (sender : InstId) :
+    ∀ ids : List InstId,
+      (∀ id ∈ ids, (∀ m ∈ (st id).box, m.sender ≠ sender) ∧ (∀ p ∈ (st id).parked, p.sender ≠ sender)) →
+        owed st dstName sender ids = 0
+  | [], _ => rfl
+  | id :: ids, h => by
+    have hid := h id (List.Mem.head _)
+    have hids := owed_out st dstName sender ids (fun i hi => h i (List.Mem.tail _ hi))
+    have hbox := countFrom_out sender (st id).box hid.1
+    have hpark := countParked_out sender (st id).parked hid.2
+    simp [owed, slot, hbox, hpark, hids]
+
+theorem occ_spawn (I : Impl) (w w' : World) (template : String) (hO : OccInv I w)
+    (h : spawn I w template = some w') : OccInv I w' := by
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t ht =>
+    by_cases hif : (t.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
+    · simp [hif] at h
+      cases h
+      simp [Bool.and_eq_true] at hif
+      have hper : t.multiplicity = .perPeer := by
+        cases hm : t.multiplicity with
+        | perPeer => rfl
+        | one =>
+          simp [hm] at hif
+          cases hif.1
+      have hlt : aliveCount w template < w.N := hif.2
+      let pid := InstId.peer template (w.nextIx template)
+      let born := bornPeer I template t.initial
+      let wG := growRoster w pid template
+      let wA := setActor wG pid born
+      let wF := readCells I.desc wA pid
+      have hfresh : pid ∉ w.roster := by
+        intro hin
+        have hix := hO.indexed template (w.nextIx template) hin
+        omega
+      have hst : ∀ i, wF.st i = if i = pid then born else w.st i := by
+        intro i
+        simp only [wF]
+        rw [readCells_st]
+        simp [wA, setActor, wG, growRoster]
+      have hrost : wF.roster = w.roster ++ [pid] := by
+        simp only [wF]
+        rw [(read_roster I.desc wA pid).1]
+        simp [wA, setActor, wG, growRoster]
+      have hN : wF.N = w.N := by
+        simp only [wF]
+        rw [(read_roster I.desc wA pid).2]
+        simp [wA, setActor, wG, growRoster]
+      have hixn : ∀ n, wF.nextIx n = if n = template then w.nextIx n + 1 else w.nextIx n := by
+        intro n
+        simp only [wF]
+        rw [read_ix, actor_ix]
+        simp [wA, wG, growRoster]
+      have hborn : born.life = .alive ∧ born.box = [] ∧ born.parked = [] ∧ born.phase = .idle ∧
+          born.typestate = t.initial ∧ ∀ d, born.tokens d = budget I.desc template d := by
+        simp [born, bornPeer, withTokens]
+      have hblank : (wF.st pid).box = [] ∧ (wF.st pid).parked = [] := by
+        have hs := hst pid
+        simp [hs, hborn]
+      suffices OccInv I wF by simpa [wF, wA, wG, pid, born, growRoster, bornPeer, withTokens] using this
+      refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+      · rw [hrost]
+        exact nodup_snoc hO.nodup hfresh
+      · intro i hl
+        rw [hrost]
+        by_cases hi : i = pid
+        · exact List.mem_append.mpr (Or.inr (by rw [hi]; exact List.Mem.head []))
+        · rw [hst i] at hl
+          simp [hi] at hl
+          exact List.mem_append.mpr (Or.inl (hO.aliveIn i hl))
+      · intro name i hi
+        rw [hixn]
+        rw [hrost] at hi
+        simp [List.mem_append, List.mem_singleton] at hi
+        cases hi with
+        | inl hold =>
+          have hold' := hO.indexed name i hold
+          by_cases hn : name = template
+          · rw [hn] at hold' ⊢
+            simp
+            exact Nat.lt_succ_of_lt hold'
+          · simp [hn]
+            exact hold'
+        | inr hnew =>
+          simp [pid] at hnew
+          simp [hnew.1, hnew.2]
+      · intro name hone
+        by_cases hn : name = template
+        · rw [hn] at hone
+          obtain ⟨tmpl, htn, hm⟩ := hone
+          have heq : tmpl = t := by
+            rw [ht] at htn
+            cases htn
+            rfl
+          rw [heq, hper] at hm
+          cases hm
+        · have hc : aliveCount wF name = aliveCount w name := by
+            rw [aliveCount_sum, aliveCount_sum, hrost]
+            rw [sum_snoc]
+            have hbit : aliveBit wF.st name pid = 0 := by
+              unfold aliveBit
+              rw [hst pid]
+              simp [pid, tname, hborn, show template ≠ name from fun h => hn h.symm]
+            have hfold : sumFold (aliveBit wF.st name) w.roster = sumFold (aliveBit w.st name) w.roster := by
+              refine sum_congr _ _ w.roster ?_
+              intro i hi
+              have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hi)
+              simp [aliveBit, hst i, hne]
+            rw [hbit, hfold]
+            simp
+          rw [hc]
+          exact hO.liveOne name hone
+      · intro name hpeer
+        by_cases hn : name = template
+        · rw [hn]
+          have hc : aliveCount wF template = aliveCount w template + 1 := by
+            rw [aliveCount_sum, aliveCount_sum, hrost]
+            rw [sum_snoc]
+            have hbit : aliveBit wF.st template pid = 1 := by
+              unfold aliveBit
+              rw [hst pid]
+              simp [pid, tname, hborn]
+            have hfold : sumFold (aliveBit wF.st template) w.roster =
+                sumFold (aliveBit w.st template) w.roster := by
+              refine sum_congr _ _ w.roster ?_
+              intro i hi
+              have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hi)
+              simp [aliveBit, hst i, hne]
+            rw [hbit, hfold]
+          rw [hc, hN]
+          omega
+        · have hc : aliveCount wF name = aliveCount w name := by
+            rw [aliveCount_sum, aliveCount_sum, hrost]
+            rw [sum_snoc]
+            have hbit : aliveBit wF.st name pid = 0 := by
+              unfold aliveBit
+              rw [hst pid]
+              simp [pid, tname, hborn, show template ≠ name from fun h => hn h.symm]
+            have hfold : sumFold (aliveBit wF.st name) w.roster = sumFold (aliveBit w.st name) w.roster := by
+              refine sum_congr _ _ w.roster ?_
+              intro i hi
+              have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hi)
+              simp [aliveBit, hst i, hne]
+            rw [hbit, hfold]
+            simp
+          rw [hc, hN]
+          exact hO.livePeer name hpeer
+      · intro i hnin
+        rw [hrost] at hnin
+        have hnin' : i ∉ w.roster := fun hin => hnin (List.mem_append.mpr (Or.inl hin))
+        have hne : i ≠ pid := fun heq => hnin (List.mem_append.mpr (Or.inr (by rw [heq]; exact List.Mem.head [])))
+        have hold := hO.offEmpty i hnin'
+        rw [hst i]
+        simp [hne]
+        exact hold
+      · intro i m hm
+        rw [hrost]
+        rw [hst i] at hm
+        by_cases hi : i = pid
+        · simp [hi, hborn] at hm
+        · simp [hi] at hm
+          exact List.mem_append.mpr (Or.inl (hO.sentFrom i m hm))
+      · intro i p hp
+        rw [hrost]
+        rw [hst i] at hp
+        by_cases hi : i = pid
+        · simp [hi, hborn] at hp
+        · simp [hi] at hp
+          exact List.mem_append.mpr (Or.inl (hO.parkFrom i p hp))
+      · intro i p hp
+        rw [hst i] at hp
+        by_cases hi : i = pid
+        · simp [hi, hborn] at hp
+        · simp [hi] at hp
+          exact hO.parkMsg i p hp
+      · intro s d hs
+        rw [hrost] at hs
+        simp [List.mem_append, List.mem_singleton] at hs
+        by_cases hss : s = pid
+        · rw [hss]
+          have hzero : owed wF.st d pid wF.roster = 0 := by
+            rw [hrost]
+            apply owed_out
+            intro i hi
+            simp [List.mem_append, List.mem_singleton] at hi
+            cases hi with
+            | inl hold =>
+              constructor
+              · intro m hm
+                rw [hst i] at hm
+                have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hold)
+                simp [hne] at hm
+                intro heq
+                exact hfresh (heq ▸ hO.sentFrom i m hm)
+              · intro p hp
+                rw [hst i] at hp
+                have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hold)
+                simp [hne] at hp
+                intro heq
+                exact hfresh (heq ▸ hO.parkFrom i p hp)
+            | inr hnew =>
+              cases hnew
+              rw [hst pid]
+              simp [hborn]
+          have htok : (wF.st pid).tokens d = budget I.desc (tname pid) d := by
+            rw [hst pid]
+            simp [hborn, pid, tname]
+          rw [hzero, htok]
+          simp
+        · have hs0 : s ∈ w.roster := by
+            cases hs with
+            | inl h => exact h
+            | inr h => exact absurd h hss
+          have howed : owed wF.st d s wF.roster = owed w.st d s w.roster := by
+            rw [hrost]
+            have hblankPid : (wF.st pid).box = [] ∧ (wF.st pid).parked = [] := hblank
+            have hstep := owed_snoc_blank wF.st d s w.roster pid hblankPid.1 hblankPid.2
+            rw [hstep]
+            refine owed_mail_eq _ _ _ _ w.roster ?_
+            intro i hi
+            have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hi)
+            rw [hst i]
+            simp [hne]
+          have htok : (wF.st s).tokens d = (w.st s).tokens d := by
+            rw [hst s]
+            simp [hss]
+          rw [howed, htok]
+          exact hO.balance s d hs0
+      · intro s d hs hl
+        rw [hrost] at hs
+        by_cases hss : s = pid
+        · rw [hss] at hl ⊢
+          rw [hst pid] at hl ⊢
+          simp [hborn] at hl ⊢
+          simp [pending, contRest]
+          exact floor_le_budget I.desc template t.initial d
+        · have hs0 : s ∈ w.roster := by
+            simp [List.mem_append, List.mem_singleton] at hs
+            cases hs with
+            | inl h => exact h
+            | inr h => exact absurd h hss
+          have hphs : (wF.st s).phase = (w.st s).phase := by rw [hst s]; simp [hss]
+          have htys : (wF.st s).typestate = (w.st s).typestate := by rw [hst s]; simp [hss]
+          have hl0 : (w.st s).life = .alive := by
+            rw [hst s] at hl
+            simp [hss] at hl
+            exact hl
+          have hold := hO.slack s d hs0 hl0
+          have hpend : pending (wF.st s) d = pending (w.st s) d := by simp [pending, hphs]
+          have hfloor : floorState I.desc (tname s) (wF.st s).typestate d =
+              floorState I.desc (tname s) (w.st s).typestate d := by rw [htys]
+          have htok : (wF.st s).tokens d = (w.st s).tokens d := by rw [hst s]; simp [hss]
+          rw [hpend, hfloor, htok]
+          exact hold
+      · intro s d hs hterm
+        rw [hrost] at hs ⊢
+        by_cases hss : s = pid
+        · rw [hss]
+          have hzero := owed_out wF.st d pid (w.roster ++ [pid]) (by
+            intro i hi
+            simp [List.mem_append, List.mem_singleton] at hi
+            cases hi with
+            | inl hold =>
+              constructor
+              · intro m hm
+                have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hold)
+                rw [hst i] at hm
+                simp [hne] at hm
+                intro heq
+                exact hfresh (heq ▸ hO.sentFrom i m hm)
+              · intro p hp
+                have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hold)
+                rw [hst i] at hp
+                simp [hne] at hp
+                intro heq
+                exact hfresh (heq ▸ hO.parkFrom i p hp)
+            | inr hnew =>
+              cases hnew
+              rw [hst pid]
+              simp [hborn])
+          exact hzero
+        · have hs0 : s ∈ w.roster := by
+            simp [List.mem_append, List.mem_singleton] at hs
+            cases hs with
+            | inl h => exact h
+            | inr h => exact absurd h hss
+          have h0 := hO.still s d hs0 hterm
+          have howed : owed wF.st d s (w.roster ++ [pid]) = owed w.st d s w.roster := by
+            have hstep := owed_snoc_blank wF.st d s w.roster pid hblank.1 hblank.2
+            rw [hstep]
+            refine owed_mail_eq _ _ _ _ w.roster ?_
+            intro i hi
+            have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hi)
+            rw [hst i]
+            simp [hne]
+          rw [howed, h0]
+      · intro s d hs hdead
+        rw [hrost] at hs
+        by_cases hss : s = pid
+        · rw [hss] at hdead
+          rw [hst pid] at hdead
+          simp [hborn] at hdead
+        · have hs0 : s ∈ w.roster := by
+            simp [List.mem_append, List.mem_singleton] at hs
+            cases hs with
+            | inl h => exact h
+            | inr h => exact absurd h hss
+          have hdead0 : (w.st s).life ≠ .alive := by
+            rw [hst s] at hdead
+            simp [hss] at hdead
+            exact hdead
+          have h0 := hO.quiet s d hs0 hdead0
+          rw [hrost]
+          have howed : owed wF.st d s (w.roster ++ [pid]) = owed w.st d s w.roster := by
+            have hstep := owed_snoc_blank wF.st d s w.roster pid hblank.1 hblank.2
+            rw [hstep]
+            refine owed_mail_eq _ _ _ _ w.roster ?_
+            intro i hi
+            have hne : i ≠ pid := fun heq => hfresh (by rw [← heq]; exact hi)
+            rw [hst i]
+            simp [hne]
+          rw [howed, h0]
+      · intro i hl1
+        by_cases hi : i = pid
+        · rw [hi]
+          rw [hst pid]
+          simp [hborn]
+        · rw [hst i]
+          simp [hi]
+          exact hO.clear i hl1
+    · simp [hif] at h
+
 end Deadlock
 

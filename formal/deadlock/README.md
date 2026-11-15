@@ -229,8 +229,13 @@ for a send the actor did not itself perform.
   names are unique. `occ_set` keeps it when one actor is replaced without changing
   its life, queues, or tokens, provided the new typestate still fits in those
   tokens. `occ_finish`, `occ_prio`, and `occ_bulk` cover `finish` and both
-  receives, including a parked sender being resumed. A running head and
-  `spawn` are not connected yet. The check is not
+  receives, including a parked sender being resumed. `occ_enqueue` covers a
+  blocking send or call, including a self-send and the park branch.
+  `occ_schedule` covers self-schedule, including the overflow crash, and
+  `occ_cell` covers a cell write followed by reader wakes. `occ_reply` covers
+  `performReply`. `occ_spawn` covers allocating a fresh per-peer instance.
+  `trySend`, a killing `terminate`, and one theorem for the whole of `execRun`
+  are not connected yet. The check is not
   known to be unsound: a terminable template
   cannot bulk-send, so a dead instance does not keep credit a replacement
   would count again. That missing preservation is why `¬ Deadlock` is not

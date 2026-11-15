@@ -62,3 +62,7 @@ import Deadlock.Occ
 #print axioms Deadlock.occ_finish
 #print axioms Deadlock.occ_prio
 #print axioms Deadlock.occ_bulk
+#print axioms Deadlock.occ_enqueue
+#print axioms Deadlock.occ_schedule
+#print axioms Deadlock.occ_cell
+#print axioms Deadlock.occ_spawn
