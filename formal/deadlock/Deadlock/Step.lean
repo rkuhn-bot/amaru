@@ -1821,4 +1821,50 @@ theorem inv_reachable (I : Impl) (N : Nat) (w : World) (hL : LocalOk I) (hR : Re
   | init => exact inv_init I N hL
   | step _ _ _ _ ha ih => exact step_inv I hL _ _ ⟨_, ha⟩ ih
 
+theorem effect_beq (a b : EffectKind) : (a == b) = true ↔ a = b := by
+  cases a <;> cases b <;> decide
+
+theorem kind_beq (a b : EdgeKind) : (a == b) = true ↔ a = b := by
+  cases a <;> cases b <;> decide
+
+theorem hasEdge_mem (D : Description) (src ss dst : String) (effect : EffectKind) (kind : EdgeKind)
+    (label : String) (h : hasEdge D src ss dst effect kind label = true) :
+    ∃ e, e ∈ D.edges ∧ e.src = src ∧ e.srcState = ss ∧ e.dst = dst ∧
+      e.effect = effect ∧ e.kind = kind ∧ e.label = label := by
+  simp [hasEdge, List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at h
+  obtain ⟨e, he, hf⟩ := h
+  obtain ⟨hf, hlab⟩ := hf
+  obtain ⟨hf, hkind⟩ := hf
+  obtain ⟨hf, heff⟩ := hf
+  obtain ⟨hf, hdst⟩ := hf
+  obtain ⟨hsrc, hss⟩ := hf
+  exact ⟨e, he, hsrc, hss, hdst, (effect_beq _ _).mp heff, (kind_beq _ _).mp hkind,
+    by simpa [beq_iff_eq] using hlab⟩
+
+/-- A parked actor is waiting on a blocking edge of the description. -/
+theorem described_park (I : Impl) (w : World) (h : Inv I w) (id dst : InstId) (isCall : Bool)
+    (k : Cont) (hph : (w.st id).phase = .parked dst isCall k) :
+    ∃ label e, e ∈ I.desc.edges ∧ e.src = tname id ∧ e.srcState = (w.st id).typestate ∧
+      e.dst = tname dst ∧ e.kind = .blocking ∧
+      e.effect = (if isCall then EffectKind.call else EffectKind.send) ∧ e.label = label := by
+  have hw := h.1.waited id
+  simp [waitEdge, hph] at hw
+  obtain ⟨label, hedge⟩ := hw
+  obtain ⟨e, he, hsrc, hss, hdst, heff, hkind, hlab⟩ :=
+    hasEdge_mem I.desc (tname id) (w.st id).typestate (tname dst)
+      (if isCall then EffectKind.call else EffectKind.send) .blocking label hedge
+  exact ⟨label, e, he, hsrc, hss, hdst, hkind, heff, hlab⟩
+
+/-- An actor awaiting a reply is waiting on a blocking call edge. -/
+theorem described_reply (I : Impl) (w : World) (h : Inv I w) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .awaitReply dst k) :
+    ∃ label e, e ∈ I.desc.edges ∧ e.src = tname id ∧ e.srcState = (w.st id).typestate ∧
+      e.dst = tname dst ∧ e.kind = .blocking ∧ e.effect = EffectKind.call ∧ e.label = label := by
+  have hw := h.1.waited id
+  simp [waitEdge, hph] at hw
+  obtain ⟨label, hedge⟩ := hw
+  obtain ⟨e, he, hsrc, hss, hdst, heff, hkind, hlab⟩ :=
+    hasEdge_mem I.desc (tname id) (w.st id).typestate (tname dst) .call .blocking label hedge
+  exact ⟨label, e, he, hsrc, hss, hdst, hkind, heff, hlab⟩
+
 end Deadlock

@@ -207,9 +207,11 @@ for a send the actor did not itself perform.
   `spawn_inv` keeps both invariants when the peer index being overwritten is
   idle with an empty queue. `Inv` is `SemInv`, `MailInv`, and `OpenSlots`
   together. It holds at `initWorld` and is preserved by one successful `apply`,
-  so every reachable world satisfies `inv_reachable`. `projects` is not yet
-  derived. The state after a queue is cleared and before its senders resume is
-  not claimed to satisfy `MailInv`.
+  so every reachable world satisfies `inv_reachable`. A parked phase or an
+  `awaitReply` is a blocking edge of the description (`described_park`,
+  `described_reply`). That edge is not yet filtered by `discharged` and
+  `targetStates`, so `projects` is not finished. The state after a queue is
+  cleared and before its senders resume is not claimed to satisfy `MailInv`.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a
