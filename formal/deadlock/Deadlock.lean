@@ -10,6 +10,7 @@ import Deadlock.RunInv
 import Deadlock.Pres
 import Deadlock.Step
 import Deadlock.Mail
+import Deadlock.Projects
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
@@ -50,3 +51,5 @@ import Deadlock.Mail
 #print axioms Deadlock.inv_reachable
 #print axioms Deadlock.described_park
 #print axioms Deadlock.described_reply
+#print axioms Deadlock.projects
+#print axioms Deadlock.ty_reachable

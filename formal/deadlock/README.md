@@ -141,15 +141,22 @@ list. It is the part that used to be assumed as `Refines.projects`,
   `priorityBound.b`, and that bound has `a = 0`. Re-arming a label does not
   grow the lane; a new label past the lane is the overflow crash.
 
-`projects`, the mailbox bound `box.length + |parked| ≤ Σ W ≤ cap`, and
-`no_crash` are **not** proved as inductive invariants yet. The accounting
-lemmas (`owed`, `owed_append_msg`, `debt_le_budget`, `targetsAll_edge`,
-`blocking` projection into `residualEdges`) are in `Occupy.lean` and
-`Local.lean`. Lemma 1's decidable side is the affine comparison
-`totalOcc ≤ capacity` (`l1`), which is a bound for every `N`, not a rejection
-of per-peer producers. The semantic inequality along a run is not proved, so
-a blocking send that Lemma 1 deletes from the residual graph is not yet known
-to be unparked.
+`projects` holds for every reachable world (`GraphOk` and `LocalOk`). A parked
+phase or an `awaitReply` is a blocking edge of the description, and if the
+partner is alive its typestate is a member of `targetStates`. In group mode
+that list is the states that co-occur with the source state in every group
+containing both roles; the live tuple is one of the allowed ones, both roles
+are multiplicity-one cores (a busy peer of such a template cannot exist), and
+`uncoveredEdges` rejects a blocking edge that no group covers. `"all"` uses
+the declared state list: an alive actor's typestate is declared, because it
+starts at `initial` and only moves to a transition's `toState`. `"explicit"`
+does not pass `LocalOk`. The mailbox bound `box.length + |parked| ≤ cap` and
+`no_crash` are **not** proved yet. The accounting lemmas (`owed`,
+`owed_append_msg`, `debt_le_budget`, `targetsAll_edge`) are in `Occupy.lean`.
+Lemma 1's decidable side is the affine comparison `totalOcc ≤ capacity`
+(`l1`), which is a bound for every `N`. The semantic inequality along a run
+is not proved, so a blocking send that Lemma 1 deletes from the residual
+graph is not yet known to be unparked.
 
 ## Operational model
 
@@ -184,7 +191,9 @@ for a send the actor did not itself perform.
   `blockingSend` and `callReply`, and `CellFresh`. Cycle-freedom
   (`heightsOkB_acyclic`) is proved and is only the well-foundedness of that
   induction.
-- **`SemInv` on every `Reachable` world, and `projects` from it.**
+- **Reachable worlds satisfy `Inv`, and `projects` is proved from that.** The
+  items below are closed. The one state this bullet does not claim is the
+  intermediate after a queue is cleared and before its senders resume.
   `semInv_init` holds at `initWorld`. `sem_set` / `credit_sem` / `cells_sem` /
   `finish_sem` / `spawn_sem` keep it when typestate and life of group roles do
   not change.   `sem_move` keeps it when one core follows a step the relation
@@ -208,10 +217,9 @@ for a send the actor did not itself perform.
   idle with an empty queue. `Inv` is `SemInv`, `MailInv`, and `OpenSlots`
   together. It holds at `initWorld` and is preserved by one successful `apply`,
   so every reachable world satisfies `inv_reachable`. A parked phase or an
-  `awaitReply` is a blocking edge of the description (`described_park`,
-  `described_reply`). That edge is not yet filtered by `discharged` and
-  `targetStates`, so `projects` is not finished. The state after a queue is
-  cleared and before its senders resume is not claimed to satisfy `MailInv`.
+  `awaitReply` is a blocking edge of the description, and a live partner's
+  typestate lies in `targetStates` (`projects`, from `projects_park` and
+  `projects_reply`).
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a
@@ -274,6 +282,7 @@ The same strings are `native_decide`d in `Deadlock/Examples.lean`.
 - `Deadlock/Local.lean` — `LocalOk`, `Assumptions`, `CellFresh`
 - `Deadlock/Occupy.lean` — in-flight message accounting
 - `Deadlock/Proof.lean` — effect/peer progress, phase stability of a running actor
+- `Deadlock/Projects.lean` — `projects` for reachable worlds
 - `Deadlock/Compat.lean` — `compat_group_closed`
 - `Deadlock/Theorem.lean` — effect and peer non-stuckness **from `Assumptions`**
 - `Deadlock/Json.lean`, `Main.lean` — `lake exe check`
@@ -286,3 +295,4 @@ From `#print axioms` (Lean 4.35.0), no `sorryAx`:
 |---|---|
 | `not_stuck_effect_assumed`, `not_stuck_peer_assumed`, `compat_group_closed` | `propext` |
 | `checkBool_sound`, `groupTargets_cooccur`, `execRun_preserves_other_run` | `propext`, `Quot.sound` |
+| `projects`, `ty_reachable`, `inv_reachable`, `step_inv`, `findTr_mem` | `propext`, `Classical.choice`, `Quot.sound` |
