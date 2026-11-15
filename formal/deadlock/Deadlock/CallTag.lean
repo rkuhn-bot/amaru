@@ -1944,4 +1944,591 @@ theorem deliver_parked_tag (I : Impl) (hL : LocalOk I) (w w1 : World) (id : Inst
         rw [(hO' d0 hd hs).2.1, (hO' d0 hd hs).2.2.1]
         exact hT.sole d0 c0
 
+/-- Deliver a non-call box head and leave the parked list where it is. -/
+theorem install_plain_kept (w w1 : World) (id : InstId) (a1 : Actor) (m : Msg) (ms : List Msg)
+    (hT : CallTagInv w) (hidle : (w.st id).phase = .idle)
+    (hst : ∀ i, w1.st i = w.st i) (hbox1 : a1.box = ms)
+    (hpark1 : a1.parked = (w.st id).parked) (hprio1 : a1.prio = (w.st id).prio)
+    (hph : a1.phase = .idle ∨ ∃ k, a1.phase = .run k ∧ k.replyTo = none)
+    (hhead : (w.st id).box = m :: ms) (hc : m.callFrom = none) :
+    CallTagInv (setActor w1 id a1) := by
+  have hcarry : ∀ c : InstId, carriedCont a1.phase = none ∨
+      ∃ k, carriedCont a1.phase = some k ∧ k.replyTo = none := by
+    intro _
+    rcases hph with hI | ⟨k, hk, hto⟩
+    · exact Or.inl (by simp [carriedCont, hI])
+    · exact Or.inr ⟨k, by simp [carriedCont, hk], hto⟩
+  apply call_tag_stable w (setActor w1 id a1) hT
+  · intro d c
+    constructor
+    · intro hm
+      by_cases hd : d = id
+      · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · have hx' : x ∈ ms := by
+            simp only [setActor, hd, hst, if_true] at hx
+            rw [hbox1] at hx
+            exact hx
+          exact Or.inl ⟨x, by rw [hd, hhead]; exact List.mem_cons_of_mem _ hx', hcf⟩
+        · have hq' : q ∈ a1.parked := by
+            simp only [setActor, hd, hst, if_true] at hq
+            exact hq
+          exact Or.inr ⟨q, by rw [hd, ← hpark1]; exact hq', hcf⟩
+      · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by simpa [setActor, hd, hst] using hx, hcf⟩
+        · exact Or.inr ⟨q, by simpa [setActor, hd, hst] using hq, hcf⟩
+    · intro hm
+      by_cases hd : d = id
+      · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · have hx' : x ∈ ms := by
+            rw [hd, hhead] at hx
+            cases hx with
+            | head => simp [hc] at hcf
+            | tail _ ht => exact ht
+          exact Or.inl ⟨x, by
+            simp only [setActor, hd, hst, if_true]
+            rw [← hbox1] at hx'
+            exact hx', hcf⟩
+        · exact Or.inr ⟨q, by
+            simp only [setActor, hd, hst, if_true]
+            rw [hd] at hq
+            rwa [← hpark1] at hq, hcf⟩
+      · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by simp [setActor, hd, hst, hx], hcf⟩
+        · exact Or.inr ⟨q, by simp [setActor, hd, hst, hq], hcf⟩
+  · intro i c
+    by_cases hi : i = id
+    · have hold : ¬handlerOwes c (w.st id).phase := by simp [handlerOwes, carriedCont, hidle]
+      have hnew : ¬handlerOwes c a1.phase := (plain_no_owe a1.phase c (hcarry c)).1
+      simp [setActor, hi]
+      exact ⟨fun h => absurd h hnew, fun h => absurd h hold⟩
+    · exact owes_iff_carried _ _ (by simp [setActor, hi, hst]) c
+  · intro i c
+    by_cases hi : i = id
+    · have hold : ¬replyPending c (w.st id).phase := by simp [replyPending, carriedCont, hidle]
+      have hnew : ¬replyPending c a1.phase := (plain_no_owe a1.phase c (hcarry c)).2
+      simp [setActor, hi]
+      exact ⟨fun h => absurd h hnew, fun h => absurd h hold⟩
+    · exact pending_iff_carried _ _ (by simp [setActor, hi, hst]) c
+  · intro c d k hph'
+    by_cases hc' : c = id
+    · simp [setActor, hc', hst] at hph'
+      rcases hph with hI | ⟨_, hk, _⟩
+      · simp [hI] at hph'
+      · simp [hk] at hph'
+    · simpa [setActor, hc', hst] using hph'
+  · intro c d k hph'
+    by_cases hc' : c = id
+    · simp [hidle, hc'] at hph'
+    · simpa [setActor, hc', hst] using hph'
+  · intro c d k hph'
+    by_cases hc' : c = id
+    · simp [setActor, hc', hst] at hph'
+      rcases hph with hI | ⟨_, hk, _⟩
+      · simp [hI] at hph'
+      · simp [hk] at hph'
+    · simpa [setActor, hc', hst] using hph'
+  · intro c d k hph'
+    by_cases hc' : c = id
+    · simp [hidle, hc'] at hph'
+    · simpa [setActor, hc', hst] using hph'
+  · intro i msg hm
+    by_cases hi : i = id
+    · exact hT.prioPlain id msg (by
+        simp only [setActor, hi, hst, if_true] at hm
+        simpa [hprio1] using hm)
+    · exact hT.prioPlain i msg (by simpa [setActor, hi, hst] using hm)
+  · intro d c
+    by_cases hd : d = id
+    · have hs := hT.sole id c
+      unfold soleCall at hs ⊢
+      rw [hhead, count_none m ms c hc] at hs
+      simp [setActor, hd, hst, hbox1, hpark1]
+      simpa [countCall] using hs
+    · simp [soleCall, setActor, hd, hst]
+      exact hT.sole d c
+
+/-- Deliver a call at the box head and leave the parked list where it is.
+The caller is already in `awaitReply`: a parked phase does not own a box message. -/
+theorem install_call_kept (w w1 : World) (id : InstId) (a1 : Actor) (m : Msg) (ms : List Msg)
+    (c : InstId) (k kw : Cont) (hT : CallTagInv w) (hidle : (w.st id).phase = .idle)
+    (hst : ∀ i, w1.st i = w.st i) (hbox1 : a1.box = ms)
+    (hpark1 : a1.parked = (w.st id).parked) (hprio1 : a1.prio = (w.st id).prio)
+    (hhead : (w.st id).box = m :: ms) (hc : m.callFrom = some c)
+    (hrun : a1.phase = .run k) (hshape : replyShape c k)
+    (hother : ∀ c', c' ≠ c → ¬handlerOwes c' a1.phase ∧ ¬replyPending c' a1.phase)
+    (hown : (w.st c).phase = .awaitReply id kw) : CallTagInv (setActor w1 id a1) := by
+  have hzeroB : countCall ms c = 0 := by
+    have hs := hT.sole id c
+    unfold soleCall at hs
+    rw [hhead, count_some m ms c hc] at hs
+    omega
+  have hzeroP : countParkedCall (w.st id).parked c = 0 := by
+    have hs := hT.sole id c
+    unfold soleCall at hs
+    rw [hhead, count_some m ms c hc] at hs
+    omega
+  have hne : c ≠ id := by
+    intro heq
+    simp [heq, hidle] at hown
+  have hduty : handlerOwes c a1.phase ∨ replyPending c a1.phase := by
+    cases hrest : k.rest with
+    | nil =>
+      have hc1 := hshape.2.1
+      simp [replyCount, hrest] at hc1
+    | cons e es =>
+      by_cases he : e = .reply
+      · exact Or.inr ⟨k, by simp [carriedCont, hrun], hshape, by simp [nextIsReply, hrest, he]⟩
+      · exact Or.inl ⟨k, by simp [carriedCont, hrun], hshape, by
+          cases e <;> simp [nextIsReply, hrest] at he ⊢⟩
+  let w' := setActor w1 id a1
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro c0 d0 k0 hph
+    have hc0 : c0 ≠ id := by
+      intro heq
+      simp [w', setActor, heq, hrun] at hph
+    have hold : (w.st c0).phase = .awaitReply d0 k0 := by
+      simpa [w', setActor, hc0, hst] using hph
+    by_cases hd : d0 = id
+    · by_cases hsame : c0 = c
+      · rw [hsame, hd]
+        have hnom : ¬mailCall w' id c := by
+          intro hm
+          rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+          · have hx' : x ∈ ms := by
+              simp only [w', setActor, if_true] at hx
+              rw [hbox1] at hx
+              exact hx
+            exact count_zero_mem ms c hzeroB x hx' hcf
+          · have hq' : q ∈ (w.st id).parked := by
+              simp only [w', setActor, if_true] at hq
+              rw [hpark1] at hq
+              exact hq
+            exact countParked_zero_mem _ c hzeroP q hq' hcf
+        rcases hduty with ho | hp
+        · exact Or.inr (Or.inl ⟨hnom, by simpa [w', setActor] using ho,
+            by simpa [w', setActor] using handlerOwes_not_pending c a1.phase ho⟩)
+        · exact Or.inr (Or.inr ⟨hnom,
+            fun ho' => handlerOwes_not_pending c a1.phase (by simpa [w', setActor] using ho')
+              (by simpa [w', setActor] using hp),
+            by simpa [w', setActor] using hp⟩)
+      · have hpre := hT.awaiting c0 id k0 (by simpa [hd] using hold)
+        have holdD : ¬(handlerOwes c0 (w.st id).phase ∨ replyPending c0 (w.st id).phase) := by
+          simp [handlerOwes, replyPending, carriedCont, hidle]
+        have hmail0 : mailCall w id c0 := by
+          rcases hpre with h1 | h2 | h3
+          · exact h1.1
+          · exact absurd (Or.inl h2.2.1) holdD
+          · exact absurd (Or.inr h3.2.2) holdD
+        have hmem : (∃ x, x ∈ ms ∧ x.callFrom = some c0) ∨
+            (∃ q, q ∈ (w.st id).parked ∧ q.msg.callFrom = some c0) := by
+          rcases hmail0 with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+          · rw [hhead] at hx
+            cases hx with
+            | head =>
+              simp [hc] at hcf
+              exact False.elim (hsame hcf.symm)
+            | tail _ ht => exact Or.inl ⟨x, ht, hcf⟩
+          · exact Or.inr ⟨q, hq, hcf⟩
+        rcases hmem with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨Or.inl ⟨x, by simp [w', setActor, hd, hbox1, hx], hcf⟩,
+            by simpa [w', setActor, hd] using (hother c0 hsame).1,
+            by simpa [w', setActor, hd] using (hother c0 hsame).2⟩
+        · exact Or.inl ⟨Or.inr ⟨q, by simp [w', setActor, hd, hpark1, hq], hcf⟩,
+            by simpa [w', setActor, hd] using (hother c0 hsame).1,
+            by simpa [w', setActor, hd] using (hother c0 hsame).2⟩
+    · have hpre := hT.awaiting c0 d0 k0 hold
+      have hmail : mailCall w' d0 c0 ↔ mailCall w d0 c0 := by
+        constructor
+        · intro hm
+          rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+          · exact Or.inl ⟨x, by simpa [w', setActor, hd, hst] using hx, hcf⟩
+          · exact Or.inr ⟨q, by simpa [w', setActor, hd, hst] using hq, hcf⟩
+        · intro hm
+          rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+          · exact Or.inl ⟨x, by simp [w', setActor, hd, hst, hx], hcf⟩
+          · exact Or.inr ⟨q, by simp [w', setActor, hd, hst, hq], hcf⟩
+      have hphEq : (w'.st d0).phase = (w.st d0).phase := by
+        simp [w', setActor, if_neg hd, hst]
+      have howe := owes_iff_carried (w.st d0).phase (w'.st d0).phase (by rw [hphEq]) c0
+      have hpend := pending_iff_carried (w.st d0).phase (w'.st d0).phase (by rw [hphEq]) c0
+      rcases hpre with h1 | h2 | h3
+      · exact Or.inl ⟨hmail.mpr h1.1, (not_iff howe).mpr h1.2.1, (not_iff hpend).mpr h1.2.2⟩
+      · exact Or.inr (Or.inl ⟨(not_iff hmail).mpr h2.1, howe.mpr h2.2.1, (not_iff hpend).mpr h2.2.2⟩)
+      · exact Or.inr (Or.inr ⟨(not_iff hmail).mpr h3.1, (not_iff howe).mpr h3.2.1, hpend.mpr h3.2.2⟩)
+  · intro c0 d0 k0 hph
+    have hc0 : c0 ≠ id := by
+      intro heq
+      simp [w', setActor, heq, hrun] at hph
+    have hold : (w.st c0).phase = .parked d0 true k0 := by
+      simpa [w', setActor, hc0, hst] using hph
+    have hpre := hT.parkedCall c0 d0 k0 hold
+    by_cases hd : d0 = id
+    · have hnotC : c0 ≠ c := by
+        intro heq
+        simp [heq, hown, hd] at hold
+      have hmem : (∃ x, x ∈ ms ∧ x.callFrom = some c0) ∨
+          (∃ q, q ∈ (w.st id).parked ∧ q.msg.callFrom = some c0) := by
+        rcases hpre.1 with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · rw [hd, hhead] at hx
+          cases hx with
+          | head =>
+            simp [hc] at hcf
+            exact False.elim (hnotC hcf.symm)
+          | tail _ ht => exact Or.inl ⟨x, ht, hcf⟩
+        · exact Or.inr ⟨q, by simpa [hd] using hq, hcf⟩
+      rcases hmem with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+      · exact ⟨Or.inl ⟨x, by simp [w', setActor, hd, hbox1, hx], hcf⟩,
+          by simpa [w', setActor, hd] using (hother c0 hnotC).1,
+          by simpa [w', setActor, hd] using (hother c0 hnotC).2⟩
+      · exact ⟨Or.inr ⟨q, by simp [w', setActor, hd, hpark1, hq], hcf⟩,
+          by simpa [w', setActor, hd] using (hother c0 hnotC).1,
+          by simpa [w', setActor, hd] using (hother c0 hnotC).2⟩
+    · exact ⟨by
+        rcases hpre.1 with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by simp [w', setActor, hd, hst, hx], hcf⟩
+        · exact Or.inr ⟨q, by simp [w', setActor, hd, hst, hq], hcf⟩,
+        by simpa [w', setActor, hd, hst] using hpre.2.1,
+        by simpa [w', setActor, hd, hst] using hpre.2.2⟩
+  · intro d0 c0 hm
+    have hpreM : mailCall w d0 c0 := by
+      by_cases hd : d0 = id
+      · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · have hx' : x ∈ ms := by
+            simp only [w', setActor, hd, if_true] at hx
+            rw [hbox1] at hx
+            exact hx
+          exact Or.inl ⟨x, by rw [hd, hhead]; exact List.mem_cons_of_mem _ hx', hcf⟩
+        · have hq' : q ∈ (w.st id).parked := by
+            simp only [w', setActor, hd, if_true] at hq
+            rw [hpark1] at hq
+            exact hq
+          exact Or.inr ⟨q, by rw [hd]; exact hq', hcf⟩
+      · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by simpa [w', setActor, hd, hst] using hx, hcf⟩
+        · exact Or.inr ⟨q, by simpa [w', setActor, hd, hst] using hq, hcf⟩
+    rcases hT.msgOwner d0 c0 hpreM with ⟨k0, hk0⟩ | ⟨k0, hk0⟩
+    · exact Or.inl ⟨k0, by
+        have hc0 : c0 ≠ id := by
+          intro heq
+          simp [heq, hidle] at hk0
+        simpa [w', setActor, hc0, hst] using hk0⟩
+    · exact Or.inr ⟨k0, by
+        have hc0 : c0 ≠ id := by
+          intro heq
+          simp [heq, hidle] at hk0
+        simpa [w', setActor, hc0, hst] using hk0⟩
+  · intro d0 c0 ho
+    by_cases hd : d0 = id
+    · have hc0 : c0 = c := by
+        by_cases hbad : c0 = c
+        · exact hbad
+        · rcases ho with h | h
+          · exact absurd (by simpa [w', setActor, hd] using h) (hother c0 hbad).1
+          · exact absurd (by simpa [w', setActor, hd] using h) (hother c0 hbad).2
+      exact ⟨kw, by rw [hc0, hd]; simpa [w', setActor, hst, hne] using hown⟩
+    · have hpre : handlerOwes c0 (w.st d0).phase ∨ replyPending c0 (w.st d0).phase := by
+        simpa [w', setActor, hd, hst] using ho
+      obtain ⟨k0, hk0⟩ := hT.oweOwner d0 c0 hpre
+      have hc0 : c0 ≠ id := by
+        intro heq
+        simp [heq, hidle] at hk0
+      exact ⟨k0, by simpa [w', setActor, hc0, hst] using hk0⟩
+  · intro i msg hm
+    by_cases hi : i = id
+    · exact hT.prioPlain id msg (by
+        simp only [w', setActor, hi, if_true] at hm
+        simpa [hprio1] using hm)
+    · exact hT.prioPlain i msg (by simpa [w', setActor, hi, hst] using hm)
+  · intro d0 c0
+    by_cases hd : d0 = id
+    · by_cases hsame : c0 = c
+      · unfold soleCall
+        have hz : countParkedCall a1.parked c = 0 := by rw [hpark1]; exact hzeroP
+        simp [w', setActor, hd, hbox1, hsame, hzeroB, hz, countParkedCall]
+      · have hs := hT.sole id c0
+        unfold soleCall at hs
+        rw [hhead] at hs
+        have hdrop : countCall (m :: ms) c0 = countCall ms c0 := by
+          have hne0 : m.callFrom ≠ some c0 := by
+            intro hbad
+            simp [hc] at hbad
+            exact hsame hbad.symm
+          simp [countCall, hne0]
+        rw [hdrop] at hs
+        simpa [soleCall, w', setActor, hd, hbox1, hpark1] using hs
+    · simpa [soleCall, w', setActor, hd, hst] using hT.sole d0 c0
+
+theorem count_append (ms : List Msg) (m : Msg) (c : InstId) :
+    countCall (ms ++ [m]) c = countCall ms c + countCall [m] c := by
+  induction ms with
+  | nil => simp [countCall]
+  | cons x xs ih =>
+    simp [countCall, ih, Nat.add_assoc]
+
+/-- Move a parked head onto the tail of the box. Phases stay put, so a call tag
+moves from one list to the other and the count is unchanged. -/
+theorem move_parked_msg (w : World) (id : InstId) (p : Parked) (ps : List Parked)
+    (hT : CallTagInv w) (hpark : (w.st id).parked = p :: ps) :
+    CallTagInv (setActor w id { (w.st id) with box := (w.st id).box ++ [p.msg], parked := ps }) := by
+  let w' := setActor w id { (w.st id) with box := (w.st id).box ++ [p.msg], parked := ps }
+  apply call_tag_stable w w' hT
+  · intro d c
+    by_cases hd : d = id
+    · constructor
+      · intro hm
+        rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · simp only [w', setActor, hd, if_true] at hx
+          rw [hd]
+          have hx' : x ∈ (w.st id).box ∨ x = p.msg := by
+            rw [List.mem_append] at hx
+            simpa using hx
+          rcases hx' with hin | heq
+          · exact Or.inl ⟨x, hin, hcf⟩
+          · rw [heq] at hcf
+            exact Or.inr ⟨p, by simp [hpark], hcf⟩
+        · simp only [w', setActor, hd, if_true] at hq
+          exact Or.inr ⟨q, by rw [hd, hpark]; exact List.mem_cons_of_mem _ hq, hcf⟩
+      · intro hm
+        rw [hd] at hm
+        rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by
+            simp [w', setActor, hd]
+            exact Or.inl hx, hcf⟩
+        · rw [hpark] at hq
+          cases hq with
+          | head =>
+            exact Or.inl ⟨p.msg, by
+              simp [w', setActor, hd], hcf⟩
+          | tail _ ht =>
+            exact Or.inr ⟨q, by
+              simp [w', setActor, hd]
+              exact ht, hcf⟩
+    · constructor
+      · intro hm
+        rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by simpa [w', setActor, if_neg hd] using hx, hcf⟩
+        · exact Or.inr ⟨q, by simpa [w', setActor, if_neg hd] using hq, hcf⟩
+      · intro hm
+        rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+        · exact Or.inl ⟨x, by simp [w', setActor, if_neg hd, hx], hcf⟩
+        · exact Or.inr ⟨q, by simp [w', setActor, if_neg hd, hq], hcf⟩
+  · intro i c
+    exact owes_iff_carried _ _ (by
+      by_cases hi : i = id <;> simp [w', setActor, hi, carriedCont]) c
+  · intro i c
+    exact pending_iff_carried _ _ (by
+      by_cases hi : i = id <;> simp [w', setActor, hi, carriedCont]) c
+  · intro c0 d0 k0 hph
+    by_cases hc : c0 = id
+    · simp [w', setActor, hc] at hph
+      rw [hc]
+      exact hph
+    · simpa [w', setActor, hc] using hph
+  · intro c0 d0 k0 hph
+    by_cases hc : c0 = id
+    · simpa [w', setActor, hc] using hph
+    · simpa [w', setActor, hc] using hph
+  · intro c0 d0 k0 hph
+    by_cases hc : c0 = id
+    · simp [w', setActor, hc] at hph
+      rw [hc]
+      exact hph
+    · simpa [w', setActor, hc] using hph
+  · intro c0 d0 k0 hph
+    by_cases hc : c0 = id
+    · simpa [w', setActor, hc] using hph
+    · simpa [w', setActor, hc] using hph
+  · intro i m hm
+    by_cases hi : i = id
+    · exact hT.prioPlain id m (by simpa [w', setActor, hi] using hm)
+    · exact hT.prioPlain i m (by simpa [w', setActor, hi] using hm)
+  · intro d c
+    by_cases hd : d = id
+    · have hs := hT.sole id c
+      unfold soleCall at hs ⊢
+      rw [hd]
+      simp [w', setActor, hpark, count_append, countCall, countParkedCall] at hs ⊢
+      omega
+    · simpa [soleCall, w', setActor, hd] using hT.sole d c
+
+/-- After the parked head has been appended to the box, admit its caller. -/
+theorem parked_tail_call (w : World) (id : InstId) (p : Parked) (ps : List Parked)
+    (kS : Cont) (name : String) (s : InstId) (hT : CallTagInv w)
+    (hpark : (w.st id).parked = p :: ps) (hph : (w.st p.sender).phase = .parked id true kS)
+    (hsnd : p.sender ≠ id) :
+    let wM := setActor w id { (w.st id) with box := (w.st id).box ++ [p.msg], parked := ps }
+    let wC := creditSender wM name s
+    CallTagInv (setActor wC p.sender (resumeSender (wC.st p.sender) true id)) := by
+  have hM := move_parked_msg w id p ps hT hpark
+  let wM := setActor w id { (w.st id) with box := (w.st id).box ++ [p.msg], parked := ps }
+  have hC := credit_tag wM name s hM
+  let wC := creditSender wM name s
+  have hphC : (wC.st p.sender).phase = .parked id true kS := by
+    have hphM : (wM.st p.sender).phase = (w.st p.sender).phase := by
+      simp [wM, setActor, hsnd]
+    simpa [wC, hphM, hph] using (credit_same wM name s p.sender).2.2.1
+  have hA := admit_phase wC p.sender id kS hC hphC
+  have hres : resumeSender (wC.st p.sender) true id =
+      { (wC.st p.sender) with phase := .awaitReply id kS } := by
+    simp [resumeSender, hphC]
+  show CallTagInv (setActor wC p.sender (resumeSender (wC.st p.sender) true id))
+  rw [hres]
+  exact hA
+
+/-- After the parked head has been appended to the box, resume a non-call sender. -/
+theorem parked_tail_send (w : World) (id : InstId) (p : Parked) (ps : List Parked)
+    (kS : Cont) (name : String) (s : InstId) (hT : CallTagInv w)
+    (hpark : (w.st id).parked = p :: ps) (hph : (w.st p.sender).phase = .parked id false kS)
+    (hsnd : p.sender ≠ id) :
+    let wM := setActor w id { (w.st id) with box := (w.st id).box ++ [p.msg], parked := ps }
+    let wC := creditSender wM name s
+    CallTagInv (setActor wC p.sender (resumeSender (wC.st p.sender) false id)) := by
+  have hM := move_parked_msg w id p ps hT hpark
+  let wM := setActor w id { (w.st id) with box := (w.st id).box ++ [p.msg], parked := ps }
+  have hC := credit_tag wM name s hM
+  let wC := creditSender wM name s
+  have hphC : (wC.st p.sender).phase = .parked id false kS := by
+    have hphM : (wM.st p.sender).phase = (w.st p.sender).phase := by
+      simp [wM, setActor, hsnd]
+    simpa [wC, hphM, hph] using (credit_same wM name s p.sender).2.2.1
+  simpa using resume_send_tag wC p.sender id kS hC hphC
+
+theorem ite_shadow {α : Type} (p : Prop) [Decidable p] (a b d : α) :
+    (if p then a else if p then b else d) = if p then a else d := by
+  by_cases h : p <;> simp [h]
+
+theorem setActor_same (w : World) (id : InstId) (a b : Actor) :
+    setActor (setActor w id a) id b = setActor w id b := by
+  simp [setActor]
+  funext i
+  by_cases hi : i = id <;> simp [hi]
+
+/-- A successful bulk receive preserves call tags. A parked entry's `callFrom`
+agrees with its sender, and a call sitting in the box already has its caller in
+`awaitReply`. -/
+theorem recvBulk_tag (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
+    (hM : MailInv w) (hT : CallTagInv w)
+    (halign : ∀ q, q ∈ (w.st id).parked →
+      (q.isCall = true → q.msg.callFrom = some q.sender) ∧
+      (q.isCall = false → q.msg.callFrom = none))
+    (hown : ∀ (m : Msg) (c : InstId), m ∈ (w.st id).box → m.callFrom = some c →
+      ∃ k, (w.st c).phase = .awaitReply id k)
+    (h : receiveBulk I w id = some w') : CallTagInv w' := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    have hidle : (w.st id).phase = .idle := by
+      by_cases hp : (w.st id).phase = .idle
+      · exact hp
+      · exact absurd (Or.inr hp) hready
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hp : (w.st id).parked with
+      | nil => simp [hbox, hp] at h
+      | cons p ps =>
+        simp [hbox, hp] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          obtain ⟨kS, hph⟩ := hM.fwd id p (by simp [hp])
+          have hsnd : p.sender ≠ id := by
+            intro heq
+            simp [heq, hidle] at hph
+          have hdel' : deliver I w id ({ (w.st id) with parked := ps }) p.msg = some (w1, a1) := by
+            simp [hbox]
+            exact hdel
+          cases hc : p.isCall with
+          | false =>
+            have hfrom := (halign p (by simp [hp])).2 hc
+            rw [hc] at hph
+            simpa [hc] using deliver_parked_send I w w1 id p ps a1 kS hM hT hidle hbox hp hc
+              hfrom hph hdel'
+          | true =>
+            have hfrom := (halign p (by simp [hp])).1 hc
+            rw [hc] at hph
+            simpa [hc] using deliver_parked_tag I hL w w1 id p ps a1 kS hM hT hidle hbox hp
+              hfrom hph hdel'
+    | cons m ms =>
+      cases hp : (w.st id).parked with
+      | nil =>
+        simp [hbox, hp] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hdel' : deliver I w id ({ (w.st id) with box := ms }) m = some (w1, a1) := by
+            simp [hp]
+            exact hdel
+          exact bulk_box I hL w w1 id m ms a1 hM hT hidle hp hbox hdel'
+      | cons p ps =>
+        simp [hbox, hp] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hdel' : deliver I w id ({ (w.st id) with box := ms }) m = some (w1, a1) := by
+            simp [hp]
+            exact hdel
+          have hst : ∀ i, w1.st i = w.st i := fun i =>
+            deliver_st I w id ({ (w.st id) with box := ms }) m w1 a1 i hdel'
+          obtain ⟨kS, hph⟩ := hM.fwd id p (by simp [hp])
+          have hsnd : p.sender ≠ id := by
+            intro heq
+            simp [heq, hidle] at hph
+          have hparkA : ((setActor w1 id a1).st id).parked = p :: ps := by
+            cases hcm : m.callFrom with
+            | none =>
+              have hplain := deliver_plain I w id ({ (w.st id) with box := ms }) m w1 a1 hdel' hcm
+              simp [setActor, hplain.2.1, hp]
+            | some c =>
+              have hcall := deliver_call I hL w id ({ (w.st id) with box := ms }) m w1 a1 c hdel' hcm
+              simp [setActor, hcall.2.1, hp]
+          have hphA : ((setActor w1 id a1).st p.sender).phase = (w.st p.sender).phase := by
+            simp [setActor, hsnd, hst]
+          cases hcm : m.callFrom with
+          | none =>
+            have hplain := deliver_plain I w id ({ (w.st id) with box := ms }) m w1 a1 hdel' hcm
+            have hI := install_plain_kept w w1 id a1 m ms hT hidle hst
+              (by simpa using hplain.1) (by simpa [hp] using hplain.2.1)
+              (by simpa using hplain.2.2.1) hplain.2.2.2 hbox hcm
+            cases hc : p.isCall with
+            | false =>
+              rw [hc] at hph
+              have hphS : ((setActor w1 id a1).st p.sender).phase = .parked id false kS := by
+                rw [hphA]; exact hph
+              have := parked_tail_send (setActor w1 id a1) id p ps kS (tname id) m.sender hI
+                hparkA hphS hsnd
+              simpa [setActor_same, setActor, ite_shadow, hc] using this
+            | true =>
+              rw [hc] at hph
+              have hphS : ((setActor w1 id a1).st p.sender).phase = .parked id true kS := by
+                rw [hphA]; exact hph
+              have := parked_tail_call (setActor w1 id a1) id p ps kS (tname id) m.sender hI
+                hparkA hphS hsnd
+              simpa [setActor_same, setActor, ite_shadow, hc] using this
+          | some c =>
+            have hcall := deliver_call I hL w id ({ (w.st id) with box := ms }) m w1 a1 c hdel' hcm
+            obtain ⟨kH, hrun, hshape, _, hother⟩ := hcall.2.2.2
+            obtain ⟨kw, hownc⟩ := hown m c (by simp [hbox]) hcm
+            have hI := install_call_kept w w1 id a1 m ms c kH kw hT hidle hst
+              (by simpa using hcall.1) (by simpa [hp] using hcall.2.1)
+              (by simpa using hcall.2.2.1) hbox hcm hrun hshape hother hownc
+            cases hc : p.isCall with
+            | false =>
+              rw [hc] at hph
+              have hphS : ((setActor w1 id a1).st p.sender).phase = .parked id false kS := by
+                rw [hphA]; exact hph
+              have := parked_tail_send (setActor w1 id a1) id p ps kS (tname id) m.sender hI
+                hparkA hphS hsnd
+              simpa [setActor_same, setActor, ite_shadow, hc] using this
+            | true =>
+              rw [hc] at hph
+              have hphS : ((setActor w1 id a1).st p.sender).phase = .parked id true kS := by
+                rw [hphA]; exact hph
+              have := parked_tail_call (setActor w1 id a1) id p ps kS (tname id) m.sender hI
+                hparkA hphS hsnd
+              simpa [setActor_same, setActor, ite_shadow, hc] using this
+
 end Deadlock

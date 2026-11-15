@@ -150,3 +150,4 @@ import Deadlock.Rank
 #print axioms Deadlock.bulk_box
 #print axioms Deadlock.deliver_parked_send
 #print axioms Deadlock.deliver_parked_tag
+#print axioms Deadlock.recvBulk_tag

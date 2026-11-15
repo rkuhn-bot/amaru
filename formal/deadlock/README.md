@@ -348,13 +348,17 @@ for a send the actor did not itself perform.
   `admit_phase` rewrites a parked call into `awaitReply` on the same
   continuation while the mailbox entry is still there. An empty mailbox that
   delivers a parked head is different: `deliver_parked_send` resumes a non-call
-  sender with `proceed`, and `deliver_parked_tag` checks the call post-state
+  sender with `proceed`, and   `deliver_parked_tag` checks the call post-state
   in one step (handler `replyTo` the sender, sender in `awaitReply`, entry
   removed). The call message has to name that sender; a swapped pair of parked
-  calls is a `CallTagInv` world the step does not preserve. A bulk receive
-  whose box and parked list are both nonempty, `exec`, `call_tag_reachable`,
-  the delivery walk, the handler reply, `never_stuck`, `deadlock_freedom`,
-  `CellFresh`, and the dead-instance lift are not done.
+  calls is a `CallTagInv` world the step does not preserve. `recvBulk_tag`
+  covers every successful bulk receive: an empty parked list, an empty box,
+  and both nonempty. The both-nonempty arm installs the box head with the
+  parked list still in place, then moves that head onto the box and resumes
+  its sender. A call that is already in the box has its caller in `awaitReply`.
+  `exec`, `call_tag_reachable`, the delivery walk, the handler reply,
+  `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift
+  are not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
