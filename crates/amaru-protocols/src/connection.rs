@@ -908,6 +908,8 @@ mod tests {
         assert_eq!(*mailbox_size, mux::MUX_MAILBOX_SIZE);
     }
 
+    include!("early_chainsync_done.rs");
+
     // HELPERS
 
     fn test_connection(state: State) -> Connection {
