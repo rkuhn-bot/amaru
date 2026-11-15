@@ -2003,4 +2003,143 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
     · rw [hparkF, if_neg hs]
       exact hO.clear s hl1
 
+theorem owed_off (st : InstId → Actor) (id : InstId) (a : Actor) (dst : String) (sender : InstId)
+    (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster) (hname : tname id ≠ dst) :
+    owed (fun i => if i = id then a else st i) dst sender roster = owed st dst sender roster := by
+  have hb : (tname id == dst) = false := by
+    cases hbb : tname id == dst with
+    | false => rfl
+    | true => exact absurd ((beq_iff_eq).mp hbb) hname
+  have hslot : slot (fun i => if i = id then a else st i) dst sender id = slot st dst sender id := by
+    simp [slot, hb]
+  have hrep := owed_replace st dst sender id a roster nodup hmem
+  omega
+
+theorem resume_pending (a : Actor) (isCall : Bool) (dst : InstId) (d : String) (hc : contTy a) :
+    pending (resumeSender a isCall dst) d ≤ pending a d := by
+  cases h : a.phase with
+  | parked _ _ k =>
+    have hty : a.typestate = k.toState := by simpa [contTy, h] using hc
+    cases isCall <;> cases hk : k.rest <;>
+      simp [resumeSender, h, proceed, pending, contRest, hk, hty]
+  | idle => simp [resumeSender, h]
+  | run k => simp [resumeSender, h]
+  | awaitReply _ _ => simp [resumeSender, h]
+  | awaitEffect _ => simp [resumeSender, h]
+  | awaitPeer _ => simp [resumeSender, h]
+  | crashed => simp [resumeSender, h]
+
+theorem resume_box (a : Actor) (isCall : Bool) (dst : InstId) : (resumeSender a isCall dst).box = a.box := by
+  cases hph : a.phase with
+  | parked _ _ k =>
+    cases isCall with
+    | true => simp [resumeSender, hph]
+    | false =>
+      cases hk : k.rest <;> simp [resumeSender, hph, proceed, hk]
+  | idle => simp [resumeSender, hph]
+  | run k => simp [resumeSender, hph]
+  | awaitReply _ _ => simp [resumeSender, hph]
+  | awaitEffect _ => simp [resumeSender, hph]
+  | awaitPeer _ => simp [resumeSender, hph]
+  | crashed => simp [resumeSender, hph]
+
+theorem resume_park (a : Actor) (isCall : Bool) (dst : InstId) :
+    (resumeSender a isCall dst).parked = a.parked := by
+  cases hph : a.phase with
+  | parked _ _ k =>
+    cases isCall with
+    | true => simp [resumeSender, hph]
+    | false =>
+      cases hk : k.rest <;> simp [resumeSender, hph, proceed, hk]
+  | idle => simp [resumeSender, hph]
+  | run k => simp [resumeSender, hph]
+  | awaitReply _ _ => simp [resumeSender, hph]
+  | awaitEffect _ => simp [resumeSender, hph]
+  | awaitPeer _ => simp [resumeSender, hph]
+  | crashed => simp [resumeSender, hph]
+
+theorem resume_tokens (a : Actor) (isCall : Bool) (dst : InstId) (d : String) :
+    (resumeSender a isCall dst).tokens d = a.tokens d := by
+  cases hph : a.phase with
+  | parked _ _ k =>
+    cases isCall with
+    | true => simp [resumeSender, hph]
+    | false =>
+      cases hk : k.rest <;> simp [resumeSender, hph, proceed, hk]
+  | idle => simp [resumeSender, hph]
+  | run k => simp [resumeSender, hph]
+  | awaitReply _ _ => simp [resumeSender, hph]
+  | awaitEffect _ => simp [resumeSender, hph]
+  | awaitPeer _ => simp [resumeSender, hph]
+  | crashed => simp [resumeSender, hph]
+
+theorem occ_resume (I : Impl) (w : World) (sender : InstId) (isCall : Bool) (dst : InstId)
+    (hO : OccInv I w) (hc : contTy (w.st sender)) :
+    OccInv I (setActor w sender (resumeSender (w.st sender) isCall dst)) := by
+  let a := resumeSender (w.st sender) isCall dst
+  exact occ_set I w sender a hO (by simp [a, resume_keeps (w.st sender) isCall dst hc])
+    (by simp [a, resume_box]) (by simp [a, resume_park]) (by intro d; simp [a, resume_tokens]) (by
+      intro d hl
+      have hl0 : (w.st sender).life = .alive := by
+        have hlife := (resume_keeps (w.st sender) isCall dst hc).2
+        rw [← hlife]
+        simpa [a] using hl
+      have hmem := hO.aliveIn sender hl0
+      have hold := hO.slack sender d hmem hl0
+      have hty := (resume_keeps (w.st sender) isCall dst hc).1
+      have hpend := resume_pending (w.st sender) isCall dst d hc
+      have htok := resume_tokens (w.st sender) isCall dst d
+      simp [a] at hty hpend htok ⊢
+      rw [hty, htok]
+      omega)
+
+theorem occ_bulk_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
+    (m : Msg) (ms : List Msg) (w1 : World) (a1 : Actor) (hO : OccInv I w)
+    (hbox : (w.st id).box = m :: ms) (hpark : (w.st id).parked = [])
+    (halive : (w.st id).life = .alive) (hidle : (w.st id).phase = .idle)
+    (hd : deliver I w id {(w.st id) with box := ms} m = some (w1, a1)) :
+    OccInv I (creditSender (setActor w1 id a1) (tname id) m.sender) := by
+  have hacc := deliver_account I hL hG w id {(w.st id) with box := ms} m w1 a1
+    (by simp [halive]) (by simp [hidle]) hd
+  obtain ⟨hl, hb, hparkA, htokA, hfl⟩ := hacc
+  have hmem := hO.aliveIn id halive
+  have hsend := hO.sentFrom id m (by rw [hbox]; exact List.Mem.head _)
+  apply occ_consume I w w1 id m.sender a1 hO
+      (fun i => deliver_st I w id _ m w1 a1 i hd)
+      (deliver_roster I w id _ m w1 a1 hd) (deliver_N I w id _ m w1 a1 hd)
+      (fun n => deliver_ix I w id _ m w1 a1 n hd)
+      (by simpa [halive] using hl) (by intro d; simpa [halive] using htokA d) hmem hsend
+  · intro s
+    by_cases hs : s = m.sender
+    · rw [hs]
+      have hdrop := owed_drop_box w.st (tname id) m.sender id m ms w.roster hO.nodup hmem rfl rfl hbox
+      have hsame := owed_actor w.st id a1 {(w.st id) with box := ms} (tname id) m.sender w.roster
+        (by simpa using hb) (by simpa [hpark] using hparkA)
+      simp
+      rw [hsame]
+      exact hdrop
+    · have hkeep := owed_keep_box w.st (tname id) s id m ms w.roster hO.nodup hmem rfl (fun h => hs h.symm) hbox
+      have hsame := owed_actor w.st id a1 {(w.st id) with box := ms} (tname id) s w.roster
+        (by simpa using hb) (by simpa [hpark] using hparkA)
+      simp [hs]
+      rw [hsame]
+      exact hkeep
+  · intro d hdne s
+    exact owed_off w.st id a1 d s w.roster hO.nodup hmem hdne.symm
+  · intro d
+    have hpend : pending (w.st id) d = 0 := by simp [pending, contRest, hidle, sendsTo]
+    rw [hpend, Nat.add_zero]
+    simpa using hfl d
+  · intro msg hm
+    rw [hb] at hm
+    exact hO.sentFrom id msg (by rw [hbox]; exact List.Mem.tail _ hm)
+  · intro p hp
+    rw [hparkA, hpark] at hp
+    cases hp
+  · intro p hp
+    rw [hparkA, hpark] at hp
+    cases hp
+  · intro _
+    rw [hparkA, hpark]
+
 end Deadlock
