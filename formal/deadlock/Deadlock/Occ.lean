@@ -4261,5 +4261,296 @@ theorem occ_try (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
         simpa [msg, try_fit_other w id dst msg (afterHead cont) hsame, cont] using hocc
     · exact occ_advance I w id cont hO hty' hph'
 
+def drainBox (w : World) (id : InstId) (dst : String) : List Msg → World
+  | [] => setActor w id { (w.st id) with box := [] }
+  | m :: ms =>
+    drainBox (creditSender (setActor w id { (w.st id) with box := ms }) dst m.sender) id dst ms
+
+def refundClearBox (w : World) (id : InstId) (dst : String) (ms : List Msg) : World :=
+  let wR := refundMsgs w dst ms
+  setActor wR id { (wR.st id) with box := [] }
+
+theorem credit_tok (w : World) (dst : String) (sender i : InstId) (d : String) :
+    ((creditSender w dst sender).st i).tokens d =
+      (w.st i).tokens d + if i = sender ∧ d = dst then 1 else 0 := by
+  by_cases hi : i = sender
+  · subst hi
+    rw [creditSender, setActor_self, bump_add]
+    by_cases hd : d = dst <;> simp [hd]
+  · rw [creditSender, setActor_other w sender i _ hi]
+    simp [hi]
+
+theorem credit_box (w : World) (dst : String) (sender i : InstId) :
+    ((creditSender w dst sender).st i).box = (w.st i).box := by
+  by_cases hi : i = sender
+  · simp [creditSender, setActor, hi, bumpToken]
+  · simp [creditSender, setActor_other w sender i _ hi]
+
+theorem credit_park (w : World) (dst : String) (sender i : InstId) :
+    ((creditSender w dst sender).st i).parked = (w.st i).parked := by
+  by_cases hi : i = sender
+  · simp [creditSender, setActor, hi, bumpToken]
+  · simp [creditSender, setActor_other w sender i _ hi]
+
+theorem credit_life (w : World) (dst : String) (sender i : InstId) :
+    ((creditSender w dst sender).st i).life = (w.st i).life ∧
+      ((creditSender w dst sender).st i).typestate = (w.st i).typestate ∧
+      ((creditSender w dst sender).st i).phase = (w.st i).phase ∧
+      ((creditSender w dst sender).st i).prio = (w.st i).prio := by
+  by_cases hi : i = sender
+  · simp [creditSender, setActor, hi, bumpToken]
+  · simp [creditSender, setActor_other w sender i _ hi]
+
+theorem refund_tok (w : World) (dst : String) (ms : List Msg) (i : InstId) (d : String) :
+    ((refundMsgs w dst ms).st i).tokens d =
+      (w.st i).tokens d + if d = dst then countFrom i ms else 0 := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs, countFrom]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, credit_tok, countFrom]
+    by_cases hd : d = dst
+    · by_cases hs : m.sender = i
+      · simp [hd, hs, Nat.add_assoc]
+      · have hne : i ≠ m.sender := fun h => hs h.symm
+        simp [hd, hne, Nat.zero_add]
+        exact hs
+    · simp [hd]
+
+theorem refund_box (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).box = (w.st i).box := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, credit_box]
+
+theorem refund_park (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).parked = (w.st i).parked := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, credit_park]
+
+theorem refund_life (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).life = (w.st i).life ∧
+      ((refundMsgs w dst ms).st i).typestate = (w.st i).typestate ∧
+      ((refundMsgs w dst ms).st i).phase = (w.st i).phase ∧
+      ((refundMsgs w dst ms).st i).prio = (w.st i).prio := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold]
+    have hc := credit_life w dst m.sender i
+    have hi := ih (creditSender w dst m.sender)
+    simp [hc] at hi
+    exact hi
+
+theorem clear_tok (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) (d : String) :
+    ((refundClearBox w id dst ms).st i).tokens d =
+      (w.st i).tokens d + if d = dst then countFrom i ms else 0 := by
+  simp [refundClearBox, setActor]
+  by_cases hi : i = id
+  · simp [hi, refund_tok]
+  · simp [hi, refund_tok]
+
+theorem clear_box (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundClearBox w id dst ms).st i).box = if i = id then [] else (w.st i).box := by
+  simp [refundClearBox, setActor]
+  by_cases hi : i = id
+  · simp [hi]
+  · simp [hi, refund_box]
+
+theorem clear_park (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundClearBox w id dst ms).st i).parked = (w.st i).parked := by
+  by_cases hi : i = id
+  · simp [refundClearBox, setActor, hi, refund_park]
+  · simp [refundClearBox, setActor, hi, refund_park]
+
+theorem clear_life (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundClearBox w id dst ms).st i).life = (w.st i).life ∧
+      ((refundClearBox w id dst ms).st i).typestate = (w.st i).typestate ∧
+      ((refundClearBox w id dst ms).st i).phase = (w.st i).phase ∧
+      ((refundClearBox w id dst ms).st i).prio = (w.st i).prio := by
+  simp [refundClearBox, setActor]
+  by_cases hi : i = id
+  · simp [hi, refund_life]
+  · simp [hi, refund_life]
+
+theorem drain_tok (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) (d : String) :
+    ((drainBox w id dst ms).st i).tokens d =
+      (w.st i).tokens d + if d = dst then countFrom i ms else 0 := by
+  induction ms generalizing w with
+  | nil =>
+    simp [drainBox, setActor, countFrom]
+    by_cases hi : i = id <;> simp [hi]
+  | cons m ms ih =>
+    simp [drainBox, countFrom]
+    have hset : ∀ j, ((setActor w id { (w.st id) with box := ms }).st j).tokens d = (w.st j).tokens d := by
+      intro j
+      by_cases hj : j = id <;> simp [setActor, hj]
+    have hcred := credit_tok (setActor w id { (w.st id) with box := ms }) dst m.sender i d
+    rw [hset] at hcred
+    have hih := ih (creditSender (setActor w id { (w.st id) with box := ms }) dst m.sender)
+    rw [hih, hcred]
+    by_cases hd : d = dst
+    · by_cases hs : m.sender = i
+      · simp [hd, hs, Nat.add_assoc]
+      · have hne : i ≠ m.sender := fun h => hs h.symm
+        simp [hd, hne, Nat.zero_add]
+        exact hs
+    · simp [hd]
+
+theorem drain_box (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((drainBox w id dst ms).st i).box = if i = id then [] else (w.st i).box := by
+  induction ms generalizing w with
+  | nil =>
+    simp [drainBox, setActor]
+    by_cases hi : i = id <;> simp [hi]
+  | cons m ms ih =>
+    simp [drainBox]
+    have hbox0 : ((setActor w id { (w.st id) with box := ms }).st i).box =
+        if i = id then ms else (w.st i).box := by
+      by_cases hi : i = id <;> simp [setActor, hi]
+    have hcred := credit_box (setActor w id { (w.st id) with box := ms }) dst m.sender i
+    rw [ih, hcred, hbox0]
+    by_cases hi : i = id <;> simp [hi]
+
+theorem drain_park (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((drainBox w id dst ms).st i).parked = (w.st i).parked := by
+  induction ms generalizing w with
+  | nil =>
+    simp [drainBox, setActor]
+    by_cases hi : i = id <;> simp [hi]
+  | cons m ms ih =>
+    simp [drainBox]
+    have hpk : ((setActor w id { (w.st id) with box := ms }).st i).parked = (w.st i).parked := by
+      by_cases hi : i = id <;> simp [setActor, hi]
+    rw [ih, credit_park, hpk]
+
+theorem drain_life (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((drainBox w id dst ms).st i).life = (w.st i).life ∧
+      ((drainBox w id dst ms).st i).typestate = (w.st i).typestate ∧
+      ((drainBox w id dst ms).st i).phase = (w.st i).phase ∧
+      ((drainBox w id dst ms).st i).prio = (w.st i).prio := by
+  induction ms generalizing w with
+  | nil =>
+    simp [drainBox, setActor]
+    by_cases hi : i = id <;> simp [hi]
+  | cons m ms ih =>
+    simp [drainBox]
+    have hL : ((setActor w id { (w.st id) with box := ms }).st i).life = (w.st i).life ∧
+        ((setActor w id { (w.st id) with box := ms }).st i).typestate = (w.st i).typestate ∧
+        ((setActor w id { (w.st id) with box := ms }).st i).phase = (w.st i).phase ∧
+        ((setActor w id { (w.st id) with box := ms }).st i).prio = (w.st i).prio := by
+      by_cases hi : i = id <;> simp [setActor, hi]
+    have hc := credit_life (setActor w id { (w.st id) with box := ms }) dst m.sender i
+    have hi := ih (creditSender (setActor w id { (w.st id) with box := ms }) dst m.sender)
+    simp [hc, hL] at hi
+    exact hi
+
+theorem actor_fields (a b : Actor) (hl : a.life = b.life) (ht : a.typestate = b.typestate)
+    (hp : a.phase = b.phase) (hb : a.box = b.box) (hpr : a.prio = b.prio) (hpk : a.parked = b.parked)
+    (htk : ∀ d, a.tokens d = b.tokens d) : a = b := by
+  cases a
+  cases b
+  cases hl
+  cases ht
+  cases hp
+  cases hb
+  cases hpr
+  cases hpk
+  simp
+  funext d
+  exact htk d
+
+theorem frame_credit (w : World) (dst : String) (s : InstId) :
+    (creditSender w dst s).N = w.N ∧ (creditSender w dst s).roster = w.roster ∧
+      (creditSender w dst s).nextIx = w.nextIx ∧ (creditSender w dst s).cell = w.cell ∧
+      (creditSender w dst s).observed = w.observed := by
+  simp [creditSender, setActor]
+
+theorem frame_refund (w : World) (dst : String) (ms : List Msg) :
+    (refundMsgs w dst ms).N = w.N ∧ (refundMsgs w dst ms).roster = w.roster ∧
+      (refundMsgs w dst ms).nextIx = w.nextIx ∧ (refundMsgs w dst ms).cell = w.cell ∧
+      (refundMsgs w dst ms).observed = w.observed := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold]
+    have hc := frame_credit w dst m.sender
+    have hi := ih (creditSender w dst m.sender)
+    exact ⟨hi.1.trans hc.1, hi.2.1.trans hc.2.1, hi.2.2.1.trans hc.2.2.1,
+      hi.2.2.2.1.trans hc.2.2.2.1, hi.2.2.2.2.trans hc.2.2.2.2⟩
+
+theorem frame_set (w : World) (id : InstId) (a : Actor) :
+    (setActor w id a).N = w.N ∧ (setActor w id a).roster = w.roster ∧
+      (setActor w id a).nextIx = w.nextIx ∧ (setActor w id a).cell = w.cell ∧
+      (setActor w id a).observed = w.observed := by
+  simp [setActor]
+
+theorem frame_drain (w : World) (id : InstId) (dst : String) (ms : List Msg) :
+    (drainBox w id dst ms).N = w.N ∧ (drainBox w id dst ms).roster = w.roster ∧
+      (drainBox w id dst ms).nextIx = w.nextIx ∧ (drainBox w id dst ms).cell = w.cell ∧
+      (drainBox w id dst ms).observed = w.observed := by
+  induction ms generalizing w with
+  | nil => simp [drainBox, setActor]
+  | cons m ms ih =>
+    simp [drainBox]
+    have hs := frame_set w id { (w.st id) with box := ms }
+    have hc := frame_credit (setActor w id { (w.st id) with box := ms }) dst m.sender
+    have hi := ih (creditSender (setActor w id { (w.st id) with box := ms }) dst m.sender)
+    exact ⟨hi.1.trans (hc.1.trans hs.1), hi.2.1.trans (hc.2.1.trans hs.2.1),
+      hi.2.2.1.trans (hc.2.2.1.trans hs.2.2.1), hi.2.2.2.1.trans (hc.2.2.2.1.trans hs.2.2.2.1),
+      hi.2.2.2.2.trans (hc.2.2.2.2.trans hs.2.2.2.2)⟩
+
+theorem frame_clear (w : World) (id : InstId) (dst : String) (ms : List Msg) :
+    (refundClearBox w id dst ms).N = w.N ∧ (refundClearBox w id dst ms).roster = w.roster ∧
+      (refundClearBox w id dst ms).nextIx = w.nextIx ∧ (refundClearBox w id dst ms).cell = w.cell ∧
+      (refundClearBox w id dst ms).observed = w.observed := by
+  simp [refundClearBox, setActor, frame_refund]
+
+theorem world_eq (w1 w2 : World) (hN : w1.N = w2.N) (hr : w1.roster = w2.roster)
+    (hix : w1.nextIx = w2.nextIx) (hst : w1.st = w2.st) (hc : w1.cell = w2.cell)
+    (ho : w1.observed = w2.observed) : w1 = w2 := by
+  cases w1
+  cases w2
+  cases hN
+  cases hr
+  cases hix
+  cases hst
+  cases hc
+  cases ho
+  rfl
+
+/-- Refunding every sender and then clearing the box is the same as dropping
+each message and crediting its sender, including when that sender is `id`. -/
+theorem drain_eq_refund (w : World) (id : InstId) (dst : String) (ms : List Msg) :
+    drainBox w id dst ms = refundClearBox w id dst ms := by
+  have hD := frame_drain w id dst ms
+  have hC := frame_clear w id dst ms
+  have hst : (drainBox w id dst ms).st = (refundClearBox w id dst ms).st := by
+    funext i
+    apply actor_fields
+    · exact (drain_life w id dst ms i).1.trans (clear_life w id dst ms i).1.symm
+    · exact (drain_life w id dst ms i).2.1.trans (clear_life w id dst ms i).2.1.symm
+    · exact (drain_life w id dst ms i).2.2.1.trans (clear_life w id dst ms i).2.2.1.symm
+    · exact (drain_box w id dst ms i).trans (clear_box w id dst ms i).symm
+    · exact (drain_life w id dst ms i).2.2.2.trans (clear_life w id dst ms i).2.2.2.symm
+    · exact (drain_park w id dst ms i).trans (clear_park w id dst ms i).symm
+    · intro d
+      exact (drain_tok w id dst ms i d).trans (clear_tok w id dst ms i d).symm
+  exact world_eq _ _ (hD.1.trans hC.1.symm) (hD.2.1.trans hC.2.1.symm)
+    (hD.2.2.1.trans hC.2.2.1.symm) hst (hD.2.2.2.1.trans hC.2.2.2.1.symm)
+    (hD.2.2.2.2.trans hC.2.2.2.2.symm)
+
 end Deadlock
 
