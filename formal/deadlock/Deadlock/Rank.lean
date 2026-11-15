@@ -328,4 +328,224 @@ theorem after_shorter (k k' : Cont) (a : Actor) (hrest : k.rest ≠ [])
   | nil => exact absurd hk hrest
   | cons _ es => simp [hk]
 
+/-- A `terminate` anywhere in a list is still there after a head is pushed back. -/
+theorem hasTerminate_cons (e : Eff) (es : List Eff) (h : hasTerminate es = true) :
+    hasTerminate (e :: es) = true := by
+  cases e <;> simp [hasTerminate, h]
+
+/-- The list a phase is still obliged to run, when it has one. -/
+def carried : Phase → Option (List Eff)
+  | .run k => some k.rest
+  | .parked _ _ k => some k.rest
+  | .awaitReply _ k => some k.rest
+  | .awaitEffect k => some k.rest
+  | .awaitPeer k => some k.rest
+  | _ => none
+
+/-- A continuation that still contains `terminate` was installed from a checked
+transition, so the actor's template is terminable. `programOk` does not say
+this: `effectsOk` skips `terminate`. -/
+def TermOk (I : Impl) (w : World) : Prop :=
+  ∀ id es, carried (w.st id).phase = some es → hasTerminate es = true →
+    terminableName I.desc (tname id)
+
+theorem term_ok_init (I : Impl) (N : Nat) : TermOk I (initWorld I N) := by
+  intro id es hc _
+  simp [init_phase, carried] at hc
+
+theorem term_ok_replace (I : Impl) (w : World) (id : InstId) (a : Actor) (hT : TermOk I w)
+    (hnew : ∀ es, carried a.phase = some es → hasTerminate es = true →
+      terminableName I.desc (tname id)) : TermOk I (setActor w id a) := by
+  intro i es hc ht
+  by_cases hi : i = id
+  · rw [hi] at hc ⊢
+    simp [setActor] at hc
+    exact hnew es hc ht
+  · simp [setActor, hi] at hc
+    exact hT i es hc ht
+
+theorem term_ok_phase (I : Impl) (w w' : World) (hT : TermOk I w)
+    (h : ∀ i, (w'.st i).phase = (w.st i).phase) : TermOk I w' := by
+  intro i es hc ht
+  rw [h i] at hc
+  exact hT i es hc ht
+
+theorem term_program (I : Impl) (hL : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions)
+    (hterm : hasTerminate tr.program = true) (t : Template)
+    (ht : templateOf I.desc tr.template = some t) : t.terminable = true := by
+  have hok := transitionOk_of_mem I hL tr hm
+  simp only [transitionOk, ht] at hok
+  repeat rw [Bool.and_eq_true] at hok
+  have hcl := hok.1.2
+  simp [hterm] at hcl
+  cases ht' : t.terminable
+  · simp [ht'] at hcl
+  · rfl
+
+theorem terminable_no_parked_call (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (id : InstId)
+    (hterm : terminableName I.desc (tname id)) : hasParkedCall (w.st id).parked = false := by
+  have hM := (inv_reachable I N w hL hR).2.1
+  simp [hasParkedCall, List.any_eq_false]
+  intro p hp
+  obtain ⟨k, hph⟩ := hM.fwd id p hp
+  cases hc : p.isCall
+  · rfl
+  · obtain ⟨t, ht, htm⟩ := hterm
+    have hbad := parked_call_unterminable I hL hG N w hR p.sender id k
+      (by simpa [hc] using hph) t ht
+    simp [htm] at hbad
+
+theorem release_keeps_victim (w : World) (id : InstId) (ps : List Parked) :
+    ((releaseParked w id ps).st id).phase = (w.st id).phase ∧
+      ((releaseParked w id ps).st id).life = (w.st id).life := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih _
+    · rw [if_neg hskip]
+      have hne : p.sender ≠ id := by
+        intro hs
+        exact hskip (by simp [hs])
+      let w' := setActor w p.sender (resumeSender (w.st p.sender) false id)
+      have hst : (w'.st id) = w.st id := by
+        have hswap : id ≠ p.sender := fun h => hne h.symm
+        simp [w', setActor, hswap]
+      have hih := ih w'
+      rw [hst] at hih
+      simpa [releaseParked, w'] using hih
+
+/-- A reachable `terminate` head is not the refused branch. The template is
+terminable because the program came from a checked transition, and `callTermFails`
+says no parked call can name that template, so the kill runs. -/
+theorem terminate_commits (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hT : TermOk I w) (id : InstId) (k : Cont) (es : List Eff)
+    (hph : (w.st id).phase = .run { k with rest := .terminate :: es })
+    (hl : (w.st id).life = .alive) :
+    ((execRun I w id (w.st id) { k with rest := .terminate :: es }).st id).life = .dead ∧
+      ((execRun I w id (w.st id) { k with rest := .terminate :: es }).st id).phase = .idle := by
+  have hterm : terminableName I.desc (tname id) :=
+    hT id (.terminate :: es) (by simp [carried, hph]) (by simp [hasTerminate])
+  have hcall := terminable_no_parked_call I hL hG N w hR id hterm
+  obtain ⟨t, ht, htm⟩ := hterm
+  simp [execRun, hph, ht, htm, hcall]
+  have hrel := release_keeps_victim
+      (setActor (refundParked (refundMsgs (readCells I.desc w id) (tname id) ((w.st id).box))
+        (tname id) ((w.st id).parked)) id
+        { (refundParked (refundMsgs (readCells I.desc w id) (tname id) ((w.st id).box))
+            (tname id) ((w.st id).parked)).st id with
+          life := .dead, phase := .idle, box := [], prio := [], parked := [] })
+      id ((w.st id).parked)
+  -- The victim installed above is dead and idle; release does not move it.
+  have hbase : ((setActor (refundParked (refundMsgs (readCells I.desc w id) (tname id) ((w.st id).box))
+        (tname id) ((w.st id).parked)) id
+        { (refundParked (refundMsgs (readCells I.desc w id) (tname id) ((w.st id).box))
+            (tname id) ((w.st id).parked)).st id with
+          life := .dead, phase := .idle, box := [], prio := [], parked := [] }).st id).life = .dead ∧
+      ((setActor (refundParked (refundMsgs (readCells I.desc w id) (tname id) ((w.st id).box))
+        (tname id) ((w.st id).parked)) id
+        { (refundParked (refundMsgs (readCells I.desc w id) (tname id) ((w.st id).box))
+            (tname id) ((w.st id).parked)).st id with
+          life := .dead, phase := .idle, box := [], prio := [], parked := [] }).st id).phase = .idle := by
+    simp [setActor]
+  exact ⟨hrel.2.trans hbase.1, hrel.1.trans hbase.2⟩
+
+theorem term_ok_of (I : Impl) (hL : LocalOk I) (w w' : World) (hT : TermOk I w)
+    (hjust : ∀ i es, carried (w'.st i).phase = some es → hasTerminate es = true →
+      (∃ es0, carried (w.st i).phase = some es0 ∧ (es = es0 ∨ ∃ e, es0 = e :: es)) ∨
+      ∃ tr ∈ I.transitions, tr.template = tname i ∧ es = tr.program) : TermOk I w' := by
+  intro i es hc ht
+  rcases hjust i es hc ht with ⟨es0, hc0, hsub⟩ | ⟨tr, hm, htmpl, hprog⟩
+  · rcases hsub with rfl | ⟨e, heq⟩
+    · exact hT i es hc0 ht
+    · exact hT i es0 hc0 (by simpa [heq] using hasTerminate_cons e es ht)
+  · rw [← htmpl]
+    cases htpl : templateOf I.desc tr.template with
+    | none =>
+      have hok := transitionOk_of_mem I hL tr hm
+      simp [transitionOk, htpl] at hok
+    | some t =>
+      exact ⟨t, htpl, term_program I hL tr hm (by simpa [hprog] using ht) t htpl⟩
+
+theorem term_ok_finish (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (hT : TermOk I w)
+    (h : finishWait w id = some w') : TermOk I w' := by
+  apply term_ok_of I hL w w' hT
+  intro i es hc ht
+  unfold finishWait at h
+  split at h
+  · next k heq =>
+    cases h
+    by_cases hi : i = id
+    · rw [hi] at hc
+      simp [setActor] at hc
+      cases hk : k.rest with
+      | nil => simp [proceed, hk, carried] at hc
+      | cons _ _ =>
+        simp [proceed, hk, carried] at hc
+        exact Or.inl ⟨k.rest, by simp [carried, hi, heq], Or.inl (by simp [hc, hk])⟩
+    · simp [setActor, hi] at hc
+      exact Or.inl ⟨es, hc, Or.inl rfl⟩
+  · next k heq =>
+    cases h
+    by_cases hi : i = id
+    · rw [hi] at hc
+      simp [setActor] at hc
+      cases hk : k.rest with
+      | nil => simp [proceed, hk, carried] at hc
+      | cons _ _ =>
+        simp [proceed, hk, carried] at hc
+        exact Or.inl ⟨k.rest, by simp [carried, hi, heq], Or.inl (by simp [hc, hk])⟩
+    · simp [setActor, hi] at hc
+      exact Or.inl ⟨es, hc, Or.inl rfl⟩
+  · cases h
+
+theorem deliver_carries (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (es : List Eff) (h : deliver I w id a m = some (w1, a1))
+    (hc : carried a1.phase = some es) : ∃ tr ∈ I.transitions, tr.template = tname id ∧ es = tr.program := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · next heq =>
+      split at h
+      · cases h
+      · cases h
+        simp [carried] at hc
+    · next tr heq =>
+      split at h
+      · cases h
+      · cases h
+        by_cases hempty : tr.program.isEmpty = true
+        · simp [hempty, carried] at hc
+        · simp [hempty, carried] at hc
+          have hmem := findTr_mem I (tname id) a.typestate m.label tr heq
+          exact ⟨tr, hmem.1, hmem.2.1, by simpa [hc]⟩
+
+theorem term_ok_prio (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (hT : TermOk I w)
+    (h : receivePrio I w id = some w') : TermOk I w' := by
+  apply term_ok_of I hL w w' hT
+  intro i es hc ht
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      by_cases hi : i = id
+      · rw [hi] at hc ⊢
+        have hc' : carried a1.phase = some es := by
+          simpa [setActor] using hc
+        obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ m w1 a1 es hdel hc'
+        exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+      · have hst := deliver_st I w id _ m w1 a1 i hdel
+        have hc0 : carried (w.st i).phase = some es := by
+          simpa [setActor, hi, hst] using hc
+        exact Or.inl ⟨es, hc0, Or.inl rfl⟩
+
 end Deadlock

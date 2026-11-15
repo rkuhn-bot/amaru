@@ -271,10 +271,18 @@ for a send the actor did not itself perform.
   `life = dead`. `call_program_replies` is the handler fact: one `reply`, and
   no `terminate` before it, so the program has a single path to the reply.
   `step_keeps_run` says any step other than that actor's own `exec` leaves a
-  running continuation in place, which is the measure's stability. What is
-  not proved is that the actor's own head then shortens the program, that a
-  lower partner therefore becomes idle, and that `Fair.bulk` then delivers
-  the parked entry. `CellFresh` and the dead-instance lift are not proved.
+  running continuation in place, which is the measure's stability.
+  `programOk` does not see `terminate` (`effectsOk` skips it). `TermOk` is
+  the missing record: a carried list that still contains `terminate` came
+  from a checked transition, so the template is terminable
+  (`term_program`, `deliver_carries`). It holds at `initWorld` and across
+  `finish` and a priority receive. `terminable_no_parked_call` is the
+  `callTermFails` half: no parked call can name that template.
+  `terminate_commits` then says the refused branch does not run, the actor
+  dies idle, whenever `TermOk` holds. `TermOk` is not yet proved for a bulk
+  receive, an `exec`, or a spawn, so a reachable `terminate` head is not yet
+  known to satisfy it. The length drop for every head, the idle induction,
+  `Fair.bulk`, `CellFresh`, and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
