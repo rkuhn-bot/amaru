@@ -74,3 +74,5 @@ import Deadlock.Inv2
 #print axioms Deadlock.inv2_reachable
 #print axioms Deadlock.bulk_apply
 #print axioms Deadlock.deadlock_kind
+#print axioms Deadlock.park_height
+#print axioms Deadlock.reply_height

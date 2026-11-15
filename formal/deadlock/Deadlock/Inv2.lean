@@ -625,6 +625,100 @@ theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   | step w w' a hw happly ih =>
     rcases ih with ⟨hI, hO, hT, hB⟩
     exact ⟨step_inv I hL w w' ⟨a, happly⟩ hI, occ_apply I hL hG a w w' hO hI.1 hI.2.1 hT hB happly,
-      ty_step I hL hG N w w' a hw happly hT, bulk_apply I hL a w w' hB happly⟩
+      ty_step I hL hG N w w' a hw happly hT,     bulk_apply I hL a w w' hB happly⟩
+
+theorem residual_of_edge (D : Description) (e : Edge) (st : String) (he : e ∈ D.edges)
+    (hd : discharged D e = false) (hs : st ∈ targetStates D e) :
+    (({ template := e.src, state := e.srcState } : Node),
+      ({ template := e.dst, state := st } : Node)) ∈ residualEdges D := by
+  unfold residualEdges
+  let step : List (Node × Node) → Edge → List (Node × Node) := fun acc e =>
+    if discharged D e = true then acc
+    else acc ++ (targetStates D e).map fun st =>
+      (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := st } : Node))
+  let pair : Node × Node :=
+    (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := st } : Node))
+  have hkeep : ∀ (es : List Edge) (acc : List (Node × Node)), pair ∈ acc → pair ∈ List.foldl step acc es := by
+    intro es
+    induction es with
+    | nil =>
+      intro acc hp
+      exact hp
+    | cons e0 es ih =>
+      intro acc hp
+      simp only [List.foldl_cons]
+      by_cases hdis0 : discharged D e0 = true
+      · simp [step, hdis0]
+        exact ih _ hp
+      · simp [step, hdis0]
+        exact ih _ (List.mem_append_left _ hp)
+  suffices ∀ (es : List Edge) (acc : List (Node × Node)), e ∈ es → pair ∈ List.foldl step acc es by
+    simpa [residualEdges, step, pair] using this D.edges [] he
+  intro es acc he
+  induction es generalizing acc with
+  | nil => cases he
+  | cons e0 es ih =>
+    simp only [List.foldl_cons]
+    cases he with
+    | head =>
+      simp [step, hd]
+      exact hkeep es _ (List.mem_append_right _ (List.mem_map.mpr ⟨st, hs, rfl⟩))
+    | tail _ ht =>
+      exact ih _ ht
+
+theorem park_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .parked dst false k) (hlive : (w.st dst).life = .alive) :
+    ∃ hs : List (Node × Nat),
+      heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
+        heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
+  obtain ⟨_, e, he, hsrc, hss, hdstn, hkind, heff, _, hpart⟩ :=
+    projects_park I hL hG N w hR id dst false k hph
+  obtain ⟨p, hp, _, _⟩ := (inv_reachable I N w hL hR).2.1.bwd id dst false k hph
+  have hdis : discharged I.desc e = false := by
+    by_cases hd : discharged I.desc e = true
+    · have hl1 : l1 I.desc (tname dst) = true := by
+        have hne : (EdgeKind.blocking == EdgeKind.nonBlocking) = false := by decide
+        simp [discharged, hkind, heff, hdstn, hne] at hd
+        exact hd.2
+      simp [hO.clear dst hl1] at hp
+    · cases hbit : discharged I.desc e
+      · rfl
+      · exact absurd hbit hd
+  have hst : (w.st dst).typestate ∈ targetStates I.desc e := by
+    rcases hpart with hd | hmem
+    · simp [hdis] at hd
+    · exact hmem hlive
+  obtain ⟨hs, hok⟩ := hG.ranked
+  have hmem := residual_of_edge I.desc e (w.st dst).typestate he hdis hst
+  have hdrop := heightsOkB_mem (residualEdges I.desc) hs hok
+    (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := (w.st dst).typestate } : Node))
+    hmem
+  rw [hsrc, hss, hdstn] at hdrop
+  exact ⟨hs, hdrop⟩
+
+theorem reply_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .awaitReply dst k) (hlive : (w.st dst).life = .alive) :
+    ∃ hs : List (Node × Nat),
+      heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
+        heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
+  obtain ⟨_, e, he, hsrc, hss, hdstn, hkind, heff, _, hpart⟩ :=
+    projects_reply I hL hG N w hR id dst k hph
+  have hdis : discharged I.desc e = false := by
+    have hne : (EdgeKind.blocking == EdgeKind.nonBlocking) = false := by decide
+    have hcall : (EffectKind.call == EffectKind.send) = false := by decide
+    simp [discharged, hkind, heff, hne, hcall]
+  have hst : (w.st dst).typestate ∈ targetStates I.desc e := by
+    rcases hpart with hd | hmem
+    · simp [hdis] at hd
+    · exact hmem hlive
+  obtain ⟨hs, hok⟩ := hG.ranked
+  have hmem := residual_of_edge I.desc e (w.st dst).typestate he hdis hst
+  have hdrop := heightsOkB_mem (residualEdges I.desc) hs hok
+    (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := (w.st dst).typestate } : Node))
+    hmem
+  rw [hsrc, hss, hdstn] at hdrop
+  exact ⟨hs, hdrop⟩
 
 end Deadlock

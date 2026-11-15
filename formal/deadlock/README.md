@@ -260,8 +260,10 @@ for a send the actor did not itself perform.
   template cannot bulk-send, so a dead instance does not keep credit a
   replacement would count again. `deadlock_kind` reduces a deadlock to a
   blocking send or a call reply that stays waiting; an effect wait is taken
-  by fairness, and no phase is a cell wait. The rank descent for those two
-  waits, `CellFresh`, and the dead-instance lift are not proved.
+  by fairness, and no phase is a cell wait. A live partner of either wait
+  sits at a strictly lower residual rank (`park_height`, `reply_height`).
+  The induction that this partner is itself stuck, `CellFresh`, and the
+  dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
