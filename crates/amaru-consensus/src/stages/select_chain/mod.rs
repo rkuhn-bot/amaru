@@ -509,6 +509,8 @@ pub fn cmp_tip(a: Option<&Header>, b: Option<&Header>) -> Ordering {
 }
 
 #[cfg(test)]
+mod boundary_not_found;
+#[cfg(test)]
 mod test_setup;
 #[cfg(test)]
 mod tests;
