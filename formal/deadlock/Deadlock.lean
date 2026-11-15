@@ -93,3 +93,5 @@ import Deadlock.Rank
 #print axioms Deadlock.exec_drops
 #print axioms Deadlock.reaches_block
 #print axioms Deadlock.prio_no_crash
+#print axioms Deadlock.declared_le_cap
+#print axioms Deadlock.lane_has_room

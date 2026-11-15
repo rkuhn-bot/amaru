@@ -2244,4 +2244,288 @@ theorem prio_no_crash (cap : Nat) (labels prio : List String) (label : String)
   have hle := nodup_mem_length prio labels hnd hsub
   omega
 
+def laneLabels (ms : List Msg) : List String := ms.map (·.label)
+
+theorem selfLabels_append (pre es : List Eff) :
+    selfLabels (pre ++ es) = selfLabels pre ++ selfLabels es := by
+  induction pre with
+  | nil => simp [selfLabels]
+  | cons e pre ih =>
+    cases e <;> simp [selfLabels, ih]
+
+theorem cellWake_append (reader : String) (pre es : List Eff) :
+    cellWakeLabels reader (pre ++ es) = cellWakeLabels reader pre ++ cellWakeLabels reader es := by
+  induction pre with
+  | nil => simp [cellWakeLabels]
+  | cons e pre ih =>
+    cases e <;> simp [cellWakeLabels, ih]
+
+theorem self_in_collected (trs : List Transition) (template : String) (tr : Transition)
+    (hm : tr ∈ trs) (ht : tr.template = template) (l : String) (hl : l ∈ selfLabels tr.program) :
+    l ∈ (trs.filterMap fun t =>
+      if t.template == template then some (selfLabels t.program) else none).flatten := by
+  induction trs with
+  | nil => cases hm
+  | cons t ts ih =>
+    cases hm with
+    | head =>
+      simp [List.filterMap, List.flatten, ht, hl, List.mem_append]
+    | tail _ ht' =>
+      have ih' := ih ht'
+      by_cases hif : t.template == template
+      · simp [List.filterMap, List.flatten, hif, List.mem_append] at ih' ⊢
+        exact Or.inr ih'
+      · simp [List.filterMap, List.flatten, hif] at ih' ⊢
+        exact ih'
+
+theorem cell_in_collected (trs : List Transition) (reader : String) (tr : Transition)
+    (hm : tr ∈ trs) (l : String) (hl : l ∈ cellWakeLabels reader tr.program) :
+    l ∈ (trs.map fun t => cellWakeLabels reader t.program).flatten := by
+  induction trs with
+  | nil => cases hm
+  | cons t ts ih =>
+    cases hm with
+    | head =>
+      simp [List.flatten, hl, List.mem_append]
+    | tail _ ht' =>
+      have ih' := ih ht'
+      simp [List.flatten, List.mem_append] at ih' ⊢
+      exact Or.inr ih'
+
+theorem self_in_prio (I : Impl) (tr : Transition) (hm : tr ∈ I.transitions) (l : String)
+    (hl : l ∈ selfLabels tr.program) : l ∈ prioLabels I tr.template := by
+  have hcol := self_in_collected I.transitions tr.template tr hm rfl l hl
+  have hmem : l ∈
+      (I.transitions.filterMap fun t =>
+        if t.template == tr.template then some (selfLabels t.program) else none).flatten ++
+      cellLabels I.desc tr.template ++
+      (I.transitions.map fun t => cellWakeLabels tr.template t.program).flatten := by
+    exact List.mem_append.mpr (Or.inl (List.mem_append.mpr (Or.inl hcol)))
+  simpa [prioLabels] using mem_dedup _ l hmem
+
+theorem cell_in_prio (I : Impl) (reader : String) (tr : Transition) (hm : tr ∈ I.transitions)
+    (l : String) (hl : l ∈ cellWakeLabels reader tr.program) : l ∈ prioLabels I reader := by
+  have hcol := cell_in_collected I.transitions reader tr hm l hl
+  have hmem : l ∈
+      (I.transitions.filterMap fun t =>
+        if t.template == reader then some (selfLabels t.program) else none).flatten ++
+      cellLabels I.desc reader ++
+      (I.transitions.map fun t => cellWakeLabels reader t.program).flatten := by
+    exact List.mem_append.mpr (Or.inr hcol)
+  simpa [prioLabels] using mem_dedup _ l hmem
+
+/-- A carried program is a suffix of a listed transition of the same template. -/
+def ProgSrc (I : Impl) (w : World) : Prop :=
+  ∀ id es, carried ((w.st id).phase) = some es →
+    ∃ tr ∈ I.transitions, tr.template = tname id ∧ ∃ pre, pre ++ es = tr.program
+
+/-- Priority-lane labels are distinct and belong to the template's declared set. -/
+def LaneOk (I : Impl) (w : World) : Prop :=
+  ∀ id, (laneLabels ((w.st id).prio)).Nodup ∧
+    ∀ m ∈ (w.st id).prio, m.label ∈ prioLabels I (tname id)
+
+theorem self_of_suffix (pre es : List Eff) (l : String) (hl : l ∈ selfLabels es) :
+    l ∈ selfLabels (pre ++ es) := by
+  rw [selfLabels_append]
+  exact List.mem_append.mpr (Or.inr hl)
+
+theorem cell_of_suffix (reader : String) (pre es : List Eff) (l : String)
+    (hl : l ∈ cellWakeLabels reader es) : l ∈ cellWakeLabels reader (pre ++ es) := by
+  rw [cellWake_append]
+  exact List.mem_append.mpr (Or.inr hl)
+
+theorem sched_declared (I : Impl) (w : World) (hS : ProgSrc I w) (id : InstId) (es : List Eff)
+    (hc : carried ((w.st id).phase) = some es) (l : String) (hl : l ∈ selfLabels es) :
+    l ∈ prioLabels I (tname id) := by
+  obtain ⟨tr, hm, ht, pre, hpre⟩ := hS id es hc
+  have hsub := self_of_suffix pre es l hl
+  rw [hpre] at hsub
+  simpa [ht] using self_in_prio I tr hm l hsub
+
+theorem wake_declared (I : Impl) (w : World) (hS : ProgSrc I w) (id : InstId) (es : List Eff)
+    (hc : carried ((w.st id).phase) = some es) (reader l : String)
+    (hl : l ∈ cellWakeLabels reader es) : l ∈ prioLabels I reader := by
+  obtain ⟨tr, hm, _, pre, hpre⟩ := hS id es hc
+  have hsub := cell_of_suffix reader pre es l hl
+  rw [hpre] at hsub
+  exact cell_in_prio I reader tr hm l hsub
+
+theorem filterMap_nil_mem {α β} (xs : List α) (f : α → Option β) (h : xs.filterMap f = [])
+    (x : α) (hx : x ∈ xs) : f x = none := by
+  induction xs with
+  | nil => cases hx
+  | cons y ys ih =>
+    cases hx with
+    | head =>
+      cases hf : f x
+      · rfl
+      · simp [List.filterMap, hf] at h
+    | tail _ ht =>
+      cases hf : f y
+      · rw [List.filterMap, hf] at h
+        exact ih h ht
+      · simp [List.filterMap, hf] at h
+
+theorem priority_le_cap (D : Description) (hG : GraphOk D) (t : Template) (ht : t ∈ D.templates) :
+    Affine.leB t.priorityBound t.priorityCapacity = true := by
+  have hnone := filterMap_nil_mem D.templates
+    (fun u => if Affine.leB u.priorityBound u.priorityCapacity then none
+      else some s!"fail: priority lane {u.name}: bound {u.priorityBound.toString} > capacity {u.priorityCapacity.toString}")
+    (by simpa [priorityFails] using hG.priority) t ht
+  by_cases hle : Affine.leB t.priorityBound t.priorityCapacity = true
+  · exact hle
+  · simp [hle] at hnone
+
+theorem prio_len_bound (I : Impl) (hL : LocalOk I) (t : Template) (ht : t ∈ I.desc.templates) :
+    (prioLabels I t.name).length ≤ t.priorityBound.b ∧ t.priorityBound.a = 0 := by
+  have hok := (local_parts I hL).2.2.2.2.2.1
+  unfold prioOk at hok
+  have hbody := (List.all_eq_true _ _).mp hok t ht
+  rw [Bool.and_eq_true] at hbody
+  exact ⟨decide_eq_true_eq.mp hbody.1, (beq_iff_eq).mp hbody.2⟩
+
+theorem lane_find_name (xs : List Template) (r : String) (t : Template)
+    (h : xs.findSome? (fun u => if u.name == r then some u else none) = some t) : t.name = r := by
+  induction xs with
+  | nil => simp at h
+  | cons u us ih =>
+    rw [List.findSome?_cons] at h
+    by_cases hn : (u.name == r) = true
+    · simp only [hn, ite_true] at h
+      cases h
+      exact (beq_iff_eq).mp hn
+    · have hf : (u.name == r) = false := by
+        cases hbb : u.name == r <;> simp_all
+      simp only [hf, ite_false] at h
+      exact ih h
+
+theorem template_name (D : Description) (r : String) (t : Template)
+    (ht : templateOf D r = some t) : t.name = r := by
+  exact lane_find_name D.templates r t (by simpa [templateOf] using ht)
+
+theorem declared_le_cap (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (id : InstId)
+    (t : Template) (ht : templateOf I.desc (tname id) = some t) :
+    (prioLabels I (tname id)).length ≤ capPrio I.desc N id := by
+  have hname := template_name I.desc (tname id) t ht
+  have hmem := template_mem I.desc (tname id) t ht
+  have hlen := prio_len_bound I hL t hmem
+  have hle := priority_le_cap I.desc hG t hmem
+  have hcoeff := (Affine.leB_iff t.priorityBound t.priorityCapacity).mp hle
+  have heval : t.priorityBound.eval N ≤ t.priorityCapacity.eval N :=
+    Affine.eval_le_of_coeff _ _ hcoeff.1 hcoeff.2 N
+  have hb : (prioLabels I t.name).length ≤ t.priorityBound.eval N := by
+    simpa [Affine.eval, hlen.2] using hlen.1
+  simpa [capPrio, ht, hname] using Nat.le_trans hb heval
+
+theorem any_label_false (ms : List Msg) (label : String)
+    (h : (ms.any fun p => p.label == label) = false) : label ∉ laneLabels ms := by
+  intro hmem
+  induction ms with
+  | nil => cases hmem
+  | cons m ms ih =>
+    rw [List.any_cons] at h
+    rw [laneLabels, List.map_cons, List.mem_cons] at hmem
+    cases hb : m.label == label
+    · rw [hb, Bool.false_or] at h
+      cases hmem with
+      | inl hhead =>
+        have ht : (m.label == label) = true := (beq_iff_eq).mpr hhead.symm
+        simp [ht] at hb
+      | inr ht =>
+        exact ih h ht
+    · rw [hb] at h
+      simp at h
+
+theorem proceed_prio (a : Actor) (k : Cont) : (proceed a k).prio = a.prio := by
+  cases hr : k.rest <;> simp [proceed, hr]
+
+theorem lane_has_room (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hLane : LaneOk I w) (id : InstId) (t : Template)
+    (ht : templateOf I.desc (tname id) = some t) (label : String)
+    (hmem : label ∈ prioLabels I (tname id))
+    (hfresh : ((w.st id).prio.any fun p => p.label == label) = false) :
+    (w.st id).prio.length < capPrio I.desc N id := by
+  have hcap := declared_le_cap I hL hG N id t ht
+  have hnd := (hLane id).1
+  have hsub : ∀ x ∈ laneLabels ((w.st id).prio), x ∈ prioLabels I (tname id) := by
+    intro x hx
+    simp [laneLabels, List.mem_map] at hx
+    obtain ⟨m, hm, hlab⟩ := hx
+    simpa [hlab] using (hLane id).2 m hm
+  have hnot : label ∉ laneLabels ((w.st id).prio) := any_label_false _ _ hfresh
+  cases Classical.em ((w.st id).prio.length < capPrio I.desc N id) with
+  | inl hlt => exact hlt
+  | inr hge =>
+    have hfull : capPrio I.desc N id ≤ (w.st id).prio.length := Nat.le_of_not_lt hge
+    have hlen : (laneLabels ((w.st id).prio)).length = (w.st id).prio.length := by
+      simp [laneLabels]
+    exact False.elim (prio_no_crash (capPrio I.desc N id) (prioLabels I (tname id))
+      (laneLabels ((w.st id).prio)) label hsub hnd hcap (by simpa [hlen] using hfull) hnot hmem)
+
+theorem prog_src_of (I : Impl) (w w' : World) (hS : ProgSrc I w)
+    (horigin : ∀ i es, carried ((w'.st i).phase) = some es →
+      (∃ es0, carried ((w.st i).phase) = some es0 ∧ (es = es0 ∨ ∃ e, es0 = e :: es)) ∨
+      ∃ tr ∈ I.transitions, tr.template = tname i ∧ es = tr.program) : ProgSrc I w' := by
+  intro i es hc
+  rcases horigin i es hc with ⟨es0, hc0, hsub⟩ | ⟨tr, hm, ht, hprog⟩
+  · obtain ⟨tr, hm, ht, pre, happ⟩ := hS i es0 hc0
+    rcases hsub with rfl | ⟨e, heq⟩
+    · exact ⟨tr, hm, ht, pre, happ⟩
+    · exact ⟨tr, hm, ht, pre ++ [e], by
+        simp [List.append_assoc, List.singleton_append, ← heq, happ]⟩
+  · exact ⟨tr, hm, ht, [], by simp [hprog]⟩
+
+theorem prog_src_init (I : Impl) (N : Nat) : ProgSrc I (initWorld I N) := by
+  intro id es hc
+  simp [init_phase, carried] at hc
+
+theorem lane_init (I : Impl) (N : Nat) : LaneOk I (initWorld I N) := by
+  intro id
+  have hst := init_base_st I N id
+  rw [hst]
+  split
+  · cases ht : templateOf I.desc (tname id) <;>
+      simp [initActor, withTokens, absentActor, ht, laneLabels]
+  · simp [absentActor, laneLabels]
+
+theorem lane_tail (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (m : Msg) (ms : List Msg)
+    (hp : (w.st id).prio = m :: ms) : (laneLabels ms).Nodup ∧ ∀ x ∈ ms, x.label ∈ prioLabels I (tname id) := by
+  have hnd := (hLane id).1
+  have hmem := (hLane id).2
+  rw [hp, laneLabels, List.map_cons, List.nodup_cons] at hnd
+  refine ⟨hnd.2, ?_⟩
+  intro x hx
+  exact hmem x (by simp [hp, hx])
+
+theorem lane_upsert (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (label : String)
+    (hsender : InstId) (hmem : label ∈ prioLabels I (tname id)) :
+    (laneLabels (upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none })).Nodup ∧
+      ∀ m ∈ upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none },
+        m.label ∈ prioLabels I (tname id) := by
+  by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
+  · have hsame : upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none } =
+        (w.st id).prio := by simp [upsertPrio, hany]
+    rw [hsame]
+    exact hLane id
+  · have hfalse : ((w.st id).prio.any fun p => p.label == label) = false := by
+      cases hbit : (w.st id).prio.any fun p => p.label == label <;> simp_all
+    have hnot := any_label_false _ _ hfalse
+    have hlabels : laneLabels (upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none }) =
+        laneLabels ((w.st id).prio) ++ [label] := by
+      simp [upsertPrio, hfalse, laneLabels]
+    refine ⟨?_, ?_⟩
+    · rw [hlabels]
+      exact nodup_snoc (hLane id).1 hnot
+    · intro m hm
+      have hgrown : upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none } =
+          (w.st id).prio ++ [{ label := label, sender := hsender, callFrom := none }] := by
+        simp [upsertPrio, hfalse]
+      rw [hgrown] at hm
+      simp [List.mem_append] at hm
+      cases hm with
+      | inl hold => exact (hLane id).2 m hold
+      | inr hnew =>
+        cases hnew
+        exact hmem
+
 end Deadlock

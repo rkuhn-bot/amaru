@@ -137,9 +137,11 @@ list. It is the part that used to be assumed as `Refines.projects`,
   the semantics can fire to be one of the steps that relation was closed under.
 - Occupancy shape: multiplicity `one` edges have `a = 0`, `perPeer` edges have
   `b = 0`, so the affine total matches the per-instance sum.
-- Priority labels (self-schedules and cell-wake labels) number at most
-  `priorityBound.b`, and that bound has `a = 0`. Re-arming a label does not
-  grow the lane; a new label past the lane is the overflow crash.
+- Priority labels (self-schedules, cell-edge labels, and `cell` writes in
+  programs) number at most `priorityBound.b`, and that bound has `a = 0`.
+  `GraphOk` already requires the bound to fit `priorityCapacity`, so the
+  declared set fits the lane for every `N`. Re-arming a label does not grow
+  the lane; a new label past the lane is the overflow crash.
 
 `projects` holds for every reachable world (`GraphOk` and `LocalOk`). A parked
 phase or an `awaitReply` is a blocking edge of the description, and if the
@@ -288,11 +290,11 @@ for a send the actor did not itself perform.
   the actor continues on the tail, still alive. `exec_drops` says one step of a
   nonempty program strictly lowers the phase measure, including a crash or a
   killing `terminate`. `reaches_block` puts those together: a live actor later
-  becomes idle, dies, crashes, or blocks on a send or a call. `prio_no_crash`
-  says that crash branch is impossible for a lane whose labels are distinct and
-  drawn from a set no larger than the capacity; reachable worlds are not yet
-  shown to keep the lane in that shape. Discharging a block by `Fair.bulk`,
-  `CellFresh`, and the dead-instance lift are not proved.
+  becomes idle, dies, crashes, or blocks on a send or a call. `lane_has_room`
+  says a fresh label from that declared set still fits, so the crash branch
+  does not run once a reachable world is known to keep the lane duplicate-free
+  and inside the set. That preservation, a `Fair.bulk` delivery, `CellFresh`,
+  and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

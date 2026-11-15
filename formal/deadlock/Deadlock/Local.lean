@@ -24,6 +24,12 @@ def selfLabels : List Eff → List String
   | .selfSchedule l :: es => l :: selfLabels es
   | _ :: es => selfLabels es
 
+/-- Labels a program can wake on `reader`'s priority lane by a `cell` write. -/
+def cellWakeLabels (reader : String) : List Eff → List String
+  | [] => []
+  | .cell d l _ :: es => (if d == reader then [l] else []) ++ cellWakeLabels reader es
+  | _ :: es => cellWakeLabels reader es
+
 def sendsOk (D : Description) (template srcState dstState : String) (prog : List Eff) : Bool :=
   D.templates.all fun t =>
     sendsTo t.name prog + floorState D template dstState t.name ≤ floorState D template srcState t.name
@@ -111,7 +117,8 @@ def prioLabels (I : Impl) (template : String) : List String :=
   dedup <|
     (I.transitions.filterMap fun tr =>
       if tr.template == template then some (selfLabels tr.program) else none).flatten ++
-      cellLabels I.desc template
+      cellLabels I.desc template ++
+      (I.transitions.map fun tr => cellWakeLabels template tr.program).flatten
 
 def prioOk (I : Impl) : Bool :=
   I.desc.templates.all fun t =>
