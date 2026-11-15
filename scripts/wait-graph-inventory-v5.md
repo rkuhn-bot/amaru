@@ -136,3 +136,108 @@ No blocking self-loop remains. `peer_selection` becomes a source: its only remai
 | `accept → manager` Accepted | `amaru-protocols/src/accept.rs:29` |
 | `ledger → track_peers` StakeDistUpdated | `amaru-ledger/src/state.rs:1288`, `amaru-node/src/stages/build_node.rs:504` |
 | `track_peers → ledger` VolatileTipEffect | `amaru-consensus/src/stages/track_peers/mod.rs:993`, `amaru-consensus/src/stages/track_peers/mod.rs:1086` |
+
+## Pass 6, after checking the code
+
+The checker still exits 1 in `after`. The bounds below were checked against `33d62a6f`. A row is discharged only where the code matches the bound. The nine `mux → handler` edges and the six edges into manager stay blocking.
+
+### Manager mailbox
+
+Production size is `DEFAULT_MAILBOX_SIZE + target_upstream_peers + target_downstream_peers` (`build_stage_graph.rs:71-72`). `DEFAULT_MAILBOX_SIZE` is 10 (`types.rs:53`). The defaults are 3 upstream and 10 downstream (`lib.rs:97-99`), so the mailbox is 23. The unit test `peer_mailbox_size(40, 10)` is 60. Nothing in this tree sizes the manager mailbox to 460. 460 would be that same formula with upstream + downstream = 450.
+
+The proposed occupancy `4·N_max + 2·max_outbound + 4` is 62 at the defaults, which is already larger than 23. Two of its terms also do not match the send sites:
+
+- `ConnectionResult` (`connector.rs:101`) is one per finished attempt, and `pump` keeps `DEFAULT_PARALLEL_CONNECTION` (10) workers busy (`connector.rs:32`, `:86`). That is not `max_outbound` (3).
+- `Accepted` (`accept.rs:29`) is sent for every TCP accept, then the accept stage schedules another pull (`accept.rs:39`). The inbound cap runs later, inside `handshake_complete` (`manager/mod.rs:537-552`), after both `Accepted` and `HandshakeComplete` (`connection.rs:454`) are already queued.
+- `RemovePeer` (`peer_selection/mod.rs:339`) is sent on every ban, and a peer can be banned again after the cooldown. There is no one-per-connection guard on that send.
+- `AddPeer` (`peer_selection/mod.rs:359`) does stay within `target_upstream_peers`: `start_dial` records the peer as dialing, and `using_occupancy` stops further dials.
+- `Listen` is one preload (`build_node.rs:516`).
+- `SetLocalUse`, `NewTip`, and `FetchBlocks` are ordinary sends. There is no cell.
+
+### Mux → handler
+
+`next_segment` does `eff.send(&sent, Sent)` (`mux.rs:881`). That `sent` ref is the oneshot from `eff.call` (`tokio.rs:712-718`): the send does not park and does not take a slot in the handler mailbox. So undequeued `Sent` is not part of `W(mux → h)`. What does pile up is `MuxMessage::Send` on the mux, and only when a call times out.
+
+`eff.call` awaits `Sent` or `NETWORK_SEND_TIMEOUT`. On timeout the request stays queued and the reply is ignored (`effect.rs:319-320`). Both miniprotocol (`miniprotocol.rs:232-235`) and the blockfetch responder (`responder.rs:230-244`) discard the admission and continue. A served range is at most `MAX_FETCHED_BLOCKS` (1000) bodies (`responder.rs:44`, `:126`). One timed-out range can leave 1 `StartBatch` + 1000 `Block` + 1 `BatchDone` outstanding, and the next range can add more. On the success path each `call` awaits, so `s_h = 1`. The constant bound needs a per-handler send credit that is not released by a timeout, or a monotone "acked up to n" cell. Neither is in the code.
+
+`want_next` delivers a buffered frame or else increments `wanted` with no cap (`mux.rs:854-861`). The outstanding count is whatever the handler has issued.
+
+`Register` sends `Registered` on every call (`mux.rs:439` → `:660`), once per register message. `do_register`'s occupied arm keeps `wanted`, the frame, and the buffer, and swaps the handler (`mux.rs:694-700`). Re-register is not only the trap. `on_expected_stop` installs the trap (`connection.rs:638-688`) and, when use comes back, `start_initiators` registers a new initiator on the same protocol id (`connection.rs:736-774`). Inherited `wanted` means a late reply is delivered to whichever handler is installed. The trap treats `FromNetwork` as a protocol error and terminates the mux (`mux.rs:252-261`). A legitimate in-flight reply after `MsgDone` does hit the trap. The fix is to zero `wanted` and clear `incoming` on that register. Until then the bound is not `p_h`.
+
+### Per handler
+
+`p_h` is the peak `WantNext` the state machine issues before the matching frame is delivered. `s_h` is outstanding `Send` on the success path, then the timeout path. Local inputs are the handler's own mailbox messages that are not `FromNetwork`.
+
+| Handler | p_h | s_h success | s_h after timeout | Local inputs | 1+p_h+s_h+local vs 10 |
+| --- | --- | --- | --- | --- | --- |
+| handshake initiator | 1 | 1 | unbounded | none after the propose | fails on timeout |
+| handshake responder | 1 | 1 | 1 (one reply, no want_next on it) | none | 3 ≤ 10 only if timeout cannot add a second send; the call result is discarded |
+| chainsync initiator | 1 in steady state; 2 if `RequestNext` is processed while the post-intersect `WantNext` is still open | 1 | unbounded | `RequestNext` per header, one `Done` | the mailbox is 14, not 10; `d+1` is not what the code holds |
+| chainsync responder | 1 | 1 | unbounded | `NewTip` per adopted block, no cell | fails |
+| blockfetch initiator | 1 per pipeline slot, slots share one `wanted`; `n=2` | 1 | unbounded | one stashed range, `Close` | the "4 ≤ 10" figure does not include a timed-out `Send` |
+| blockfetch responder | 1 | 1 | ≤ 1002 per range, then more | none (the range is handled inside the transition) | fails |
+| tx initiator | 1 | 1 | unbounded | `Close`, and the mempool wake | fails |
+| tx responder | 1 | 1 | unbounded | capacity wake, inflight timeout | fails |
+| keepalive initiator | 1 | 1 | unbounded | `Close`, timer is priority | fails on timeout |
+| keepalive responder | 1 | 1 | 1 per response | none | same timeout hole |
+| peer-sharing initiator | 1 | 1 | unbounded | `Close`, timer is priority | fails on timeout |
+| peer-sharing responder | 1 | 1 | 1 per share | none | same timeout hole |
+| done trap | inherited `wanted` | 0 | 0 | `Registered` | not a constant `p_h` |
+
+### WantNext sites
+
+The mux does not enforce these. Each row is the protocol state at the call. The actual send is `miniprotocol.rs:228` for a network outcome and `:274` for a local outcome, except blockfetch, which sends `WantNext` itself.
+
+| Handler | Site | State at the call | What it does |
+| --- | --- | --- | --- |
+| chainsync initiator | `initiator.rs:341` via `:274` | `Idle`, after `Registered` runs `init` (no `want_next`, `:299`) | one `WantNext` with `FindIntersect` |
+| chainsync initiator | `initiator.rs:316` via `:228` | `Intersect`, on `IntersectFound` | one `WantNext`, not two up front, and `RequestNext(PIPELINE_DEPTH)` is a single wire message |
+| chainsync initiator | `initiator.rs:323` via `:228` | `CanAwait(n)`, on `AwaitReply` | re-issues one `WantNext` |
+| chainsync initiator | `initiator.rs:343`, `:345`, `:348` via `:274` | `Idle`, `CanAwait`, or `MustReply`, on local `RequestNext` | one `WantNext` each; `MustReply` can add one while an earlier `WantNext` is still open |
+| chainsync responder | `responder.rs:249` via `:228` | `Idle`, on `Registered` | initial `WantNext` |
+| chainsync responder | `responder.rs:268` via `:228` | `Idle`, on `Done` | `WantNext` |
+| chainsync responder | `responder.rs:279`, `:283` via `:274` | `Intersect` | `WantNext` with the intersect reply. Not `Idle` |
+| chainsync responder | `responder.rs:287` via `:274` | `CanAwait` | `AwaitReply` sends and does **not** `WantNext` |
+| chainsync responder | `responder.rs:291`, `:294`, `:297` via `:274` | `CanAwait` or `MustReply` | `WantNext` with the roll. Not `Idle` |
+| handshake initiator | `initiator.rs:159` via `:274` | `Propose`, after `Registered` | one `WantNext` with `Propose`. `init` itself has no `want_next` (`:128`) |
+| handshake responder | `responder.rs:101` via `:228` | `Propose`, on `Registered` | initial `WantNext` |
+| handshake responder | `responder.rs:123-126` via `:274` | `Confirm` | the reply has no `want_next` |
+| tx initiator | `initiator.rs:170` via `:228` | `Idle`, on `Registered` | `Init` plus `WantNext` |
+| tx initiator | `initiator.rs:215`, `:218`, `:221` via `:274` | `Idle` | `WantNext` with each reply |
+| tx responder | `responder.rs:205` via `:228` | `Init`, on `Registered` | initial `WantNext` |
+| tx responder | `responder.rs:224` via `:228` | `TxIdsBlocking`, on `Done` | `WantNext`, and the state returns to `Init` |
+| tx responder | `responder.rs:233-240` via `:274` | `Idle` | `WantNext` with each request. The network replies (`:216-222`) do not |
+| keepalive initiator | `initiator.rs:179` via `:274` | `Idle` | `WantNext` with the cookie. The reply (`:169`) does not |
+| keepalive responder | `responder.rs:108` via `:228` | `Idle`, on `Registered` | initial `WantNext` |
+| keepalive responder | `responder.rs:121` via `:228` | `Idle`, on `Done` | `WantNext` |
+| keepalive responder | `responder.rs:131` via `:274` | `Waiting` | `WantNext` with the response. Not `Idle` |
+| peer-sharing initiator | `initiator.rs:259` via `:274` | `Idle` | `WantNext` with the request |
+| peer-sharing responder | `responder.rs:198` via `:228` | `Idle`, on `Registered` | initial `WantNext` |
+| peer-sharing responder | `responder.rs:213` via `:228` | `Idle`, on `Done` | `WantNext` |
+| peer-sharing responder | `responder.rs:223` via `:274` | `Busy` | `WantNext` with `SharePeers`. Not `Idle` |
+| blockfetch initiator | `initiator.rs:290`, `:298` | `Busy` | `WantNext` on `Pull` and `StartBatch` |
+| blockfetch initiator | `initiator.rs:346` | `Streaming` | `WantNext` per block |
+| blockfetch initiator | `initiator.rs:400` | `Idle`, after a stashed fetch | `WantNext` after the range `call` |
+| blockfetch responder | `responder.rs:217-223` | `Idle` | `Registered` is rewritten to `Pull`, then `WantNext`. This is a `WantNext` in the `Registered` transition |
+| blockfetch responder | `responder.rs:248`, `:256` | end of the `Idle` range transition | one `WantNext` after the batch, not per block |
+| blockfetch responder | `responder.rs:264` | `Idle`, on `ClientDone` | `WantNext` |
+
+Sites that are not "responders `WantNext` only in `StIdle`, never on `Registered`":
+
+- chainsync responder from `Intersect`, `CanAwait`, and `MustReply` (`responder.rs:279`, `:291`, `:294`, `:297`)
+- keepalive responder from `Waiting` (`responder.rs:131`)
+- peer-sharing responder from `Busy` (`responder.rs:223`)
+- blockfetch responder's `Pull` on `Registered` (`responder.rs:217-223`)
+- every responder `init` that sets `want_next`, which runs because `Registered` takes the `init` arm (`miniprotocol.rs:224`)
+
+The chainsync initiator does re-issue on `AwaitReply` (`initiator.rs:323`) and does not issue two `WantNext` up front on `IntersectFound`.
+
+### The other mux outputs
+
+`OutgoingSdu` is at most one: `sending` gates both sends (`mux.rs:446-449`, `:469-474`) and `Written` clears it. `Read` alternates with `FromNetwork`: one `Read` at init (`mux.rs:392`), and the next only after a segment has been handed to the mux (`mux.rs:463`). Both are `W = 1` against a mailbox of 10, and both stay discharged.
+
+### Checker
+
+`now`: exit 1. 72 blocking edges kept, 6 discharged. One component of 24, plus the `Resolved` self-loop.
+
+`after`: exit 1. 56 blocking edges kept, 22 discharged. Components of 10 (mux and the handlers whose return edge is still open), 6 (`fetch_blocks`, `cleanup_replies`, `manager`, `connector`, `validate_block`, `adopt_chain`), and 2 (`ledger`, `track_peers`).

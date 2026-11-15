@@ -620,6 +620,63 @@ R("track_peers", "ledger", "VolatileTipEffect", "L1",
   "ledger request queue 16", "state.rs:418; track_peers/mod.rs:993,1086", "blocking", "blocking")
 
 
+# Fields added after checking the code: w_formula, capacity_formula, at_defaults, verified.
+# verified false forces after=blocking. The checker does not read these fields.
+VERIFY: dict[tuple, dict] = {}
+
+
+def V(frm, to, message, **fields):
+    VERIFY[(frm, to, message)] = fields
+
+
+# Reader and writer. `sending` and the Read/FromNetwork alternation are in the code.
+V("mux", "mux_reader", "Read", verified=True, lemma_checked="L1",
+  w_formula="1", capacity_formula="10", at_defaults=10,
+  check="init sends one Read (mux.rs:392); the next Read is sent only from the FromNetwork arm (mux.rs:463)")
+V("mux", "mux_writer", "OutgoingSdu", verified=True, lemma_checked="L1",
+  w_formula="1", capacity_formula="10", at_defaults=10,
+  check="sending is set around the only two OutgoingSdu sends (mux.rs:446-449 and 469-474) and cleared on Written")
+
+# Manager. The production mailbox is 10+upstream+downstream = 23, not the formula and not 460.
+for _edge in (
+    ("connection", "manager", "HandshakeComplete"),
+    ("adopt_chain", "manager", "NewTip"),
+    ("fetch_blocks", "manager", "FetchBlocks"),
+    ("peer_selection", "manager", "AddPeer/RemovePeer/Disconnect/SetLocalUse"),
+    ("connector", "manager", "ConnectionResult"),
+    ("accept", "manager", "Accepted"),
+):
+    V(*_edge, verified=False, lemma_checked="L1",
+      w_formula="4*N_max+2*max_outbound+4",
+      capacity_formula="DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      at_defaults="formula 62, mailbox 23",
+      check=(
+          "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by "
+          "DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. "
+          "Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), "
+          "after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) "
+          "is sent on every ban, including after cooldown. The three cells are not in the code."
+      ))
+
+# Mux to handler. Sent is a oneshot, wanted is not reset on re-register, timeout drops the credit.
+for _name in (
+    "handshake", "chainsync_responder", "tx_submission_initiator", "tx_submission_responder",
+    "keepalive_initiator", "keepalive_responder", "peer_sharing_initiator", "peer_sharing_responder",
+    "blockfetch_responder",
+):
+    V("mux", _name, "Registered/FromNetwork", verified=False, lemma_checked="L1",
+      w_formula="1+p_h+s_h+local", capacity_formula="10", at_defaults="not ≤ 10",
+      check=(
+          "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. "
+          "want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm "
+          "(mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later "
+          "start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). "
+          "A late frame is delivered to the trap, which terminates (mux.rs:252-261). "
+          "eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; "
+          "blockfetch/responder.rs:238)."
+      ))
+
+
 def main() -> None:
     missing = []
     rows = []
@@ -636,12 +693,19 @@ def main() -> None:
             missing.append(key)
             continue
         lemma, w, capacity, location, now, after = ROWS[key]
-        rows.append({
+        row = {
             "edge": f"{frm} -> {to} [{message}]",
             "from": frm, "to": to, "message": message,
             "lemma": lemma, "w": w, "capacity": capacity, "location": location,
             "now": now, "after": after,
-        })
+        }
+        extra = VERIFY.get((frm, to, message))
+        if extra:
+            row.update(extra)
+            # A failed check stays blocking. Do not promote it.
+            if extra.get("verified") is False:
+                row["after"] = "blocking"
+        rows.append(row)
     extra = [key for key in ROWS if not any(e[0] == key[0] and e[1] == key[1] and e[2] == key[2] and e[3] for e in EDGES)]
     if missing or extra:
         raise SystemExit(f"missing {missing} extra {extra}")
@@ -686,7 +750,12 @@ def main() -> None:
             "token, RequestNext credit with Done-once, and the cap at accept. A cell or a "
             "deleted send is discharged. A cell whose mailbox sum still exceeds capacity stays blocking."
         ),
-        "columns": ["edge", "lemma", "w", "capacity", "location", "now", "after"],
+        "columns": ["edge", "lemma", "w", "capacity", "location", "now", "after", "w_formula", "capacity_formula", "at_defaults", "verified"],
+        "verification": (
+            "Rows with verified=false stay blocking in after. The manager mailbox in this tree is "
+            "10+target_upstream_peers+target_downstream_peers (23 at the defaults of 3 and 10), "
+            "from build_stage_graph.rs:71-72. No production path sizes it to 460."
+        ),
         "rows": rows,
     }
     out = Path("scripts")

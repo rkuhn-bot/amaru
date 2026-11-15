@@ -8,8 +8,13 @@
     "capacity",
     "location",
     "now",
-    "after"
+    "after",
+    "w_formula",
+    "capacity_formula",
+    "at_defaults",
+    "verified"
   ],
+  "verification": "Rows with verified=false stay blocking in after. The manager mailbox in this tree is 10+target_upstream_peers+target_downstream_peers (23 at the defaults of 3 and 10), from build_stage_graph.rs:71-72. No production path sizes it to 460.",
   "rows": [
     {
       "edge": "handshake -> mux [WantNext/Send]",
@@ -33,7 +38,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "chainsync_initiator -> mux [WantNext/Send]",
@@ -81,7 +92,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "tx_submission_initiator -> mux [WantNext/Send]",
@@ -105,7 +122,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "tx_submission_responder -> mux [WantNext/Send]",
@@ -129,7 +152,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "keepalive_initiator -> mux [WantNext/Send]",
@@ -153,7 +182,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "keepalive_responder -> mux [WantNext/Send]",
@@ -177,7 +212,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "peer_sharing_initiator -> mux [WantNext/Send]",
@@ -201,7 +242,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "peer_sharing_responder -> mux [WantNext/Send]",
@@ -225,7 +272,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "blockfetch_initiator -> mux [WantNext/Send]",
@@ -273,7 +326,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:660,846,858",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "1+p_h+s_h+local",
+      "capacity_formula": "10",
+      "at_defaults": "not \u2264 10",
+      "check": "Sent at mux.rs:881 is a oneshot (tokio.rs:712-718), so it is not a handler-mailbox slot. want_next increments unconditionally (mux.rs:854-861). do_register's Occupied arm (mux.rs:694-700) keeps wanted and the buffer. install_done_trap and a later start_initiators both Register the same protocol id (connection.rs:638-688, 736-774). A late frame is delivered to the trap, which terminates (mux.rs:252-261). eff.call discards a timeout and the Send stays queued (miniprotocol.rs:232-235; blockfetch/responder.rs:238)."
     },
     {
       "edge": "mux -> done_trap [Registered/FromNetwork]",
@@ -297,7 +356,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:392,463",
       "now": "discharged",
-      "after": "discharged"
+      "after": "discharged",
+      "verified": true,
+      "lemma_checked": "L1",
+      "w_formula": "1",
+      "capacity_formula": "10",
+      "at_defaults": 10,
+      "check": "init sends one Read (mux.rs:392); the next Read is sent only from the FromNetwork arm (mux.rs:463)"
     },
     {
       "edge": "mux_reader -> mux [FromNetwork]",
@@ -321,7 +386,13 @@
       "capacity": "bulk 10 (child of a stage whose Effects.mailbox_size is the graph default)",
       "location": "mux.rs:449,474",
       "now": "discharged",
-      "after": "discharged"
+      "after": "discharged",
+      "verified": true,
+      "lemma_checked": "L1",
+      "w_formula": "1",
+      "capacity_formula": "10",
+      "at_defaults": 10,
+      "check": "sending is set around the only two OutgoingSdu sends (mux.rs:446-449 and 469-474) and cleared on Written"
     },
     {
       "edge": "mux_writer -> mux [Written]",
@@ -453,7 +524,13 @@
       "capacity": "manager bulk 10+max_outbound+max_inbound (23)",
       "location": "connection.rs:454",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "4*N_max+2*max_outbound+4",
+      "capacity_formula": "DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      "at_defaults": "formula 62, mailbox 23",
+      "check": "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) is sent on every ban, including after cooldown. The three cells are not in the code."
     },
     {
       "edge": "manager -> connection [Initialize/Disconnect/FetchBlocks/NewTip/SetLocalUse]",
@@ -681,7 +758,13 @@
       "capacity": "manager bulk 10+max_outbound+max_inbound (23)",
       "location": "adopt_chain/mod.rs:266",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "4*N_max+2*max_outbound+4",
+      "capacity_formula": "DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      "at_defaults": "formula 62, mailbox 23",
+      "check": "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) is sent on every ban, including after cooldown. The three cells are not in the code."
     },
     {
       "edge": "adopt_chain -> block_source [AdoptedTip]",
@@ -729,7 +812,13 @@
       "capacity": "manager bulk 10+max_outbound+max_inbound (23)",
       "location": "fetch_blocks/mod.rs:440,544",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "4*N_max+2*max_outbound+4",
+      "capacity_formula": "DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      "at_defaults": "formula 62, mailbox 23",
+      "check": "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) is sent on every ban, including after cooldown. The three cells are not in the code."
     },
     {
       "edge": "fetch_blocks -> peer_selection [Adversarial]",
@@ -825,7 +914,13 @@
       "capacity": "manager bulk 10+max_outbound+max_inbound (23)",
       "location": "peer_selection/mod.rs:339,359,782,945",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "4*N_max+2*max_outbound+4",
+      "capacity_formula": "DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      "at_defaults": "formula 62, mailbox 23",
+      "check": "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) is sent on every ban, including after cooldown. The three cells are not in the code."
     },
     {
       "edge": "peer_selection -> peer_selection [Resolved]",
@@ -873,7 +968,13 @@
       "capacity": "manager bulk 10+max_outbound+max_inbound (23)",
       "location": "connector.rs:101",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "4*N_max+2*max_outbound+4",
+      "capacity_formula": "DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      "at_defaults": "formula 62, mailbox 23",
+      "check": "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) is sent on every ban, including after cooldown. The three cells are not in the code."
     },
     {
       "edge": "connector -> connect_worker [ConnectJob]",
@@ -921,7 +1022,13 @@
       "capacity": "manager bulk 10+max_outbound+max_inbound (23)",
       "location": "accept.rs:29",
       "now": "blocking",
-      "after": "blocking"
+      "after": "blocking",
+      "verified": false,
+      "lemma_checked": "L1",
+      "w_formula": "4*N_max+2*max_outbound+4",
+      "capacity_formula": "DEFAULT_MAILBOX_SIZE+target_upstream_peers+target_downstream_peers",
+      "at_defaults": "formula 62, mailbox 23",
+      "check": "mailbox is build_stage_graph.rs:71-72. ConnectionResult is bounded by DEFAULT_PARALLEL_CONNECTION=10 (connector.rs:32,86), not max_outbound. Accepted is capped only inside handshake_complete (manager/mod.rs:537-552), after accept.rs:29 has already queued it. RemovePeer (peer_selection/mod.rs:339) is sent on every ban, including after cooldown. The three cells are not in the code."
     },
     {
       "edge": "ledger -> track_peers [StakeDistUpdated]",
