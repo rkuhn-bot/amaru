@@ -3068,7 +3068,8 @@ theorem occ_self_call (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
 theorem occ_self_send (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : Cont)
     (e : Eff) (es : List Eff) (label : String) (hint : Nat) (hO : OccInv I w)
     (hph : (w.st sender).phase = .run k) (hk : k.rest = e :: es)
-    (he : e = .send (tname sender) label hint ∨ e = .call (tname sender) label hint)
+    (he : e = .send (tname sender) label hint ∨ e = .call (tname sender) label hint ∨
+      e = .trySend (tname sender) label hint)
     (hmsg : msg.sender = sender) (hty : (w.st sender).typestate = k.toState)
     (hsender : (w.st sender).life = .alive) (hnot : ¬ terminableName I.desc (tname sender))
     (hpark : (w.st sender).parked = [])
@@ -3077,7 +3078,7 @@ theorem occ_self_send (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
   have hmem := hO.aliveIn sender hsender
   have hpend1 : 1 ≤ pending (w.st sender) (tname sender) := by
     simp [pending, contRest, hph, hk]
-    rcases he with rfl | rfl <;> simp [sendsTo]
+    rcases he with rfl | rfl | rfl <;> simp [sendsTo]
   have htok1 : 1 ≤ (w.st sender).tokens (tname sender) := by
     have hS := hO.slack sender (tname sender) hmem hsender
     omega
@@ -3104,9 +3105,10 @@ theorem occ_self_send (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
       · exact Or.inr (Or.inr (proceed_phase_indep base aS (afterHead k)))
     exact pending_drop (w.st sender) aS k e es (tname sender) label hint d hph hk
       (by
-        rcases he with h | h
+        rcases he with h | h | h
         · exact Or.inl h
-        · exact Or.inr (Or.inl h)) hp
+        · exact Or.inr (Or.inl h)
+        · exact Or.inr (Or.inr h)) hp
   · intro s
     exact owed_self_box w.st (tname sender) sender aS msg w.roster hO.nodup hmem rfl hmsg
       (by simp [aS, base, proceed_box, hcb]) (by simp [aS, base, proceed_parked, hcp]) s
@@ -3519,7 +3521,8 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
 theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)
     (e : Eff) (es : List Eff) (label : String) (hint : Nat) (hO : OccInv I w)
     (hph : (w.st sender).phase = .run k) (hk : k.rest = e :: es)
-    (he : e = .send (tname dst) label hint ∨ e = .call (tname dst) label hint)
+    (he : e = .send (tname dst) label hint ∨ e = .call (tname dst) label hint ∨
+      e = .trySend (tname dst) label hint)
     (hmsg : msg.sender = sender) (hty : (w.st sender).typestate = k.toState)
     (hsender : (w.st sender).life = .alive) (hnot : ¬ terminableName I.desc (tname sender))
     (hne : sender ≠ dst) (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
@@ -3529,7 +3532,7 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
   have hdst := hO.aliveIn dst hlive
   have hpend1 : 1 ≤ pending (w.st sender) (tname dst) := by
     simp [pending, contRest, hph, hk]
-    rcases he with rfl | rfl <;> simp [sendsTo]
+    rcases he with rfl | rfl | rfl <;> simp [sendsTo]
   have htok1 : 1 ≤ (w.st sender).tokens (tname dst) := by
     have hS := hO.slack sender (tname dst) hmem hsender
     omega
@@ -3559,9 +3562,10 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
       · exact Or.inr (Or.inr (proceed_phase_indep charged aS (afterHead k)))
     exact pending_drop (w.st sender) aS k e es (tname dst) label hint d hph hk
       (by
-        rcases he with h | h
+        rcases he with h | h | h
         · exact Or.inl h
-        · exact Or.inr (Or.inl h)) hp
+        · exact Or.inr (Or.inl h)
+        · exact Or.inr (Or.inr h)) hp
   · intro s
     exact owed_other_box w.st (tname dst) sender dst aS aD msg w.roster hO.nodup hdst hmem hne rfl hmsg
       (by simp [aS, charged, proceed_box, hcb]) (by simp [aS, charged, proceed_parked, hcp])
@@ -3714,15 +3718,23 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
       · subst hsame
         cases isCall with
         | false =>
-          exact occ_self_send I w sender msg k e es label hint hO hph hk he hmsg hty hsender hnot
-            hroom.1 hroom.2
+          exact occ_self_send I w sender msg k e es label hint hO hph hk
+            (by
+              rcases he with h | h
+              · exact Or.inl h
+              · exact Or.inr (Or.inl h))
+            hmsg hty hsender hnot hroom.1 hroom.2
         | true =>
           exact occ_self_call I w sender msg k e es label hint hO hph hk he hmsg hsender hnot
             hroom.1 hroom.2
       · cases isCall with
         | false =>
-          exact occ_other_send I w sender dst msg k e es label hint hO hph hk he hmsg hty hsender hnot
-            hsame hlive hroom.1 hroom.2
+          exact occ_other_send I w sender dst msg k e es label hint hO hph hk
+            (by
+              rcases he with h | h
+              · exact Or.inl h
+              · exact Or.inr (Or.inl h))
+            hmsg hty hsender hnot hsame hlive hroom.1 hroom.2
         | true =>
           exact occ_other_call I w sender dst msg k e es label hint hO hph hk he hmsg hsender hnot
             hsame hlive hroom.1 hroom.2
@@ -4185,6 +4197,69 @@ theorem occ_spawn (I : Impl) (w w' : World) (template : String) (hO : OccInv I w
           simp [hi]
           exact hO.clear i hl1
     · simp [hif] at h
+
+theorem try_fit_self (w : World) (id : InstId) (msg : Msg) (k : Cont) :
+    let a' := chargeSender (w.st id) (tname id)
+    let w1 := setActor w id a'
+    let stored := { (w1.st id) with box := (w1.st id).box ++ [msg] }
+    setActor (setActor w1 id stored) id (proceed ((setActor w1 id stored).st id) k) =
+      setActor w id (proceed { a' with box := a'.box ++ [msg] } k) := by
+  simp only [setActor]
+  congr 1
+  funext i
+  by_cases hi : i = id <;> simp [hi]
+
+theorem try_fit_other (w : World) (id dst : InstId) (msg : Msg) (k : Cont) (hne : id ≠ dst) :
+    let a' := chargeSender (w.st id) (tname dst)
+    let w1 := setActor w id a'
+    let stored := { (w1.st dst) with box := (w1.st dst).box ++ [msg] }
+    setActor (setActor w1 dst stored) id (proceed ((setActor w1 dst stored).st id) k) =
+      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) id (proceed a' k) := by
+  simp only [setActor, hne]
+  congr 1
+  funext i
+  by_cases hi : i = id
+  · simp [hi]
+  · have hne' : dst ≠ id := fun h => hne h.symm
+    simp [hi, hne']
+
+/-- A `trySend` that fits spends one token and stores the message.
+A miss, a dead target, or a full mailbox continues without a charge. -/
+theorem occ_try (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
+    (dstName label : String) (hint : Nat) (es : List Eff) (hO : OccInv I w) (hT : TyOk I.desc w)
+    (hph : (w.st id).phase = .run { k with rest := .trySend dstName label hint :: es })
+    (hty : (w.st id).typestate = k.toState) (hsender : (w.st id).life = .alive)
+    (hnot : ¬ terminableName I.desc (tname id)) :
+    OccInv I (execRun I w id (w.st id) { k with rest := .trySend dstName label hint :: es }) := by
+  let cont : Cont := { k with rest := .trySend dstName label hint :: es }
+  have hph' : (w.st id).phase = .run cont := by simpa [cont] using hph
+  have hty' : (w.st id).typestate = cont.toState := by simpa [cont] using hty
+  simp [execRun, cont]
+  cases hr : route w I.desc dstName hint with
+  | none =>
+    simp [hr]
+    exact occ_advance I w id cont hO hty' hph'
+  | some dst =>
+    simp [hr]
+    have hname := route_tname w I.desc dstName hint dst hr
+    split
+    · next hcond =>
+      have hlive : (w.st dst).life = .alive := hcond.1.1
+      have hpark : (w.st dst).parked = [] := hcond.1.2
+      have hcap : (w.st dst).box.length < capBulk I.desc w.N dst := hcond.2
+      let msg : Msg := { label := label, sender := id, callFrom := none }
+      have he : Eff.trySend dstName label hint = Eff.trySend (tname dst) label hint := by rw [hname]
+      by_cases hsame : id = dst
+      · subst hsame
+        have hocc := occ_self_send I w id msg cont (.trySend dstName label hint) es label hint hO
+          hph' rfl (Or.inr (Or.inr he)) rfl hty' hsender hnot hpark hcap
+        rw [enqueue_room_self_send w I.desc id msg (afterHead cont) hsender hpark hcap] at hocc
+        simpa [msg, try_fit_self, cont] using hocc
+      · have hocc := occ_other_send I w id dst msg cont (.trySend dstName label hint) es label hint hO
+          hph' rfl (Or.inr (Or.inr he)) rfl hty' hsender hnot hsame hlive hpark hcap
+        rw [enqueue_room_other_send w I.desc id dst msg (afterHead cont) hlive hsame hpark hcap] at hocc
+        simpa [msg, try_fit_other w id dst msg (afterHead cont) hsame, cont] using hocc
+    · exact occ_advance I w id cont hO hty' hph'
 
 end Deadlock
 

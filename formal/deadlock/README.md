@@ -235,11 +235,20 @@ for a send the actor did not itself perform.
   `occ_cell` covers a cell write followed by reader wakes. `occ_reply` covers
   `performReply`. `occ_spawn` covers allocating a fresh per-peer instance.
   `trySend`, a killing `terminate`, and one theorem for the whole of `execRun`
-  are not connected yet. The check is not
-  known to be unsound: a terminable template
-  cannot bulk-send, so a dead instance does not keep credit a replacement
-  would count again. That missing preservation is why `¬ Deadlock` is not
-  claimed yet.
+  are not connected yet. Charging a send requires the sender's template not
+  to be terminable, and `OccInv.still` keeps a terminable actor's owed count
+  at zero. That is narrower than Amaru: a per-peer stage, such as a chainsync
+  initiator, terminates when its peer disconnects and does send to shared
+  stages. Deadlock freedom is proved first under this restriction. The lift
+  lets a dead instance keep the messages it already sent charged until they
+  are consumed, and counts every instance with `life = dead` and `owed > 0`
+  toward the per-peer occupancy bound (or bounds those leftovers by an
+  explicit annotation). If that preservation needs a check the current
+  description does not have, the check is defined with the lift. The present
+  check is not known to be unsound for the restricted model: a terminable
+  template cannot bulk-send, so a dead instance does not keep credit a
+  replacement would count again. That missing preservation, and the missing
+  `execRun` theorem, are why `¬ Deadlock` is not claimed yet.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
