@@ -61,3 +61,4 @@ import Deadlock.Occ
 #print axioms Deadlock.occ_set
 #print axioms Deadlock.occ_finish
 #print axioms Deadlock.occ_prio
+#print axioms Deadlock.occ_bulk

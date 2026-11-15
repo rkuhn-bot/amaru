@@ -2235,4 +2235,150 @@ theorem occ_bulk_park (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : Wor
     rw [hpark] at hempty
     cases hempty
 
+theorem slot_admit (st : InstId → Actor) (dst : String) (s id : InstId) (m : Msg) (ms : List Msg)
+    (p : Parked) (ps : List Parked) (hname : tname id = dst) (hbox : (st id).box = m :: ms)
+    (hpark : (st id).parked = p :: ps) (hmsg : p.sender = p.msg.sender) :
+    slot (fun i => if i = id then { st id with box := ms ++ [p.msg], parked := ps } else st i) dst s id +
+        (if m.sender = s then 1 else 0) = slot st dst s id := by
+  have hb : (tname id == dst) = true := by simpa [beq_iff_eq] using hname
+  simp [slot, hb, hbox, hpark, countFrom, countParked, countFrom_append, hmsg]
+  by_cases hm : m.sender = s <;> by_cases hp : p.sender = s <;> simp [hm, hp] <;> omega
+
+theorem owed_admit (st : InstId → Actor) (dst : String) (s id : InstId) (m : Msg) (ms : List Msg)
+    (p : Parked) (ps : List Parked) (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster)
+    (hname : tname id = dst) (hbox : (st id).box = m :: ms) (hpark : (st id).parked = p :: ps)
+    (hmsg : p.sender = p.msg.sender) :
+    owed (fun i => if i = id then { st id with box := ms ++ [p.msg], parked := ps } else st i) dst s roster +
+        (if m.sender = s then 1 else 0) = owed st dst s roster := by
+  have hslot := slot_admit st dst s id m ms p ps hname hbox hpark hmsg
+  have hrep := owed_replace st dst s id { st id with box := ms ++ [p.msg], parked := ps } roster nodup hmem
+  omega
+
+theorem occ_bulk_both (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
+    (m : Msg) (ms : List Msg) (p : Parked) (ps : List Parked) (w1 : World) (a1 : Actor) (hO : OccInv I w)
+    (hbox : (w.st id).box = m :: ms) (hpark : (w.st id).parked = p :: ps)
+    (halive : (w.st id).life = .alive) (hidle : (w.st id).phase = .idle) (hmsg : p.sender = p.msg.sender)
+    (hd : deliver I w id {(w.st id) with box := ms} m = some (w1, a1)) :
+    OccInv I (creditSender (setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps }) (tname id) m.sender) := by
+  have hacc := deliver_account I hL hG w id {(w.st id) with box := ms} m w1 a1
+    (by simp [halive]) (by simp [hidle]) hd
+  obtain ⟨hl, hb, hparkA, htokA, hfl⟩ := hacc
+  let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+  have hmem := hO.aliveIn id halive
+  have hsend := hO.sentFrom id m (by rw [hbox]; exact List.Mem.head _)
+  apply occ_consume I w w1 id m.sender admitted hO
+      (fun i => deliver_st I w id _ m w1 a1 i hd)
+      (deliver_roster I w id _ m w1 a1 hd) (deliver_N I w id _ m w1 a1 hd)
+      (fun n => deliver_ix I w id _ m w1 a1 n hd)
+      (by simpa [admitted, halive] using hl) (by intro d; simpa [admitted, halive] using htokA d) hmem hsend
+  · intro s
+    have hmodel := owed_admit w.st (tname id) s id m ms p ps w.roster hO.nodup hmem rfl hbox hpark hmsg
+    have hsameO := owed_actor w.st id admitted { w.st id with box := ms ++ [p.msg], parked := ps }
+      (tname id) s w.roster (by simp [admitted, hb]) (by simp [admitted, hparkA])
+    rw [hsameO]
+    have hif : (if s = m.sender then 1 else 0) = (if m.sender = s then 1 else 0) := by
+      by_cases h : s = m.sender
+      · simp [h]
+      · have h2 : m.sender ≠ s := fun he => h he.symm
+        simp [h, h2]
+    rw [hif]
+    exact hmodel
+  · intro d hdne s
+    exact owed_off w.st id admitted d s w.roster hO.nodup hmem hdne.symm
+  · intro d
+    have hpend : pending (w.st id) d = 0 := by simp [pending, contRest, hidle, sendsTo]
+    have hsameP : pending admitted d = pending a1 d := by simp [admitted, pending]
+    have hsameT : admitted.typestate = a1.typestate := by simp [admitted]
+    rw [hpend, Nat.add_zero, hsameP, hsameT]
+    simpa using hfl d
+  · intro msg hm
+    simp [admitted, hb] at hm
+    rcases hm with hm | hm
+    · exact hO.sentFrom id msg (by rw [hbox]; exact List.Mem.tail _ hm)
+    · rw [hm, ← hmsg]
+      exact hO.parkFrom id p (by rw [hpark]; exact List.Mem.head _)
+  · intro q hq
+    simp [admitted] at hq
+    exact hO.parkFrom id q (by rw [hpark]; exact List.Mem.tail _ hq)
+  · intro q hq
+    simp [admitted] at hq
+    exact hO.parkMsg id q (by rw [hpark]; exact List.Mem.tail _ hq)
+  · intro hl1
+    have hempty := hO.clear id hl1
+    rw [hpark] at hempty
+    cases hempty
+
+theorem occ_bulk (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId) (w' : World)
+    (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (h : receiveBulk I w id = some w') :
+    OccInv I w' := by
+  have hready := receive_ready I w id w' h
+  unfold receiveBulk at h
+  simp only [hready.1, hready.2] at h
+  cases hbox : (w.st id).box with
+  | nil =>
+    cases hpk : (w.st id).parked with
+    | nil => simp [hbox, hpk] at h
+    | cons p ps =>
+      simp [hbox, hpk] at h
+      split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        have hmsg := hO.parkMsg id p (by rw [hpk]; exact List.Mem.head _)
+        have hne : p.sender ≠ id :=
+          not_queued w id hM (by simp [notParked, hready.2]) id p (by rw [hpk]; exact List.Mem.head _)
+        have hd' : deliver I w id {(w.st id) with parked := ps} p.msg = some (w1, a1) := by
+          simpa [hready.1, hready.2, hbox] using hd
+        have hO1 := occ_bulk_park I hL hG w id p ps w1 a1 hO hpk hbox hready.1 hready.2 hmsg hd'
+        let wC := creditSender (setActor w1 id a1) (tname id) p.sender
+        have hph : (wC.st p.sender).phase = (w.st p.sender).phase := by
+          rw [(credit_phase (setActor w1 id a1) (tname id) p.sender p.sender).1,
+            setActor_other w1 id p.sender a1 hne, deliver_st I w id _ p.msg w1 a1 p.sender hd, hmsg]
+        have hty : (wC.st p.sender).typestate = (w.st p.sender).typestate := by
+          rw [(credit_keeps_ty (setActor w1 id a1) (tname id) p.sender p.sender).2,
+            setActor_other w1 id p.sender a1 hne, deliver_st I w id _ p.msg w1 a1 p.sender hd, hmsg]
+        have hc : contTy (wC.st p.sender) := (contTy_match _ _ hph hty).mpr (hS.cont p.sender)
+        simpa [wC, hmsg] using occ_resume I wC p.sender p.isCall id hO1 hc
+  | cons m ms =>
+    cases hpk : (w.st id).parked with
+    | nil =>
+      simp [hbox, hpk] at h
+      split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        have hd' : deliver I w id {(w.st id) with box := ms} m = some (w1, a1) := by
+          simpa [hready.1, hready.2, hpk] using hd
+        simpa using occ_bulk_box I hL hG w id m ms w1 a1 hO hbox hpk hready.1 hready.2 hd'
+    | cons p ps =>
+      simp [hbox, hpk] at h
+      split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        have hmsg := hO.parkMsg id p (by rw [hpk]; exact List.Mem.head _)
+        have hne : p.sender ≠ id :=
+          not_queued w id hM (by simp [notParked, hready.2]) id p (by rw [hpk]; exact List.Mem.head _)
+        let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+        have hd' : deliver I w id {(w.st id) with box := ms} m = some (w1, a1) := by
+          simpa [hready.1, hready.2, hpk] using hd
+        have hO1 := occ_bulk_both I hL hG w id m ms p ps w1 a1 hO hbox hpk hready.1 hready.2 hmsg hd'
+        let wC := creditSender (setActor w1 id admitted) (tname id) m.sender
+        have hph : (wC.st p.sender).phase = (w.st p.sender).phase := by
+          by_cases hs : p.sender = m.sender
+          · rw [hs, (credit_phase (setActor w1 id admitted) (tname id) m.sender m.sender).1,
+              setActor_other w1 id m.sender admitted (by rw [← hs]; exact hne),
+              deliver_st I w id _ m w1 a1 m.sender hd]
+          · rw [(credit_phase (setActor w1 id admitted) (tname id) m.sender p.sender).1,
+              setActor_other w1 id p.sender admitted hne, deliver_st I w id _ m w1 a1 p.sender hd]
+        have hty : (wC.st p.sender).typestate = (w.st p.sender).typestate := by
+          by_cases hs : p.sender = m.sender
+          · rw [hs, (credit_keeps_ty (setActor w1 id admitted) (tname id) m.sender m.sender).2,
+              setActor_other w1 id m.sender admitted (by rw [← hs]; exact hne),
+              deliver_st I w id _ m w1 a1 m.sender hd]
+          · rw [(credit_keeps_ty (setActor w1 id admitted) (tname id) m.sender p.sender).2,
+              setActor_other w1 id p.sender admitted hne, deliver_st I w id _ m w1 a1 p.sender hd]
+        have hc : contTy (wC.st p.sender) := (contTy_match _ _ hph hty).mpr (hS.cont p.sender)
+        simpa [wC, admitted] using occ_resume I wC p.sender p.isCall id hO1 hc
+
 end Deadlock
