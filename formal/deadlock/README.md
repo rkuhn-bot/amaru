@@ -195,11 +195,13 @@ for a send the actor did not itself perform.
   `exec_cell_sem` also keep `MailInv`. `MailInv` says each parked entry's
   sender is `.parked` on that mailbox with the same call bit, each such phase
   has one entry there, and a sender occurs once. `exec_term_skip_sem` is
-  terminate that the template refuses. A terminate that actually kills the
-  actor, and `receiveBulk` / `receivePrio`, are not yet connected, so a
+  terminate that the template refuses. `exec_term_die_sem` is a killing
+  terminate: the mailbox is refunded, the actor is dead with an empty queue,
+  and every parked sender is resumed, and both invariants hold of that
+  combined state. `receiveBulk` / `receivePrio` are not yet connected, so a
   reachable world is not yet known to satisfy `SemInv`, and `projects` is not
-  derived. Killing an actor clears its queue and resumes the parked senders in
-  one step; `MailInv` does not hold in between.
+  derived. The state after the queue is cleared and before those resumes is
+  not claimed to satisfy `MailInv`.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a

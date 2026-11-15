@@ -398,7 +398,272 @@ theorem resume_false_ok (D : Description) (sid : InstId) (a : Actor) (dst : Inst
   | awaitPeer _ => simp [resumeSender, hph, notParked, hc, hg, hw]
   | crashed => simp [resumeSender, hph, notParked, hc, hg, hw]
 
+theorem fold_release (I : Impl) (id : InstId) (ps : List Parked) (w : World) (hS : SemInv I w) :
+    SemInv I (ps.foldl (fun w p =>
+      if (p.isCall || decide (p.sender = id)) = true then w
+      else setActor w p.sender (resumeSender (w.st p.sender) false id)) w) := by
+  induction ps generalizing w with
+  | nil => simpa using hS
+  | cons p ps ih =>
+    simp only [List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      exact ih _ hS
+    · have hf : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hf]
+      have hr := resume_false_ok I.desc p.sender (w.st p.sender) id (hS.cont _) (hS.prog _) (hS.waited _)
+      exact ih _ (sem_set I w p.sender (resumeSender (w.st p.sender) false id) hS hr.1 hr.2.1
+        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1)
+
+theorem release_sem (I : Impl) (w : World) (id : InstId) (ps : List Parked) (hS : SemInv I w) :
+    SemInv I (releaseParked w id ps) := by
+  simpa [releaseParked] using fold_release I id ps w hS
+
+private def releaseFold (id : InstId) (ps : List Parked) (w : World) : World :=
+  ps.foldl (fun w p =>
+    if (p.isCall || decide (p.sender = id)) = true then w
+    else setActor w p.sender (resumeSender (w.st p.sender) false id)) w
+
+theorem release_fold_eq (w : World) (id : InstId) (ps : List Parked) :
+    releaseParked w id ps = releaseFold id ps w := by
+  simp [releaseParked, releaseFold]
+
+theorem release_id_fixed (id : InstId) (ps : List Parked) (w : World)
+    (hself : ∀ p ∈ ps, p.sender ≠ id) : (releaseFold id ps w).st id = w.st id := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    have htail : ∀ q ∈ ps, q.sender ≠ id := fun q hq => hself q (List.mem_cons_of_mem _ hq)
+    have hp : p.sender ≠ id := hself p List.mem_cons_self
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change (releaseFold id ps w).st id = w.st id
+      exact ih _ htail
+    · have hf : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hf]
+      change (releaseFold id ps (setActor w p.sender (resumeSender (w.st p.sender) false id))).st id =
+        w.st id
+      rw [ih _ htail]
+      exact setActor_other w p.sender id (resumeSender (w.st p.sender) false id) hp.symm
+
+theorem release_parked_other (id : InstId) (ps : List Parked) (i : InstId) (w : World)
+    (_hi : i ≠ id) (hs : ∀ p ∈ ps, p.sender ≠ i) :
+    ((releaseFold id ps w).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    have htail : ∀ q ∈ ps, q.sender ≠ i := fun q hq => hs q (List.mem_cons_of_mem _ hq)
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change ((releaseFold id ps w).st i).parked = (w.st i).parked
+      exact ih _ htail
+    · have hf : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hf]
+      change ((releaseFold id ps (setActor w p.sender (resumeSender (w.st p.sender) false id))).st i).parked =
+        (w.st i).parked
+      rw [ih _ htail, setActor_other w p.sender i (resumeSender (w.st p.sender) false id)
+        (hs p List.mem_cons_self).symm]
+
+theorem release_st_other (id : InstId) (ps : List Parked) (i : InstId) (w : World)
+    (_hi : i ≠ id) (hs : ∀ p ∈ ps, p.sender ≠ i) : (releaseFold id ps w).st i = w.st i := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    have htail : ∀ q ∈ ps, q.sender ≠ i := fun q hq => hs q (List.mem_cons_of_mem _ hq)
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change (releaseFold id ps w).st i = w.st i
+      exact ih _ htail
+    · have hf : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hf]
+      change (releaseFold id ps (setActor w p.sender (resumeSender (w.st p.sender) false id))).st i = w.st i
+      rw [ih _ htail, setActor_other w p.sender i (resumeSender (w.st p.sender) false id)
+        (hs p List.mem_cons_self).symm]
+
+theorem resume_parked (a : Actor) (isCall : Bool) (dst : InstId) :
+    (resumeSender a isCall dst).parked = a.parked := by
+  cases h : a.phase with
+  | parked _ _ _ =>
+    cases isCall with
+    | true => simp [resumeSender, h]
+    | false =>
+      simp [resumeSender, h, proceed]
+      split <;> rfl
+  | idle => simp [resumeSender, h]
+  | run _ => simp [resumeSender, h]
+  | awaitReply _ _ => simp [resumeSender, h]
+  | awaitEffect _ => simp [resumeSender, h]
+  | awaitPeer _ => simp [resumeSender, h]
+  | crashed => simp [resumeSender, h]
+
+theorem resume_false_free (a : Actor) (dst : InstId) :
+    notParked (resumeSender a false dst).phase := by
+  cases h : a.phase with
+  | parked _ _ _ =>
+    simp [resumeSender, h]
+    exact proceed_not_parked a _
+  | idle => simp [resumeSender, h, notParked]
+  | run _ => simp [resumeSender, h, notParked]
+  | awaitReply _ _ => simp [resumeSender, h, notParked]
+  | awaitEffect _ => simp [resumeSender, h, notParked]
+  | awaitPeer _ => simp [resumeSender, h, notParked]
+  | crashed => simp [resumeSender, h, notParked]
+
+theorem release_keeps_free (id : InstId) (ps : List Parked) (w : World) (sid : InstId)
+    (hf : notParked (w.st sid).phase) : notParked ((releaseFold id ps w).st sid).phase := by
+  induction ps generalizing w with
+  | nil => simpa [releaseFold] using hf
+  | cons p ps ih =>
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change notParked ((releaseFold id ps w).st sid).phase
+      exact ih _ hf
+    · have hfalse : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hfalse]
+      change notParked ((releaseFold id ps (setActor w p.sender (resumeSender (w.st p.sender) false id))).st sid).phase
+      by_cases hwho : p.sender = sid
+      · subst hwho
+        exact ih _ (by rw [setActor_self]; exact resume_false_free _ _)
+      · exact ih _ (by
+          rw [setActor_other w p.sender sid (resumeSender (w.st p.sender) false id) (Ne.symm hwho)]
+          exact hf)
+
+theorem release_resumed (id : InstId) (ps : List Parked) (w : World) (p : Parked)
+    (hp : p ∈ ps) (hc : p.isCall = false) (hs : p.sender ≠ id) :
+    notParked ((releaseFold id ps w).st p.sender).phase := by
+  induction ps generalizing w with
+  | nil => cases hp
+  | cons q qs ih =>
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (q.isCall || decide (q.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change notParked ((releaseFold id qs w).st p.sender).phase
+      have hmem : p ∈ qs := by
+        rcases List.mem_cons.mp hp with rfl | hmem
+        · have hdec : decide (p.sender = id) = false := decide_eq_false hs
+          simp [hc, hdec] at hskip
+        · exact hmem
+      exact ih _ hmem
+    · have hfalse : (q.isCall || decide (q.sender = id)) = false := by
+        cases hb : q.isCall || decide (q.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hfalse]
+      change notParked
+        ((releaseFold id qs (setActor w q.sender (resumeSender (w.st q.sender) false id))).st p.sender).phase
+      by_cases hwho : q.sender = p.sender
+      · rw [hwho]
+        exact release_keeps_free id qs (setActor w p.sender (resumeSender (w.st p.sender) false id)) p.sender
+          (by rw [setActor_self]; exact resume_false_free _ _)
+      · have hmem : p ∈ qs := by
+          rcases List.mem_cons.mp hp with rfl | hmem
+          · exact absurd rfl hwho
+          · exact hmem
+        exact ih _ hmem
+
+theorem release_parked_all (id : InstId) (ps : List Parked) (w : World) (i : InstId) (hi : i ≠ id) :
+    ((releaseFold id ps w).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change ((releaseFold id ps w).st i).parked = (w.st i).parked
+      exact ih _
+    · have hfalse : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hfalse]
+      change ((releaseFold id ps (setActor w p.sender (resumeSender (w.st p.sender) false id))).st i).parked =
+        (w.st i).parked
+      by_cases hwho : p.sender = i
+      · subst hwho
+        rw [ih _, setActor_self, resume_parked]
+      · rw [ih _, setActor_other w p.sender i (resumeSender (w.st p.sender) false id) (Ne.symm hwho)]
+
+theorem credit_phase (w : World) (tmpl : String) (sender i : InstId) :
+    ((creditSender w tmpl sender).st i).phase = (w.st i).phase ∧
+      ((creditSender w tmpl sender).st i).parked = (w.st i).parked := by
+  unfold creditSender
+  by_cases h : i = sender
+  · subst h
+    simp [setActor_self, bumpToken]
+  · simp [setActor_other w sender i _ h]
+
+theorem refund_msgs_phase (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).phase = (w.st i).phase ∧
+      ((refundMsgs w dst ms).st i).parked = (w.st i).parked := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    have h1 := credit_phase w dst m.sender i
+    have h2 := ih (creditSender w dst m.sender)
+    change ((refundMsgs (creditSender w dst m.sender) dst ms).st i).phase = (w.st i).phase ∧
+      ((refundMsgs (creditSender w dst m.sender) dst ms).st i).parked = (w.st i).parked
+    rw [h2.1, h1.1, h2.2, h1.2]
+    exact ⟨rfl, rfl⟩
+
+theorem refund_park_phase (w : World) (dst : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w dst ps).st i).phase = (w.st i).phase ∧
+      ((refundParked w dst ps).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    have h1 := credit_phase w dst p.msg.sender i
+    have h2 := ih (creditSender w dst p.msg.sender)
+    change ((refundParked (creditSender w dst p.msg.sender) dst ps).st i).phase = (w.st i).phase ∧
+      ((refundParked (creditSender w dst p.msg.sender) dst ps).st i).parked = (w.st i).parked
+    rw [h2.1, h1.1, h2.2, h1.2]
+    exact ⟨rfl, rfl⟩
+
+theorem no_parked_call (ps : List Parked) (h : hasParkedCall ps = false) (p : Parked) (hp : p ∈ ps) :
+    p.isCall = false := by
+  cases hc : p.isCall
+  · rfl
+  · have : hasParkedCall ps = true := by
+      simp [hasParkedCall]
+      exact ⟨p, hp, hc⟩
+    simp [this] at h
+
 /-- Terminate that the template does not allow leaves the world unchanged. -/
+
 theorem exec_term_skip_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
     (hS : SemInv I w) (hM : MailInv w)
     (hphase : (w.st id).phase = .run { k with rest := .terminate :: es })
@@ -414,5 +679,91 @@ theorem exec_term_skip_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es :
   | some t =>
     simp [hno t ht]
     exact ⟨hS, hM⟩
+
+/-- Killing terminate refunds the mailbox, installs the dead actor, and resumes
+every parked sender together. The queue is empty only after those resumes. -/
+theorem exec_term_die_sem (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (t : Template)
+    (k : Cont) (es : List Eff) (hS : SemInv I w) (hM : MailInv w)
+    (hphase : (w.st id).phase = .run { k with rest := .terminate :: es })
+    (ht : templateOf I.desc (tname id) = some t) (hterm : t.terminable = true)
+    (hnocall : hasParkedCall (w.st id).parked = false) :
+    SemInv I (execRun I w id (w.st id) { k with rest := .terminate :: es }) ∧
+      MailInv (execRun I w id (w.st id) { k with rest := .terminate :: es }) := by
+  let ps := (w.st id).parked
+  let wR := readCells I.desc w id
+  let wM := refundMsgs wR (tname id) (w.st id).box
+  let wP := refundParked wM (tname id) ps
+  let dead : Actor :=
+    { (wP.st id) with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+  let wD := setActor wP id dead
+  let wF := releaseParked wD id ps
+  have heq : execRun I w id (w.st id) { k with rest := .terminate :: es } = wF := by
+    simp [execRun, ht, hterm, hnocall, wF, wD, dead, wP, wM, wR, ps]
+  have hSR : SemInv I wR := cells_sem I w id hS
+  have hMR : MailInv wR := mail_copy w wR hM fun i => readCells_st I.desc w id i
+  have hRM := refund_msgs_inv I wR (tname id) (w.st id).box hSR hMR
+  have hRP := refund_park_inv I wM (tname id) ps hRM.1 hRM.2
+  have hne_role : ∀ (g : CompatGroup) (r : String), g ∈ compatGroups I.desc.compatibility →
+      r ∈ g.roles → InstId.core r ≠ id := by
+    intro g r hg hr heq
+    cases id with
+    | core name =>
+      cases heq
+      exact terminable_not_role I hL r t ht hterm g hg hr
+    | peer _ _ => cases heq
+  have hSD : SemInv I wD := by
+    apply sem_stable I wP wD hRP.1
+    · intro g hg r hr
+      rw [setActor_other wP id (InstId.core r) dead (hne_role g r hg hr)]
+    · intro g hg r hr
+      rw [setActor_other wP id (InstId.core r) dead (hne_role g r hg hr)]
+    · intro i
+      by_cases h : i = id
+      · rw [h, setActor_self]; simp [dead, contTy]
+      · rw [setActor_other wP id i dead h]; exact hRP.1.cont i
+    · intro i
+      by_cases h : i = id
+      · rw [h, setActor_self]; simp [dead, programOk]
+      · rw [setActor_other wP id i dead h]; exact hRP.1.prog i
+    · intro i
+      by_cases h : i = id
+      · rw [h, setActor_self]; simp [dead, waitEdge]
+      · rw [setActor_other wP id i dead h]; exact hRP.1.waited i
+  have hSF : SemInv I wF := release_sem I wD id ps hSD
+  have hphaseP : (wP.st id).phase = (w.st id).phase := by
+    rw [(refund_park_phase wM (tname id) ps id).1, (refund_msgs_phase wR (tname id) (w.st id).box id).1,
+      readCells_st]
+  have hparkP : (wP.st id).parked = ps := by
+    rw [(refund_park_phase wM (tname id) ps id).2, (refund_msgs_phase wR (tname id) (w.st id).box id).2,
+      readCells_st]
+  have hfree : notParked (wP.st id).phase := by
+    rw [hphaseP, hphase]
+    simp [notParked]
+  have hself : ∀ p ∈ ps, p.sender ≠ id := by
+    intro p hp
+    exact not_queued wP id hRP.2 hfree id p (by simpa [hparkP] using hp)
+  have hstId : wF.st id = dead := by
+    have hfix := release_id_fixed id ps wD hself
+    rw [← release_fold_eq] at hfix
+    simpa [wF, wD, setActor_self] using hfix
+  have hpk : ∀ i, i ≠ id → (wF.st i).parked = (wP.st i).parked := by
+    intro i hi
+    have h := release_parked_all id ps wD i hi
+    rw [← release_fold_eq] at h
+    rw [h, setActor_other wP id i dead hi]
+  have hother : ∀ i, i ≠ id → (∀ p ∈ ps, p.sender ≠ i) → (wF.st i).phase = (wP.st i).phase := by
+    intro i hi hs
+    have h := release_st_other id ps i wD hi hs
+    rw [← release_fold_eq] at h
+    rw [h, setActor_other wP id i dead hi]
+  have hresume : ∀ p ∈ ps, notParked (wF.st p.sender).phase := by
+    intro p hp
+    have h := release_resumed id ps wD p hp (no_parked_call ps hnocall p hp) (hself p hp)
+    rw [← release_fold_eq] at h
+    simpa [wF] using h
+  have hMF : MailInv wF :=
+    mail_of_clear wP wF id ps hRP.2 hfree (fun p hp => no_parked_call ps hnocall p hp)
+      (fun p => by rw [hparkP]) (by rw [hstId]) (by rw [hstId]) hpk hresume hother
+  simpa [heq] using ⟨hSF, hMF⟩
 
 end Deadlock

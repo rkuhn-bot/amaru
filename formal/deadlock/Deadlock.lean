@@ -38,3 +38,4 @@ import Deadlock.Mail
 #print axioms Deadlock.exec_reply_sem
 #print axioms Deadlock.exec_cell_sem
 #print axioms Deadlock.exec_term_skip_sem
+#print axioms Deadlock.exec_term_die_sem
