@@ -141,3 +141,5 @@ import Deadlock.Rank
 #print axioms Deadlock.call_tag_stable
 #print axioms Deadlock.finish_tag
 #print axioms Deadlock.spawn_tag
+#print axioms Deadlock.prio_tag
+#print axioms Deadlock.deliver_call

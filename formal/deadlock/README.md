@@ -340,9 +340,11 @@ for a send the actor did not itself perform.
   `d`'s handler with the reply still ahead, or that reply as the next effect.
   A parked call owns the mailbox entry before admission, which is why a
   `callFrom` is not stray there either. It holds in the initial world, and
-  `finish` and `spawn` preserve it. Preservation for receive and `exec`, the
-  delivery of the tagged message, the handler reply, `never_stuck`,
-  `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not proved.
+  `finish`, `spawn`, and priority receive preserve it. A priority message has
+  `callFrom = none`, so the receive only transports the tag. At most one bulk
+  message names a caller. Bulk receive, `exec`, the delivery walk, the handler
+  reply, `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance
+  lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

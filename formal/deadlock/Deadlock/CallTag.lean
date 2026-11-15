@@ -133,6 +133,18 @@ def mailCall (w : World) (d c : InstId) : Prop :=
   (∃ m, m ∈ (w.st d).box ∧ m.callFrom = some c) ∨
   (∃ p, p ∈ (w.st d).parked ∧ p.msg.callFrom = some c)
 
+def countCall : List Msg → InstId → Nat
+  | [], _ => 0
+  | m :: ms, c => (if m.callFrom = some c then 1 else 0) + countCall ms c
+
+def countParkedCall : List Parked → InstId → Nat
+  | [], _ => 0
+  | p :: ps, c => (if p.msg.callFrom = some c then 1 else 0) + countParkedCall ps c
+
+/-- At most one bulk message names a given caller. Delivering it then leaves none. -/
+def soleCall (w : World) (d c : InstId) : Prop :=
+  countCall (w.st d).box c + countParkedCall (w.st d).parked c ≤ 1
+
 /-- `d` is inside the handler for `c`, and the reply is not the next effect. -/
 def handlerOwes (c : InstId) (ph : Phase) : Prop :=
   ∃ k, carriedCont ph = some k ∧ replyShape c k ∧ ¬nextIsReply k
@@ -166,6 +178,7 @@ structure CallTagInv (w : World) : Prop where
   oweOwner : ∀ d c, handlerOwes c (w.st d).phase ∨ replyPending c (w.st d).phase →
     ∃ k, (w.st c).phase = .awaitReply d k
   prioPlain : ∀ id m, m ∈ (w.st id).prio → m.callFrom = none
+  sole : ∀ d c, soleCall w d c
 
 theorem init_prio_empty (I : Impl) (N : Nat) (id : InstId) : ((initWorld I N).st id).prio = [] := by
   rw [init_base_st]
@@ -221,7 +234,7 @@ theorem call_tag_copy (w w' : World) (hT : CallTagInv w)
     (h : ∀ i, (w'.st i).phase = (w.st i).phase ∧ (w'.st i).box = (w.st i).box ∧
       (w'.st i).parked = (w.st i).parked ∧ (w'.st i).prio = (w.st i).prio) :
     CallTagInv w' := by
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro c d k hph
     have hpre := hT.awaiting c d k (by simpa [(h c).1] using hph)
     have hmail : mailCall w' d c ↔ mailCall w d c := by
@@ -265,6 +278,8 @@ theorem call_tag_copy (w w' : World) (hT : CallTagInv w)
     exact ⟨k, by simpa [← (h c).1] using hk⟩
   · intro id m hm
     exact hT.prioPlain id m (by simpa [(h id).2.2.2] using hm)
+  · intro d c
+    simpa [soleCall, (h d).2.1, (h d).2.2.1] using hT.sole d c
 
 /-- Tags survive a step that keeps every await and parked call in place and does not
 change who owes a reply or which call sits in a mailbox. -/
@@ -276,8 +291,9 @@ theorem call_tag_stable (w w' : World) (hT : CallTagInv w)
     (hawait' : ∀ c d k, (w.st c).phase = .awaitReply d k → (w'.st c).phase = .awaitReply d k)
     (hpark : ∀ c d k, (w'.st c).phase = .parked d true k → (w.st c).phase = .parked d true k)
     (hpark' : ∀ c d k, (w.st c).phase = .parked d true k → (w'.st c).phase = .parked d true k)
-    (hprio : ∀ id m, m ∈ (w'.st id).prio → m.callFrom = none) : CallTagInv w' := by
-  refine ⟨?_, ?_, ?_, ?_, hprio⟩
+    (hprio : ∀ id m, m ∈ (w'.st id).prio → m.callFrom = none)
+    (hsole : ∀ d c, soleCall w' d c) : CallTagInv w' := by
+  refine ⟨?_, ?_, ?_, ?_, hprio, hsole⟩
   · intro c d k hph
     have hpre := hT.awaiting c d k (hawait c d k hph)
     rcases hpre with h1 | h2 | h3
@@ -304,7 +320,7 @@ theorem call_tag_stable (w w' : World) (hT : CallTagInv w)
     exact ⟨k, hawait' c d k hk⟩
 
 theorem call_tag_init (I : Impl) (N : Nat) : CallTagInv (initWorld I N) := by
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro c d k hph
     simp [init_phase] at hph
   · intro c d k hph
@@ -320,6 +336,8 @@ theorem call_tag_init (I : Impl) (N : Nat) : CallTagInv (initWorld I N) := by
     · simp [carriedCont, hph] at hk
   · intro id m hm
     simp [init_prio_empty] at hm
+  · intro d c
+    simp [soleCall, countCall, countParkedCall, (init_box I N d).1, (init_box I N d).2]
 
 theorem proceed_fields (a : Actor) (k : Cont) :
     (proceed a k).box = a.box ∧ (proceed a k).parked = a.parked ∧
@@ -444,6 +462,12 @@ theorem resume_tag (w : World) (id : InstId) (k : Cont) (hT : CallTagInv w)
     by_cases hi : i = id
     · exact hT.prioPlain id m (by simpa [w', setActor, hi, hfields.2.2.1] using hm)
     · exact hT.prioPlain i m (by simpa [w', setActor, hi] using hm)
+  · intro d c
+    have hbox : (w'.st d).box = (w.st d).box := by
+      by_cases hd : d = id <;> simp [w', setActor, hd, hfields.1]
+    have hpark : (w'.st d).parked = (w.st d).parked := by
+      by_cases hd : d = id <;> simp [w', setActor, hd, hfields.2.1]
+    simpa [soleCall, hbox, hpark] using hT.sole d c
 
 theorem finish_tag (w : World) (id : InstId) (w' : World) (hT : CallTagInv w)
     (h : finishWait w id = some w') : CallTagInv w' := by
@@ -545,5 +569,205 @@ theorem spawn_tag (I : Impl) (w : World) (template : String) (w' : World)
       by_cases hi : i = nid
       · simp [hi, nid, readCells_st, setActor, withTokens] at hm
       · exact hT.prioPlain i m (by simpa [nid, readCells_st, setActor, hi] using hm)
+    · intro d c
+      simpa [soleCall, hbox d, hparkL d] using hT.sole d c
+
+theorem plain_no_owe (ph : Phase) (c : InstId)
+    (h : carriedCont ph = none ∨ ∃ k, carriedCont ph = some k ∧ k.replyTo = none) :
+    ¬handlerOwes c ph ∧ ¬replyPending c ph := by
+  constructor
+  · intro ⟨k, hk, hs, _⟩
+    rcases h with hnone | ⟨k', hk', hto⟩
+    · simp [hnone] at hk
+    · rw [hk] at hk'
+      cases hk'
+      have hbad := hs.1
+      simp [hto] at hbad
+  · intro ⟨k, hk, hs, _⟩
+    rcases h with hnone | ⟨k', hk', hto⟩
+    · simp [hnone] at hk
+    · rw [hk] at hk'
+      cases hk'
+      have hbad := hs.1
+      simp [hto] at hbad
+
+/-- A priority or ordinary message carries no caller, so delivering it starts no handler. -/
+theorem deliver_plain (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) (hc : m.callFrom = none) :
+    a1.box = a.box ∧ a1.parked = a.parked ∧ a1.prio = a.prio ∧
+      (a1.phase = .idle ∨ ∃ k, a1.phase = .run k ∧ k.replyTo = none) := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · next hnot => simp [hc, Option.isSome] at hnot
+      · simp [hc, Option.isSome] at h
+        rcases h with ⟨_, ha⟩
+        subst ha
+        exact ⟨rfl, rfl, rfl, Or.inl rfl⟩
+    · next tr htr =>
+      split at h
+      · simp [hc] at h
+      · cases h
+        cases tr.program with
+        | nil => exact ⟨rfl, rfl, rfl, Or.inl rfl⟩
+        | cons _ _ => exact ⟨rfl, rfl, rfl, Or.inr ⟨_, rfl, hc⟩⟩
+
+theorem deliver_call (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a1 : Actor) (c : InstId) (h : deliver I w id a m = some (w1, a1))
+    (hc : m.callFrom = some c) :
+    a1.box = a.box ∧ a1.parked = a.parked ∧ a1.prio = a.prio ∧
+      ∃ k, a1.phase = .run k ∧ replyShape c k ∧
+        (nextIsReply k ∨ ¬nextIsReply k) ∧
+        ∀ c', c' ≠ c → ¬handlerOwes c' a1.phase ∧ ¬replyPending c' a1.phase := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · simp [hc, Option.isSome] at *
+      · simp [hc, Option.isSome] at *
+    · next tr htr =>
+      have hmem := (findTr_mem I (tname id) a.typestate m.label tr htr).1
+      have hacc : tr.acceptsCall = true := by
+        cases hb : tr.acceptsCall with
+        | false => simp [hc, Option.isSome, hb] at h
+        | true => rfl
+      have hok := transitionOk_of_mem I hL tr hmem
+      cases ht : templateOf I.desc tr.template with
+      | none => simp [transitionOk, ht] at hok
+      | some t =>
+        simp only [transitionOk, ht, hacc, ite_true] at hok
+        repeat rw [Bool.and_eq_true] at hok
+        have hcount : replyCount tr.program = 1 := beq_iff_eq.mp hok.1.1.2.1
+        have hterm : terminateBeforeReply tr.program = false := by
+          cases hb : terminateBeforeReply tr.program
+          · rfl
+          · simp [hb] at hok
+        have hne : tr.program ≠ [] := by
+          intro hempty
+          simp [hempty, replyCount] at hcount
+        simp [hc, Option.isSome, hacc] at h
+        rcases h with ⟨_, ha⟩
+        subst ha
+        cases hp : tr.program with
+        | nil => exact absurd hp hne
+        | cons e es =>
+          refine ⟨rfl, rfl, rfl, ?_⟩
+          refine ⟨{ rest := e :: es, toState := tr.toState, replyTo := some c }, rfl, ?_, ?_, ?_⟩
+          · exact ⟨rfl, by simpa [hp] using hcount, by simpa [hp] using hterm⟩
+          · by_cases hr : e = .reply
+            · exact Or.inl (by simp [nextIsReply, hr])
+            · exact Or.inr (by
+                cases e <;> simp [nextIsReply] at hr ⊢)
+          · intro c' hne'
+            have hto : ¬({ rest := e :: es, toState := tr.toState, replyTo := some c } : Cont).replyTo = some c' := by
+              intro hbad
+              injection hbad with heq
+              exact hne' heq.symm
+            constructor
+            · intro ⟨k, hk, hs, _⟩
+              simp [carriedCont] at hk
+              cases hk
+              have hbad := hs.1
+              simp [hto] at hbad
+            · intro ⟨k, hk, hs, _⟩
+              simp [carriedCont] at hk
+              cases hk
+              have hbad := hs.1
+              simp [hto] at hbad
+
+theorem prio_tag (I : Impl) (w : World) (id : InstId) (w' : World) (hT : CallTagInv w)
+    (h : receivePrio I w id = some w') : CallTagInv w' := by
+  unfold receivePrio at h
+  cases hp : (w.st id).prio with
+  | nil => simp [hp] at h
+  | cons m ms =>
+    simp [hp] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      obtain ⟨⟨_, hidle⟩, heq⟩ := h
+      injection heq with hw
+      subst hw
+      have hc : m.callFrom = none := hT.prioPlain id m (by simp [hp])
+      have hplain := deliver_plain I w id ({ (w.st id) with prio := ms }) m w1 a1 hdel hc
+      have hst : ∀ i, w1.st i = w.st i := fun i =>
+        deliver_st I w id ({ (w.st id) with prio := ms }) m w1 a1 i hdel
+      apply call_tag_stable w (setActor w1 id a1) hT
+      · intro d c
+        refine mail_iff_lists w (setActor w1 id a1) ?_ ?_ d c
+        · intro i
+          by_cases hi : i = id
+          · simp [setActor, hi, hst, hplain.1]
+          · simp [setActor, hi, hst]
+        · intro i
+          by_cases hi : i = id
+          · simp [setActor, hi, hst, hplain.2.1]
+          · simp [setActor, hi, hst]
+      · intro i c
+        by_cases hi : i = id
+        · rw [hi]
+          have hold : ¬handlerOwes c (w.st id).phase := by
+            simp [handlerOwes, carriedCont, hidle]
+          have hnew : ¬handlerOwes c a1.phase := (plain_no_owe a1.phase c (by
+            rcases hplain.2.2.2 with hI | ⟨k, hk, hto⟩
+            · exact Or.inl (by simp [carriedCont, hI])
+            · exact Or.inr ⟨k, by simp [carriedCont, hk], hto⟩)).1
+          simp [setActor]
+          exact ⟨fun h => absurd h hnew, fun h => absurd h hold⟩
+        · have hph : ((setActor w1 id a1).st i).phase = (w.st i).phase := by simp [setActor, hi, hst]
+          exact owes_iff_carried _ _ (by simp [hph]) c
+      · intro i c
+        by_cases hi : i = id
+        · rw [hi]
+          have hold : ¬replyPending c (w.st id).phase := by
+            simp [replyPending, carriedCont, hidle]
+          have hnew : ¬replyPending c a1.phase := (plain_no_owe a1.phase c (by
+            rcases hplain.2.2.2 with hI | ⟨k, hk, hto⟩
+            · exact Or.inl (by simp [carriedCont, hI])
+            · exact Or.inr ⟨k, by simp [carriedCont, hk], hto⟩)).2
+          simp [setActor]
+          exact ⟨fun h => absurd h hnew, fun h => absurd h hold⟩
+        · have hph : ((setActor w1 id a1).st i).phase = (w.st i).phase := by simp [setActor, hi, hst]
+          exact pending_iff_carried _ _ (by simp [hph]) c
+      · intro c d k hph
+        by_cases hc : c = id
+        · simp [setActor, hc, hst] at hph
+          rcases hplain.2.2.2 with hI | ⟨_, hk, _⟩
+          · simp [hI] at hph
+          · simp [hk] at hph
+        · simpa [setActor, hc, hst] using hph
+      · intro c d k hph
+        by_cases hc : c = id
+        · simp [hidle, hc] at hph
+        · simpa [setActor, hc, hst] using hph
+      · intro c d k hph
+        by_cases hc : c = id
+        · simp [setActor, hc, hst] at hph
+          rcases hplain.2.2.2 with hI | ⟨_, hk, _⟩
+          · simp [hI] at hph
+          · simp [hk] at hph
+        · simpa [setActor, hc, hst] using hph
+      · intro c d k hph
+        by_cases hc : c = id
+        · simp [hidle, hc] at hph
+        · simpa [setActor, hc, hst] using hph
+      · intro i msg hm
+        by_cases hi : i = id
+        · have hmem : msg ∈ ms := by simpa [setActor, hi, hst, hplain.2.2.1] using hm
+          exact hT.prioPlain id msg (by simp [hp, hmem])
+        · exact hT.prioPlain i msg (by simpa [setActor, hi, hst] using hm)
+      · intro d c
+        have hbox : ((setActor w1 id a1).st d).box = (w.st d).box := by
+          by_cases hd : d = id
+          · simp [setActor, hd, hst, hplain.1]
+          · simp [setActor, hd, hst]
+        have hpark : ((setActor w1 id a1).st d).parked = (w.st d).parked := by
+          by_cases hd : d = id
+          · simp [setActor, hd, hst, hplain.2.1]
+          · simp [setActor, hd, hst]
+        simpa [soleCall, hbox, hpark] using hT.sole d c
 
 end Deadlock
