@@ -4008,6 +4008,59 @@ theorem bulk_admits_call (I : Impl) (w w' : World) (id : InstId) (h : receiveBul
         rw [hc]
         exact resume_call_waits _ id k (hpre.trans hph)
 
+theorem credit_parked (w : World) (dst : String) (sender i : InstId) :
+    ((creditSender w dst sender).st i).parked = (w.st i).parked := by
+  by_cases hi : i = sender
+  · simp [creditSender, setActor, hi, bumpToken]
+  · simp [creditSender, setActor, hi]
+
+theorem deliver_parked (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.parked = a.parked := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        rfl
+    · split at h
+      · cases h
+      · cases h
+        split <;> rfl
+
+theorem finish_parked (w w' : World) (id i : InstId) (h : finishWait w id = some w') :
+    (w'.st i).parked = (w.st i).parked := by
+  unfold finishWait at h
+  split at h
+  · cases h
+    by_cases hi : i = id
+    · simp [setActor, hi, proceed_parked]
+    · simp [setActor, hi]
+  · cases h
+    by_cases hi : i = id
+    · simp [setActor, hi, proceed_parked]
+    · simp [setActor, hi]
+  · cases h
+
+theorem prio_parked (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio I w id = some w') :
+    (w'.st i).parked = (w.st i).parked := by
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      have hpk := deliver_parked I w id ({ (w.st id) with prio := ms }) m w1 a1 hdel
+      have hst := deliver_st I w id _ m w1 a1 i hdel
+      by_cases hi : i = id
+      · rw [hi]
+        simp [setActor, hpk]
+      · simp [setActor, hi, hst]
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
