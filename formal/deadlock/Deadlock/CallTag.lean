@@ -3634,4 +3634,275 @@ theorem recvBulk_tag (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
                 hMail hparkA hphS hsnd
               simpa [setActor_same, setActor, ite_shadow, shiftBase, hc] using this
 
+/-- A running handler owes a caller exactly when its continuation still has that reply. -/
+theorem shape_split (c : InstId) (k : Cont) :
+    handlerOwes c (.run k) ∨ replyPending c (.run k) ↔ replyShape c k := by
+  constructor
+  · intro h
+    rcases h with ⟨k0, hk, hs, _⟩ | ⟨k0, hk, hs, _⟩
+    · simp [carriedCont] at hk
+      cases hk
+      exact hs
+    · simp [carriedCont] at hk
+      cases hk
+      exact hs
+  · intro hs
+    cases hhead : k.rest with
+    | nil => exact absurd hhead (replyShape_nonempty c k hs)
+    | cons e es =>
+      by_cases he : e = .reply
+      · rw [he] at hhead
+        exact Or.inr ⟨k, by simp [carriedCont], hs, by simp [nextIsReply, hhead]⟩
+      · exact Or.inl ⟨k, by simp [carriedCont], hs, by
+          intro hn
+          cases e with
+          | reply => exact absurd rfl he
+          | _ => simp [nextIsReply, hhead] at hn⟩
+
+/-- Dropping a head that is neither the reply nor `terminate` keeps the reply shape. -/
+theorem replyShape_tail (c : InstId) (k : Cont) (e : Eff) (es : List Eff)
+    (hrest : k.rest = e :: es) (hne : e ≠ .reply) (hterm : e ≠ .terminate) :
+    replyShape c k ↔ replyShape c (afterHead k) := by
+  constructor
+  · intro hs
+    exact replyShape_after c k e es hrest hs hne
+  · intro hs
+    obtain ⟨hto, hcount, hterm0⟩ := hs
+    refine ⟨?_, ?_, ?_⟩
+    · simpa [afterHead, hrest] using hto
+    · simpa [afterHead, hrest, replyCount_ne_reply e es hne] using hcount
+    · cases e with
+      | reply => exact absurd rfl hne
+      | terminate => exact absurd rfl hterm
+      | _ =>
+        have hterm0' : terminateBeforeReply es = false := by
+          simpa [afterHead, hrest] using hterm0
+        simpa [terminateBeforeReply, hrest] using hterm0'
+
+/-- The reply obligation is unchanged when a non-reply, non-terminate head is consumed. -/
+theorem tail_duty (a : Actor) (k : Cont) (e : Eff) (es : List Eff) (c : InstId)
+    (hrest : k.rest = e :: es) (hne : e ≠ .reply) (hterm : e ≠ .terminate) :
+    handlerOwes c (proceed a (afterHead k)).phase ∨ replyPending c (proceed a (afterHead k)).phase ↔
+      handlerOwes c (.run k) ∨ replyPending c (.run k) := by
+  have hshape := replyShape_tail c k e es hrest hne hterm
+  have hsplit := shape_split c k
+  cases hes : es with
+  | nil =>
+    have hidle : (proceed a (afterHead k)).phase = .idle := by
+      simp [proceed, afterHead, hrest, hes]
+    constructor
+    · intro h
+      simp [hidle, handlerOwes, replyPending, carriedCont] at h
+    · intro h
+      have hc := (hsplit.mp h).2.1
+      cases e with
+      | reply => exact absurd rfl hne
+      | _ => simp [replyCount, hrest, hes] at hc
+  | cons e2 es2 =>
+    have hrun : (proceed a (afterHead k)).phase = .run (afterHead k) := by
+      simp [proceed, afterHead, hrest, hes]
+    have hsplit' : handlerOwes c (.run (afterHead k)) ∨ replyPending c (.run (afterHead k)) ↔
+        replyShape c (afterHead k) := shape_split c (afterHead k)
+    constructor
+    · intro h
+      exact hsplit.mpr (hshape.mpr (hsplit'.mp (by simpa [hrun] using h)))
+    · intro h
+      exact (by simpa [hrun] using hsplit'.mpr (hshape.mp (hsplit.mp h)))
+
+/-- Consuming a head that is neither the reply nor `terminate` preserves call tags.
+The runner stays in `.run` or becomes idle; nobody's mail moves. -/
+theorem run_tail_tag (w : World) (id : InstId) (k : Cont) (e : Eff) (es : List Eff)
+    (hT : CallTagInv w) (hph : (w.st id).phase = .run k) (hrest : k.rest = e :: es)
+    (hne : e ≠ .reply) (hterm : e ≠ .terminate) :
+    CallTagInv (setActor w id (proceed (w.st id) (afterHead k))) := by
+  let w' := setActor w id (proceed (w.st id) (afterHead k))
+  have hst (i : InstId) (hi : i ≠ id) : w'.st i = w.st i := by simp [w', setActor, hi]
+  have hbox (i : InstId) : (w'.st i).box = (w.st i).box := by
+    by_cases hi : i = id
+    · simp [w', hi, setActor, proceed_fields]
+    · simp [hst i hi]
+  have hparked (i : InstId) : (w'.st i).parked = (w.st i).parked := by
+    by_cases hi : i = id
+    · simp [w', hi, setActor, proceed_fields]
+    · simp [hst i hi]
+  have hprioL (i : InstId) : (w'.st i).prio = (w.st i).prio := by
+    by_cases hi : i = id
+    · simp [w', hi, setActor, proceed_fields]
+    · simp [hst i hi]
+  apply call_tag_duty w w' hT
+  · intro d c
+    constructor
+    · intro hm
+      rcases hm with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+      · exact Or.inl ⟨m, by rw [← hbox d]; exact hm, hc⟩
+      · exact Or.inr ⟨p, by rw [← hparked d]; exact hp, hc⟩
+    · intro hm
+      rcases hm with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+      · exact Or.inl ⟨m, by rw [hbox d]; exact hm, hc⟩
+      · exact Or.inr ⟨p, by rw [hparked d]; exact hp, hc⟩
+  · intro i c
+    by_cases hi : i = id
+    · rw [hi]
+      have hnew : (w'.st id).phase = (proceed (w.st id) (afterHead k)).phase := by
+        simp [w', setActor]
+      have hold : (w.st id).phase = .run k := hph
+      constructor
+      · intro h
+        have h' := (tail_duty (w.st id) k e es c hrest hne hterm).mp (by simpa [hnew] using h)
+        rwa [hph]
+      · intro h
+        have h' := (tail_duty (w.st id) k e es c hrest hne hterm).mpr (by simpa [hold] using h)
+        simpa [hnew] using h'
+    · have hpe : (w'.st i).phase = (w.st i).phase := by rw [hst i hi]
+      constructor
+      · intro h
+        rcases h with ho | hp
+        · exact Or.inl (by simpa [← hpe] using ho)
+        · exact Or.inr (by simpa [← hpe] using hp)
+      · intro h
+        rcases h with ho | hp
+        · exact Or.inl (by simpa [hpe] using ho)
+        · exact Or.inr (by simpa [hpe] using hp)
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · cases hes : es with
+      | nil => simp [w', hc, setActor, proceed, afterHead, hrest, hes] at hph'
+      | cons _ _ => simp [w', hc, setActor, proceed, afterHead, hrest, hes] at hph'
+    · simpa [hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · cases hes : es with
+      | nil => simp [w', hc, setActor, proceed, afterHead, hrest, hes] at hph'
+      | cons _ _ => simp [w', hc, setActor, proceed, afterHead, hrest, hes] at hph'
+    · simpa [hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro i m hm
+    exact hT.prioPlain i m (by rw [hprioL i] at hm; exact hm)
+  · intro d c
+    unfold soleCall
+    rw [hbox d, hparked d]
+    exact hT.sole d c
+  · intro d p hp s
+    exact parkFrom_transport w w' hT hparked
+      (by
+        intro s0 d0 k0
+        constructor
+        · intro hk
+          by_cases hs0 : s0 = id
+          · cases hes : es with
+            | nil => simp [w', hs0, setActor, proceed, afterHead, hrest, hes] at hk
+            | cons _ _ => simp [w', hs0, setActor, proceed, afterHead, hrest, hes] at hk
+          · simpa [hst s0 hs0] using hk
+        · intro hk
+          by_cases hs0 : s0 = id
+          · simp [hs0, hph] at hk
+          · simpa [← hst s0 hs0] using hk)
+      d p hp s
+  · intro c d kA hk
+    exact parkedOnly_transport w w' hT hparked
+      (by intro i m hm; rw [hbox i] at hm; exact hm)
+      (by
+        intro c0 d0 k0 hk0
+        by_cases hc0 : c0 = id
+        · cases hes : es with
+          | nil => simp [w', hc0, setActor, proceed, afterHead, hrest, hes] at hk0
+          | cons _ _ => simp [w', hc0, setActor, proceed, afterHead, hrest, hes] at hk0
+        · simpa [hst c0 hc0] using hk0)
+      c d kA hk
+
+/-- An empty continuation goes idle and was not still holding a reply. -/
+theorem run_done_tag (w : World) (id : InstId) (k : Cont) (hT : CallTagInv w)
+    (hph : (w.st id).phase = .run k) (hrest : k.rest = []) :
+    CallTagInv (setActor w id { (w.st id) with phase := .idle, typestate := k.toState }) := by
+  let w' := setActor w id { (w.st id) with phase := .idle, typestate := k.toState }
+  have hst (i : InstId) (hi : i ≠ id) : w'.st i = w.st i := by simp [w', setActor, hi]
+  have hsame (i : InstId) : (w'.st i).box = (w.st i).box ∧ (w'.st i).parked = (w.st i).parked ∧
+      (w'.st i).prio = (w.st i).prio := by
+    by_cases hi : i = id
+    · simp [w', hi, setActor]
+    · simp [hst i hi]
+  apply call_tag_stable w w' hT
+  · intro d c
+    constructor
+    · intro hm
+      rcases hm with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+      · exact Or.inl ⟨m, by rw [← (hsame d).1]; exact hm, hc⟩
+      · exact Or.inr ⟨p, by rw [← (hsame d).2.1]; exact hp, hc⟩
+    · intro hm
+      rcases hm with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+      · exact Or.inl ⟨m, by rw [(hsame d).1]; exact hm, hc⟩
+      · exact Or.inr ⟨p, by rw [(hsame d).2.1]; exact hp, hc⟩
+  · intro i c
+    by_cases hi : i = id
+    · constructor
+      · intro h
+        simp [w', hi, setActor, handlerOwes, carriedCont] at h
+      · intro ⟨k0, hk, hs, _⟩
+        simp [hi, carriedCont, hph] at hk
+        cases hk
+        exact False.elim (replyShape_nonempty c k hs hrest)
+    · simp [hst i hi]
+  · intro i c
+    by_cases hi : i = id
+    · constructor
+      · intro h
+        simp [w', hi, setActor, replyPending, carriedCont] at h
+      · intro ⟨k0, hk, hs, _⟩
+        simp [hi, carriedCont, hph] at hk
+        cases hk
+        exact False.elim (replyShape_nonempty c k hs hrest)
+    · simp [hst i hi]
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · simp [w', hc, setActor] at hph'
+    · simpa [hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · simp [w', hc, setActor] at hph'
+    · simpa [hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = id
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro i m hm
+    exact hT.prioPlain i m (by rw [(hsame i).2.2] at hm; exact hm)
+  · intro d c
+    unfold soleCall
+    rw [(hsame d).1, (hsame d).2.1]
+    exact hT.sole d c
+  · intro d p hp s
+    exact parkFrom_transport w w' hT (fun i => (hsame i).2.1)
+      (by
+        intro s0 d0 k0
+        constructor
+        · intro hk
+          by_cases hs0 : s0 = id
+          · simp [w', hs0, setActor] at hk
+          · simpa [hst s0 hs0] using hk
+        · intro hk
+          by_cases hs0 : s0 = id
+          · simp [hs0, hph] at hk
+          · simpa [← hst s0 hs0] using hk)
+      d p hp s
+  · intro c d kA hk
+    exact parkedOnly_transport w w' hT (fun i => (hsame i).2.1)
+      (by intro i m hm; rw [(hsame i).1] at hm; exact hm)
+      (by
+        intro c0 _ _ hk0
+        by_cases hc0 : c0 = id
+        · simp [w', hc0, setActor] at hk0
+        · simpa [hst c0 hc0] using hk0)
+      c d kA hk
+
 end Deadlock
