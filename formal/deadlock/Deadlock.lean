@@ -118,3 +118,10 @@ import Deadlock.Rank
 #print axioms Deadlock.blocking_fuel
 #print axioms Deadlock.await_next
 #print axioms Deadlock.await_fuel
+#print axioms Deadlock.blocking_stays
+#print axioms Deadlock.await_stays
+#print axioms Deadlock.send_drops_at
+#print axioms Deadlock.await_drops_at
+#print axioms Deadlock.parked_forever_false
+#print axioms Deadlock.mailbox_alive
+#print axioms Deadlock.call_below

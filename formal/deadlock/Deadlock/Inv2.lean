@@ -726,6 +726,30 @@ theorem reply_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) 
     hmem
   simpa [hsrc, hss, hdstn] using hdrop
 
+/-- A parked call waits on a live callee of strictly smaller height. -/
+theorem call_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (id dst : InstId) (k : Cont) (hs : List (Node × Nat))
+    (hok : heightsOkB (residualEdges I.desc) hs = true)
+    (hph : (w.st id).phase = .parked dst true k) (hlive : (w.st dst).life = .alive) :
+    heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
+      heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
+  obtain ⟨_, e, he, hsrc, hss, hdstn, hkind, heff, _, hpart⟩ :=
+    projects_park I hL hG N w hR id dst true k hph
+  have heff' : e.effect = EffectKind.call := by simpa using heff
+  have hdis : discharged I.desc e = false := by
+    have hne : (EdgeKind.blocking == EdgeKind.nonBlocking) = false := by decide
+    have hcall : (EffectKind.call == EffectKind.send) = false := by decide
+    simp [discharged, hkind, heff', hne, hcall]
+  have hst : (w.st dst).typestate ∈ targetStates I.desc e := by
+    rcases hpart with hd | hmem
+    · simp [hdis] at hd
+    · exact hmem hlive
+  have hmem := residual_of_edge I.desc e (w.st dst).typestate he hdis hst
+  have hdrop := heightsOkB_mem (residualEdges I.desc) hs hok
+    (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := (w.st dst).typestate } : Node))
+    hmem
+  simpa [hsrc, hss, hdstn] using hdrop
+
 theorem reply_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id dst : InstId) (k : Cont)
     (hph : (w.st id).phase = .awaitReply dst k) (hlive : (w.st dst).life = .alive) :
