@@ -202,8 +202,11 @@ for a send the actor did not itself perform.
   finds a transition, and a peer only when no group role changes.
   `receive_prio_inv` and `receive_bulk_inv` keep both invariants, including a
   bulk receive that admits a parked sender and resumes that sender together.
-  Spawn, and the single `step_inv` that would feed `semInv_reachable` and
-  `projects`, are not yet connected. The state after a queue is cleared and
+  `exec_basic_inv` keeps `MailInv` for `internal`, `peer`, `send`, and `call`,
+  including the branch that parks. `exec_head_inv` covers every running head.
+  `spawn_inv` keeps both invariants when the peer index being overwritten is
+  idle with an empty queue (`slotFree`). `step_inv`, `semInv_reachable`, and
+  `projects` are not yet connected. The state after a queue is cleared and
   before its senders resume is not claimed to satisfy `MailInv`.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does

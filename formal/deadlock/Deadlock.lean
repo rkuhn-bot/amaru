@@ -42,3 +42,6 @@ import Deadlock.Mail
 #print axioms Deadlock.deliver_inv
 #print axioms Deadlock.receive_prio_inv
 #print axioms Deadlock.receive_bulk_inv
+#print axioms Deadlock.exec_basic_inv
+#print axioms Deadlock.spawn_inv
+#print axioms Deadlock.exec_head_inv

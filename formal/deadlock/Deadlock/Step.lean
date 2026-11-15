@@ -105,6 +105,46 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       · refine ⟨l, ?_⟩
         simpa [route_tname w I.desc d n dstId hr] using hhead.1
 
+/-- The same heads, including a send or call that parks, preserve `MailInv`. -/
+theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff) (es : List Eff)
+    (hS : SemInv I w) (hM : MailInv w)
+    (hphase : (w.st id).phase = .run { k with rest := e :: es })
+    (hprog : effectsOk I.desc (tname id) (w.st id).typestate (e :: es) = true)
+    (he : e = .internal ∨ e = .peer ∨
+      (∃ d l n, e = .send d l n) ∨ (∃ d l n, e = .call d l n)) :
+    SemInv I (execRun I w id (w.st id) { k with rest := e :: es }) ∧
+      MailInv (execRun I w id (w.st id) { k with rest := e :: es }) := by
+  have hsem := exec_basic_sem I w id k e es hS hphase hprog he
+  have hfree : notParked (w.st id).phase := by simp [notParked, hphase]
+  refine ⟨hsem, ?_⟩
+  rcases he with he | he | he | he
+  · subst he
+    simp [execRun]
+    exact mail_set_free w id _ hM hfree (by simp [notParked]) rfl
+  · subst he
+    simp [execRun]
+    exact mail_set_free w id _ hM hfree (by simp [notParked]) rfl
+  · obtain ⟨d, l, n, he⟩ := he
+    subst he
+    cases hr : route w I.desc d n with
+    | none =>
+      simp [execRun, hr]
+      exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
+    | some dstId =>
+      simp [execRun, hr]
+      exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := none } false
+        (afterHead { k with rest := .send d l n :: es }) hM hfree
+  · obtain ⟨d, l, n, he⟩ := he
+    subst he
+    cases hr : route w I.desc d n with
+    | none =>
+      simp [execRun, hr]
+      exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
+    | some dstId =>
+      simp [execRun, hr]
+      exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := some id } true
+        (afterHead { k with rest := .call d l n :: es }) hM hfree
+
 theorem exec_done_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemInv I w)
     (hphase : (w.st id).phase = .run { k with rest := [] }) :
     SemInv I (execRun I w id (w.st id) { k with rest := [] }) := by
@@ -116,6 +156,14 @@ theorem exec_done_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemI
   · simp [contTy]
   · simp [programOk]
   · simp [waitEdge]
+
+theorem exec_done_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemInv I w) (hM : MailInv w)
+    (hphase : (w.st id).phase = .run { k with rest := [] }) :
+    SemInv I (execRun I w id (w.st id) { k with rest := [] }) ∧
+      MailInv (execRun I w id (w.st id) { k with rest := [] }) := by
+  refine ⟨exec_done_sem I w id k hS hphase, ?_⟩
+  simp [execRun]
+  exact mail_set_free w id _ hM (by simp [notParked, hphase]) (by simp [notParked]) rfl
 
 theorem run_not_parked (w : World) (id : InstId) (k : Cont) (h : (w.st id).phase = .run k) :
     notParked (w.st id).phase := by
@@ -1094,5 +1142,130 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (
         rw [hsame] at hAd
         have hfree : notParked admitted.phase := hdI.free
         simpa using resume_one I w w1 id admitted p ps m.sender hAd hM hdI.st hphase hpk rfl hfree
+
+/-- The peer index spawn overwrites is idle and has an empty parked list. -/
+def slotFree (w : World) (template : String) : Prop :=
+  (w.st (InstId.peer template (w.nextIx template))).phase = .idle ∧
+    (w.st (InstId.peer template (w.nextIx template))).parked = []
+
+def growRoster (w : World) (pid : InstId) (template : String) : World :=
+  { w with
+    roster := w.roster ++ [pid]
+    nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n }
+
+def bornPeer (I : Impl) (template initial : String) : Actor :=
+  withTokens I.desc template
+    { life := .alive, typestate := initial, phase := .idle, box := [], prio := [], parked := [],
+      tokens := fun _ => 0 }
+
+theorem spawn_mail (I : Impl) (w : World) (template : String) (w' : World) (hM : MailInv w)
+    (hfree : slotFree w template) (h : spawn I w template = some w') : MailInv w' := by
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t _ =>
+    by_cases hif : (t.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
+    · simp [hif] at h
+      cases h
+      let pid := InstId.peer template (w.nextIx template)
+      have hst : ∀ i, (growRoster w pid template).st i = w.st i := by
+        intro _; rfl
+      have hMg := mail_copy w _ hM hst
+      have hM1 := mail_set_same _ pid (bornPeer I template t.initial) hMg
+        (by simp [bornPeer, withTokens, hst]; exact hfree.1.symm)
+        (by simp [bornPeer, withTokens, hst]; exact hfree.2)
+      exact mail_copy _ _ hM1 fun i => readCells_st I.desc _ pid i
+    · simp [hif] at h
+
+theorem spawn_inv (I : Impl) (w : World) (template : String) (w' : World) (hS : SemInv I w)
+    (hM : MailInv w) (hfree : slotFree w template) (h : spawn I w template = some w') :
+    SemInv I w' ∧ MailInv w' :=
+  ⟨spawn_sem I w w' template hS h, spawn_mail I w template w' hM hfree h⟩
+
+theorem finish_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w) (hM : MailInv w)
+    (h : finishWait w id = some w') : SemInv I w' ∧ MailInv w' := by
+  unfold finishWait at h
+  split at h
+  · next k heq =>
+    cases h
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+    have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
+      simpa [programOk, heq] using hS.prog id
+    have hfree : notParked (w.st id).phase := by simp [notParked, heq]
+    exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree
+  · next k heq =>
+    cases h
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+    have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
+      simpa [programOk, heq] using hS.prog id
+    have hfree : notParked (w.st id).phase := by simp [notParked, heq]
+    exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree
+  · cases h
+
+/-- One running head: every effect, including a parking send or call and a killing terminate. -/
+theorem exec_head_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w' : World)
+    (hS : SemInv I w) (hM : MailInv w) (h : execHead I w id = some w') :
+    SemInv I w' ∧ MailInv w' := by
+  simp only [execHead] at h
+  split at h
+  · cases h
+  · split at h
+    · next k hph =>
+      cases h
+      have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
+        simpa [programOk, hph] using hS.prog id
+      cases hk : k.rest with
+      | nil =>
+        let k' : Cont := { rest := [], toState := k.toState, replyTo := k.replyTo }
+        have hk' : k = k' := by
+          cases k with
+          | mk r t o =>
+            simp [k', show r = [] from hk]
+        have hphase : (w.st id).phase = .run k' := by rw [hk'] at hph; exact hph
+        rw [hk']
+        exact exec_done_inv I w id k' hS hM hphase
+      | cons e es =>
+        let k' : Cont := { rest := e :: es, toState := k.toState, replyTo := k.replyTo }
+        have hk' : k = k' := by
+          cases k with
+          | mk r t o =>
+            simp [k', show r = e :: es from hk]
+        have hphase : (w.st id).phase = .run k' := by rw [hk'] at hph; exact hph
+        have hprog' : effectsOk I.desc (tname id) (w.st id).typestate k'.rest = true := by
+          rw [hk'] at hprog; exact hprog
+        rw [hk']
+        cases e with
+        | internal =>
+          exact exec_basic_inv I w id k' .internal es hS hM hphase hprog' (Or.inl rfl)
+        | peer =>
+          exact exec_basic_inv I w id k' .peer es hS hM hphase hprog' (Or.inr (Or.inl rfl))
+        | send d l n =>
+          exact exec_basic_inv I w id k' (.send d l n) es hS hM hphase hprog'
+            (Or.inr (Or.inr (Or.inl ⟨d, l, n, rfl⟩)))
+        | call d l n =>
+          exact exec_basic_inv I w id k' (.call d l n) es hS hM hphase hprog'
+            (Or.inr (Or.inr (Or.inr ⟨d, l, n, rfl⟩)))
+        | trySend d l n =>
+          exact exec_try_sem I w id k' d l n es hS hM hphase hprog'
+        | reply =>
+          exact exec_reply_sem I w id k' es hS hM hphase hprog'
+        | selfSchedule label =>
+          exact exec_sched_sem I w id k' label es hS hM hphase hprog'
+        | cell dst label value =>
+          exact exec_cell_sem I w id k' dst label value es hS hM hphase hprog'
+        | terminate =>
+          cases ht : templateOf I.desc (tname id) with
+          | none =>
+            exact exec_term_skip_sem I w id k' es hS hM hphase
+              (by intro _ ht'; simp [ht] at ht')
+          | some t =>
+            by_cases hkill : t.terminable = true ∧ hasParkedCall (w.st id).parked = false
+            · exact exec_term_die_sem I hL w id t k' es hS hM hphase ht hkill.1 hkill.2
+            · exact exec_term_skip_sem I w id k' es hS hM hphase
+                (by
+                  intro t' ht'
+                  have : t' = t := by rw [ht] at ht'; cases ht'; rfl
+                  simpa [this] using hkill)
+    · cases h
 
 end Deadlock
