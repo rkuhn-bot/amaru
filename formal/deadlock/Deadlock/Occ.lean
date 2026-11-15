@@ -2509,5 +2509,22 @@ theorem occ_reply (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : OccInv I
     | awaitPeer _ => exact occ_advance I w id k hO hty hph
     | crashed => exact occ_advance I w id k hO hty hph
 
+theorem owed_append_other (st : InstId → Actor) (dstName : String) (s dst : InstId) (msg : Msg)
+    (roster : List InstId) (nodup : roster.Nodup) (hmem : dst ∈ roster) (hname : tname dst = dstName)
+    (hs : msg.sender ≠ s) :
+    owed (fun i => if i = dst then { st dst with box := (st dst).box ++ [msg] } else st i) dstName s roster =
+      owed st dstName s roster := by
+  have hb : (tname dst == dstName) = true := by simpa [beq_iff_eq] using hname
+  have hslot : slot (fun i => if i = dst then { st dst with box := (st dst).box ++ [msg] } else st i)
+      dstName s dst = slot st dstName s dst := by
+    have hne : (msg.sender == s) = false := by
+      cases hbb : msg.sender == s with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hbb) hs
+    simp [slot, hb, countFrom_append, hne]
+    exact hs
+  have hrep := owed_replace st dstName s dst { st dst with box := (st dst).box ++ [msg] } roster nodup hmem
+  omega
+
 end Deadlock
 
