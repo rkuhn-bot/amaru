@@ -2526,5 +2526,157 @@ theorem owed_append_other (st : InstId → Actor) (dstName : String) (s dst : In
   have hrep := owed_replace st dstName s dst { st dst with box := (st dst).box ++ [msg] } roster nodup hmem
   omega
 
+theorem charge_skip (a : Actor) (dst d : String) (h : d ≠ dst) :
+    (chargeSender a dst).tokens d = a.tokens d := by
+  simp [chargeSender, bumpToken, h]
+
+theorem charge_at (a : Actor) (dst : String) (h : 1 ≤ a.tokens dst) :
+    (chargeSender a dst).tokens dst + 1 = a.tokens dst :=
+  charge_tokens a dst h
+
+/-- Spend one token at `name` and add one owed message for `sender`.
+Every other account is unchanged. The sender is not a terminable template:
+a terminable actor is not allowed to put a bulk message in flight. -/
+theorem occ_pay (I : Impl) (w w' : World) (sender : InstId) (name : String) (hO : OccInv I w)
+    (hrost : w'.roster = w.roster) (hN : w'.N = w.N) (hix : ∀ n, w'.nextIx n = w.nextIx n)
+    (hlife : ∀ i, (w'.st i).life = (w.st i).life)
+    (hSty : (w'.st sender).typestate = (w.st sender).typestate)
+    (htyO : ∀ i, i ≠ sender → (w'.st i).typestate = (w.st i).typestate)
+    (hSph : ∀ d, pending (w'.st sender) d + (if d = name then 1 else 0) ≤ pending (w.st sender) d)
+    (hphO : ∀ i, i ≠ sender → (w'.st i).phase = (w.st i).phase)
+    (htok : ∀ d, (w'.st sender).tokens d + (if d = name then 1 else 0) = (w.st sender).tokens d)
+    (htokO : ∀ i, i ≠ sender → ∀ d, (w'.st i).tokens d = (w.st i).tokens d)
+    (hown : ∀ s, owed w'.st name s w.roster =
+      owed w.st name s w.roster + if s = sender then 1 else 0)
+    (hother : ∀ d, d ≠ name → ∀ s, owed w'.st d s w.roster = owed w.st d s w.roster)
+    (hbox : ∀ i m, m ∈ (w'.st i).box → m.sender ∈ w.roster)
+    (hpark : ∀ i p, p ∈ (w'.st i).parked → p.sender ∈ w.roster)
+    (hpm : ∀ i p, p ∈ (w'.st i).parked → p.sender = p.msg.sender)
+    (hclear : ∀ i, l1 I.desc (tname i) = true → (w'.st i).parked = [])
+    (hoff : ∀ i, i ∉ w.roster → (w'.st i).box = (w.st i).box ∧ (w'.st i).parked = (w.st i).parked)
+    (hsend : sender ∈ w.roster) (hsender : (w.st sender).life = .alive)
+    (hnot : ¬ terminableName I.desc (tname sender)) :
+    OccInv I w' := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hrost]; exact hO.nodup
+  · intro i hl
+    rw [hlife] at hl
+    rw [hrost]
+    exact hO.aliveIn i hl
+  · intro template i hi
+    rw [hix]
+    exact hO.indexed template i (by rw [hrost] at hi; exact hi)
+  · intro template ht
+    have hc : aliveCount w' template = aliveCount w template := by
+      rw [aliveCount_sum, aliveCount_sum, hrost]
+      refine sum_congr _ _ w.roster ?_
+      intro i _
+      unfold aliveBit
+      simp [hlife]
+    rw [hc]; exact hO.liveOne template ht
+  · intro template ht
+    have hc : aliveCount w' template = aliveCount w template := by
+      rw [aliveCount_sum, aliveCount_sum, hrost]
+      refine sum_congr _ _ w.roster ?_
+      intro i _
+      unfold aliveBit
+      simp [hlife]
+    rw [hc, hN]; exact hO.livePeer template ht
+  · intro i hnin
+    have hnin' : i ∉ w.roster := by rw [hrost] at hnin; exact hnin
+    have hold := hO.offEmpty i hnin'
+    have hq := hoff i hnin'
+    rw [hq.1, hq.2]
+    exact hold
+  · intro i m hm
+    rw [hrost]
+    exact hbox i m hm
+  · intro i p hp
+    rw [hrost]
+    exact hpark i p hp
+  · intro i p hp
+    exact hpm i p hp
+  · intro s d hs
+    rw [hrost] at hs ⊢
+    by_cases hd : d = name
+    · rw [hd]
+      rw [hown s]
+      by_cases hss : s = sender
+      · have hswap : sender = s := hss.symm
+        subst hswap
+        simp
+        have htk := htok name
+        simp at htk
+        have hbal := hO.balance sender name hs
+        omega
+      · simp [hss]
+        have htk := htokO s hss name
+        have hbal := hO.balance s name hs
+        omega
+    · rw [hother d hd s]
+      by_cases hss : s = sender
+      · have hswap : sender = s := hss.symm
+        subst hswap
+        have htk := htok d
+        simp [hd] at htk
+        have hbal := hO.balance sender d hs
+        omega
+      · have htk := htokO s hss d
+        have hbal := hO.balance s d hs
+        omega
+  · intro s d hs hl
+    rw [hrost] at hs
+    rw [hlife] at hl
+    have hold := hO.slack s d hs hl
+    by_cases hss : s = sender
+    · have hswap : sender = s := hss.symm
+      subst hswap
+      have hty : (w'.st sender).typestate = (w.st sender).typestate := hSty
+      have hfloorEq : floorState I.desc (tname sender) (w'.st sender).typestate d =
+          floorState I.desc (tname sender) (w.st sender).typestate d := by rw [hty]
+      rw [hfloorEq]
+      have hpen := hSph d
+      have htk := htok d
+      omega
+    · have hph : (w'.st s).phase = (w.st s).phase := hphO s hss
+      have hty : (w'.st s).typestate = (w.st s).typestate := htyO s hss
+      have hpendEq : pending (w'.st s) d = pending (w.st s) d := by simp [pending, hph]
+      have hfloorEq : floorState I.desc (tname s) (w'.st s).typestate d =
+          floorState I.desc (tname s) (w.st s).typestate d := by rw [hty]
+      rw [hpendEq, hfloorEq]
+      have htk := htokO s hss d
+      omega
+  · intro s d hs hterm
+    rw [hrost] at hs ⊢
+    by_cases hss : s = sender
+    · have hswap : sender = s := hss.symm
+      subst hswap
+      exact absurd hterm hnot
+    · have h0 := hO.still s d hs hterm
+      by_cases hd : d = name
+      · rw [hd] at h0 ⊢
+        have hown' := hown s
+        simp [hss] at hown'
+        rw [hown']
+        exact h0
+      · rw [hother d hd s, h0]
+  · intro s d hs hdead
+    rw [hrost] at hs ⊢
+    rw [hlife] at hdead
+    by_cases hss : s = sender
+    · have hswap : sender = s := hss.symm
+      subst hswap
+      exact absurd hsender hdead
+    · have h0 := hO.quiet s d hs hdead
+      by_cases hd : d = name
+      · rw [hd] at h0 ⊢
+        have hown' := hown s
+        simp [hss] at hown'
+        rw [hown']
+        exact h0
+      · rw [hother d hd s, h0]
+  · intro i hl1
+    exact hclear i hl1
+
 end Deadlock
 
