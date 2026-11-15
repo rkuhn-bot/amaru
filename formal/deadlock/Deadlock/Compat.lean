@@ -4,25 +4,19 @@ set_option autoImplicit false
 
 namespace Deadlock
 
-/-! The group relation is untrusted. `compatFails = []` is a local check that the
-initial tuple is allowed and that every listed step and every restart preserves
-the set. That is enough for every run, because a step changes at most the
-typestate of one live actor, and termination is a restart in the product
-(a dead role is read back as its initial state). -/
+/-! The group relation is untrusted. `compatFails = []` checks the initial tuple
+and closure under the listed typestate steps. Absent and dead roles are not
+read as `initial`: the tuple is required only while every role is alive. -/
 
-def observedState (D : Description) (w : World) (role : String) : String :=
-  let id := InstId.core role
-  if (w.st id).life == .alive then (w.st id).typestate
-  else
-    match templateOf D role with
-    | some t => t.initial
-    | none => ""
+def roleTuple (w : World) (g : CompatGroup) : List RoleState :=
+  g.roles.map fun r => { role := r, state := (w.st (.core r)).typestate }
 
-def observedTuple (D : Description) (w : World) (g : CompatGroup) : List RoleState :=
-  g.roles.map fun r => { role := r, state := observedState D w r }
+def groupLive (w : World) (g : CompatGroup) : Prop :=
+  ∀ r ∈ g.roles, (w.st (.core r)).life = .alive
 
 def CompatInv (D : Description) (w : World) : Prop :=
-  ∀ g ∈ compatGroups D.compatibility, tupleMem g.allowed (observedTuple D w g) = true
+  ∀ g ∈ compatGroups D.compatibility, groupLive w g →
+    tupleMem g.allowed (roleTuple w g) = true
 
 def contTy (a : Actor) : Prop :=
   match a.phase with

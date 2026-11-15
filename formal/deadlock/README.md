@@ -28,9 +28,12 @@ protocol. This version does not compute either of those.
 
 - the initial tuple (every role in its `initial` state) is allowed
 - every transition in `transitions` sends an allowed tuple to an allowed tuple
-- restart does too: putting any one role back in its initial state, from any
-  allowed tuple, is allowed (spawn, and terminate of the last instance of a
-  multiplicity-one role, which the product reads as the initial state)
+- a per-peer role is rejected: the check does not certify every instance count
+- a terminable role is rejected: a dead actor is not a state of the tuple, and
+  is not treated as the initial state
+- restart-in-place is not a step of the semantics, so it is not a closure
+  obligation. Fresh spawn allocates a new per-peer index; those roles are the
+  ones the check rejects
 - every blocking edge has both ends in some group, so the list cannot quietly
   drop an interaction
 
@@ -56,10 +59,10 @@ check leaves each group well-formed and with an empty closure list.
 Roles in a group must have multiplicity `one` in this version. The tuple format
 does not depend on that; per-peer products are left to the later fixpoint.
 
-`compatibility: "all"` is the universal relation (nothing to get wrong).
-`compatibility: "explicit"` is the older pairwise filter used by
-`token-pair.json`. It is not the invariance check. New descriptions should use
-`groups`.
+`compatibility: "all"` is the universal relation: every declared pair co-occurs,
+so it cannot hide a cycle. `compatibility: "explicit"` is rejected. A pairwise
+list is not an invariance check and must not pass. `token-pair.json` now fails
+with that message; the checked token relation is `token-relation.json`.
 
 ## Target theorem
 
@@ -128,14 +131,10 @@ list. It is the part that used to be assumed as `Refines.projects`,
   `terminable` template, and a terminable template's programs do no bulk send.
 - Every call label is accepted, with `acceptsCall`, in every declared state of
   the callee.
-- Every blocking edge allows **every declared state** of its destination
-  (`targetsAll`). Together with "typestate stays inside the declared states",
-  that is the compatibility invariant the height argument needs. It is
-  stricter than a selective token gate: `token-pair.json` still passes the
-  graph checker, but an implementation whose partner can be in a state the
-  edge does not list fails `LocalOk`. Receive-side correlation (the token is
-  what makes `holding` and `busy` disjoint) is not tracked.
-- Explicit compatibility lists are closed under the callee's transitions.
+- For `compatibility: "all"`, every declared partner state is a residual
+  target. For `groups`, residual targets are the states that co-occur in the
+  relation (`groupTargets_cooccur`). `stepsCoverB` requires every transition
+  the semantics can fire to be one of the steps that relation was closed under.
 - Occupancy shape: multiplicity `one` edges have `a = 0`, `perPeer` edges have
   `b = 0`, so the affine total matches the per-instance sum.
 - Priority labels (self-schedules and cell-wake labels) number at most
@@ -182,10 +181,16 @@ for a send the actor did not itself perform.
   `blockingSend` and `callReply`, and `CellFresh`. Cycle-freedom
   (`heightsOkB_acyclic`) is proved and is only the well-foundedness of that
   induction.
-- **Lifting `compat_group_closed` to every `Reachable` world.** The check shows
-  the set of tuples is closed under the listed steps and under restart, and
-  residual edges are filtered by those tuples. The induction that a run's
-  observed tuple stays inside that set is not finished.
+- **`SemInv` on every `Reachable` world, and `projects` from it.**
+  `stepBreaks_closed`, `stepsCover_of_local`, `findTr_mem`, and
+  `init_tuple_mem` are proved. The induction that deliver is the only
+  typestate change of a live group role, that the tuple at every blocking
+  program counter stays allowed, and that a wait therefore lies on a residual
+  edge, is not finished.
+- **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
+  without a proved bound that the mailbox never parks. A height argument does
+  not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a
+  missing invariant, not a counter-model.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
@@ -224,7 +229,7 @@ by the semantic rework, and the old examples keep their verdicts.
 |---|---|
 | `examples/safe.json` | `pass` |
 | `examples/credit.json` | `pass` |
-| `examples/token-pair.json` | `pass` |
+| `examples/token-pair.json` | `fail: compatibility mode explicit is not an invariance check; use groups` |
 | `examples/token-pair-ungated.json` | `fail: residual cycle` |
 | `examples/manager-peer.json` | `fail: residual cycle` |
 | `examples/overflow.json` | `fail: overflowing mailbox` |
