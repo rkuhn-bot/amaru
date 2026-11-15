@@ -6,7 +6,7 @@ cardano-node are not used.
 
 Pinned toolchain: `lean-toolchain` (`leanprover/lean4:v4.35.0`).
 `lake-manifest.json` locks an empty package set: the proof depends only on
-Lean's prelude, not Mathlib, so `lake build` does not download anything else.
+Lean's prelude, not Mathlib.
 
 ```sh
 cd formal/deadlock
@@ -16,252 +16,243 @@ lake exe check examples/safe.json
 
 Exit status is 0 on `pass`, 1 when the checks fail, 2 on usage or parse errors.
 
-## What is proved
+## Compatibility relation
 
-`GraphOk` is the decidable side of the theory (Lemmas 1–4 and H1–H7, minus
-timing). `checkBool` / `lake exe check` implement it. `checkBool_sound` says a
-passing check yields `GraphOk`. A reported cycle is a real cycle
-(`issue_cycle_real`).
+The relation is untrusted input. A group names two or more template roles and
+lists the tuples of `(role, state)` that may co-occur. Pairs are groups of size
+2; a 3-stage fetch token is a group of size 3. The same JSON is what a later
+exporter can fill with a product fixpoint, or with the projection of a global
+protocol. This version does not compute either of those.
 
-`deadlock_freedom` is the theorem a later Rust test should cite. Its statement:
+`compatFails` checks, locally and decidably:
 
-```lean
-theorem deadlock_freedom (I : Impl) (hG : GraphOk I.desc) (hR : Refines I) :
-    ∀ N, ∀ ρ : Run I N, Fair ρ →
-      (∀ i s, ¬ WaitPath (ρ.cfg i) s s) ∧
-      (∀ s i, waitKind ((ρ.cfg i).st s) = some .effect → ¬ Stuck ρ s i) ∧
-      (∀ s i, waitKind ((ρ.cfg i).st s) = some .peer → ¬ Stuck ρ s i) ∧
-      (∀ s i, waitKind ((ρ.cfg i).st s) ≠ some .cell) ∧
-      (∀ s i dst, l1 I.desc (tname dst) = true →
-        waitKind ((ρ.cfg i).st s) ≠ some (.blockingSend dst))
+- the initial tuple (every role in its `initial` state) is allowed
+- every transition in `transitions` sends an allowed tuple to an allowed tuple
+- restart does too: putting any one role back in its initial state, from any
+  allowed tuple, is allowed (spawn, and terminate of the last instance of a
+  multiplicity-one role, which the product reads as the initial state)
+- every blocking edge has both ends in some group, so the list cannot quietly
+  drop an interaction
+
+Failure names the step and the pre/post tuple, for example:
+
+```text
+fail: compatibility broken by transition fetch_blocks idle -> busy [OnTip]
+  pre: (select_chain: holding, fetch_blocks: idle, header_store: idle)
+  post: (select_chain: holding, fetch_blocks: busy, header_store: idle)
 ```
 
-In prose, for every instance count `N` and every fair run of an implementation
-that refines a passing description:
+or, when the relation is closed but too coarse, the residual cycle it still
+leaves. A failure means **not provable with this relation**. The check is
+sufficient, not necessary: a list can be rejected even though some finer
+argument would have worked. A wrong or hand-written list cannot make a passing
+check unsound. It can only fail.
 
-1. **Safety.** No configuration on the run contains a wait-for cycle. A wait is
-   a blocking send or an admitted call waiting for its reply. Any such cycle
-   would project to a cycle in the state-indexed residual graph, which the
-   checker has rejected. Projection is on `(template, typestate)`, so one proof
-   covers every `N` and every intermediate set of live instances.
-2. **Effects.** No actor is stuck forever in an internal effect. Completion is
-   always enabled and does not depend on any other actor (A-int). Fairness
-   therefore takes it.
-3. **Peers.** No actor is stuck forever in a peer wait. Every peer wait in the
-   semantics is timed: completion is always enabled (A-peer, timeouts kept;
-   Theorem B's numeric bounds are not). Descriptions that set `untimedPeer`
-   are rejected.
-4. **Cells.** No phase waits on a cell. A cell write stores the value and, when
-   the dirty bit was clear, `try_send`s one wake. A full mailbox drops the wake
-   and leaves the bit set. The writer is not parked. `WaitKind.cell` is the
-   class a blocking cell read would have; `waitKind_ne_cell` says no phase is
-   in it.
-5. **Lemma 1.** On a mailbox whose summed occupancy bound fits its capacity for
-   every `N` (`a*N+b` compared coefficient-wise), refinement says there is no
-   blocking-send wait. The checker deletes those send edges from the residual
-   graph. Call **reply** edges are not deleted by credit: admission may be
-   free while the caller still waits for the answer.
+Residual edges are drawn only to partner states that co-occur with the source
+state in every group containing both roles (`groupTargets`).
+`groupTargets_cooccur` is that filter. `compat_group_closed` says a passing
+check leaves each group well-formed and with an empty closure list.
 
-Partial deadlock (some actor stuck forever while others still step) and global
-deadlock are both impossible for the waits in (2)–(5), because those waits
-cannot stick. A wait-cycle, partial or global, is impossible for every blocking
-send and call by (1), with or without fairness.
+Roles in a group must have multiplicity `one` in this version. The tuple format
+does not depend on that; per-peer products are left to the later fixpoint.
 
-`performReply_caller_box` is the oneshot reply fact: the reply step does not
-read the caller's bulk occupancy. A caller whose own mailbox is full is not
-blocked by that fullness. The definition `CallerMailboxFull` records the
-configuration the informal notes worry about.
+`compatibility: "all"` is the universal relation (nothing to get wrong).
+`compatibility: "explicit"` is the older pairwise filter used by
+`token-pair.json`. It is not the invariance check. New descriptions should use
+`groups`.
 
-### Axioms
+## Target theorem
 
-From `#print axioms` (Lean 4.35.0):
+```lean
+theorem deadlock_freedom (I) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I) :
+  ∀ N, ∀ ρ : Run I N, Fair ρ → ¬ Deadlock ρ ∧ CellFresh ρ
+```
 
-| theorem | axioms |
-|---|---|
-| `deadlock_freedom` | `propext` |
-| `no_wait_cycle` | `propext` |
-| `not_stuck_effect` | `propext` |
-| `checkBool_sound` | `propext`, `Quot.sound` |
+`Deadlock` is the one in `Semantics.lean`: some actor is stuck forever on a
+blocking send, a call reply, a cell wait, or an internal effect. `CellFresh`
+says that after a cell write strictly raises the stored value, some later step
+of a live reader of that template is a receive or an exec that read-and-clears,
+and the value it records is at least the written one.
 
-No `sorry`, no `Classical.choice`, no axioms beyond Lean's standard ones.
+**This statement is not yet a theorem.** The height induction that would
+discharge a blocking send or a call reply — destination at strictly lower
+rank, finite program, FIFO index in `parked` then `box`, one reply before
+terminate — is not closed. What is closed is recorded below. Nothing in the
+development uses `sorry`.
 
-## Assumptions (the trust boundary)
+## Assumptions
 
-`GraphOk` is checked. `Refines I` is not. A Rust exporter that dumps typestate
-graphs and wiring as JSON, then runs `lake exe check`, discharges `GraphOk`
-for that description. For `deadlock_freedom` to apply to production code the
-exporter (or a later proof) must also establish `Refines`:
+`Assumptions` is only the trust boundary. Effect completion and peer timeout
+are assumptions about the binary, not results.
 
-- **`projects`.** In every reachable configuration, a blocking send or a
-  call-reply wait from actor `s` to actor `dst` is a residual edge
-  `(template s, typestate s) → (template dst, typestate dst)`. The `allowed`
-  list is an **over-approximation** of pairs that can co-occur: every reachable
-  pair must be listed. An omitted reachable pair makes `projects` false and the
-  checker can miss a cycle. Extra pairs can only cause a false failure.
-  When `compatibility` is `"all"`, every target state is allowed.
-- **`call_replies`.** If a transition is started by dequeuing a call
-  (`acceptsCall`), its program contains `reply` before it finishes. The checker
-  only sees the boolean `repliesInDequeue` on the edge; this field says the
-  boolean is honest.
-- **`credit_clear`.** Occupancy bounds are real invariants. For a mailbox with
-  Lemma 1 (`mustFit` or, more precisely, `l1`: sum of edge occupancies `≤`
-  capacity for every `N`), no reachable state has a blocking sender parked on
-  it. The exporter's numbers must count every producer, including per-peer
-  copies, injectors, and wakes. An edge's `occupancy` is that producer's
-  contribution, already written as `a*N+b` (the checker does not multiply by
-  `N` again).
-- **`no_crash`.** Priority-lane occupancy, including an in-flight self-schedule,
-  stays `≤ priorityBound ≤ priorityCapacity`. Overflow is a crash in the
-  semantics, not a wait; refinement says the crash state is unreachable.
-- **Edge honesty.** A superseding edge must be a non-blocking cell write with
-  flags (i)–(v) plus the dirty bit, or the check fails. An ingress edge must be
-  a non-blocking `try_send` whose `ingressLegal + other producers ≤ capacity`,
-  or the check fails. The exporter must not mark a real blocking send as either
-  of those.
-- **Effects.** Anything classified as `internal` must actually complete without
-  waiting on an actor mailbox. A callback that blocks on a stage is not an
-  internal effect; it has to be a pseudo-stage edge. Peer waits in the model
-  all complete (timeout or environment). `untimedPeer: true` is rejected.
-- **Names.** `freshNames` must be true. The semantics never revives a `dead`
-  id. Sends to a dead actor drop. A call to a missing or terminable actor is
-  rejected by the check (`no call targets a terminable template`).
-- **Fairness.** Runs are fair in the sense of `Fair`: a forced action that
-  stays enabled is taken (F1), admission is FIFO in `enqueueOrPark` /
-  `receiveBulk` (F2), and if an actor is idle with bulk work infinitely often
-  then it takes a bulk receive infinitely often (F3, priority does not starve
-  the mailbox). Spawn is not forced.
+```lean
+structure Assumptions (I : Impl) : Prop where
+  rust_refines :
+    ∀ tr ∈ I.transitions, ∃ tr' ∈ I.transitions,
+      tr'.template = tr.template ∧ tr'.fromState = tr.fromState ∧
+      tr'.label = tr.label ∧ tr'.program = tr.program ∧
+      tr'.toState = tr.toState ∧ tr'.acceptsCall = tr.acceptsCall
+  internal_complete :
+    ∀ (w : World) (id : InstId) (k : Cont),
+      (w.st id).phase = .awaitEffect k → Enabled I w (.finish id)
+  peer_complete :
+    ∀ (w : World) (id : InstId) (k : Cont),
+      (w.st id).phase = .awaitPeer k → Enabled I w (.finish id)
+```
 
-`Impl` is the description plus a finite list of transitions
-`(template, fromState, label, program, toState, acceptsCall)`. Programs are
-finite lists of `send`, `trySend`, `call`, `reply`, `selfSchedule`, `cell`,
-`internal`, `peer`, `terminate`. Per-peer targets use the effect's `hint`
-index, which must be `< N`.
+`rust_refines` is the exporter obligation: the node's programs are
+`I.transitions`. In the Lean model the list is the model, so the field is the
+identity on that list; applying the development to Rust is assuming the
+exporter told the truth. `internal_complete` and `peer_complete` are A-int and
+A-peer. Fair scheduling is the separate `Fair` hypothesis (F1 on forced
+actions, F3 so priority does not starve the bulk mailbox). Spawn is not forced.
 
-Affine comparison is exact for every `N ≥ 0`: `a₁*N+b₁ ≤ a₂*N+b₂` for all `N`
-if and only if `a₁ ≤ a₂` and `b₁ ≤ b₂` (`Affine.leB_iff_forall_eval`).
+`not_stuck_effect_assumed` and `not_stuck_peer_assumed` use those two fields.
+They are not derived from `GraphOk`.
+
+## What `LocalOk` checks
+
+`LocalOk I` is `localOkB I = true`, a decidable predicate on the transition
+list. It is the part that used to be assumed as `Refines.projects`,
+`credit_clear`, and `no_crash`, and is now a check:
+
+- Every transition's states are declared, `release = 1`, and
+  `sends(program) + floor(toState) ≤ floor(fromState)` for every destination
+  template. `floor` is `budget - debt`, and `debt` is the per-instance sum of
+  edge occupancies out of that state (`b` for multiplicity `one`, `a` for
+  `perPeer`).
+- A program's `send` / `trySend` / `call` effects are edges from the
+  **target** state (typestate moves when the transition starts).
+- An `acceptsCall` program has exactly one `reply`, and no `terminate` before
+  it. Any other program has no `reply`. `terminate` occurs only on a
+  `terminable` template, and a terminable template's programs do no bulk send.
+- Every call label is accepted, with `acceptsCall`, in every declared state of
+  the callee.
+- Every blocking edge allows **every declared state** of its destination
+  (`targetsAll`). Together with "typestate stays inside the declared states",
+  that is the compatibility invariant the height argument needs. It is
+  stricter than a selective token gate: `token-pair.json` still passes the
+  graph checker, but an implementation whose partner can be in a state the
+  edge does not list fails `LocalOk`. Receive-side correlation (the token is
+  what makes `holding` and `busy` disjoint) is not tracked.
+- Explicit compatibility lists are closed under the callee's transitions.
+- Occupancy shape: multiplicity `one` edges have `a = 0`, `perPeer` edges have
+  `b = 0`, so the affine total matches the per-instance sum.
+- Priority labels (self-schedules and cell-wake labels) number at most
+  `priorityBound.b`, and that bound has `a = 0`. Re-arming a label does not
+  grow the lane; a new label past the lane is the overflow crash.
+
+`projects`, the mailbox bound `box.length + |parked| ≤ Σ W ≤ cap`, and
+`no_crash` are **not** proved as inductive invariants yet. The accounting
+lemmas (`owed`, `owed_append_msg`, `debt_le_budget`, `targetsAll_edge`,
+`blocking` projection into `residualEdges`) are in `Occupy.lean` and
+`Local.lean`. The preservation over every action is not finished, so they are
+not cited by a deadlock theorem.
+
+## Operational model
+
+- Message labels are real. `send` / `trySend` / `call` / `selfSchedule` carry
+  the label the transition fires on. `cell` carries the value.
+- A call with no `acceptsCall` transition is not dequeued. A call to a name
+  that is not alive is discarded and does not become `awaitReply`.
+  `performReply` resumes the caller only when that caller is in
+  `awaitReply` **this** sender. `terminate` runs only for `terminable`
+  templates and is refused while a parked entry is a call; parked calls are
+  not resumed as sends. Dropped mail on terminate is credited back to its
+  senders.
+- Cells live at `(template, label)`. A write sets `value := max(old, payload)`
+  and `dirty := true`, and if the bit was clear it upserts one priority wake
+  per live reader. Every `deliver`, `init`, spawn, and successful `terminate`
+  read-and-clears `dirty` and stores the value in `observed`. Wakes are not
+  bulk occupancy and are not charged.
+- Instance ids are unbounded (`peer name index`). `World.N` bounds how many
+  instances of each per-peer template are alive at once. Spawn takes the next
+  index; a `dead` id is not reused.
+- Bulk send/park charges the sender one token for the destination template.
+  A bulk receive credits that sender after the receiver is installed, so a
+  self-send is not overwritten. Priority delivery is not credited.
+
+`execRun_preserves_other_run` says an actor in `.run` keeps that phase across
+another actor's `exec`. `enqueue_keeps_other_run` is the corresponding fact
+for a send the actor did not itself perform.
 
 ## What is not covered
 
-- **Theorem B / timing.** No Δ, no per-hop budget, no per-peer fairness bound,
-  no O4/O5. Deadlock freedom is not timeliness. A fair run may still be
-  arbitrarily slow.
-- **General residual-queue liveness.** `no_wait_cycle` forbids a cycle of
-  blocking sends and call replies, at every `N`. It does not by itself show
-  that a sender parked *behind* other parked senders, or waiting while its
-  target is busy in a lower program, eventually runs. The pieces for that
-  argument are in the development (`run_enabled`, `can_receive_enabled`,
-  `fair_recv`, `recv_resumes_head_of_box`, rank from `GraphOk.ranked`) but the
-  phase-stability lemma under other actors' steps is not finished, so it is
-  not part of `deadlock_freedom`. Lemma 1 mailboxes do not need it: refinement
-  says they never park.
-- **Protocol deadlock of an idle actor** waiting for a message nobody will
-  send, while its mailbox still drains. That is out of scope except where it
-  is a call that never replies (`call_replies` is the hypothesis, not a
-  theorem that every program replies).
-- **Livelock** of `try_send` retry loops (obligation O1').
-- **That Amaru refines this model.** Nothing here reads the Rust. Until an
-  exporter produces the JSON and a proof or audit of `Refines`, the theorem
-  does not apply to the node.
+- **The height induction itself**, and therefore `¬ Deadlock` for
+  `blockingSend` and `callReply`, and `CellFresh`. Cycle-freedom
+  (`heightsOkB_acyclic`) is proved and is only the well-foundedness of that
+  induction.
+- **Lifting `compat_group_closed` to every `Reachable` world.** The check shows
+  the set of tuples is closed under the listed steps and under restart, and
+  residual edges are filtered by those tuples. The induction that a run's
+  observed tuple stays inside that set is not finished.
+- **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
+  timeliness.
+- **Receive-side and obligation liveness.** Token leaks, "this request
+  eventually gets that response", and the selective token gate
+  (`holding` excludes `busy` even though both states are reachable) are out of
+  scope. `LocalOk` over-approximates by requiring every declared partner state
+  on a blocking edge.
+- **That Amaru refines this model.** Nothing here reads the Rust.
 
 ## Checker rules
 
-`lake exe check` fails unless all of the following hold.
+`lake exe check` fails unless all of the following hold. These are unchanged
+by the semantic rework, and the old examples keep their verdicts.
 
 - Templates and edge endpoints exist; states contain `initial`; names are unique.
 - `send` and `call` are blocking. `trySend`, `reply`, `selfSchedule`, `cell`,
   `internal`, `peer` are non-blocking.
-- `scope` matches multiplicity (`cross` is per-peer to per-peer, `coreInst`
-  mixes `one` and `perPeer`, `intra` is unrestricted).
+- `scope` matches multiplicity.
 - `freshNames` is true. No template has `untimedPeer`. Priority bound `≤`
   priority capacity. Every `call` has `repliesInDequeue` and its target is not
-  `terminable`.
-- A `superseding` edge is a non-blocking `cell` whose flags are all true:
-  `singleWriter` and `orderMonotone` (i), `noPerMessageObligation` (ii),
-  `visibility` (iii), `readPoints` (iv), `idempotent` (v), `dirtyBit`.
-  Otherwise the offending flag is printed.
+  `terminable`. A call with `repliesInDequeue: false` is `lost-reply.json`.
+- A `superseding` edge is a non-blocking `cell` whose flags are all true,
+  including `dirtyBit` and `readPoints`. A missing flag is `lost-wake.json`.
 - An `ingress` edge is a non-blocking `trySend` with `ingressLegal` such that
   `legal + occupancy of every other edge into that mailbox ≤ capacity`.
-- **Residual graph.** An edge contributes state-indexed waits unless it is
-  non-blocking, or it is a blocking `send` into a mailbox with Lemma 1.
-  Calls stay (the reply wait). Each remaining edge is drawn only to target
-  states the compatibility relation allows. That graph must be acyclic. A
-  cycle is printed as `(template, state) -> ... -> (template, state)`.
-- **`mustFit`.** Default true. The mailbox's summed occupancy must be `≤` its
-  capacity. Set false only when the mailbox is deliberately not credited and
-  its blocking sends are ordered by compatibility (the token example). A
-  violation is printed as `fail: overflowing mailbox`.
+- **Residual graph.** Non-blocking edges are dropped. A blocking `send` into a
+  Lemma 1 mailbox is dropped. Calls stay. Each remaining edge is drawn only to
+  compatibility targets. The graph must be acyclic.
+- **`mustFit`.** Default true. Summed occupancy must be `≤` capacity.
 
-`a*N+b` may be a bare number (`b`, with `a = 0`) or `{"a": …, "b": …}`.
-
-### Schema `amaru-deadlock-graph/v1`
-
-```json
-{
-  "schema": "amaru-deadlock-graph/v1",
-  "name": "example",
-  "freshNames": true,
-  "compatibility": "all",
-  "templates": [{
-    "name": "sink",
-    "multiplicity": "one",
-    "capacity": {"a": 0, "b": 10},
-    "priorityCapacity": 4,
-    "priorityBound": 1,
-    "states": ["idle"],
-    "initial": "idle",
-    "terminable": false,
-    "untimedPeer": false,
-    "mustFit": true
-  }],
-  "edges": [{
-    "src": "source",
-    "srcState": "idle",
-    "dst": "sink",
-    "kind": "blocking",
-    "reliability": "reliable",
-    "effect": "send",
-    "label": "Ping",
-    "scope": "intra",
-    "occupancy": 1,
-    "repliesInDequeue": false,
-    "ingress": false,
-    "ingressLegal": null,
-    "cell": {
-      "singleWriter": false,
-      "orderMonotone": false,
-      "noPerMessageObligation": false,
-      "visibility": false,
-      "readPoints": false,
-      "idempotent": false,
-      "dirtyBit": false
-    }
-  }]
-}
-```
-
-`compatibility` is `"all"` or `"explicit"`. The latter requires `allowed`:
-`[{ "src", "srcState", "dst", "dstState" }]`. Omitted booleans default as in
-the decoder (`terminable` / `untimedPeer` / `repliesInDequeue` / `ingress`
-false, `mustFit` true, missing `cell` all false).
+`a*N+b` may be a bare number or `{"a": …, "b": …}`.
 
 ## Examples
 
 | file | expected |
 |---|---|
-| `examples/safe.json` | `pass` — one blocking send, occupancy 1, capacity 10 |
-| `examples/credit.json` | `pass` — request and response, each of occupancy 1 into a capacity-1 mailbox (Lemma 1 both ways) |
-| `examples/token-pair.json` | `pass` — `select_chain`/`fetch_blocks` token cycle, occupancy 11 > capacity 10, broken by compatibility |
-| `examples/token-pair-ungated.json` | `fail: residual cycle` — same edges, compatibility `"all"` |
-| `examples/manager-peer.json` | `fail: residual cycle` — blocking `manager ↔ peer_selection`, occupancy 11 > 10 |
-| `examples/overflow.json` | `fail: overflowing mailbox` — one send, 11 > 10, `mustFit` |
+| `examples/safe.json` | `pass` |
+| `examples/credit.json` | `pass` |
+| `examples/token-pair.json` | `pass` |
+| `examples/token-pair-ungated.json` | `fail: residual cycle` |
+| `examples/manager-peer.json` | `fail: residual cycle` |
+| `examples/overflow.json` | `fail: overflowing mailbox` |
+| `examples/lost-reply.json` | `fail: call source -[Ping]-> sink is not answered in the dequeue transition` |
+| `examples/lost-wake.json` | `fail: superseding edge Wake misses cell conditions readPoints, dirtyBit` |
+| `examples/token-relation.json` | `pass` — 3-role fetch token, closed under its transitions and under restart |
+| `examples/token-relation-gap.json` | `fail: compatibility broken by transition fetch_blocks idle -> busy [OnTip]` with the pre/post tuple |
+| `examples/token-relation-coarse.json` | `fail: residual cycle` — the extra `(holding, busy)` tuple is closed, and it restores the cycle |
 
-The same verdicts are `native_decide`d in `Deadlock/Examples.lean`.
+The same strings are `native_decide`d in `Deadlock/Examples.lean`.
 
 ## Layout
 
 - `Deadlock/Basic.lean` — descriptions, affine forms
 - `Deadlock/Graph.lean` — residual graph, checker, `checkBool_sound`
-- `Deadlock/Semantics.lean` — configurations, step, fairness, deadlock notions
-- `Deadlock/Proof.lean` — effect, peer, and cell progress; oneshot reply; head-of-queue resume
-- `Deadlock/Theorem.lean` — `Refines`, `no_wait_cycle`, `deadlock_freedom`
+- `Deadlock/Semantics.lean` — configurations, step, fairness, `Deadlock`, cells, churn
+- `Deadlock/Local.lean` — `LocalOk`, `Assumptions`, `CellFresh`
+- `Deadlock/Occupy.lean` — in-flight message accounting
+- `Deadlock/Proof.lean` — effect/peer progress, phase stability of a running actor
+- `Deadlock/Compat.lean` — `compat_group_closed`
+- `Deadlock/Theorem.lean` — effect and peer non-stuckness **from `Assumptions`**
 - `Deadlock/Json.lean`, `Main.lean` — `lake exe check`
+
+## Axioms
+
+From `#print axioms` (Lean 4.35.0), no `sorryAx`:
+
+| theorem | axioms |
+|---|---|
+| `not_stuck_effect_assumed`, `not_stuck_peer_assumed`, `compat_group_closed` | `propext` |
+| `checkBool_sound`, `groupTargets_cooccur`, `execRun_preserves_other_run` | `propext`, `Quot.sound` |

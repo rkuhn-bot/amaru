@@ -1,0 +1,56 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "lost-wake",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "writer",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    },
+    {
+      "name": "reader",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    }
+  ],
+  "edges": [
+    {
+      "src": "writer",
+      "srcState": "idle",
+      "dst": "reader",
+      "kind": "nonBlocking",
+      "reliability": "superseding",
+      "effect": "cell",
+      "label": "Wake",
+      "scope": "intra",
+      "occupancy": 1,
+      "repliesInDequeue": false,
+      "ingress": false,
+      "cell": {
+        "singleWriter": true,
+        "orderMonotone": true,
+        "noPerMessageObligation": true,
+        "visibility": true,
+        "readPoints": false,
+        "idempotent": true,
+        "dirtyBit": false
+      }
+    }
+  ]
+}

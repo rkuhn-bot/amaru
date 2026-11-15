@@ -1,0 +1,47 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "lost-reply",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "source",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    },
+    {
+      "name": "sink",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    }
+  ],
+  "edges": [
+    {
+      "src": "source",
+      "srcState": "idle",
+      "dst": "sink",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "call",
+      "label": "Ping",
+      "scope": "intra",
+      "occupancy": 1,
+      "repliesInDequeue": false,
+      "ingress": false
+    }
+  ]
+}

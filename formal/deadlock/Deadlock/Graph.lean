@@ -164,6 +164,44 @@ theorem heightsOkB_acyclic (es : List (Node × Node)) (hs : List (Node × Nat))
   intro a b he
   exact heightsOkB_mem es hs hb (a, b) ((edgeBool_iff es a b).mp he)
 
+/-! Compatibility groups. The list is untrusted. A passing check means it contains
+the initial tuple and is closed under every listed step and under restart
+(and therefore under terminate-and-respawn). It is sufficient, not necessary:
+failure means "not provable with this relation". -/
+
+def compatGroups : CompatMode → List CompatGroup
+  | .groups gs => gs
+  | _ => []
+
+def lookupRole (t : List RoleState) (role : String) : Option String :=
+  t.findSome? fun rs => if rs.role == role then some rs.state else none
+
+def tupleMem (allowed : List (List RoleState)) (t : List RoleState) : Bool :=
+  allowed.any fun a =>
+    t.all (fun rs => lookupRole a rs.role == some rs.state) &&
+      a.all (fun rs => lookupRole t rs.role == some rs.state)
+
+def substRole (t : List RoleState) (role state : String) : List RoleState :=
+  t.map fun rs => if rs.role == role then { rs with state } else rs
+
+def fmtTuple (t : List RoleState) : String :=
+  "(" ++ String.intercalate ", " (t.map fun rs => s!"{rs.role}: {rs.state}") ++ ")"
+
+def coStates (g : CompatGroup) (src ss dst : String) : List String :=
+  dedup <| g.allowed.filterMap fun tup =>
+    if lookupRole tup src == some ss then lookupRole tup dst else none
+
+def listInter (xs ys : List String) : List String :=
+  xs.filter fun x => ys.elem x
+
+/-- Partner states that co-occur with `srcState` in every group containing both roles.
+Extra groups only remove states, so a hand-written list cannot add a residual edge
+the relation does not allow. -/
+def groupTargets (gs : List CompatGroup) (src ss dst : String) : List String :=
+  match gs.filter fun g => g.roles.elem src && g.roles.elem dst with
+  | [] => []
+  | g :: rest => rest.foldl (fun acc h => listInter acc (coStates h src ss dst)) (coStates g src ss dst)
+
 /-! Discharge -/
 
 def targetStates (D : Description) (e : Edge) : List String :=
@@ -173,6 +211,7 @@ def targetStates (D : Description) (e : Edge) : List String :=
     dedup <| ps.filterMap fun a =>
       if a.src == e.src && a.srcState == e.srcState && a.dst == e.dst then some a.dstState
       else none
+  | .groups gs => groupTargets gs e.src e.srcState e.dst
 
 /-- A blocking send is deleted when Lemma 1 applies. Calls stay: admission may be
 credited, but the reply wait is still a residual edge. Non-blocking effects are not waits. -/
@@ -420,10 +459,84 @@ def allowedFails (D : Description) : List String :=
     ps.filterMap fun a =>
       if stateMem D a.src a.srcState && stateMem D a.dst a.dstState then none
       else some s!"fail: compatibility pair {a.src}/{a.srcState} ~ {a.dst}/{a.dstState} mentions an unknown state"
+  | .groups _ => []
+
+def stepBreaks (g : CompatGroup) (step : CompatStep) (fromAny : Bool) : List String :=
+  g.allowed.filterMap fun tup =>
+    if !(g.roles.elem step.template) then none
+    else
+      match lookupRole tup step.template with
+      | none => none
+      | some s =>
+        if !fromAny && s != step.fromState then none
+        else
+          let post := substRole tup step.template step.toState
+          if tupleMem g.allowed post then none
+          else
+            some s!"fail: compatibility broken by transition {step.template} {s} -> {step.toState} [{step.label}]\n  pre: {fmtTuple tup}\n  post: {fmtTuple post}"
+
+def groupWellformed (D : Description) (g : CompatGroup) : List String :=
+  if g.roles.length < 2 then [s!"fail: compatibility group {g.name} needs at least two roles"]
+  else if g.roles.length != (dedup g.roles).length then [s!"fail: compatibility group {g.name} repeats a role"]
+  else
+    let unknown := g.roles.filter fun r => !(hasTemplate D r)
+    if !unknown.isEmpty then
+      [s!"fail: compatibility group {g.name} mentions unknown template {unknown.head?.getD "?"}"]
+    else
+      let perPeer := g.roles.filter fun r =>
+        match templateOf D r with
+        | some t => t.multiplicity == .perPeer
+        | none => false
+      if !perPeer.isEmpty then
+        [s!"fail: compatibility group {g.name} role {perPeer.head?.getD "?"} must have multiplicity one in this check"]
+      else
+        g.allowed.filterMap fun tup =>
+          if tup.length != g.roles.length then
+            some s!"fail: compatibility group {g.name} tuple {fmtTuple tup} does not cover every role"
+          else if g.roles.any fun r => !(tup.any fun rs => rs.role == r) then
+            some s!"fail: compatibility group {g.name} tuple {fmtTuple tup} does not cover every role"
+          else if tup.any fun rs => !(stateMem D rs.role rs.state) then
+            some s!"fail: compatibility group {g.name} tuple {fmtTuple tup} mentions an unknown state"
+          else none
+
+def initialTuple (D : Description) (g : CompatGroup) : List RoleState :=
+  g.roles.filterMap fun r =>
+    match templateOf D r with
+    | some t => some { role := r, state := t.initial }
+    | none => none
+
+def restartSteps (D : Description) (g : CompatGroup) : List CompatStep :=
+  g.roles.filterMap fun r =>
+    match templateOf D r with
+    | some t => some { template := r, fromState := t.initial, toState := t.initial, label := "restart" }
+    | none => none
+
+def groupClosure (D : Description) (g : CompatGroup) : List String :=
+  if !(groupWellformed D g).isEmpty then []
+  else
+    let init := initialTuple D g
+    let initFail :=
+      if tupleMem g.allowed init then []
+      else [s!"fail: compatibility group {g.name} rejects the initial tuple\n  tuple: {fmtTuple init}"]
+    initFail ++ D.steps.flatMap (stepBreaks g · false) ++
+      (restartSteps D g).flatMap (stepBreaks g · true)
+
+def uncoveredEdges (D : Description) (gs : List CompatGroup) : List String :=
+  D.edges.filterMap fun e =>
+    if e.kind != .blocking then none
+    else if gs.any fun g => g.roles.elem e.src && g.roles.elem e.dst then none
+    else some s!"fail: blocking edge {e.label} from {e.src} to {e.dst} is not in any compatibility group"
+
+def compatFails (D : Description) : List String :=
+  match D.compatibility with
+  | .all => []
+  | .explicit _ => []
+  | .groups gs =>
+    gs.flatMap (fun g => groupWellformed D g ++ groupClosure D g) ++ uncoveredEdges D gs
 
 def structLines (D : Description) : List String :=
   nameFails D ++ stateFails D ++ endpointFails D ++ kindFails D ++ scopeFails D ++
-    cellFails D ++ ingressFails D ++ allowedFails D
+    cellFails D ++ ingressFails D ++ allowedFails D ++ compatFails D
 
 def priorityFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
@@ -634,6 +747,60 @@ theorem certify_of_cycle (D : Description) (c : List Node) (h : Issue.cycle c �
     have peel' : Issue.cycle c ∈ [certHead D] := by
       simpa [certIssue, hac] using peel
     exact certHead_cycle D c (mem_singleton_eq peel').symm
+
+theorem listInter_elem (xs ys : List String) (x : String) :
+    x ∈ listInter xs ys ↔ x ∈ xs ∧ ys.elem x = true := by
+  simp [listInter, List.mem_filter, List.elem_iff]
+
+theorem foldl_inter_spec (src ss dst : String) (rest : List CompatGroup) (acc : List String) (ds : String)
+    (h : ds ∈ rest.foldl (fun acc h => listInter acc (coStates h src ss dst)) acc) :
+    ds ∈ acc ∧ ∀ g ∈ rest, (coStates g src ss dst).elem ds = true := by
+  induction rest generalizing acc with
+  | nil =>
+    simp at h
+    exact ⟨h, fun _ hg => by cases hg⟩
+  | cons g gs ih =>
+    simp only [List.foldl_cons] at h
+    have ih' := ih _ h
+    refine ⟨?_, ?_⟩
+    · exact (listInter_elem acc (coStates g src ss dst) ds).mp ih'.1 |>.1
+    · intro g' hg
+      cases hg with
+      | head =>
+        exact (listInter_elem acc (coStates g src ss dst) ds).mp ih'.1 |>.2
+      | tail _ ht =>
+        exact ih'.2 g' ht
+
+/-- A residual target drawn from a group relation co-occurs with the source state
+in every group that contains both roles. -/
+theorem groupTargets_cooccur (gs : List CompatGroup) (src ss dst ds : String)
+    (h : ds ∈ groupTargets gs src ss dst) (g : CompatGroup)
+    (hg : g ∈ gs) (hs : g.roles.elem src = true) (hd : g.roles.elem dst = true) :
+    (coStates g src ss dst).elem ds = true := by
+  have hbool : (g.roles.elem src && g.roles.elem dst) = true := by
+    rw [hs, hd]
+    rfl
+  have hg' : g ∈ gs.filter fun g => g.roles.elem src && g.roles.elem dst :=
+    List.mem_filter.mpr ⟨hg, hbool⟩
+  unfold groupTargets at h
+  cases hh : gs.filter fun g => g.roles.elem src && g.roles.elem dst with
+  | nil =>
+    rw [hh] at hg'
+    cases hg'
+  | cons g0 rest =>
+    rw [hh] at h
+    have hmem := foldl_inter_spec src ss dst rest (coStates g0 src ss dst) ds h
+    have hg'' : g = g0 ∨ g ∈ rest := by
+      have : g ∈ g0 :: rest := by
+        rw [hh] at hg'
+        exact hg'
+      simpa [List.mem_cons] using this
+    cases hg'' with
+    | inl heq =>
+      subst heq
+      exact List.elem_iff.mpr hmem.1
+    | inr hrest =>
+      exact hmem.2 g hrest
 
 theorem issue_cycle_real (D : Description) (c : List Node) (h : Issue.cycle c ∈ issues D) :
     ∃ n, Path (edgeBool (residualEdges D)) n n := by

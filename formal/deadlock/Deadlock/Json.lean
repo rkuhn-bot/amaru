@@ -259,6 +259,33 @@ private def decodeAllowed (v : JVal) : Except String Allowed := do
     dstState := ← asString (← field v "dstState") "allowed.dstState"
   }
 
+private def decodeRoleState (v : JVal) : Except String RoleState := do
+  return {
+    role := ← asString (← field v "role") "role"
+    state := ← asString (← field v "state") "state"
+  }
+
+private def decodeGroup (v : JVal) : Except String CompatGroup := do
+  let name ← asString (← field v "name") "group.name"
+  let roles ← (← asArr (← field v "roles") "roles").mapM fun s => asString s "role"
+  let raw ← asArr (← field v "allowed") "allowed"
+  let allowed ← raw.mapM fun tup => do
+    let xs ← asArr tup "tuple"
+    xs.mapM decodeRoleState
+  return { name, roles, allowed }
+
+private def decodeGroups (v : JVal) : Except String CompatMode := do
+  let groups ← (← asArr (← field v "groups") "groups").mapM decodeGroup
+  return .groups groups
+
+private def decodeStep (v : JVal) : Except String CompatStep := do
+  return {
+    template := ← asString (← field v "template") "transition.template"
+    fromState := ← asString (← field v "from") "transition.from"
+    toState := ← asString (← field v "to") "transition.to"
+    label := ← asString (← field v "label") "transition.label"
+  }
+
 def decodeDescription (v : JVal) : Except String Description := do
   match jget v "schema" with
   | some (.str "amaru-deadlock-graph/v1") => pure ()
@@ -273,8 +300,12 @@ def decodeDescription (v : JVal) : Except String Description := do
     | some (.str "explicit") => do
       let pairs ← (← asArr (← field v "allowed") "allowed").mapM decodeAllowed
       pure (.explicit pairs)
-    | _ => throw "compatibility must be \"all\" or \"explicit\""
-  return { name, freshNames, templates, edges, compatibility }
+    | some (.obj fs) => decodeGroups (.obj fs)
+    | _ => throw "compatibility must be \"all\", \"explicit\", or {\"groups\": ...}"
+  let steps ← match jget v "transitions" with
+    | none => pure []
+    | some xs => (← asArr xs "transitions").mapM decodeStep
+  return { name, freshNames, templates, edges, compatibility, steps }
 
 def parseDescription (s : String) : Except String Description := do
   decodeDescription (← parseJson s)

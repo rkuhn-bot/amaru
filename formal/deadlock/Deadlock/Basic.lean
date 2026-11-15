@@ -165,8 +165,8 @@ structure Edge where
   cell : CellFlags
   deriving DecidableEq, Repr, Inhabited, BEq
 
-/-- One quadruple of the compatibility relation: while `src` is blocked in `srcState`,
-`dst` is allowed to be in `dstState`. -/
+/-- One quadruple of the legacy pairwise relation: while `src` is blocked in `srcState`,
+`dst` is allowed to be in `dstState`. New descriptions use `CompatGroup` instead. -/
 structure Allowed where
   src : String
   srcState : String
@@ -174,9 +174,34 @@ structure Allowed where
   dstState : String
   deriving DecidableEq, Repr, Inhabited, BEq
 
+/-- One coordinate of an allowed tuple: the role is a template name. -/
+structure RoleState where
+  role : String
+  state : String
+  deriving DecidableEq, Repr, Inhabited, BEq
+
+/-- A group of interacting templates and the tuples that may co-occur.
+`roles` has length at least 2. Each list in `allowed` assigns every role a state.
+The list is untrusted; `compatFails` checks that it is an inductive invariant. -/
+structure CompatGroup where
+  name : String
+  roles : List String
+  allowed : List (List RoleState)
+  deriving DecidableEq, Repr, Inhabited, BEq
+
+/-- A typestate step the relation must be closed under. Program transitions are
+listed by the exporter. Restart and terminate are added by the checker. -/
+structure CompatStep where
+  template : String
+  fromState : String
+  toState : String
+  label : String
+  deriving DecidableEq, Repr, Inhabited, BEq
+
 inductive CompatMode where
   | all
   | explicit (pairs : List Allowed)
+  | groups (gs : List CompatGroup)
   deriving DecidableEq, Repr, Inhabited, BEq
 
 structure Description where
@@ -185,6 +210,9 @@ structure Description where
   templates : List Template
   edges : List Edge
   compatibility : CompatMode
+  /-- Typestate steps the compatibility check closes under. Empty for `all`
+  and for the legacy pairwise format. -/
+  steps : List CompatStep
   deriving DecidableEq, Repr, Inhabited, BEq
 
 structure Node where
