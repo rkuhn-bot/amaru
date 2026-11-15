@@ -301,8 +301,9 @@ for a send the actor did not itself perform.
   branch, and it is not taken.   `bulk_resumes_send` says a bulk receive whose
   parked list is nonempty resumes a blocking send at the head, and
   `bulk_admits_call` says the same receive puts a parked call into
-  `awaitReply`. `finish_parked` and `prio_parked` say those other receives
-  do not drop a parked list. What is not proved is that fairness eventually performs that
+  `awaitReply`. `finish_parked`, `prio_parked`, `bulk_other_parked`, and
+  `spawn_keeps_parked` say a finish, a priority delivery, a bulk receive of
+  someone else, and a spawn do not drop an existing parked entry. What is not proved is that fairness eventually performs that
   receive while the waiter is still the head, the handler's single reply, the
   rank induction, `CellFresh`, and the dead-instance lift.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not

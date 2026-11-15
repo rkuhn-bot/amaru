@@ -4061,6 +4061,81 @@ theorem prio_parked (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio I
         simp [setActor, hpk]
       · simp [setActor, hi, hst]
 
+theorem bulk_other_parked (I : Impl) (w w' : World) (j i : InstId)
+    (h : receiveBulk I w j = some w') (hne : i ≠ j) :
+    (w'.st i).parked = (w.st i).parked := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st j).life ≠ .alive ∨ (w.st j).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st j).box with
+    | nil =>
+      cases hpark : (w.st j).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w j _ p.msg w1 a1 i hdel
+          by_cases hs : i = p.sender
+          · have hnj : p.sender ≠ j := fun h => hne (hs.trans h)
+            rw [hs] at hst ⊢
+            simp [setActor_self, resume_parked, credit_parked]
+            rw [setActor_other w1 j p.sender a1 hnj]
+            exact congrArg (·.parked) hst
+          · simp [setActor_other (creditSender (setActor w1 j a1) (tname j) p.msg.sender) p.sender i _ hs,
+              credit_parked, setActor_other w1 j i a1 hne, hst]
+    | cons m ms =>
+      cases hpark : (w.st j).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w j _ m w1 a1 i hdel
+          rw [credit_parked]
+          simp [setActor, hne, hst]
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hst := deliver_st I w j _ m w1 a1 i hdel
+          by_cases hs : i = p.sender
+          · have hnj : p.sender ≠ j := fun h => hne (hs.trans h)
+            rw [hs] at hst ⊢
+            simp [setActor_self, resume_parked, credit_parked, admitted]
+            rw [setActor_other w1 j p.sender admitted hnj]
+            exact congrArg (·.parked) hst
+          · simp [admitted, setActor_other (creditSender (setActor w1 j admitted) (tname j) m.sender)
+              p.sender i _ hs, credit_parked, setActor_other w1 j i admitted hne, hst]
+
+theorem spawn_keeps_parked (I : Impl) (w w' : World) (template : String)
+    (h : spawn I w template = some w') (hO : OpenSlots w) (i : InstId) (p : Parked)
+    (hm : p ∈ (w.st i).parked) : p ∈ (w'.st i).parked := by
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t ht =>
+    split at h
+    · cases h
+      let nid := InstId.peer template (w.nextIx template)
+      have hfree := (hO template (w.nextIx template) (Nat.le_refl _)).2.2
+      by_cases hi : i = nid
+      · rw [hi, hfree] at hm
+        cases hm
+      · let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n } : World)
+        let born : Actor := withTokens I.desc template { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [], tokens := fun _ => 0 }
+        have hs := readCells_st I.desc (setActor wR nid born) nid i
+        rw [hs]
+        simpa [wR, setActor, hi] using hm
+    · cases h
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
