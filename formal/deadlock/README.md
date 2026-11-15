@@ -233,9 +233,13 @@ for a send the actor did not itself perform.
   blocking send or call, including a self-send and the park branch.
   `occ_schedule` covers self-schedule, including the overflow crash, and
   `occ_cell` covers a cell write followed by reader wakes. `occ_reply` covers
-  `performReply`. `occ_spawn` covers allocating a fresh per-peer instance.
-  `trySend`, a killing `terminate`, and one theorem for the whole of `execRun`
-  are not connected yet. Charging a send requires the sender's template not
+  `performReply`.   `occ_spawn` covers allocating a fresh per-peer instance. `occ_try` covers
+  `trySend`: a fitting target is charged, and a miss or a full mailbox is not.
+  `drain_eq_refund` shows that refunding a box and then clearing it is the
+  same world as dropping each message and crediting its sender, including a
+  message the mailbox owner sent to itself; `occ_drain_box` keeps `OccInv`
+  along that second order. The parked lane, the life change, `releaseParked`,
+  and one theorem for the whole of `execRun` are not connected yet. Charging a send requires the sender's template not
   to be terminable, and `OccInv.still` keeps a terminable actor's owed count
   at zero. That is narrower than Amaru: a per-peer stage, such as a chainsync
   initiator, terminates when its peer disconnects and does send to shared

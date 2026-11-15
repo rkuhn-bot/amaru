@@ -4552,5 +4552,52 @@ theorem drain_eq_refund (w : World) (id : InstId) (dst : String) (ms : List Msg)
     (hD.2.2.1.trans hC.2.2.1.symm) hst (hD.2.2.2.1.trans hC.2.2.2.1.symm)
     (hD.2.2.2.2.trans hC.2.2.2.2.symm)
 
+theorem occ_drop_box (I : Impl) (w : World) (id : InstId) (m : Msg) (ms : List Msg) (hO : OccInv I w)
+    (hmem : id ∈ w.roster) (hbox : (w.st id).box = m :: ms) :
+    OccInv I (creditSender (setActor w id { (w.st id) with box := ms }) (tname id) m.sender) := by
+  have hsend : m.sender ∈ w.roster := hO.sentFrom id m (by rw [hbox]; exact List.Mem.head _)
+  let a1 : Actor := { (w.st id) with box := ms }
+  apply occ_consume I w w id m.sender a1 hO (fun _ => rfl) rfl rfl (fun _ => rfl) rfl (fun _ => rfl)
+    hmem hsend
+  · intro s
+    by_cases hs : s = m.sender
+    · have hswap : m.sender = s := hs.symm
+      subst hswap
+      simpa [a1] using owed_drop_box w.st (tname id) m.sender id m ms w.roster hO.nodup hmem rfl rfl hbox
+    · have hkeep := owed_keep_box w.st (tname id) s id m ms w.roster hO.nodup hmem rfl
+        (fun h => hs h.symm) hbox
+      simpa [a1, hs] using hkeep
+  · intro d hd s
+    exact owed_off w.st id a1 d s w.roster hO.nodup hmem (fun h => hd (h.symm))
+  · intro d
+    simp [a1, pending]
+  · intro m' hm'
+    have hm0 : m' ∈ ms := by simpa [a1] using hm'
+    exact hO.sentFrom id m' (by rw [hbox]; exact List.mem_cons.mpr (Or.inr hm0))
+  · intro p hp
+    exact hO.parkFrom id p (by simpa [a1] using hp)
+  · intro p hp
+    exact hO.parkMsg id p (by simpa [a1] using hp)
+  · intro hl1
+    simpa [a1] using hO.clear id hl1
+
+theorem occ_drain_box (I : Impl) (w : World) (id : InstId) (ms : List Msg) (hO : OccInv I w)
+    (hmem : id ∈ w.roster) (hbox : (w.st id).box = ms) :
+    OccInv I (drainBox w id (tname id) ms) := by
+  induction ms generalizing w with
+  | nil =>
+    have hempty : (w.st id).box = [] := hbox
+    apply occ_keep I w id ({ (w.st id) with box := [] }) hO rfl (by simp [hempty]) rfl (fun _ => rfl) rfl
+    intro d
+    simp [pending]
+  | cons m ms ih =>
+    have hstep := occ_drop_box I w id m ms hO hmem hbox
+    have hbox1 : ((creditSender (setActor w id { (w.st id) with box := ms }) (tname id) m.sender).st id).box = ms := by
+      rw [credit_box]
+      simp [setActor]
+    have hmem1 : id ∈ (creditSender (setActor w id { (w.st id) with box := ms }) (tname id) m.sender).roster := by
+      simpa [creditSender, setActor] using hmem
+    simpa [drainBox] using ih _ hstep hmem1 hbox1
+
 end Deadlock
 

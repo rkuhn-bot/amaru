@@ -66,3 +66,5 @@ import Deadlock.Occ
 #print axioms Deadlock.occ_schedule
 #print axioms Deadlock.occ_cell
 #print axioms Deadlock.occ_spawn
+#print axioms Deadlock.occ_try
+#print axioms Deadlock.drain_eq_refund
