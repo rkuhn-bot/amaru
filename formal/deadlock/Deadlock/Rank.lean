@@ -8068,6 +8068,96 @@ theorem call_admitted (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat
     have hfreeze := await_stays I hL ρ s dst k i (u - i) hawait (fun v hv1 _ => hall v hv1)
     simpa [Nat.add_sub_of_le hu] using hfreeze
 
+/-- A fresh enqueue adds at most the parked entry it was given. -/
+theorem enqueue_parked_mem (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (mb : InstId) (p : Parked)
+    (hp : p ∈ ((enqueueOrPark w D sender dst msg isCall k).st mb).parked) :
+    p ∈ (w.st mb).parked ∨
+      (mb = dst ∧ p.sender = sender ∧ p.msg = msg ∧ p.isCall = isCall ∧ (w.st dst).life = .alive) := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
+        have hparkS : (w.st sender).parked = [] := by rw [hsame]; exact hroom.1
+        have hcapS : (w.st sender).box.length < capBulk D w.N sender := by rw [hsame]; exact hroom.2
+        cases isCall
+        · rw [← hsame] at hp
+          rw [enqueue_room_self_send w D sender msg k hliveS hparkS hcapS] at hp
+          by_cases hmb : mb = sender
+          · simp [setActor, hmb, proceed_parked, charge_parked] at hp
+            exact Or.inl (by rw [← hmb] at hp; exact hp)
+          · simp [setActor, hmb] at hp
+            exact Or.inl hp
+        · rw [← hsame] at hp
+          rw [enqueue_room_self_call w D sender msg k hliveS hparkS hcapS] at hp
+          by_cases hmb : mb = sender
+          · simp [setActor, hmb, charge_parked] at hp
+            exact Or.inl (by rw [← hmb] at hp; exact hp)
+          · simp [setActor, hmb] at hp
+            exact Or.inl hp
+      · have hflip : ¬ dst = sender := fun h => hsame h.symm
+        cases isCall
+        · rw [enqueue_room_other_send w D sender dst msg k hlive hsame hroom.1 hroom.2] at hp
+          by_cases hmb : mb = dst
+          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+            simp only [setActor] at hp
+            rw [if_neg hne] at hp
+            rw [if_pos hmb] at hp
+            exact Or.inl (by rw [← hmb] at hp; exact hp)
+          · by_cases hsender : mb = sender
+            · simp [setActor, hmb, hsender, hflip, proceed_parked, charge_parked] at hp
+              exact Or.inl (by rw [← hsender] at hp; exact hp)
+            · simp [setActor, hmb, hsender, hflip] at hp
+              exact Or.inl hp
+        · rw [enqueue_room_other_call w D sender dst msg k hlive hsame hroom.1 hroom.2] at hp
+          by_cases hmb : mb = dst
+          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+            simp only [setActor] at hp
+            rw [if_neg hne] at hp
+            rw [if_pos hmb] at hp
+            exact Or.inl (by rw [← hmb] at hp; exact hp)
+          · by_cases hsender : mb = sender
+            · simp [setActor, hmb, hsender, hflip, charge_parked] at hp
+              exact Or.inl (by rw [← hsender] at hp; exact hp)
+            · simp [setActor, hmb, hsender, hflip] at hp
+              exact Or.inl hp
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
+        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := by
+          rw [hsame]; exact hroom
+        rw [← hsame] at hp
+        rw [enqueue_park_self w D sender msg isCall k hliveS hroomS] at hp
+        by_cases hmb : mb = sender
+        · simp [setActor, hmb, charge_parked] at hp
+          cases hp with
+          | inl h => exact Or.inl (by rw [← hmb] at h; exact h)
+          | inr h =>
+            cases h
+            exact Or.inr ⟨hmb.trans hsame, rfl, rfl, rfl, hlive⟩
+        · simp [setActor, hmb] at hp
+          exact Or.inl hp
+      · have hflip : ¬ dst = sender := fun h => hsame h.symm
+        rw [enqueue_park_other w D sender dst msg isCall k hlive hsame hroom] at hp
+        by_cases hmb : mb = dst
+        · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+          simp [setActor, hmb, hne, hflip] at hp
+          cases hp with
+          | inl h => exact Or.inl (by rw [← hmb] at h; exact h)
+          | inr h =>
+            cases h
+            exact Or.inr ⟨hmb, rfl, rfl, rfl, hlive⟩
+        · by_cases hsender : mb = sender
+          · simp [setActor, hmb, hsender, hflip, charge_parked] at hp
+            exact Or.inl (by rw [← hsender] at hp; exact hp)
+          · simp [setActor, hmb, hsender, hflip] at hp
+            exact Or.inl hp
+  · rw [enqueue_dead w D sender dst msg isCall k hlive] at hp
+    by_cases hmb : mb = sender
+    · simp [setActor, hmb, proceed_parked] at hp
+      exact Or.inl (by rw [← hmb] at hp; exact hp)
+    · simp [setActor, hmb] at hp
+      exact Or.inl hp
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
