@@ -295,11 +295,11 @@ for a send the actor did not itself perform.
   does not run once a reachable world keeps the lane duplicate-free and inside
   the set. `prog_src_reachable` says a carried list is a suffix of a listed
   transition, so its `selfSchedule` and `cell` labels are declared.
-  `lane_schedule` keeps the lane well-formed across that step, and
-  `schedule_not_crashed` says the step does not write `.crashed` when the lane
-  invariant already holds. The invariant is not yet proved for the other
-  actions, so a reachable world is not yet known to be crash-free. A
-  `Fair.bulk` delivery, `CellFresh`, and the dead-instance lift are not proved.
+  `lane_reachable` says every reachable world keeps that lane: receive, finish,
+  spawn, and every exec head, including a cell wake into a reader's lane.
+  `reachable_not_crashed` follows: the only write of `.crashed` is the overflow
+  branch, and it is not taken. A `Fair.bulk` delivery, `CellFresh`, and the
+  dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

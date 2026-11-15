@@ -3467,4 +3467,452 @@ theorem lane_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   | step w w' a prev h ih =>
     exact lane_apply I hL hG a w w' ih (prog_src_reachable I N w prev) h
 
+/-- No actor is in the overflow phase. -/
+def NoCrash (w : World) : Prop := ∀ i, (w.st i).phase ≠ .crashed
+
+theorem proceed_not_crashed (a : Actor) (k : Cont) : (proceed a k).phase ≠ .crashed := by
+  cases hk : k.rest <;> simp [proceed, hk] <;> intro h <;> cases h
+
+theorem set_not_crashed (w : World) (hpre : NoCrash w) (id : InstId) (a : Actor)
+    (hp : a.phase ≠ .crashed) (i : InstId) :
+    ((setActor w id a).st i).phase ≠ .crashed := by
+  by_cases hi : i = id
+  · rw [hi]
+    simpa [setActor] using hp
+  · simpa [setActor, hi] using hpre i
+
+theorem resume_not_crashed (a : Actor) (b : Bool) (dst : InstId) (h : a.phase ≠ .crashed) :
+    (resumeSender a b dst).phase ≠ .crashed := by
+  cases hph : a.phase with
+  | parked _ _ k =>
+    cases b
+    · cases hk : k.rest <;> simp [resumeSender, hph, hk, proceed] <;> intro hc <;> cases hc
+    · simp [resumeSender, hph]
+  | idle => simpa [resumeSender, hph] using h
+  | run _ => simpa [resumeSender, hph] using h
+  | awaitReply _ _ => simpa [resumeSender, hph] using h
+  | awaitEffect _ => simpa [resumeSender, hph] using h
+  | awaitPeer _ => simpa [resumeSender, hph] using h
+  | crashed => exact False.elim (h hph)
+
+theorem enqueue_not_crashed (w : World) (hpre : NoCrash w) (D : Description) (sender dst : InstId)
+    (msg : Msg) (isCall : Bool) (k : Cont) (i : InstId) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).phase ≠ .crashed := by
+  by_cases hi : i = sender
+  · rw [hi]
+    cases isCall with
+    | false =>
+      unfold enqueueOrPark
+      by_cases hlive : (w.st dst).life = .alive
+      · simp [hlive]
+        by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+        · simp [hroom]
+          by_cases hsame : sender = dst
+          · simp [hsame, setActor]
+            exact proceed_not_crashed _ k
+          · simp [hsame, setActor]
+            exact proceed_not_crashed _ k
+        · simp [hroom]
+          by_cases hsame : sender = dst <;> simp [hsame, setActor]
+      · simp [hlive, setActor]
+        exact proceed_not_crashed _ k
+    | true =>
+      unfold enqueueOrPark
+      by_cases hlive : (w.st dst).life = .alive
+      · simp [hlive]
+        by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+        · simp [hroom]
+          by_cases hsame : sender = dst <;> simp [hsame, setActor]
+        · simp [hroom]
+          by_cases hsame : sender = dst <;> simp [hsame, setActor]
+      · simp [hlive, setActor]
+        exact proceed_not_crashed _ k
+  · simpa [enqueue_phase_other w D sender dst msg isCall k i hi] using hpre i
+
+theorem deliver_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.phase ≠ .crashed := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        simp
+    · split at h
+      · cases h
+      · cases h
+        split <;> simp
+
+theorem release_not_crashed (w : World) (hpre : NoCrash w) (id : InstId) (ps : List Parked)
+    (i : InstId) : ((releaseParked w id ps).st i).phase ≠ .crashed := by
+  induction ps generalizing w with
+  | nil => simpa [releaseParked] using hpre i
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w hpre
+    · rw [if_neg hskip]
+      have hres := resume_not_crashed (w.st p.sender) false id (hpre p.sender)
+      have hset : NoCrash (setActor w p.sender (resumeSender (w.st p.sender) false id)) := by
+        intro j
+        by_cases hj : j = p.sender
+        · rw [hj]
+          simpa [setActor] using hres
+        · simpa [setActor, hj] using hpre j
+      exact ih _ hset
+
+theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (hpre : NoCrash w) (id : InstId) (k : Cont)
+    (hph : (w.st id).phase = .run k) (i : InstId) :
+    ((execRun I w id (w.st id) k).st i).phase ≠ .crashed := by
+  cases k with
+  | mk rest toState replyTo =>
+    cases hrest : rest with
+    | nil =>
+      have hp : ({ (w.st id) with phase := Phase.idle, typestate := toState }).phase ≠ .crashed := by
+        simp
+      simpa [execRun, hrest] using set_not_crashed w hpre id _ hp i
+    | cons e tail =>
+      cases e with
+      | selfSchedule label =>
+        exact schedule_not_crashed I hL hG w hLane hS id label tail toState replyTo
+          (by simpa [hrest] using hph) hpre i
+      | send dst label hint =>
+        simp only [execRun, hrest]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+            ⟨.send dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+        | some dstId =>
+          simpa [hr] using enqueue_not_crashed w hpre I.desc id dstId
+            { label := label, sender := id, callFrom := none } false
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i
+      | call dst label hint =>
+        simp only [execRun, hrest]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+            ⟨.call dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+        | some dstId =>
+          simpa [hr] using enqueue_not_crashed w hpre I.desc id dstId
+            { label := label, sender := id, callFrom := some id } true
+            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i
+      | internal =>
+        have hp : ({ (w.st id) with phase := .awaitEffect (afterHead
+            ⟨.internal :: tail, toState, replyTo⟩) }).phase ≠ .crashed := by
+          simp
+        simpa [execRun, hrest] using set_not_crashed w hpre id _ hp i
+      | peer =>
+        have hp : ({ (w.st id) with phase := .awaitPeer (afterHead
+            ⟨.peer :: tail, toState, replyTo⟩) }).phase ≠ .crashed := by
+          simp
+        simpa [execRun, hrest] using set_not_crashed w hpre id _ hp i
+      | trySend dst label hint =>
+        simp only [execRun, hrest]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+            ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+        | some dstId =>
+          simp only [hr]
+          split
+          · let k' := afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩
+            let charged := chargeSender (w.st id) (tname dstId)
+            have hch : charged.phase = (w.st id).phase := by simp [charged, chargeSender, bumpToken]
+            let w1 := setActor w id charged
+            have h1 : NoCrash w1 := by
+              intro j
+              by_cases hj : j = id
+              · rw [hj]
+                simpa [w1, setActor, hch] using hpre id
+              · simpa [w1, setActor, hj] using hpre j
+            let stored : Actor := { (w1.st dstId) with box := (w1.st dstId).box ++ [{ label := label, sender := id, callFrom := none }] }
+            have hstored : stored.phase = (w1.st dstId).phase := by simp [stored]
+            let w2 := setActor w1 dstId stored
+            have h2 : NoCrash w2 := set_not_crashed w1 h1 dstId stored (by simpa [hstored] using h1 dstId)
+            show ((setActor w2 id (proceed (w2.st id) k')).st i).phase ≠ .crashed
+            exact set_not_crashed w2 h2 id (proceed (w2.st id) k') (proceed_not_crashed _ _) i
+          · simpa using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+              ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+      | reply =>
+        simp only [execRun, hrest]
+        unfold performReply
+        cases hto : replyTo with
+        | none =>
+          simpa [hto] using set_not_crashed w hpre id
+            (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+            (proceed_not_crashed _ _) i
+        | some caller =>
+          cases hcall : (w.st caller).phase with
+          | awaitReply dst ck =>
+            by_cases hd : dst = id
+            · let k' := afterHead ⟨.reply :: tail, toState, replyTo⟩
+              let resumed := proceed (w.st caller) ck
+              let w1 := setActor w caller resumed
+              have h1 : NoCrash w1 := set_not_crashed w hpre caller resumed (proceed_not_crashed _ _)
+              simp only [hto, hcall, hd]
+              rw [ite_true]
+              exact set_not_crashed
+                (setActor w caller (proceed (w.st caller) ck))
+                (by simpa [w1, resumed] using h1) id
+                (proceed ((setActor w caller (proceed (w.st caller) ck)).st id)
+                  (afterHead { rest := .reply :: tail, toState := toState, replyTo := some caller }))
+                (proceed_not_crashed _ _) i
+            · simpa [hto, hcall, hd] using set_not_crashed w hpre id
+                (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+                (proceed_not_crashed _ _) i
+          | idle =>
+            simpa [hto, hcall] using set_not_crashed w hpre id
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed_not_crashed _ _) i
+          | run _ =>
+            simpa [hto, hcall] using set_not_crashed w hpre id
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed_not_crashed _ _) i
+          | awaitEffect _ =>
+            simpa [hto, hcall] using set_not_crashed w hpre id
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed_not_crashed _ _) i
+          | awaitPeer _ =>
+            simpa [hto, hcall] using set_not_crashed w hpre id
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed_not_crashed _ _) i
+          | parked _ _ _ =>
+            simpa [hto, hcall] using set_not_crashed w hpre id
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed_not_crashed _ _) i
+          | crashed =>
+            simpa [hto, hcall] using set_not_crashed w hpre id
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed_not_crashed _ _) i
+      | cell dst label value =>
+        let k' := afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩
+        let base := setCell w dst label { value := max (w.cell dst label).value value, dirty := true }
+        let stepped := setActor base id (proceed (base.st id) k')
+        have hbase : NoCrash base := by
+          intro j
+          simpa [base, setCell] using hpre j
+        have hstep : NoCrash stepped :=
+          set_not_crashed base hbase id (proceed (base.st id) k') (proceed_not_crashed _ _)
+        simp only [execRun, hrest]
+        cases hdirty : (w.cell dst label).dirty
+        · show ((wakeReaders I.desc stepped dst label id).st i).phase ≠ .crashed
+          simp only [wakeReaders]
+          rw [wakes_phase (readersOf stepped dst) I.desc stepped dst label id i]
+          exact hstep i
+        · show (stepped.st i).phase ≠ .crashed
+          exact hstep i
+      | terminate =>
+        simp only [execRun, hrest]
+        cases htpl : templateOf I.desc (tname id) with
+        | none =>
+          simpa [htpl] using hpre i
+        | some t =>
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · simp [htpl, hkill]
+            let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+              (tname id) (w.st id).parked
+            have hbase : NoCrash base := by
+              intro j
+              simpa [base, readCells_st, phase_refund, phase_refundP] using hpre j
+            let dead : Actor :=
+              { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+            have hdead : NoCrash (setActor base id dead) := by
+              intro j
+              by_cases hj : j = id
+              · rw [hj]
+                simp [setActor, dead]
+              · simpa [setActor, hj] using hbase j
+            simpa [base, dead] using
+              release_not_crashed (setActor base id dead) hdead id (w.st id).parked i
+          · simpa [htpl, hkill] using hpre i
+
+theorem head_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
+    (hLane : LaneOk I w) (hS : ProgSrc I w) (hpre : NoCrash w) (id : InstId) (w' : World)
+    (h : execHead I w id = some w') : NoCrash w' := by
+  intro i
+  unfold execHead at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h
+      cases h
+      exact exec_not_crashed I hL hG w hLane hS hpre id k hph i
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
+
+theorem finish_not_crashed (w : World) (hpre : NoCrash w) (id : InstId) (w' : World)
+    (h : finishWait w id = some w') : NoCrash w' := by
+  intro i
+  unfold finishWait at h
+  split at h
+  · cases h
+    exact set_not_crashed w hpre id (proceed (w.st id) _) (proceed_not_crashed _ _) i
+  · cases h
+    exact set_not_crashed w hpre id (proceed (w.st id) _) (proceed_not_crashed _ _) i
+  · cases h
+
+theorem spawn_not_crashed (I : Impl) (w : World) (hpre : NoCrash w) (template : String) (w' : World)
+    (h : spawn I w template = some w') : NoCrash w' := by
+  intro i
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t ht =>
+    split at h
+    · cases h
+      let nid := InstId.peer template (w.nextIx template)
+      let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n } : World)
+      have hR : NoCrash wR := by
+        intro j
+        simpa [wR] using hpre j
+      let born : Actor := withTokens I.desc template
+        { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
+          tokens := fun _ => 0 }
+      have hp : born.phase ≠ .crashed := by simp [born, withTokens]
+      have hborn : NoCrash (setActor wR nid born) := set_not_crashed wR hR nid born hp
+      have hs := readCells_st I.desc (setActor wR nid born) nid i
+      show ((readCells I.desc (setActor wR nid born) nid).st i).phase ≠ .crashed
+      simpa [hs] using hborn i
+    · cases h
+
+theorem prio_not_crashed (I : Impl) (w : World) (hpre : NoCrash w) (id : InstId) (w' : World)
+    (h : receivePrio I w id = some w') : NoCrash w' := by
+  intro i
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      have hst := deliver_st I w id _ m w1 a1 i hdel
+      have hp := deliver_not_crashed I w id _ m w1 a1 hdel
+      by_cases hi : i = id
+      · rw [hi]
+        simpa [setActor] using hp
+      · simpa [setActor, hi, hst] using hpre i
+
+theorem bulk_not_crashed (I : Impl) (w : World) (hpre : NoCrash w) (id : InstId) (w' : World)
+    (h : receiveBulk I w id = some w') : NoCrash w' := by
+  intro i
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hp := deliver_not_crashed I w id _ p.msg w1 a1 hdel
+          have hinner : NoCrash (creditSender (setActor w1 id a1) (tname id) p.msg.sender) := by
+            intro j
+            rw [phase_credit]
+            by_cases hj : j = id
+            · rw [hj]
+              simpa [setActor] using hp
+            · have hst := deliver_st I w id _ p.msg w1 a1 j hdel
+              simpa [setActor, hj, hst] using hpre j
+          by_cases hs : i = p.sender
+          · rw [hs]
+            simpa [setActor] using resume_not_crashed _ _ _ (hinner p.sender)
+          · simpa [setActor, hs] using hinner i
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hp := deliver_not_crashed I w id _ m w1 a1 hdel
+          rw [phase_credit]
+          by_cases hi : i = id
+          · rw [hi]
+            simpa [setActor] using hp
+          · have hst := deliver_st I w id _ m w1 a1 i hdel
+            simpa [setActor, hi, hst] using hpre i
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          let admitted := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hp := deliver_not_crashed I w id _ m w1 a1 hdel
+          have hadm : admitted.phase = a1.phase := by simp [admitted]
+          have hinner : NoCrash (creditSender (setActor w1 id admitted) (tname id) m.sender) := by
+            intro j
+            rw [phase_credit]
+            by_cases hj : j = id
+            · rw [hj]
+              simpa [setActor, hadm] using hp
+            · have hst := deliver_st I w id _ m w1 a1 j hdel
+              simpa [setActor, admitted, hj, hst] using hpre j
+          by_cases hs : i = p.sender
+          · rw [hs]
+            simpa [setActor] using resume_not_crashed _ _ _ (hinner p.sender)
+          · simpa [setActor, hs] using hinner i
+
+theorem apply_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
+    (w w' : World) (hpre : NoCrash w) (hLane : LaneOk I w) (hS : ProgSrc I w)
+    (h : apply I a w = some w') : NoCrash w' := by
+  cases a with
+  | recvBulk id => exact bulk_not_crashed I w hpre id w' (by simpa [apply] using h)
+  | recvPrio id => exact prio_not_crashed I w hpre id w' (by simpa [apply] using h)
+  | exec id => exact head_not_crashed I hL hG w hLane hS hpre id w' (by simpa [apply] using h)
+  | finish id => exact finish_not_crashed w hpre id w' (by simpa [apply] using h)
+  | spawn template => exact spawn_not_crashed I w hpre template w' (by simpa [apply] using h)
+
+theorem fold_read_st (D : Description) (ids : List InstId) (w : World) (i : InstId) :
+    ((ids.foldl (fun w id => readCells D w id) w).st i) = w.st i := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    exact (ih (readCells D w j)).trans (readCells_st D w j i)
+
+theorem init_not_crashed (I : Impl) (N : Nat) : NoCrash (initWorld I N) := by
+  intro i
+  have hidle : ((initWorld I N).st i).phase = .idle := by
+    unfold initWorld
+    rw [fold_read_st]
+    cases hb : (coreRoster I.desc).contains i with
+    | false =>
+      show (if (coreRoster I.desc).contains i = true then initActor I.desc i else absentActor).phase = .idle
+      rw [hb]
+      simp [absentActor]
+    | true =>
+      show (if (coreRoster I.desc).contains i = true then initActor I.desc i else absentActor).phase = .idle
+      rw [hb]
+      unfold initActor
+      cases templateOf I.desc (tname i) with
+      | none => simp [absentActor]
+      | some _ => simp [withTokens]
+  simp [hidle]
+
+theorem reachable_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) : NoCrash w := by
+  induction hR with
+  | init => exact init_not_crashed I N
+  | step w w' a prev happ ih =>
+    exact apply_not_crashed I hL hG a w w' ih (lane_reachable I hL hG N w prev)
+      (prog_src_reachable I N w prev) happ
+
 end Deadlock
