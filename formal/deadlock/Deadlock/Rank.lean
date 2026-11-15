@@ -4183,6 +4183,15 @@ theorem parkIndex_mem (ps : List Parked) (s : InstId) (h : parkIndex ps s < ps.l
 def QueueStep (old new : List Parked) : Prop :=
   new = old ∨ (∃ a, new = old ++ [a]) ∨ (∃ p ps, old = p :: ps ∧ new = ps)
 
+/-- An update that does not drop a parked entry. Exec and enqueue are of this form. -/
+def QueueGrow (old new : List Parked) : Prop :=
+  new = old ∨ ∃ a, new = old ++ [a]
+
+theorem grow_step (old new : List Parked) (h : QueueGrow old new) : QueueStep old new := by
+  rcases h with h | ⟨a, h⟩
+  · exact Or.inl h
+  · exact Or.inr (Or.inl ⟨a, h⟩)
+
 theorem queue_place (old new : List Parked) (s : InstId) (h : QueueStep old new)
     (hin : parkIndex old s < old.length) :
     (parkIndex new s < new.length ∧ parkIndex new s ≤ parkIndex old s) ∨
@@ -4243,7 +4252,7 @@ theorem bulk_drops_head (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk
 /-- A parked entry is only ever added at the end of the list. -/
 theorem enqueue_queue (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) (i : InstId) :
-    QueueStep ((w.st i).parked) ((enqueueOrPark w D sender dst msg isCall k).st i).parked := by
+    QueueGrow ((w.st i).parked) ((enqueueOrPark w D sender dst msg isCall k).st i).parked := by
   unfold enqueueOrPark
   by_cases hlive : (w.st dst).life = .alive
   · simp [hlive]
@@ -4300,7 +4309,7 @@ theorem enqueue_queue (w : World) (D : Description) (sender dst : InstId) (msg :
         by_cases hi : i = dst
         · rw [hi]
           simp [setActor, charge_parked]
-          exact Or.inr (Or.inl ⟨{ sender := dst, msg := msg, isCall := isCall }, rfl⟩)
+          exact Or.inr ⟨{ sender := dst, msg := msg, isCall := isCall }, rfl⟩
         · simp [setActor, hi]
           exact Or.inl rfl
       · by_cases hi : i = dst
@@ -4308,7 +4317,7 @@ theorem enqueue_queue (w : World) (D : Description) (sender dst : InstId) (msg :
           have hflip : ¬ dst = sender := fun h => hsame h.symm
           simp [setActor, charge_parked]
           rw [if_neg hflip]
-          exact Or.inr (Or.inl ⟨{ sender := sender, msg := msg, isCall := isCall }, rfl⟩)
+          exact Or.inr ⟨{ sender := sender, msg := msg, isCall := isCall }, rfl⟩
         · by_cases his : i = sender
           · rw [his, if_neg hsame]
             simp [setActor, hi, charge_parked]
@@ -4431,7 +4440,7 @@ theorem release_life_self (w : World) (id : InstId) (ps : List Parked) :
 
 theorem queue_actor (w : World) (id : InstId) (a : Actor) (mb : InstId)
     (h : a.parked = (w.st id).parked) :
-    QueueStep ((w.st mb).parked) ((setActor w id a).st mb).parked := by
+    QueueGrow ((w.st mb).parked) ((setActor w id a).st mb).parked := by
   by_cases hmb : mb = id
   · rw [hmb, setActor_self, h]
     exact Or.inl rfl
@@ -4440,7 +4449,7 @@ theorem queue_actor (w : World) (id : InstId) (a : Actor) (mb : InstId)
 
 theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
     (hlive : ((execRun I w id (w.st id) k).st mb).life = .alive) :
-    QueueStep ((w.st mb).parked) ((execRun I w id (w.st id) k).st mb).parked := by
+    QueueGrow ((w.st mb).parked) ((execRun I w id (w.st id) k).st mb).parked := by
   cases k with
   | mk rest toState replyTo =>
     cases rest with
@@ -4625,7 +4634,7 @@ theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = so
       | run k =>
         simp [hph] at h
         cases h
-        exact exec_queue I w id k mb hlive
+        exact grow_step _ _ (exec_queue I w id k mb hlive)
       | idle => simp [hph] at h
       | parked _ _ _ => simp [hph] at h
       | awaitReply _ _ => simp [hph] at h
@@ -4670,6 +4679,289 @@ theorem recv_closer (I : Impl) (w w' : World) (dst : InstId) (h : receiveBulk I 
     omega
   rw [hdrop]
   exact ⟨hidx.symm, hlt⟩
+
+theorem grow_index (old new : List Parked) (s : InstId) (h : QueueGrow old new)
+    (hin : parkIndex old s < old.length) :
+    parkIndex new s = parkIndex old s ∧ parkIndex new s < new.length := by
+  rcases h with h | ⟨a, h⟩
+  · simp [h, hin]
+  · rw [h]
+    have hidx := parkIndex_append old s a hin
+    refine ⟨hidx, ?_⟩
+    rw [hidx, List.length_append]
+    simp
+    exact Nat.lt_succ_of_lt hin
+
+theorem bulk_head_unblocks (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk I w id = some w')
+    (p : Parked) (ps : List Parked) (hp : (w.st id).parked = p :: ps) (s : InstId)
+    (hs : s = p.sender) (hne : s ≠ id) (k : Cont) (hph : (w.st s).phase = .parked id false k) :
+    waitKind (w'.st s) ≠ some (.blockingSend id) := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        have hst := deliver_st I w id _ p.msg w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id a1 p.msg.sender s (by simpa [hs] using hne) hst
+        rw [hs] at hpre hph ⊢
+        simp only [setActor_self]
+        exact resume_leaves_block _ id k p.isCall (hpre.trans hph)
+    | cons m ms =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+        have hst := deliver_st I w id _ m w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id admitted m.sender s (by simpa [hs] using hne) hst
+        rw [hs] at hpre hph ⊢
+        simp only [setActor_self, admitted]
+        exact resume_leaves_block _ id k p.isCall (hpre.trans hph)
+
+/-- While a blocking send stays parked on a live receiver, its queue index does not increase. -/
+theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
+    (hO : OpenSlots w) (s dst : InstId) (k k' : Cont)
+    (hph : (w.st s).phase = .parked dst false k)
+    (hph' : (w'.st s).phase = .parked dst false k')
+    (halive : (w.st dst).life = .alive) (halive' : (w'.st dst).life = .alive)
+    (hin : parkIndex ((w.st dst).parked) s < ((w.st dst).parked).length) :
+    parkIndex ((w'.st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
+      parkIndex ((w'.st dst).parked) s < ((w'.st dst).parked).length := by
+  cases a with
+  | recvBulk id =>
+    by_cases hid : id = dst
+    · rw [hid] at h
+      cases hp : (w.st dst).parked with
+      | nil => simp [parkIndex, hp] at hin
+      | cons p ps =>
+        rw [hp] at hin
+        by_cases hs : p.sender = s
+        · exfalso
+          have hrecv : receiveBulk I w dst = some w' := by simpa [apply] using h
+          have hne : s ≠ dst := by
+            intro heq
+            unfold receiveBulk at hrecv
+            by_cases hready : (w.st dst).life ≠ .alive ∨ (w.st dst).phase ≠ .idle
+            · simp [hready] at hrecv
+            · have hidle : (w.st dst).phase = .idle := by
+                by_cases hpI : (w.st dst).phase = .idle
+                · exact hpI
+                · exact False.elim (hready (Or.inr hpI))
+              rw [← heq] at hidle
+              simp [hph] at hidle
+          have hun := bulk_head_unblocks I w w' dst hrecv p ps hp s (by rw [hs]) hne k hph
+          have hstill : waitKind (w'.st s) = some (.blockingSend dst) := by simp [waitKind, hph']
+          exact hun hstill
+        · have hrec := recv_closer I w w' dst (by simpa [apply] using h) p ps hp s hs hin
+          constructor
+          · rw [← hrec.1]
+            exact Nat.le_succ _
+          · exact hrec.2
+    · have heq := bulk_other_parked I w w' id dst (by simpa [apply] using h) (fun h => hid h.symm)
+      rw [heq]
+      exact ⟨Nat.le_refl _, hin⟩
+  | recvPrio id =>
+    have heq := prio_parked I w w' id dst (by simpa [apply] using h)
+    rw [heq]
+    exact ⟨Nat.le_refl _, hin⟩
+  | finish id =>
+    have heq := finish_parked w w' id dst (by simpa [apply] using h)
+    rw [heq]
+    exact ⟨Nat.le_refl _, hin⟩
+  | exec id =>
+    simp only [apply] at h
+    unfold execHead at h
+    by_cases hrun : (w.st id).life = .alive
+    · simp [hrun] at h
+      cases hphase : (w.st id).phase with
+      | run kk =>
+        simp [hphase] at h
+        cases h
+        have hg := grow_index _ _ s (exec_queue I w id kk dst halive') hin
+        exact ⟨Nat.le_of_eq hg.1, hg.2⟩
+      | idle => simp [hphase] at h
+      | parked _ _ _ => simp [hphase] at h
+      | awaitReply _ _ => simp [hphase] at h
+      | awaitEffect _ => simp [hphase] at h
+      | awaitPeer _ => simp [hphase] at h
+      | crashed => simp [hphase] at h
+    · simp [hrun] at h
+  | spawn template =>
+    simp only [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        let nid := InstId.peer template (w.nextIx template)
+        let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n } : World)
+        let born : Actor := withTokens I.desc template { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [], tokens := fun _ => 0 }
+        have hfresh : dst ≠ nid := by
+          intro heq
+          have habsent := (hO template (w.nextIx template) (Nat.le_refl _)).1
+          rw [heq] at halive
+          rw [habsent] at halive
+          cases halive
+        have hs := readCells_st I.desc (setActor wR nid born) nid dst
+        rw [hs]
+        simp only [wR, setActor, hfresh]
+        exact And.intro (Nat.le_refl _) hin
+      · cases h
+
+theorem index_zero_head (ps : List Parked) (s : InstId) (h : parkIndex ps s = 0)
+    (hlen : 0 < ps.length) : ∃ p rest, ps = p :: rest ∧ p.sender = s := by
+  cases ps with
+  | nil => simp at hlen
+  | cons p rest =>
+    by_cases hs : p.sender = s
+    · exact ⟨p, rest, rfl, hs⟩
+    · have hidx := parkIndex_skip p rest s hs
+      simp [hidx] at h
+
+theorem index_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (s dst : InstId) (i n : Nat)
+    (hstay : ∀ t, i ≤ t → t ≤ i + n → ∃ k, ((ρ.cfg t).st s).phase = .parked dst false k)
+    (halive : ∀ t, i ≤ t → t ≤ i + n → ((ρ.cfg t).st dst).life = .alive)
+    (hin : parkIndex (((ρ.cfg i).st dst).parked) s < (((ρ.cfg i).st dst).parked).length) :
+    parkIndex (((ρ.cfg (i + n)).st dst).parked) s ≤ parkIndex (((ρ.cfg i).st dst).parked) s ∧
+      parkIndex (((ρ.cfg (i + n)).st dst).parked) s <
+        (((ρ.cfg (i + n)).st dst).parked).length := by
+  induction n with
+  | zero =>
+    simp only [Nat.add_zero]
+    exact And.intro (Nat.le_refl _) hin
+  | succ n ih =>
+    have hprev := ih (fun t h1 h2 => hstay t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+      (fun t h1 h2 => halive t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+    have hO := (inv3_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).1.1.2.2
+    obtain ⟨k0, hk0⟩ := hstay (i + n) (Nat.le_add_right i n) (by omega)
+    obtain ⟨k1, hk1⟩ := hstay (i + n + 1) (by omega) (by omega)
+    have hstep := step_index I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) (ρ.valid (i + n))
+      hO s dst k0 k1 hk0 hk1
+      (halive (i + n) (Nat.le_add_right i n) (by omega))
+      (halive (i + n + 1) (by omega) (by omega))
+      hprev.2
+    exact And.intro (Nat.le_trans hstep.1 hprev.1) hstep.2
+
+theorem next_bulk {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (dst : InstId) (i : Nat)
+    (hio : ∀ t, ∃ j, t ≤ j ∧ CanReceive (ρ.cfg j) dst) :
+    ∃ j, i ≤ j ∧ ρ.act j = .recvBulk dst ∧ ∀ t, i ≤ t → t < j → ρ.act t ≠ .recvBulk dst := by
+  obtain ⟨j0, hj0, hact0⟩ := hF.bulk dst hio i
+  have hscan := scanAct_spec ρ.act (.recvBulk dst) (j0 - i) i
+    ⟨j0 - i, Nat.le_refl _, by simpa [Nat.add_sub_of_le hj0] using hact0⟩
+  exact ⟨scanAct ρ.act (.recvBulk dst) (j0 - i) i, hscan.1, hscan.2⟩
+
+/-- A blocking send that stays queued is removed by bulk receives.
+`n` bounds the waiter's index. Each receive of the live receiver moves that
+index strictly closer to the head, and the receive that finds it at the head
+clears the wait. -/
+theorem queued_forever_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ) (s dst : InstId) (n i : Nat)
+    (hstay : ∀ t, i ≤ t → ∃ k, ((ρ.cfg t).st s).phase = .parked dst false k)
+    (halive : ∀ t, i ≤ t → ((ρ.cfg t).st dst).life = .alive)
+    (hin : parkIndex (((ρ.cfg i).st dst).parked) s ≤ n)
+    (hlt : parkIndex (((ρ.cfg i).st dst).parked) s < (((ρ.cfg i).st dst).parked).length)
+    (hio : ∀ t, ∃ j, t ≤ j ∧ CanReceive (ρ.cfg j) dst) : False := by
+  induction n generalizing i with
+  | zero =>
+    have hzero : parkIndex (((ρ.cfg i).st dst).parked) s = 0 := by omega
+    obtain ⟨j, hj, hact, _⟩ := next_bulk ρ hF dst i hio
+    have hmono := index_mono I hL hG ρ s dst i (j - i)
+      (fun t h1 h2 => hstay t h1)
+      (fun t h1 h2 => halive t h1) (by omega)
+    have hat : parkIndex (((ρ.cfg j).st dst).parked) s = 0 := by
+      have hle := hmono.1
+      have : i + (j - i) = j := Nat.add_sub_of_le hj
+      simp [this] at hle
+      omega
+    have hlen : 0 < (((ρ.cfg j).st dst).parked).length := by
+      have := hmono.2
+      simp [Nat.add_sub_of_le hj] at this
+      omega
+    obtain ⟨p, ps, hp, hs⟩ := index_zero_head _ s hat hlen
+    obtain ⟨k, hk⟩ := hstay j hj
+    have hne : s ≠ dst := by
+      intro heq
+      obtain ⟨k0, hk0⟩ := hstay i (Nat.le_refl _)
+      have hrecv : receiveBulk I (ρ.cfg j) dst = some (ρ.cfg (j + 1)) := by
+        have hv := ρ.valid j
+        simp [hact] at hv
+        exact hv
+      unfold receiveBulk at hrecv
+      by_cases hready : ((ρ.cfg j).st dst).life ≠ .alive ∨ ((ρ.cfg j).st dst).phase ≠ .idle
+      · simp [hready] at hrecv
+      · have hidle : ((ρ.cfg j).st dst).phase = .idle := by
+          by_cases hpI : ((ρ.cfg j).st dst).phase = .idle
+          · exact hpI
+          · exact False.elim (hready (Or.inr hpI))
+        rw [← heq] at hidle
+        simp [hk] at hidle
+    have hun := bulk_head_unblocks I (ρ.cfg j) (ρ.cfg (j + 1)) dst
+      (by simpa [apply, hact] using ρ.valid j) p ps hp s hs.symm hne k hk
+    obtain ⟨k', hk'⟩ := hstay (j + 1) (Nat.le_succ_of_le hj)
+    have hstill : waitKind ((ρ.cfg (j + 1)).st s) = some (.blockingSend dst) := by simp [waitKind, hk']
+    exact hun hstill
+  | succ n ih =>
+    obtain ⟨j, hj, hact, hfirst⟩ := next_bulk ρ hF dst i hio
+    have hmono := index_mono I hL hG ρ s dst i (j - i)
+      (fun t h1 _ => hstay t h1) (fun t h1 _ => halive t h1) (by omega)
+    have hatj : parkIndex (((ρ.cfg j).st dst).parked) s ≤ n + 1 := by
+      have hle := hmono.1
+      simp [Nat.add_sub_of_le hj] at hle
+      exact Nat.le_trans hle hin
+    have hlenj : parkIndex (((ρ.cfg j).st dst).parked) s < (((ρ.cfg j).st dst).parked).length := by
+      have hltj := hmono.2
+      simp [Nat.add_sub_of_le hj] at hltj
+      exact hltj
+    by_cases hzero : parkIndex (((ρ.cfg j).st dst).parked) s = 0
+    · have hlenpos : 0 < (((ρ.cfg j).st dst).parked).length := by omega
+      obtain ⟨p, ps, hp, hs⟩ := index_zero_head _ s hzero hlenpos
+      obtain ⟨k, hk⟩ := hstay j hj
+      have hrecv : receiveBulk I (ρ.cfg j) dst = some (ρ.cfg (j + 1)) := by
+        simpa [apply, hact] using ρ.valid j
+      have hne : s ≠ dst := by
+        intro heq
+        unfold receiveBulk at hrecv
+        by_cases hready : ((ρ.cfg j).st dst).life ≠ .alive ∨ ((ρ.cfg j).st dst).phase ≠ .idle
+        · simp [hready] at hrecv
+        · have hidle : ((ρ.cfg j).st dst).phase = .idle := by
+            by_cases hpI : ((ρ.cfg j).st dst).phase = .idle
+            · exact hpI
+            · exact False.elim (hready (Or.inr hpI))
+          rw [← heq] at hidle
+          simp [hk] at hidle
+      have hun := bulk_head_unblocks I (ρ.cfg j) (ρ.cfg (j + 1)) dst hrecv p ps hp s hs.symm hne k hk
+      obtain ⟨k', hk'⟩ := hstay (j + 1) (Nat.le_succ_of_le hj)
+      exact hun (by simp [waitKind, hk'])
+    · have hpos : 0 < parkIndex (((ρ.cfg j).st dst).parked) s := Nat.pos_of_ne_zero hzero
+      cases hp : ((ρ.cfg j).st dst).parked with
+      | nil => simp [parkIndex, hp] at hlenj
+      | cons p ps =>
+        have hsnd : p.sender ≠ s := by
+          intro heq
+          have h0 := parkIndex_head p ps s heq
+          rw [hp] at hzero
+          exact hzero h0
+        rw [hp] at hlenj hatj
+        have hrec := recv_closer I (ρ.cfg j) (ρ.cfg (j + 1)) dst
+          (by simpa [apply, hact] using ρ.valid j) p ps hp s hsnd (by omega)
+        have hnext : parkIndex (((ρ.cfg (j + 1)).st dst).parked) s ≤ n := by
+          have := hrec.1
+          omega
+        have hltn : parkIndex (((ρ.cfg (j + 1)).st dst).parked) s <
+            (((ρ.cfg (j + 1)).st dst).parked).length := hrec.2
+        exact ih (j + 1)
+          (fun t ht => hstay t (Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) ht)))
+          (fun t ht => halive t (Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) ht)))
+          hnext hltn
 
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)

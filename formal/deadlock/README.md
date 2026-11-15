@@ -306,9 +306,14 @@ for a send the actor did not itself perform.
   (`enqueue_queue`, `bulk_drops_head`, `bulk_queue`). `parkIndex` is the
   waiter's position: an append does not move it (`parkIndex_append`), and
   `recv_closer` says dropping a head in front of it moves it one place closer.
-  `queue_place` puts the three queue steps together. Chaining this with
-  `reaches_block` and `Fair.bulk` into `deadlock_freedom` is not proved, and
-  neither are `CellFresh` and the dead-instance lift. What is not proved is that fairness eventually performs that
+  `queue_place` puts the three queue steps together. `step_index` and
+  `index_mono` carry the index across any finite run in which the send stays
+  parked and the receiver stays alive. `queued_forever_false` is the inner
+  induction: if that receiver is idle with mail infinitely often, `Fair.bulk`
+  delivers often enough to walk a finite index down to the head and clear the
+  send. The outer rank induction that produces those idle visits, the call
+  reply, `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not
+  proved. What is not proved is that fairness eventually performs that
   receive while the waiter is still the head, the handler's single reply, the
   rank induction, `CellFresh`, and the dead-instance lift.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
