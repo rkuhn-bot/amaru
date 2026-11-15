@@ -35,4 +35,20 @@ theorem inv2_init (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) :
     Inv2 I (initWorld I N) :=
   ⟨inv_init I N hL, occ_init I hG N, ty_init I hG N, bulk_init I N⟩
 
+theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
+    (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hT : TyOk I.desc w) (hB : BulkFree I w)
+    (h : apply I a w = some w') : OccInv I w' := by
+  cases a with
+  | recvBulk id =>
+    simpa [apply] using occ_bulk I hL hG w id w' hO hS hM h
+  | recvPrio id =>
+    simpa [apply] using occ_prio I hL hG w id w' hO h
+  | exec id =>
+    simpa [apply] using occ_head I hL w w' id hO hT hS h
+      (fun k hph ht => by simpa [contRest, hph] using hB id ht)
+  | finish id =>
+    simpa [apply] using occ_finish I w w' id hO hS h
+  | spawn template =>
+    simpa [apply] using occ_spawn I w w' template hO h
+
 end Deadlock

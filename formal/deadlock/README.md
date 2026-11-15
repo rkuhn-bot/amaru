@@ -241,7 +241,11 @@ for a send the actor did not itself perform.
   along that second order. `occ_die` marks that actor dead once both lanes are empty and
   it owes nothing, and `occ_release` resumes the parked senders.
   `occ_exec` covers every head of a running actor, including a killing
-  `terminate`. Charging a send requires the sender's template not
+  `terminate`. `Inv2` packages the step invariant, occupancy, typestate, and
+  the terminable-continuation restriction, and holds at `initWorld`.
+  `occ_apply` keeps occupancy for every action. Preservation of the
+  terminable-continuation restriction, and therefore `inv2_reachable`, is not
+  proved yet. Charging a send requires the sender's template not
   to be terminable, and `OccInv.still` keeps a terminable actor's owed count
   at zero. That is narrower than Amaru: a per-peer stage, such as a chainsync
   initiator, terminates when its peer disconnects and does send to shared
