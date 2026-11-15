@@ -1,5 +1,6 @@
 import Deadlock.Json
 import Deadlock.Pres
+import Deadlock.Step
 
 def main (args : List String) : IO UInt32 := do
   match args with

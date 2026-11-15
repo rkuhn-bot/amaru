@@ -187,13 +187,16 @@ for a send the actor did not itself perform.
 - **`SemInv` on every `Reachable` world, and `projects` from it.**
   `semInv_init` holds at `initWorld`. `sem_set` / `credit_sem` / `cells_sem` /
   `finish_sem` / `spawn_sem` keep it when typestate and life of group roles do
-  not change. `sem_move` keeps it when one core follows a step the relation
+  not change.   `sem_move` keeps it when one core follows a step the relation
   was closed under (`step_on_observed`). `enqueue_sem` keeps it for a blocking
-  send or call and stores that edge in `waitEdge`. `execRun` (reply, try-send,
-  self-schedule, cell, terminate) and `receiveBulk` / `receivePrio` are not
-  yet connected, so a reachable world is not yet known to satisfy `SemInv`,
-  and `projects` is not derived. A wait's destination state is therefore not
-  yet shown to lie in `targetStates`.
+  send or call and stores that edge in `waitEdge`. `exec_basic_sem` covers an
+  `internal`, `peer`, `send`, or `call` head, and `exec_done_sem` covers an
+  empty continuation. `trySend`, `selfSchedule`, `reply`, `cell`, `terminate`,
+  and `receiveBulk` / `receivePrio` are not yet connected, so a reachable world
+  is not yet known to satisfy `SemInv`, and `projects` is not derived. A
+  receive that resumes a parked call needs `mailOk`: every parked entry's
+  sender is in `.parked` on that mailbox with the same call bit. Without that,
+  `resumeSender` can overwrite a phase that was not waiting here.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a

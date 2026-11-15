@@ -8,6 +8,7 @@ import Deadlock.Theorem
 import Deadlock.Compat
 import Deadlock.RunInv
 import Deadlock.Pres
+import Deadlock.Step
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
@@ -22,3 +23,5 @@ import Deadlock.Pres
 #print axioms Deadlock.semInv_init
 #print axioms Deadlock.sem_move
 #print axioms Deadlock.enqueue_sem
+#print axioms Deadlock.exec_basic_sem
+#print axioms Deadlock.exec_done_sem
