@@ -205,11 +205,11 @@ for a send the actor did not itself perform.
   `exec_basic_inv` keeps `MailInv` for `internal`, `peer`, `send`, and `call`,
   including the branch that parks. `exec_head_inv` covers every running head.
   `spawn_inv` keeps both invariants when the peer index being overwritten is
-  idle with an empty queue (`slotFree`). `step_inv` is one successful `apply`:
-  it keeps `SemInv` and `MailInv`, using `OpenSlots` so that spawn's index is
-  free. `OpenSlots` is not yet shown to be preserved, so `semInv_reachable`
-  and `projects` are not yet connected. The state after a queue is cleared and
-  before its senders resume is not claimed to satisfy `MailInv`.
+  idle with an empty queue. `Inv` is `SemInv`, `MailInv`, and `OpenSlots`
+  together. It holds at `initWorld` and is preserved by one successful `apply`,
+  so every reachable world satisfies `inv_reachable`. `projects` is not yet
+  derived. The state after a queue is cleared and before its senders resume is
+  not claimed to satisfy `MailInv`.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a

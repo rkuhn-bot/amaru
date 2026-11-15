@@ -1353,6 +1353,121 @@ theorem open_credit (w : World) (tmpl : String) (sender : InstId) (hO : OpenSlot
   have h0 := hO template i hi
   simp [bumpToken, h0]
 
+theorem coreRoster_is_core (D : Description) (id : InstId) (h : id ∈ coreRoster D) :
+    ∃ name, id = InstId.core name := by
+  simp [coreRoster, List.mem_filterMap] at h
+  obtain ⟨t, _, ht⟩ := h
+  obtain ⟨_, hid⟩ := ht
+  exact ⟨t.name, hid.symm⟩
+
+theorem peer_not_roster (D : Description) (template : String) (i : Nat) :
+    (coreRoster D).contains (InstId.peer template i) = false := by
+  rw [Bool.eq_false_iff]
+  intro htrue
+  have hmem : InstId.peer template i ∈ coreRoster D := by
+    simpa [List.contains_iff_mem] using htrue
+  obtain ⟨_, hn⟩ := coreRoster_is_core D _ hmem
+  cases hn
+
+theorem foldl_read_ix (D : Description) (ids : List InstId) (w : World) (template : String) :
+    ((ids.foldl (fun w id => readCells D w id) w).nextIx template) = w.nextIx template := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    rw [List.foldl_cons, ih (readCells D w id), read_ix]
+
+theorem init_ix (I : Impl) (N : Nat) (template : String) : (initWorld I N).nextIx template = 0 := by
+  unfold initWorld
+  simpa using foldl_read_ix I.desc (coreRoster I.desc)
+    { N := N, roster := coreRoster I.desc, nextIx := fun _ => 0,
+      st := fun id => if (coreRoster I.desc).contains id then initActor I.desc id else absentActor,
+      cell := fun _ _ => cleanCell, observed := fun _ _ => 0 } template
+
+theorem open_init (I : Impl) (N : Nat) : OpenSlots (initWorld I N) := by
+  intro template i hi
+  rw [init_ix] at hi
+  rw [init_base_st]
+  rw [peer_not_roster]
+  simp [absentActor]
+
+theorem open_grow (w : World) (pid : InstId) (template : String) (hO : OpenSlots w) :
+    OpenSlots (growRoster w pid template) := by
+  intro t i hi
+  by_cases ht : t = template
+  · have hi' : w.nextIx t + 1 ≤ i := by simpa [growRoster, ht] using hi
+    have hold : w.nextIx t ≤ i := Nat.le_trans (Nat.le_succ _) hi'
+    exact hO t i hold
+  · have hi' : w.nextIx t ≤ i := by simpa [growRoster, ht] using hi
+    exact hO t i hi'
+
+theorem open_spawn (I : Impl) (w : World) (template : String) (w' : World) (hO : OpenSlots w)
+    (h : spawn I w template = some w') : OpenSlots w' := by
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t _ =>
+    by_cases hif : (t.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
+    · simp [hif] at h
+      cases h
+      let pid := InstId.peer template (w.nextIx template)
+      have hO1 := open_grow w pid template hO
+      have hkeep : ∀ t' i, (growRoster w pid template).nextIx t' ≤ i →
+          pid = InstId.peer t' i →
+          (bornPeer I template t.initial).life = .absent ∧
+            (bornPeer I template t.initial).phase = .idle ∧
+            (bornPeer I template t.initial).parked = [] := by
+        intro t' i hi hid
+        have hpid : pid = InstId.peer template (w.nextIx template) := rfl
+        rw [hpid] at hid
+        cases hid
+        have hi' : w.nextIx template + 1 ≤ w.nextIx template := by simpa [growRoster] using hi
+        exact False.elim (Nat.not_succ_le_self _ hi')
+      exact open_read I.desc _ pid (open_set _ pid _ hO1 hkeep)
+    · simp [hif] at h
+
+theorem open_finish (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
+    (h : finishWait w id = some w') : OpenSlots w' := by
+  unfold finishWait at h
+  split at h
+  · next _ heq =>
+    cases h
+    exact open_busy w id _ hO (by rw [heq]; intro hbad; cases hbad)
+  · next _ heq =>
+    cases h
+    exact open_busy w id _ hO (by rw [heq]; intro hbad; cases hbad)
+  · cases h
+
+theorem deliver_st (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (i : InstId) (h : deliver I w id a m = some (w1, a1)) : w1.st i = w.st i := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        exact readCells_st I.desc w id i
+    · split at h
+      · cases h
+      · cases h
+        exact readCells_st I.desc w id i
+
+theorem deliver_ix (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (template : String) (h : deliver I w id a m = some (w1, a1)) :
+    w1.nextIx template = w.nextIx template := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        exact read_ix I.desc w id template
+    · split at h
+      · cases h
+      · cases h
+        exact read_ix I.desc w id template
+
 theorem receive_ready (I : Impl) (w : World) (id : InstId) (w' : World)
     (h : receiveBulk I w id = some w') :
     (w.st id).life = .alive ∧ (w.st id).phase = .idle := by
@@ -1379,22 +1494,331 @@ theorem prio_ready (I : Impl) (w : World) (id : InstId) (w' : World)
       have h2 : ¬ (w.st id).phase ≠ .idle := by simpa [decide_eq_false_iff_not] using hf.2
       exact ⟨by simpa using h1, by simpa using h2⟩
 
+theorem open_same (w w' : World) (hO : OpenSlots w) (hn : ∀ t, w'.nextIx t = w.nextIx t)
+    (hs : ∀ i, w'.st i = w.st i) : OpenSlots w' := by
+  intro t i hi
+  rw [hn] at hi
+  rw [hs]
+  exact hO t i hi
+
+theorem open_resume (w : World) (sid : InstId) (isCall : Bool) (dst : InstId) (hO : OpenSlots w) :
+    OpenSlots (setActor w sid (resumeSender (w.st sid) isCall dst)) := by
+  by_cases hph : (w.st sid).phase = .idle
+  · refine open_set w sid _ hO ?_
+    intro template i hi hid
+    rw [hid] at hph ⊢
+    simp [resumeSender, hph]
+    exact ⟨(hO template i hi).1, (hO template i hi).2.2⟩
+  · exact open_busy w sid _ hO hph
+
+theorem open_prio (I : Impl) (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
+    (h : receivePrio I w id = some w') : OpenSlots w' := by
+  have hready := prio_ready I w id w' h
+  simp only [receivePrio] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        have hO1 := open_same w w1 hO (fun t => deliver_ix I w id _ _ w1 a1 t hd)
+          (fun i => deliver_st I w id _ _ w1 a1 i hd)
+        have hlive : (w1.st id).life = .alive := by
+          rw [deliver_st I w id _ _ w1 a1 id hd]
+          exact hready.1
+        exact open_alive w1 id a1 hO1 hlive
+
+theorem open_after_deliver (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a1 : Actor) (hO : OpenSlots w) (hlive : (w.st id).life = .alive)
+    (h : deliver I w id a m = some (w1, a1)) : OpenSlots (setActor w1 id a1) := by
+  have hO1 := open_same w w1 hO (fun t => deliver_ix I w id a m w1 a1 t h)
+    (fun i => deliver_st I w id a m w1 a1 i h)
+  have hlive1 : (w1.st id).life = .alive := by rw [deliver_st I w id a m w1 a1 id h]; exact hlive
+  exact open_alive w1 id a1 hO1 hlive1
+
+theorem open_bulk (I : Impl) (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
+    (h : receiveBulk I w id = some w') : OpenSlots w' := by
+  have hready := receive_ready I w id w' h
+  simp only [receiveBulk] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        exact open_credit _ _ _ (open_after_deliver I w id _ _ w1 a1 hO hready.1 hd)
+    · split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        have hbase := open_same w w1 hO (fun t => deliver_ix I w id _ _ w1 a1 t hd)
+          (fun i => deliver_st I w id _ _ w1 a1 i hd)
+        have hlive1 : (w1.st id).life = .alive := by
+          rw [deliver_st I w id _ _ w1 a1 id hd]; exact hready.1
+        exact open_resume _ _ _ _ (open_credit _ _ _ (open_alive w1 id _ hbase hlive1))
+    · split at h
+      · cases h
+      · next w1 a1 hd =>
+        cases h
+        exact open_resume _ _ _ _ (open_credit _ _ _ (open_after_deliver I w id _ _ w1 a1 hO hready.1 hd))
+    · cases h
+
+theorem enqueue_open (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (isCall : Bool)
+    (k : Cont) (hO : OpenSlots w) (hs : (w.st sender).phase ≠ .idle) :
+    OpenSlots (enqueueOrPark w D sender dst msg isCall k) := by
+  unfold enqueueOrPark
+  dsimp only
+  by_cases halive : (w.st dst).life = .alive
+  · simp [halive]
+    by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · simp [hsame]
+        split
+        · exact open_busy w dst _ hO (by simpa [hsame] using hs)
+        · exact open_busy w dst _ hO (by simpa [hsame] using hs)
+      · simp [hsame]
+        split
+        · apply open_busy
+          · exact open_alive w dst _ hO halive
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hs
+        · apply open_busy
+          · exact open_alive w dst _ hO halive
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hs
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · simp [hsame]
+        exact open_busy w dst _ hO (by simpa [hsame] using hs)
+      · simp [hsame]
+        apply open_busy
+        · exact open_alive w dst _ hO halive
+        · rw [setActor_other _ dst sender _ hsame]
+          exact hs
+  · simp [halive]
+    exact open_busy w sender _ hO hs
+
+theorem open_tryWake (D : Description) (w : World) (id : InstId) (label : String) (writer : InstId)
+    (hO : OpenSlots w) : OpenSlots (tryWake D w id label writer) := by
+  simp only [tryWake]
+  split
+  · next hcond =>
+    apply open_alive
+    · exact hO
+    · simp [Bool.and_eq_true] at hcond
+      exact hcond.1.1
+  · exact hO
+
+theorem open_wakes (D : Description) (w : World) (ids : List InstId) (label : String) (writer : InstId)
+    (hO : OpenSlots w) : OpenSlots (ids.foldl (fun w i => tryWake D w i label writer) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hO
+  | cons i ids ih =>
+    rw [List.foldl_cons]
+    exact ih _ (open_tryWake D w i label writer hO)
+
+theorem open_msgs (w : World) (dst : String) (ms : List Msg) (hO : OpenSlots w) :
+    OpenSlots (refundMsgs w dst ms) := by
+  induction ms generalizing w with
+  | nil => simpa [refundMsgs] using hO
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    exact ih _ (open_credit w dst m.sender hO)
+
+theorem open_parks (w : World) (dst : String) (ps : List Parked) (hO : OpenSlots w) :
+    OpenSlots (refundParked w dst ps) := by
+  induction ps generalizing w with
+  | nil => simpa [refundParked] using hO
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    exact ih _ (open_credit w dst p.msg.sender hO)
+
+theorem open_release_fold (id : InstId) (ps : List Parked) (w : World) (hO : OpenSlots w) :
+    OpenSlots (releaseFold id ps w) := by
+  induction ps generalizing w with
+  | nil => simpa [releaseFold] using hO
+  | cons p ps ih =>
+    simp only [releaseFold, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hskip]
+      change OpenSlots (releaseFold id ps w)
+      exact ih _ hO
+    · have hf : (p.isCall || decide (p.sender = id)) = false := by
+        cases hb : p.isCall || decide (p.sender = id) <;> simp_all
+      conv in (List.foldl _ (if _ then _ else _) _) =>
+        arg 2
+        simp [hf]
+      change OpenSlots (releaseFold id ps (setActor w p.sender (resumeSender (w.st p.sender) false id)))
+      exact ih _ (open_resume w p.sender false id hO)
+
+theorem open_release (w : World) (id : InstId) (ps : List Parked) (hO : OpenSlots w) :
+    OpenSlots (releaseParked w id ps) := by
+  simpa [release_fold_eq] using open_release_fold id ps w hO
+
+theorem busy_run (id : InstId) (w : World) (k : Cont) (h : (w.st id).phase = .run k) :
+    (w.st id).phase ≠ .idle := by
+  rw [h]
+  intro hbad
+  cases hbad
+
+theorem exec_run_open (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : OpenSlots w)
+    (hlive : (w.st id).life = .alive) (hph : (w.st id).phase = .run k) :
+    OpenSlots (execRun I w id (w.st id) k) := by
+  cases hk : k.rest with
+  | nil =>
+    simp [execRun, hk]
+    exact open_busy w id _ hO (busy_run id w k hph)
+  | cons e es =>
+    cases e with
+    | internal =>
+      simp [execRun, hk]
+      exact open_busy w id _ hO (busy_run id w k hph)
+    | peer =>
+      simp [execRun, hk]
+      exact open_busy w id _ hO (busy_run id w k hph)
+    | send d l n =>
+      cases hr : route w I.desc d n with
+      | none =>
+        simp [execRun, hk, hr]
+        exact open_busy w id _ hO (busy_run id w k hph)
+      | some dst =>
+        simp [execRun, hk, hr]
+        exact enqueue_open w I.desc id dst _ false _ hO (busy_run id w k hph)
+    | call d l n =>
+      cases hr : route w I.desc d n with
+      | none =>
+        simp [execRun, hk, hr]
+        exact open_busy w id _ hO (busy_run id w k hph)
+      | some dst =>
+        simp [execRun, hk, hr]
+        exact enqueue_open w I.desc id dst _ true _ hO (busy_run id w k hph)
+    | trySend d l n =>
+      cases hr : route w I.desc d n with
+      | none =>
+        simp [execRun, hk, hr]
+        exact open_busy w id _ hO (busy_run id w k hph)
+      | some dst =>
+        simp [execRun, hk, hr]
+        split
+        · next hcond =>
+          by_cases hsame : dst = id
+          · rw [hsame]
+            have h1 := open_busy w id (chargeSender (w.st id) (tname id)) hO (busy_run id w k hph)
+            have hph1 : ((setActor w id (chargeSender (w.st id) (tname id))).st id).phase ≠ .idle := by
+              simp [setActor_self, chargeSender, bumpToken, hph]
+            exact open_busy _ id _ (open_busy _ id _ h1 hph1)
+              (by simp [setActor_self, chargeSender, bumpToken, hph])
+          · exact open_busy _ id _
+              (open_alive _ dst _
+                (open_busy w id _ hO (busy_run id w k hph))
+                (by rw [setActor_other _ id dst _ hsame]; exact hcond.1.1))
+              (by rw [setActor_other _ dst id _ (Ne.symm hsame), setActor_self, chargeSender, bumpToken, hph]
+                  intro hbad; cases hbad)
+        · exact open_busy w id _ hO (busy_run id w k hph)
+    | reply =>
+      simp [execRun, hk, performReply]
+      split
+      · exact open_busy w id _ hO (busy_run id w k hph)
+      · rename_i caller hto
+        split
+        all_goals first
+          | exact open_busy w id _ hO (busy_run id w k hph)
+          | (rename_i dst ck hphc
+             split
+             · by_cases hsc : caller = id
+               · rw [hsc] at hphc ⊢
+                 exact open_alive _ id _
+                   (open_busy w id _ hO (by rw [hphc]; intro hbad; cases hbad))
+                   (by simp [setActor_self, proceed]; split <;> exact hlive)
+               · exact open_busy _ id _
+                   (open_busy w caller _ hO (by rw [hphc]; intro hbad; cases hbad))
+                   (by rw [setActor_other _ caller id _ (Ne.symm hsc)]; exact busy_run id w k hph)
+             · exact open_busy w id _ hO (busy_run id w k hph))
+    | selfSchedule _ =>
+      simp [execRun, hk]
+      split <;> try split
+      · exact open_busy w id _ hO (busy_run id w k hph)
+      · exact open_busy w id _ hO (busy_run id w k hph)
+      · exact open_busy w id _ hO (busy_run id w k hph)
+    | cell dst label value =>
+      simp [execRun, hk]
+      have hcell : OpenSlots (setCell w dst label { value := max (w.cell dst label).value value, dirty := true }) := by
+        intro t i hi
+        simp [setCell] at hi ⊢
+        exact hO t i hi
+      split
+      · exact open_busy _ id _ hcell (by simp [setCell, hph])
+      · exact open_wakes I.desc _ (readersOf _ dst) label id
+          (open_busy _ id _ hcell (by simp [setCell, hph]))
+    | terminate =>
+      simp [execRun, hk]
+      split
+      · next t ht =>
+        split
+        · have hbase := open_parks _ (tname id) (w.st id).parked
+            (open_msgs _ (tname id) (w.st id).box (open_read I.desc w id hO))
+          exact open_release _ id (w.st id).parked
+            (open_busy _ id _ hbase (by
+              rw [(refund_park_phase _ (tname id) (w.st id).parked id).1,
+                (refund_msgs_phase _ (tname id) (w.st id).box id).1, readCells_st, hph]
+              intro hbad
+              cases hbad))
+        · exact hO
+      · exact hO
+
+theorem exec_head_open (I : Impl) (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
+    (h : execHead I w id = some w') : OpenSlots w' := by
+  simp only [execHead] at h
+  split at h
+  · cases h
+  · next hnot =>
+    split at h
+    · next k hph =>
+      cases h
+      have hlive : (w.st id).life = .alive := by
+        simpa [decide_eq_false_iff_not] using hnot
+      exact exec_run_open I w id k hO hlive hph
+    · cases h
+
+/-- `SemInv`, `MailInv`, and the unspawned peer indices, together. -/
+def Inv (I : Impl) (w : World) : Prop :=
+  SemInv I w ∧ MailInv w ∧ OpenSlots w
+
 theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w')
-    (hS : SemInv I w) (hM : MailInv w) (hO : OpenSlots w) :
-    SemInv I w' ∧ MailInv w' := by
+    (h : Inv I w) : Inv I w' := by
   obtain ⟨a, ha⟩ := hstep
+  rcases h with ⟨hS, hM, hO⟩
   cases a with
   | recvBulk id =>
     have hready := receive_ready I w id w' ha
-    exact receive_bulk_inv I hL w id w' hS hM hready.1 hready.2 ha
+    have hinv := receive_bulk_inv I hL w id w' hS hM hready.1 hready.2 ha
+    exact ⟨hinv.1, hinv.2, open_bulk I w id w' hO ha⟩
   | recvPrio id =>
     have hready := prio_ready I w id w' ha
-    exact receive_prio_inv I hL w id w' hS hM hready.1 hready.2 ha
+    have hinv := receive_prio_inv I hL w id w' hS hM hready.1 hready.2 ha
+    exact ⟨hinv.1, hinv.2, open_prio I w id w' hO ha⟩
   | exec id =>
-    exact exec_head_inv I hL w id w' hS hM ha
+    exact ⟨(exec_head_inv I hL w id w' hS hM ha).1, (exec_head_inv I hL w id w' hS hM ha).2,
+      exec_head_open I w id w' hO ha⟩
   | finish id =>
-    exact finish_inv I w w' id hS hM ha
+    exact ⟨(finish_inv I w w' id hS hM ha).1, (finish_inv I w w' id hS hM ha).2, open_finish w id w' hO ha⟩
   | spawn template =>
-    exact spawn_inv I w template w' hS hM (open_slot w hO template) ha
+    exact ⟨(spawn_inv I w template w' hS hM (open_slot w hO template) ha).1,
+      (spawn_inv I w template w' hS hM (open_slot w hO template) ha).2, open_spawn I w template w' hO ha⟩
+
+theorem inv_init (I : Impl) (N : Nat) (hL : LocalOk I) : Inv I (initWorld I N) :=
+  ⟨semInv_init I N hL, mail_init I N, open_init I N⟩
+
+theorem inv_reachable (I : Impl) (N : Nat) (w : World) (hL : LocalOk I) (hR : Reachable I N w) :
+    Inv I w := by
+  induction hR with
+  | init => exact inv_init I N hL
+  | step _ _ _ _ ha ih => exact step_inv I hL _ _ ⟨_, ha⟩ ih
 
 end Deadlock
