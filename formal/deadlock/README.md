@@ -145,8 +145,11 @@ list. It is the part that used to be assumed as `Refines.projects`,
 `no_crash` are **not** proved as inductive invariants yet. The accounting
 lemmas (`owed`, `owed_append_msg`, `debt_le_budget`, `targetsAll_edge`,
 `blocking` projection into `residualEdges`) are in `Occupy.lean` and
-`Local.lean`. The preservation over every action is not finished, so they are
-not cited by a deadlock theorem.
+`Local.lean`. Lemma 1's decidable side is the affine comparison
+`totalOcc ≤ capacity` (`l1`), which is a bound for every `N`, not a rejection
+of per-peer producers. The semantic inequality along a run is not proved, so
+a blocking send that Lemma 1 deletes from the residual graph is not yet known
+to be unparked.
 
 ## Operational model
 
@@ -182,11 +185,15 @@ for a send the actor did not itself perform.
   (`heightsOkB_acyclic`) is proved and is only the well-foundedness of that
   induction.
 - **`SemInv` on every `Reachable` world, and `projects` from it.**
-  `stepBreaks_closed`, `stepsCover_of_local`, `findTr_mem`, and
-  `init_tuple_mem` are proved. The induction that deliver is the only
-  typestate change of a live group role, that the tuple at every blocking
-  program counter stays allowed, and that a wait therefore lies on a residual
-  edge, is not finished.
+  `semInv_init` holds at `initWorld`. `sem_set` / `credit_sem` / `cells_sem` /
+  `finish_sem` / `spawn_sem` keep it when typestate and life of group roles do
+  not change. `sem_move` keeps it when one core follows a step the relation
+  was closed under (`step_on_observed`). `enqueue_sem` keeps it for a blocking
+  send or call and stores that edge in `waitEdge`. `execRun` (reply, try-send,
+  self-schedule, cell, terminate) and `receiveBulk` / `receivePrio` are not
+  yet connected, so a reachable world is not yet known to satisfy `SemInv`,
+  and `projects` is not derived. A wait's destination state is therefore not
+  yet shown to lie in `targetStates`.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a

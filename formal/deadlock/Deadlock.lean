@@ -7,6 +7,7 @@ import Deadlock.Local
 import Deadlock.Theorem
 import Deadlock.Compat
 import Deadlock.RunInv
+import Deadlock.Pres
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
@@ -18,3 +19,6 @@ import Deadlock.RunInv
 #print axioms Deadlock.stepsCover_of_local
 #print axioms Deadlock.init_tuple_mem
 #print axioms Deadlock.findTr_mem
+#print axioms Deadlock.semInv_init
+#print axioms Deadlock.sem_move
+#print axioms Deadlock.enqueue_sem
