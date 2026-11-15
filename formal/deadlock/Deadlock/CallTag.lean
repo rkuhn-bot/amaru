@@ -3182,35 +3182,33 @@ theorem shift_parkedCall (w : World) (id : InstId) (p : Parked) (ps : List Parke
   by_cases hc : c = p.sender
   · rw [hc, shift_phF w id p ps kS hsnd] at hph'
     cases hph'
-  · by_cases hcId : c = id
-    · rw [hcId, shift_phId w id p ps kS hsnd] at hph'
-      have hpre := hT.parkedCall id d k hph'
-      obtain ⟨q, hq, hsend, hcf⟩ := (hT.parkedOnly id d k hph').1
-      exact ⟨Or.inr ⟨q, by
-          by_cases hd : d = id
-          · rw [hd, hpark] at hq
-            cases hq with
-            | head => exact False.elim (hc hsend.symm)
-            | tail _ ht => rw [hd, shift_parkId w id p ps kS hsnd]; exact ht
-          · by_cases hdS : d = p.sender
-            · rw [hdS, ← shift_parkS w id p ps kS hsnd]; exact hq
-            · rw [← (shift_other w id p ps kS d hd hdS).2.2.1]; exact hq, hcf⟩,
-        (not_iff (shift_owes w id p ps kS hph hsnd d id)).mpr (by rw [← hcId]; exact hpre.2.1),
-        (not_iff (shift_pending w id p ps kS hph hsnd d id)).mpr (by rw [← hcId]; exact hpre.2.2)⟩
-    · rw [← (shift_other w id p ps kS c hcId hc).1] at hph'
-      have hpre := hT.parkedCall c d k hph'
-      obtain ⟨q, hq, hsend, hcf⟩ := (hT.parkedOnly c d k hph').1
-      exact ⟨Or.inr ⟨q, by
-          by_cases hd : d = id
-          · rw [hd, hpark] at hq
-            cases hq with
-            | head => exact False.elim (hc hsend.symm)
-            | tail _ ht => rw [hd, shift_parkId w id p ps kS hsnd]; exact ht
-          · by_cases hdS : d = p.sender
-            · rw [hdS, ← shift_parkS w id p ps kS hsnd]; exact hq
-            · rw [← (shift_other w id p ps kS d hd hdS).2.2.1]; exact hq, hcf⟩,
-        (not_iff (shift_owes w id p ps kS hph hsnd d c)).mpr hpre.2.1,
-        (not_iff (shift_pending w id p ps kS hph hsnd d c)).mpr hpre.2.2⟩
+  · have hph0 : (w.st c).phase = .parked d true k := by
+      by_cases hcId : c = id
+      · have h := hph'
+        rw [hcId, shift_phId w id p ps kS hsnd] at h
+        rwa [← hcId] at h
+      · rw [(shift_other w id p ps kS c hcId hc).1] at hph'
+        exact hph'
+    have hpre := hT.parkedCall c d k hph0
+    obtain ⟨q, hq, hsend, hcf⟩ := (hT.parkedOnly c d k hph0).1
+    refine ⟨?_, (not_iff (shift_owes w id p ps kS hph hsnd d c)).mpr hpre.2.1,
+      (not_iff (shift_pending w id p ps kS hph hsnd d c)).mpr hpre.2.2⟩
+    by_cases hd : d = id
+    · rw [hd, hpark] at hq
+      cases hq with
+      | head => exact False.elim (hc hsend.symm)
+      | tail _ ht =>
+        exact Or.inr ⟨q, by
+          rw [hd, shift_parkId w id p ps kS hsnd]
+          exact ht, hcf⟩
+    · by_cases hdS : d = p.sender
+      · exact Or.inr ⟨q, by
+          rw [hdS] at hq
+          rw [hdS, shift_parkS w id p ps kS hsnd]
+          exact hq, hcf⟩
+      · exact Or.inr ⟨q, by
+          rw [(shift_other w id p ps kS d hd hdS).2.2.1]
+          exact hq, hcf⟩
 
 theorem shift_parkFrom (w : World) (id : InstId) (p : Parked) (ps : List Parked) (kS : Cont)
     (hT : CallTagInv w) (hM : MailInv w) (hpark : (w.st id).parked = p :: ps)
