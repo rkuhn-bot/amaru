@@ -311,11 +311,16 @@ for a send the actor did not itself perform.
   parked and the receiver stays alive. `queued_forever_false` is the inner
   induction: if that receiver is idle with mail infinitely often, `Fair.bulk`
   delivers often enough to walk a finite index down to the head and clear the
-  send. The outer rank induction that produces those idle visits, the call
-  reply, `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not
-  proved. What is not proved is that fairness eventually performs that
-  receive while the waiter is still the head, the handler's single reply, the
-  rank induction, `CellFresh`, and the dead-instance lift.
+  send. `only_terminate_kills` and `receiver_stays` say the receiver of a send
+  that stays parked cannot die: a life leaves `alive` only on that actor's
+  killing `terminate`, and that step resumes the sender (`alive_while_send`).
+  `blocking_next` says one step either leaves the sender on the same parked
+  continuation or runs it, and `blocking_fuel` says the run is strictly
+  shorter. `await_next` and `await_fuel` are the same fact for a call that has
+  reached `awaitReply`. The outer rank induction that turns those drops into
+  infinitely many idle visits of the lower-rank receiver, the parked-call
+  admission, the handler reply, `deadlock_freedom`, `CellFresh`, and the
+  dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

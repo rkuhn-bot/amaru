@@ -5954,6 +5954,299 @@ theorem alive_while_send (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
     exact receiver_stays I hL N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) (ρ.act (i + n))
       (ρ.cfg (i + n + 1)) s dst k k' (ρ.valid (i + n)) hk hk' ih
 
+/-- An actor awaiting a reply keeps that wait, or the reply runs its continuation. -/
+theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : Cont)
+    (hM : MailInv w) (hO : OpenSlots w) (h : apply I a w = some w')
+    (hph : (w.st s).phase = .awaitReply dst k) :
+    (w'.st s).phase = .awaitReply dst k ∨ (w'.st s).phase = (proceed (w.st s) k).phase := by
+  cases a with
+  | finish id =>
+    simp only [apply] at h
+    unfold finishWait at h
+    cases hphF : (w.st id).phase with
+    | awaitEffect kF =>
+      simp [hphF] at h
+      cases h
+      have hs : s ≠ id := by
+        intro heq
+        rw [heq] at hph
+        rw [hph] at hphF
+        cases hphF
+      exact Or.inl (by simpa [setActor, hs] using hph)
+    | awaitPeer kF =>
+      simp [hphF] at h
+      cases h
+      have hs : s ≠ id := by
+        intro heq
+        rw [heq] at hph
+        rw [hph] at hphF
+        cases hphF
+      exact Or.inl (by simpa [setActor, hs] using hph)
+    | idle => simp [hphF] at h
+    | run _ => simp [hphF] at h
+    | parked _ _ _ => simp [hphF] at h
+    | awaitReply _ _ => simp [hphF] at h
+    | crashed => simp [hphF] at h
+  | spawn template =>
+    simp only [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        have hslot := hO template (w.nextIx template) (Nat.le_refl _)
+        have hne : s ≠ InstId.peer template (w.nextIx template) := by
+          intro heq
+          rw [heq] at hph
+          rw [hslot.2.1] at hph
+          cases hph
+        simp only [readCells_st, setActor, hne]
+        exact Or.inl hph
+      · cases h
+  | recvPrio id =>
+    simp only [apply] at h
+    have hs : s ≠ id := by
+      intro heq
+      rw [heq] at hph
+      unfold receivePrio at h
+      cases hp : (w.st id).prio with
+      | nil => simp [hp] at h
+      | cons _ _ => simp [hp, hph] at h
+    unfold receivePrio at h
+    cases hp : (w.st id).prio with
+    | nil => simp [hp] at h
+    | cons m ms =>
+      by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+      · simp [hp, hready] at h
+      · simp [hp, hready] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ m w1 a1 s hdel
+          exact Or.inl (by simpa [setActor, hs, hst] using hph)
+  | recvBulk id =>
+    simp only [apply] at h
+    have hs : s ≠ id := by
+      intro heq
+      rw [heq] at hph
+      unfold receiveBulk at h
+      simp [hph] at h
+    -- A receive resumes a parked sender. An actor already awaiting is not that sender's phase,
+    -- so the installed resume is the identity on `s` unless `s` is parked, which it is not.
+    unfold receiveBulk at h
+    by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+    · simp [hready] at h
+    · simp [hready] at h
+      cases hbox : (w.st id).box with
+      | nil =>
+        cases hpark : (w.st id).parked with
+        | nil => simp [hbox, hpark] at h
+        | cons q qs =>
+          simp [hbox, hpark] at h
+          split at h
+          · cases h
+          · next w1 a1 hdel =>
+            cases h
+            have hst := deliver_st I w id _ q.msg w1 a1 s hdel
+            have hpre : ((creditSender (setActor w1 id a1) (tname id) q.msg.sender).st s).phase =
+                (w.st s).phase := by
+              have hset : ((setActor w1 id a1).st s).phase = (w.st s).phase := by
+                simpa [setActor, hs, hst] using hph
+              exact ((credit_life (setActor w1 id a1) (tname id) q.msg.sender s).2.2.1).trans hset
+            by_cases hsender : s = q.sender
+            · have hid := resume_id_of_not_parked
+                ((creditSender (setActor w1 id a1) (tname id) q.msg.sender).st s) q.isCall id
+                (fun d c ck hbad => by rw [hpre] at hbad; simp [hph] at hbad)
+              rw [← hsender]
+              simp only [setActor, ite_true]
+              have hres : (resumeSender ((creditSender (setActor w1 id a1) (tname id) q.msg.sender).st s) q.isCall id).phase =
+                  ((creditSender (setActor w1 id a1) (tname id) q.msg.sender).st s).phase := by rw [hid]
+              exact Or.inl (hres.trans (hpre.trans hph))
+            · simp only [setActor, hsender, ite_false]
+              exact Or.inl (hpre.trans hph)
+      | cons m ms =>
+        cases hpark : (w.st id).parked with
+        | nil =>
+          simp [hbox, hpark] at h
+          split at h
+          · cases h
+          · next w1 a1 hdel =>
+            cases h
+            have hst := deliver_st I w id _ m w1 a1 s hdel
+            have hcred := (credit_life (setActor w1 id a1) (tname id) m.sender s).2.2.1
+            have hset : ((setActor w1 id a1).st s).phase = (w.st s).phase := by
+              simpa [setActor, hs, hst] using hph
+            exact Or.inl ((hcred.trans hset).trans hph)
+        | cons q qs =>
+          simp [hbox, hpark] at h
+          split at h
+          · cases h
+          · next w1 a1 hdel =>
+            cases h
+            have hst := deliver_st I w id _ m w1 a1 s hdel
+            let admitted : Actor := { a1 with box := a1.box ++ [q.msg], parked := qs }
+            have hpre : ((creditSender (setActor w1 id admitted) (tname id) m.sender).st s).phase =
+                (w.st s).phase := by
+              have hset : ((setActor w1 id admitted).st s).phase = (w.st s).phase := by
+                simpa [setActor, hs, hst] using hph
+              exact ((credit_life (setActor w1 id admitted) (tname id) m.sender s).2.2.1).trans hset
+            by_cases hsender : s = q.sender
+            · have hid := resume_id_of_not_parked
+                ((creditSender (setActor w1 id admitted) (tname id) m.sender).st s) q.isCall id
+                (fun d c ck hbad => by rw [hpre] at hbad; simp [hph] at hbad)
+              rw [← hsender]
+              simp only [setActor, ite_true]
+              have hres :
+                  (resumeSender ((creditSender (setActor w1 id admitted) (tname id) m.sender).st s) q.isCall id).phase =
+                    ((creditSender (setActor w1 id admitted) (tname id) m.sender).st s).phase := by rw [hid]
+              exact Or.inl (hres.trans (hpre.trans hph))
+            · simp only [setActor, hsender, ite_false]
+              exact Or.inl (hpre.trans hph)
+  | exec id =>
+    simp only [apply] at h
+    have hsne : s ≠ id := by
+      intro heq
+      rw [heq] at hph
+      simp [execHead, hph] at h
+    unfold execHead at h
+    by_cases hlid : (w.st id).life = .alive
+    · simp [hlid] at h
+      cases hphE : (w.st id).phase with
+      | run kE =>
+        simp [hphE] at h
+        cases h
+        cases hk : kE.rest with
+        | nil => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
+        | cons e tail =>
+          cases e with
+          | reply =>
+            simp [execRun, hk]
+            unfold performReply
+            cases hr : kE.replyTo with
+            | none => exact Or.inl (by simp [setActor, hsne, hph])
+            | some caller =>
+              cases hcall : (w.st caller).phase with
+              | awaitReply dst' ck =>
+                by_cases hd : dst' = id
+                · by_cases hc : s = caller
+                  · rw [hc, hcall] at hph
+                    cases hph
+                    have hcne : ¬caller = id := fun h => hsne (hc.trans h)
+                    simp [hcall, hd, hc, hcne, setActor]
+                  · simp [hcall, hd, setActor, hc, hsne]
+                    exact Or.inl hph
+                · exact Or.inl (by simp [hcall, hd, setActor, hsne, hph])
+              | idle => exact Or.inl (by simp [hcall, setActor, hsne, hph])
+              | run _ => exact Or.inl (by simp [hcall, setActor, hsne, hph])
+              | parked _ _ _ => exact Or.inl (by simp [hcall, setActor, hsne, hph])
+              | awaitEffect _ => exact Or.inl (by simp [hcall, setActor, hsne, hph])
+              | awaitPeer _ => exact Or.inl (by simp [hcall, setActor, hsne, hph])
+              | crashed => exact Or.inl (by simp [hcall, setActor, hsne, hph])
+          | send name label hint =>
+            simp [execRun, hk]
+            cases hr : route w I.desc name hint with
+            | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
+            | some dstId =>
+              simp [hr]
+              exact Or.inl ((enqueue_phase_other w I.desc id dstId
+                ({ label := label, sender := id, callFrom := none } : Msg) false (afterHead kE) s hsne).trans hph)
+          | call name label hint =>
+            simp [execRun, hk]
+            cases hr : route w I.desc name hint with
+            | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
+            | some dstId =>
+              simp [hr]
+              exact Or.inl ((enqueue_phase_other w I.desc id dstId
+                ({ label := label, sender := id, callFrom := some id } : Msg) true (afterHead kE) s hsne).trans hph)
+          | trySend name label hint =>
+            simp [execRun, hk]
+            cases hr : route w I.desc name hint with
+            | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
+            | some dstId =>
+              simp [hr]
+              split
+              · by_cases hd : s = dstId
+                · have hid : ¬dstId = id := fun hne => hsne (hd.trans hne)
+                  simp [setActor, hd, hid, chargeSender, bumpToken]
+                  have hph' := hph
+                  rw [hd] at hph'
+                  exact Or.inl hph'
+                · exact Or.inl (by simp [setActor, hd, hsne, hph])
+              · exact Or.inl (by simp [setActor, hsne, hph])
+          | selfSchedule label =>
+            simp [execRun, hk]
+            split
+            · exact Or.inl (by simp [setActor, hsne, hph])
+            · split
+              · exact Or.inl (by simp [setActor, hsne, hph])
+              · exact Or.inl (by simp [setActor, hsne, hph])
+          | cell name label value =>
+            simp only [execRun, hk]
+            split
+            · exact Or.inl (by simp [setCell, setActor, hsne, hph])
+            · rw [wakeReaders]
+              exact Or.inl (by
+                rw [wakes_phase (readersOf _ _) I.desc _ name label id s]
+                simp [setCell, setActor, hsne, hph])
+          | internal => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
+          | peer => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
+          | terminate =>
+            cases ht : templateOf I.desc (tname id) with
+            | none => exact Or.inl (by simp [execRun, hk, ht, hph])
+            | some t =>
+              by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+              · let base :=
+                  refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box) (tname id)
+                    (w.st id).parked
+                let dead : Actor :=
+                  { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+                have hmiss : ∀ p, p ∈ (w.st id).parked → p.sender ≠ s := by
+                  intro p hp heq
+                  obtain ⟨k0, hk0⟩ := hM.fwd id p hp
+                  rw [heq, hph] at hk0
+                  cases hk0
+                have hbase : (base.st s).phase = (w.st s).phase := by
+                  have hread := readCells_st I.desc w id s
+                  have href := (refund_life (readCells I.desc w id) (tname id) (w.st id).box s).2.2.1
+                  have hrefp :=
+                    (refundP_life (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box) (tname id)
+                      (w.st id).parked s).2.2.1
+                  simp [base, hread, href, hrefp]
+                have hset : ((setActor base id dead).st s).phase = (w.st s).phase := by
+                  simp [setActor, hsne, hbase]
+                have hrel :=
+                  (congrArg (fun a => a.phase)
+                    (release_misses (setActor base id dead) id (w.st id).parked s hmiss)).trans hset
+                have hstep : execRun I w id (w.st id) kE =
+                    releaseParked (setActor base id dead) id (w.st id).parked := by
+                  simp [execRun, hk, ht, hkill, base, dead]
+                rw [hstep]
+                exact Or.inl (hrel.trans hph)
+              · exact Or.inl (by simp [execRun, hk, ht, hkill, hph])
+      | idle => simp [hphE] at h
+      | parked _ _ _ => simp [hphE] at h
+      | awaitReply _ _ => simp [hphE] at h
+      | awaitEffect _ => simp [hphE] at h
+      | awaitPeer _ => simp [hphE] at h
+      | crashed => simp [hphE] at h
+    · simp [hlid] at h
+
+/-- The reply that ends an `awaitReply` runs a strictly shorter continuation. -/
+theorem await_fuel (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : Cont)
+    (hM : MailInv w) (hO : OpenSlots w) (h : apply I a w = some w')
+    (hph : (w.st s).phase = .awaitReply dst k)
+    (hdiff : waitKind (w'.st s) ≠ some (.callReply dst)) :
+    phaseFuel ((w'.st s).phase) < phaseFuel ((w.st s).phase) := by
+  rcases await_next I a w w' s dst k hM hO h hph with hsame | hpro
+  · exact absurd (by simp [waitKind, hsame]) hdiff
+  · rw [hpro]
+    have hle := proceed_fuel (w.st s) k
+    have hold : phaseFuel ((w.st s).phase) = 2 * k.rest.length + 1 := by simp [phaseFuel, hph]
+    rw [hold]
+    omega
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)

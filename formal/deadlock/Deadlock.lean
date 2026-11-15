@@ -111,3 +111,10 @@ import Deadlock.Rank
 #print axioms Deadlock.index_mono
 #print axioms Deadlock.queued_forever_false
 #print axioms Deadlock.terminate_unblocks
+#print axioms Deadlock.only_terminate_kills
+#print axioms Deadlock.receiver_stays
+#print axioms Deadlock.alive_while_send
+#print axioms Deadlock.blocking_next
+#print axioms Deadlock.blocking_fuel
+#print axioms Deadlock.await_next
+#print axioms Deadlock.await_fuel
