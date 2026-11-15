@@ -1268,4 +1268,133 @@ theorem exec_head_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w' 
                   simpa [this] using hkill)
     · cases h
 
+/-- Peer indices at or above `nextIx` have not been spawned. -/
+def OpenSlots (w : World) : Prop :=
+  ∀ template i, w.nextIx template ≤ i →
+    (w.st (InstId.peer template i)).life = .absent ∧
+      (w.st (InstId.peer template i)).phase = .idle ∧
+      (w.st (InstId.peer template i)).parked = []
+
+theorem open_slot (w : World) (h : OpenSlots w) (template : String) : slotFree w template := by
+  have h0 := h template (w.nextIx template) (Nat.le_refl _)
+  exact ⟨h0.2.1, h0.2.2⟩
+
+theorem not_open (w : World) (h : OpenSlots w) (id : InstId) (template : String) (i : Nat)
+    (hi : w.nextIx template ≤ i) (hid : id = InstId.peer template i)
+    (hlive : (w.st id).life = .alive) : False := by
+  have h0 := h template i hi
+  rw [hid] at hlive
+  simp [hlive] at h0
+
+theorem read_ix (D : Description) (w : World) (id : InstId) (template : String) :
+    (readCells D w id).nextIx template = w.nextIx template := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons _ ls ih =>
+    simp only [List.foldl_cons, setCell, setObserved]
+    exact ih _
+
+theorem actor_ix (w : World) (id : InstId) (a : Actor) (template : String) :
+    (setActor w id a).nextIx template = w.nextIx template := by
+  simp [setActor]
+
+theorem credit_ix (w : World) (tmpl : String) (sender : InstId) (template : String) :
+    (creditSender w tmpl sender).nextIx template = w.nextIx template := by
+  simp [creditSender, setActor]
+
+/-- A step is one successful `apply`. -/
+def Step (I : Impl) (w w' : World) : Prop :=
+  ∃ a, apply I a w = some w'
+
+theorem not_open_phase (w : World) (h : OpenSlots w) (id : InstId) (template : String) (i : Nat)
+    (hi : w.nextIx template ≤ i) (hid : id = InstId.peer template i)
+    (hph : (w.st id).phase ≠ .idle) : False := by
+  have h0 := h template i hi
+  rw [hid] at hph
+  exact hph h0.2.1
+
+theorem open_set (w : World) (id : InstId) (a : Actor) (hO : OpenSlots w)
+    (hkeep : ∀ template i, w.nextIx template ≤ i → id = InstId.peer template i →
+      a.life = .absent ∧ a.phase = .idle ∧ a.parked = []) :
+    OpenSlots (setActor w id a) := by
+  intro template i hi
+  rw [actor_ix] at hi
+  by_cases hid : id = InstId.peer template i
+  · rw [hid, setActor_self]
+    exact hkeep template i hi hid
+  · rw [setActor_other w id (InstId.peer template i) a (Ne.symm hid)]
+    exact hO template i hi
+
+theorem open_alive (w : World) (id : InstId) (a : Actor) (hO : OpenSlots w)
+    (hlive : (w.st id).life = .alive) : OpenSlots (setActor w id a) := by
+  refine open_set w id a hO ?_
+  intro template i hi hid
+  exact False.elim (not_open w hO id template i hi hid hlive)
+
+theorem open_busy (w : World) (id : InstId) (a : Actor) (hO : OpenSlots w)
+    (hph : (w.st id).phase ≠ .idle) : OpenSlots (setActor w id a) := by
+  refine open_set w id a hO ?_
+  intro template i hi hid
+  exact False.elim (not_open_phase w hO id template i hi hid hph)
+
+theorem open_read (D : Description) (w : World) (id : InstId) (hO : OpenSlots w) :
+    OpenSlots (readCells D w id) := by
+  intro template i hi
+  rw [read_ix] at hi
+  rw [readCells_st]
+  exact hO template i hi
+
+theorem open_credit (w : World) (tmpl : String) (sender : InstId) (hO : OpenSlots w) :
+    OpenSlots (creditSender w tmpl sender) := by
+  refine open_set w sender (bumpToken (w.st sender) tmpl (.ofNat 1)) hO ?_
+  intro template i hi hid
+  rw [hid]
+  have h0 := hO template i hi
+  simp [bumpToken, h0]
+
+theorem receive_ready (I : Impl) (w : World) (id : InstId) (w' : World)
+    (h : receiveBulk I w id = some w') :
+    (w.st id).life = .alive ∧ (w.st id).phase = .idle := by
+  simp only [receiveBulk] at h
+  split at h
+  · cases h
+  · next hf =>
+    simp [Bool.or_eq_false_iff] at hf
+    have h1 : ¬ (w.st id).life ≠ .alive := by simpa [decide_eq_false_iff_not] using hf.1
+    have h2 : ¬ (w.st id).phase ≠ .idle := by simpa [decide_eq_false_iff_not] using hf.2
+    exact ⟨by simpa using h1, by simpa using h2⟩
+
+theorem prio_ready (I : Impl) (w : World) (id : InstId) (w' : World)
+    (h : receivePrio I w id = some w') :
+    (w.st id).life = .alive ∧ (w.st id).phase = .idle := by
+  simp only [receivePrio] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · next hf =>
+      simp [Bool.or_eq_false_iff] at hf
+      have h1 : ¬ (w.st id).life ≠ .alive := by simpa [decide_eq_false_iff_not] using hf.1
+      have h2 : ¬ (w.st id).phase ≠ .idle := by simpa [decide_eq_false_iff_not] using hf.2
+      exact ⟨by simpa using h1, by simpa using h2⟩
+
+theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w')
+    (hS : SemInv I w) (hM : MailInv w) (hO : OpenSlots w) :
+    SemInv I w' ∧ MailInv w' := by
+  obtain ⟨a, ha⟩ := hstep
+  cases a with
+  | recvBulk id =>
+    have hready := receive_ready I w id w' ha
+    exact receive_bulk_inv I hL w id w' hS hM hready.1 hready.2 ha
+  | recvPrio id =>
+    have hready := prio_ready I w id w' ha
+    exact receive_prio_inv I hL w id w' hS hM hready.1 hready.2 ha
+  | exec id =>
+    exact exec_head_inv I hL w id w' hS hM ha
+  | finish id =>
+    exact finish_inv I w w' id hS hM ha
+  | spawn template =>
+    exact spawn_inv I w template w' hS hM (open_slot w hO template) ha
+
 end Deadlock

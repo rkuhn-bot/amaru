@@ -45,3 +45,4 @@ import Deadlock.Mail
 #print axioms Deadlock.exec_basic_inv
 #print axioms Deadlock.spawn_inv
 #print axioms Deadlock.exec_head_inv
+#print axioms Deadlock.step_inv
