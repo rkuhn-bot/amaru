@@ -1079,6 +1079,8 @@ async fn record_header_rejected<T: amaru_pure_stage::SendData + Sync>(
 }
 
 #[cfg(test)]
+mod mailbox_cycle;
+#[cfg(test)]
 mod test_setup;
 #[cfg(test)]
 mod tests;
