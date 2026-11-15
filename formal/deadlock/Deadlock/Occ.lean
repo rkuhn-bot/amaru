@@ -1249,4 +1249,60 @@ theorem occ_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I 
     · rw [setActor_other w id i a hi]
       exact hO.clear i hl1
 
+theorem proceed_box (a : Actor) (k : Cont) : (proceed a k).box = a.box := by
+  unfold proceed
+  cases k.rest <;> rfl
+
+theorem proceed_tokens (a : Actor) (k : Cont) (d : String) : (proceed a k).tokens d = a.tokens d := by
+  unfold proceed
+  cases k.rest <;> rfl
+
+theorem proceed_pending (a : Actor) (k : Cont) (d : String)
+    (h : a.phase = .awaitEffect k ∨ a.phase = .awaitPeer k) :
+    pending (proceed a k) d ≤ pending a d := by
+  unfold proceed pending
+  cases hk : k.rest with
+  | nil =>
+    rcases h with hp | hp <;> simp [contRest, hk, hp, sendsTo]
+  | cons _ _ =>
+    rcases h with hp | hp <;> simp [contRest, hk, hp]
+
+/-- `finish` only advances a wait. The typestate is already the continuation's
+target, and the remaining sends do not grow. -/
+theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS : SemInv I w)
+    (h : finishWait w id = some w') : OccInv I w' := by
+  unfold finishWait at h
+  split at h
+  · next k heq =>
+    cases h
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+    let a := proceed (w.st id) k
+    exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
+      (proceed_tokens _ _) (by
+        intro d hl
+        have hmem := hO.aliveIn id (by rw [proceed_life] at hl; exact hl)
+        have hold := hO.slack id d hmem (by rw [proceed_life] at hl; exact hl)
+        have hty' := proceed_keeps_ty (w.st id) k hty
+        have hpend := proceed_pending (w.st id) k d (Or.inl heq)
+        rw [hty']
+        have htok := proceed_tokens (w.st id) k d
+        rw [htok]
+        exact Nat.le_trans (Nat.add_le_add_left hpend _) hold)
+  · next k heq =>
+    cases h
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+    let a := proceed (w.st id) k
+    exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
+      (proceed_tokens _ _) (by
+        intro d hl
+        have hmem := hO.aliveIn id (by rw [proceed_life] at hl; exact hl)
+        have hold := hO.slack id d hmem (by rw [proceed_life] at hl; exact hl)
+        have hty' := proceed_keeps_ty (w.st id) k hty
+        have hpend := proceed_pending (w.st id) k d (Or.inr heq)
+        rw [hty']
+        have htok := proceed_tokens (w.st id) k d
+        rw [htok]
+        exact Nat.le_trans (Nat.add_le_add_left hpend _) hold)
+  · cases h
+
 end Deadlock
