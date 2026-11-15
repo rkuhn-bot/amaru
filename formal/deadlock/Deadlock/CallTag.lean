@@ -3313,66 +3313,64 @@ theorem shift_msgOwner (w : World) (id : InstId) (p : Parked) (ps : List Parked)
       (∃ k, ((shiftWorld w id p ps kS).st c).phase = .awaitReply d k) ∨
         (∃ k, ((shiftWorld w id p ps kS).st c).phase = .parked d true k) := by
   intro d c hm
-  have hphase (c0 : InstId) (hc0 : c0 ≠ p.sender)
-      (hk : (w.st c0).phase = .awaitReply d k ∨ (w.st c0).phase = .parked d true k) :
-      (∃ k, ((shiftWorld w id p ps kS).st c0).phase = .awaitReply d k) ∨
-        (∃ k, ((shiftWorld w id p ps kS).st c0).phase = .parked d true k) := by
-    -- filled below; this nested approach is too awkward. use direct cases.
-    cases hk with
-    | inl h =>
-      by_cases hi : c0 = id
-      · exact Or.inl ⟨k, by rw [hi, shift_phId w id p ps kS hsnd, ← hi]; exact h⟩
-      · exact Or.inl ⟨k, by rw [(shift_other w id p ps kS c0 hi hc0).1]; exact h⟩
-    | inr h =>
-      by_cases hi : c0 = id
-      · exact Or.inr ⟨k, by rw [hi, shift_phId w id p ps kS hsnd, ← hi]; exact h⟩
-      · exact Or.inr ⟨k, by rw [(shift_other w id p ps kS c0 hi hc0).1]; exact h⟩
   by_cases hc : c = p.sender
-  · have hmail0 : mailCall w d c := by
-      rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
-      · by_cases hd : d = id
-        · rw [hd, shift_boxId w id p ps kS hsnd] at hx
-          rw [List.mem_append] at hx
-          rcases hx with hin | heq
-          · exact Or.inl ⟨x, hin, by rw [hc] at hcf; exact hcf⟩
-          · simp at heq
-            rw [heq, hfrom] at hcf
-            have : d = id := hd
-            rw [hc] at hcf
-            -- appended message: caller is the sender, now awaiting id
-            exact Or.inl ⟨x, by
-              -- not used
-              exact hin, hcf⟩
-        · exact Or.inl ⟨x, by
-            by_cases hdS : d = p.sender
-            · rw [hdS, shift_boxS w id p ps kS hsnd] at hx
-              rw [hdS]; exact hx
-            · rw [(shift_other w id p ps kS d hd hdS).2.1] at hx
-              exact hx, by rw [hc] at hcf; exact hcf⟩
-      · exact Or.inr ⟨q, shift_old_park w id p ps kS hpark hsnd d q hq, by rw [hc] at hcf; exact hcf⟩
-    rcases hT.msgOwner d p.sender (by rw [← hc]; exact hmail0) with ⟨k, hk⟩ | ⟨k, hk⟩
-    · exact Or.inl ⟨k, by
-        rw [hc]
-        by_cases hi : p.sender = id
-        · exact absurd hi hsnd
-        · rw [(shift_other w id p ps kS p.sender hi (by rw [← hc]; exact hc)).1]
-          exact hk⟩
-    · rw [hph] at hk
-      have hd0 : d = id := by
-        -- hk : parked id = parked d
-        injection (by rw [hk] : Phase.parked id true kS = Phase.parked d true k) with hd _
-        exact hd
-      exact Or.inl ⟨kS, by rw [hc, hd0, shift_phF w id p ps kS hsnd]⟩
-  · have hmail0 : mailCall w d c := (shift_mail_ne w id p ps kS hpark hfrom hsnd d c hc).mp hm
+  · rcases hm with ⟨x, hx, hcf⟩ | ⟨q, hq, hcf⟩
+    · by_cases hd : d = id
+      · rw [hd, shift_boxId w id p ps kS hsnd] at hx
+        rw [List.mem_append] at hx
+        rcases hx with hin | heq
+        · exact False.elim ((hT.parkedOnly p.sender id kS hph).2
+            ⟨x, hin, by rw [hc] at hcf; exact hcf⟩)
+        · exact Or.inl ⟨kS, by rw [hc, hd, shift_phF w id p ps kS hsnd]⟩
+      · have hx0 : x ∈ (w.st d).box := by
+          by_cases hdS : d = p.sender
+          · have hx' := hx
+            rw [hdS, shift_boxS w id p ps kS hsnd] at hx'
+            rwa [← hdS] at hx'
+          · rw [(shift_other w id p ps kS d hd hdS).2.1] at hx
+            exact hx
+        rcases hT.msgOwner d p.sender
+            (Or.inl ⟨x, hx0, by rw [hc] at hcf; exact hcf⟩) with ⟨k, hk⟩ | ⟨k, hk⟩
+        · rw [hph] at hk
+          cases hk
+        · have hk' := hk
+          rw [hph] at hk'
+          injection hk' with hd0
+          exact False.elim (hd hd0.symm)
+    · have hq0 := shift_old_park w id p ps kS hpark hsnd d q hq
+      obtain ⟨hseq, k, hk⟩ := (hT.parkFrom d q hq0 p.sender).mp (by rw [hc] at hcf; exact hcf)
+      have hk' := hk
+      rw [hph] at hk'
+      injection hk' with hd0
+      have hqN : q ∈ ps := by
+        have hq' := hq
+        rw [← hd0] at hq'
+        rw [shift_parkId w id p ps kS hsnd] at hq'
+        exact hq'
+      have hsame := hM.uniq id id q p
+        (by rw [← hd0] at hq0; exact hq0) (by rw [hpark]; exact List.Mem.head _) hseq
+      rw [hsame.2] at hqN
+      have hnd := hM.once id
+      rw [hpark] at hnd
+      exact False.elim ((List.nodup_cons.mp hnd).1 hqN)
+  · have hmail0 := (shift_mail_ne w id p ps kS hpark hfrom hsnd d c hc).mp hm
     rcases hT.msgOwner d c hmail0 with ⟨k, hk⟩ | ⟨k, hk⟩
     · exact Or.inl ⟨k, by
         by_cases hi : c = id
-        · rw [hi, shift_phId w id p ps kS hsnd, ← hi]; exact hk
-        · rw [(shift_other w id p ps kS c hi hc).1]; exact hk⟩
+        · have h := hk
+          rw [hi] at h
+          rw [hi, shift_phId w id p ps kS hsnd]
+          exact h
+        · rw [(shift_other w id p ps kS c hi hc).1]
+          exact hk⟩
     · exact Or.inr ⟨k, by
         by_cases hi : c = id
-        · rw [hi, shift_phId w id p ps kS hsnd, ← hi]; exact hk
-        · rw [(shift_other w id p ps kS c hi hc).1]; exact hk⟩
+        · have h := hk
+          rw [hi] at h
+          rw [hi, shift_phId w id p ps kS hsnd]
+          exact h
+        · rw [(shift_other w id p ps kS c hi hc).1]
+          exact hk⟩
 
 theorem shift_oweOwner (w : World) (id : InstId) (p : Parked) (ps : List Parked) (kS : Cont)
     (hT : CallTagInv w) (hph : (w.st p.sender).phase = .parked id true kS) (hsnd : p.sender ≠ id) :
