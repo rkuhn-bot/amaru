@@ -4725,11 +4725,58 @@ theorem bulk_head_unblocks (I : Impl) (w w' : World) (id : InstId) (h : receiveB
         simp only [setActor_self, admitted]
         exact resume_leaves_block _ id k p.isCall (hpre.trans hph)
 
-/-- While a blocking send stays parked on a live receiver, its queue index does not increase. -/
+theorem resume_not_parked (a : Actor) (dst : InstId) (k : Cont) (b c : Bool)
+    (h : a.phase = .parked dst c k) : ∀ d bit k', (resumeSender a b dst).phase ≠ .parked d bit k' := by
+  intro d bit k' hbad
+  cases b with
+  | false =>
+    cases hk : k.rest with
+    | nil => simp [resumeSender, h, proceed, hk] at hbad
+    | cons _ _ => simp [resumeSender, h, proceed, hk] at hbad
+  | true => simp [resumeSender, h] at hbad
+
+/-- A bulk receive whose parked head is `s` takes `s` out of every parked phase. -/
+theorem bulk_head_leaves (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk I w id = some w')
+    (p : Parked) (ps : List Parked) (hp : (w.st id).parked = p :: ps) (s : InstId)
+    (hs : s = p.sender) (hne : s ≠ id) (c : Bool) (k : Cont)
+    (hph : (w.st s).phase = .parked id c k) :
+    ∀ d bit k', ((w'.st s).phase) ≠ .parked d bit k' := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        have hst := deliver_st I w id _ p.msg w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id a1 p.msg.sender s (by simpa [hs] using hne) hst
+        intro d bit k' hbad
+        rw [hs] at hpre hph hbad
+        simp only [setActor_self] at hbad
+        exact resume_not_parked _ id k p.isCall c (hpre.trans hph) d bit k' hbad
+    | cons m ms =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+        have hst := deliver_st I w id _ m w1 a1 s hdel
+        have hpre := install_sender_phase w w1 id admitted m.sender s (by simpa [hs] using hne) hst
+        intro d bit k' hbad
+        rw [hs] at hpre hph hbad
+        simp only [setActor_self, admitted] at hbad
+        exact resume_not_parked _ id k p.isCall c (hpre.trans hph) d bit k' hbad
+
+/-- While a parked wait stays parked on a live receiver, its queue index does not increase. -/
 theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
-    (hO : OpenSlots w) (s dst : InstId) (k k' : Cont)
-    (hph : (w.st s).phase = .parked dst false k)
-    (hph' : (w'.st s).phase = .parked dst false k')
+    (hO : OpenSlots w) (s dst : InstId) (c : Bool) (k k' : Cont)
+    (hph : (w.st s).phase = .parked dst c k)
+    (hph' : (w'.st s).phase = .parked dst c k')
     (halive : (w.st dst).life = .alive) (halive' : (w'.st dst).life = .alive)
     (hin : parkIndex ((w.st dst).parked) s < ((w.st dst).parked).length) :
     parkIndex ((w'.st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
@@ -4756,9 +4803,8 @@ theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = som
                 · exact False.elim (hready (Or.inr hpI))
               rw [← heq] at hidle
               simp [hph] at hidle
-          have hun := bulk_head_unblocks I w w' dst hrecv p ps hp s (by rw [hs]) hne k hph
-          have hstill : waitKind (w'.st s) = some (.blockingSend dst) := by simp [waitKind, hph']
-          exact hun hstill
+          have hleft := bulk_head_leaves I w w' dst hrecv p ps hp s (by rw [hs]) hne c k hph
+          exact hleft dst c k' hph'
         · have hrec := recv_closer I w w' dst (by simpa [apply] using h) p ps hp s hs hin
           constructor
           · rw [← hrec.1]
@@ -4827,8 +4873,8 @@ theorem index_zero_head (ps : List Parked) (s : InstId) (h : parkIndex ps s = 0)
       simp [hidx] at h
 
 theorem index_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
-    (s dst : InstId) (i n : Nat)
-    (hstay : ∀ t, i ≤ t → t ≤ i + n → ∃ k, ((ρ.cfg t).st s).phase = .parked dst false k)
+    (s dst : InstId) (c : Bool) (i n : Nat)
+    (hstay : ∀ t, i ≤ t → t ≤ i + n → ∃ k, ((ρ.cfg t).st s).phase = .parked dst c k)
     (halive : ∀ t, i ≤ t → t ≤ i + n → ((ρ.cfg t).st dst).life = .alive)
     (hin : parkIndex (((ρ.cfg i).st dst).parked) s < (((ρ.cfg i).st dst).parked).length) :
     parkIndex (((ρ.cfg (i + n)).st dst).parked) s ≤ parkIndex (((ρ.cfg i).st dst).parked) s ∧
@@ -4845,7 +4891,7 @@ theorem index_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (
     obtain ⟨k0, hk0⟩ := hstay (i + n) (Nat.le_add_right i n) (by omega)
     obtain ⟨k1, hk1⟩ := hstay (i + n + 1) (by omega) (by omega)
     have hstep := step_index I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) (ρ.valid (i + n))
-      hO s dst k0 k1 hk0 hk1
+      hO s dst c k0 k1 hk0 hk1
       (halive (i + n) (Nat.le_add_right i n) (by omega))
       (halive (i + n + 1) (by omega) (by omega))
       hprev.2
@@ -4874,7 +4920,7 @@ theorem queued_forever_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {
   | zero =>
     have hzero : parkIndex (((ρ.cfg i).st dst).parked) s = 0 := by omega
     obtain ⟨j, hj, hact, _⟩ := next_bulk ρ hF dst i hio
-    have hmono := index_mono I hL hG ρ s dst i (j - i)
+    have hmono := index_mono I hL hG ρ s dst false i (j - i)
       (fun t h1 h2 => hstay t h1)
       (fun t h1 h2 => halive t h1) (by omega)
     have hat : parkIndex (((ρ.cfg j).st dst).parked) s = 0 := by
@@ -4911,7 +4957,7 @@ theorem queued_forever_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {
     exact hun hstill
   | succ n ih =>
     obtain ⟨j, hj, hact, hfirst⟩ := next_bulk ρ hF dst i hio
-    have hmono := index_mono I hL hG ρ s dst i (j - i)
+    have hmono := index_mono I hL hG ρ s dst false i (j - i)
       (fun t h1 _ => hstay t h1) (fun t h1 _ => halive t h1) (by omega)
     have hatj : parkIndex (((ρ.cfg j).st dst).parked) s ≤ n + 1 := by
       have hle := hmono.1
@@ -4941,6 +4987,102 @@ theorem queued_forever_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {
       have hun := bulk_head_unblocks I (ρ.cfg j) (ρ.cfg (j + 1)) dst hrecv p ps hp s hs.symm hne k hk
       obtain ⟨k', hk'⟩ := hstay (j + 1) (Nat.le_succ_of_le hj)
       exact hun (by simp [waitKind, hk'])
+    · have hpos : 0 < parkIndex (((ρ.cfg j).st dst).parked) s := Nat.pos_of_ne_zero hzero
+      cases hp : ((ρ.cfg j).st dst).parked with
+      | nil => simp [parkIndex, hp] at hlenj
+      | cons p ps =>
+        have hsnd : p.sender ≠ s := by
+          intro heq
+          have h0 := parkIndex_head p ps s heq
+          rw [hp] at hzero
+          exact hzero h0
+        rw [hp] at hlenj hatj
+        have hrec := recv_closer I (ρ.cfg j) (ρ.cfg (j + 1)) dst
+          (by simpa [apply, hact] using ρ.valid j) p ps hp s hsnd (by omega)
+        have hnext : parkIndex (((ρ.cfg (j + 1)).st dst).parked) s ≤ n := by
+          have := hrec.1
+          omega
+        have hltn : parkIndex (((ρ.cfg (j + 1)).st dst).parked) s <
+            (((ρ.cfg (j + 1)).st dst).parked).length := hrec.2
+        exact ih (j + 1)
+          (fun t ht => hstay t (Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) ht)))
+          (fun t ht => halive t (Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) ht)))
+          hnext hltn
+
+/-- A parked wait, send or call, does not stay parked once the receiver is idle
+with mail infinitely often. For a call this is admission: the phase cannot
+remain `.parked dst true`. -/
+theorem parked_forever_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ) (s dst : InstId) (c : Bool) (n i : Nat)
+    (hstay : ∀ t, i ≤ t → ∃ k, ((ρ.cfg t).st s).phase = .parked dst c k)
+    (halive : ∀ t, i ≤ t → ((ρ.cfg t).st dst).life = .alive)
+    (hin : parkIndex (((ρ.cfg i).st dst).parked) s ≤ n)
+    (hlt : parkIndex (((ρ.cfg i).st dst).parked) s < (((ρ.cfg i).st dst).parked).length)
+    (hio : ∀ t, ∃ j, t ≤ j ∧ CanReceive (ρ.cfg j) dst) : False := by
+  induction n generalizing i with
+  | zero =>
+    have hzero : parkIndex (((ρ.cfg i).st dst).parked) s = 0 := by omega
+    obtain ⟨j, hj, hact, _⟩ := next_bulk ρ hF dst i hio
+    have hmono := index_mono I hL hG ρ s dst c i (j - i)
+      (fun t h1 _ => hstay t h1) (fun t h1 _ => halive t h1) (by omega)
+    have hat : parkIndex (((ρ.cfg j).st dst).parked) s = 0 := by
+      have hle := hmono.1
+      simp [Nat.add_sub_of_le hj] at hle
+      omega
+    have hlen : 0 < (((ρ.cfg j).st dst).parked).length := by
+      have := hmono.2
+      simp [Nat.add_sub_of_le hj] at this
+      omega
+    obtain ⟨p, ps, hp, hs⟩ := index_zero_head _ s hat hlen
+    obtain ⟨k, hk⟩ := hstay j hj
+    have hrecv : receiveBulk I (ρ.cfg j) dst = some (ρ.cfg (j + 1)) := by
+      simpa [apply, hact] using ρ.valid j
+    have hne : s ≠ dst := by
+      intro heq
+      unfold receiveBulk at hrecv
+      by_cases hready : ((ρ.cfg j).st dst).life ≠ .alive ∨ ((ρ.cfg j).st dst).phase ≠ .idle
+      · simp [hready] at hrecv
+      · have hidle : ((ρ.cfg j).st dst).phase = .idle := by
+          by_cases hpI : ((ρ.cfg j).st dst).phase = .idle
+          · exact hpI
+          · exact False.elim (hready (Or.inr hpI))
+        rw [← heq] at hidle
+        simp [hk] at hidle
+    have hleft := bulk_head_leaves I (ρ.cfg j) (ρ.cfg (j + 1)) dst hrecv p ps hp s hs.symm hne c k hk
+    obtain ⟨k', hk'⟩ := hstay (j + 1) (Nat.le_succ_of_le hj)
+    exact hleft dst c k' hk'
+  | succ n ih =>
+    obtain ⟨j, hj, hact, _⟩ := next_bulk ρ hF dst i hio
+    have hmono := index_mono I hL hG ρ s dst c i (j - i)
+      (fun t h1 _ => hstay t h1) (fun t h1 _ => halive t h1) (by omega)
+    have hatj : parkIndex (((ρ.cfg j).st dst).parked) s ≤ n + 1 := by
+      have hle := hmono.1
+      simp [Nat.add_sub_of_le hj] at hle
+      exact Nat.le_trans hle hin
+    have hlenj : parkIndex (((ρ.cfg j).st dst).parked) s < (((ρ.cfg j).st dst).parked).length := by
+      have hltj := hmono.2
+      simp [Nat.add_sub_of_le hj] at hltj
+      exact hltj
+    by_cases hzero : parkIndex (((ρ.cfg j).st dst).parked) s = 0
+    · have hlenpos : 0 < (((ρ.cfg j).st dst).parked).length := by omega
+      obtain ⟨p, ps, hp, hs⟩ := index_zero_head _ s hzero hlenpos
+      obtain ⟨k, hk⟩ := hstay j hj
+      have hrecv : receiveBulk I (ρ.cfg j) dst = some (ρ.cfg (j + 1)) := by
+        simpa [apply, hact] using ρ.valid j
+      have hne : s ≠ dst := by
+        intro heq
+        unfold receiveBulk at hrecv
+        by_cases hready : ((ρ.cfg j).st dst).life ≠ .alive ∨ ((ρ.cfg j).st dst).phase ≠ .idle
+        · simp [hready] at hrecv
+        · have hidle : ((ρ.cfg j).st dst).phase = .idle := by
+            by_cases hpI : ((ρ.cfg j).st dst).phase = .idle
+            · exact hpI
+            · exact False.elim (hready (Or.inr hpI))
+          rw [← heq] at hidle
+          simp [hk] at hidle
+      have hleft := bulk_head_leaves I (ρ.cfg j) (ρ.cfg (j + 1)) dst hrecv p ps hp s hs.symm hne c k hk
+      obtain ⟨k', hk'⟩ := hstay (j + 1) (Nat.le_succ_of_le hj)
+      exact hleft dst c k' hk'
     · have hpos : 0 < parkIndex (((ρ.cfg j).st dst).parked) s := Nat.pos_of_ne_zero hzero
       cases hp : ((ρ.cfg j).st dst).parked with
       | nil => simp [parkIndex, hp] at hlenj
@@ -6246,6 +6388,124 @@ theorem await_fuel (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
     have hold : phaseFuel ((w.st s).phase) = 2 * k.rest.length + 1 := by simp [phaseFuel, hph]
     rw [hold]
     omega
+
+theorem proceed_not_blocking (a : Actor) (k : Cont) (dst : InstId) :
+    waitKind (proceed a k) ≠ some (.blockingSend dst) := by
+  cases hk : k.rest <;> simp [proceed, waitKind, hk]
+
+theorem proceed_not_reply (a : Actor) (k : Cont) (dst : InstId) :
+    waitKind (proceed a k) ≠ some (.callReply dst) := by
+  cases hk : k.rest <;> simp [proceed, waitKind, hk]
+
+/-- While the blocking-send kind persists, the parked continuation is unchanged. -/
+theorem blocking_stays (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
+    (s dst : InstId) (k : Cont) (i n : Nat)
+    (hph : ((ρ.cfg i).st s).phase = .parked dst false k)
+    (hkind : ∀ t, i ≤ t → t ≤ i + n → waitKind ((ρ.cfg t).st s) = some (.blockingSend dst)) :
+    ((ρ.cfg (i + n)).st s).phase = .parked dst false k := by
+  induction n with
+  | zero => simpa using hph
+  | succ n ih =>
+    have hprev := ih (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+    have hR := cfg_reachable ρ (i + n)
+    have hM := (inv_reachable I N (ρ.cfg (i + n)) hL hR).2.1
+    have hO := (inv_reachable I N (ρ.cfg (i + n)) hL hR).2.2
+    cases blocking_next I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) s dst k hM hO
+        (ρ.valid (i + n)) hprev with
+    | inl hsame => exact hsame
+    | inr hpro =>
+      have hnow := hkind (i + n + 1) (by omega) (by omega)
+      have hwk : waitKind ((ρ.cfg (i + n + 1)).st s) =
+          waitKind (proceed ((ρ.cfg (i + n)).st s) k) := by simp [waitKind, hpro]
+      exact absurd (hwk.symm.trans hnow) (proceed_not_blocking ((ρ.cfg (i + n)).st s) k dst)
+
+/-- While an `awaitReply` kind persists, that continuation is unchanged. -/
+theorem await_stays (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
+    (s dst : InstId) (k : Cont) (i n : Nat)
+    (hph : ((ρ.cfg i).st s).phase = .awaitReply dst k)
+    (hkind : ∀ t, i ≤ t → t ≤ i + n → waitKind ((ρ.cfg t).st s) = some (.callReply dst)) :
+    ((ρ.cfg (i + n)).st s).phase = .awaitReply dst k := by
+  induction n with
+  | zero => simpa using hph
+  | succ n ih =>
+    have hprev := ih (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+    have hR := cfg_reachable ρ (i + n)
+    have hM := (inv_reachable I N (ρ.cfg (i + n)) hL hR).2.1
+    have hO := (inv_reachable I N (ρ.cfg (i + n)) hL hR).2.2
+    cases await_next I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) s dst k hM hO
+        (ρ.valid (i + n)) hprev with
+    | inl hsame => exact hsame
+    | inr hpro =>
+      have hnow := hkind (i + n + 1) (by omega) (by omega)
+      have hwk : waitKind ((ρ.cfg (i + n + 1)).st s) =
+          waitKind (proceed ((ρ.cfg (i + n)).st s) k) := by simp [waitKind, hpro]
+      exact absurd (hwk.symm.trans hnow) (proceed_not_reply ((ρ.cfg (i + n)).st s) k dst)
+
+/-- Least `m ≥ i` at which `p` holds, given some later witness. -/
+theorem earliest (p : Nat → Prop) : ∀ j i, i ≤ j → p j →
+    ∃ m, i ≤ m ∧ p m ∧ ∀ t, i ≤ t → t < m → ¬p t := by
+  intro j
+  induction j using Nat.strongRecOn with
+  | ind j ih =>
+    intro i hij hp
+    cases Classical.em (∃ t, i ≤ t ∧ t < j ∧ p t) with
+    | inl hex =>
+      obtain ⟨t, ht, hlt, hpt⟩ := hex
+      exact ih t hlt i ht hpt
+    | inr hno =>
+      refine ⟨j, hij, hp, ?_⟩
+      intro t ht hlt hpt
+      exact hno ⟨t, ht, hlt, hpt⟩
+
+/-- The first step that leaves a blocking send drops `phaseFuel`. -/
+theorem send_drops_at (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
+    (s dst : InstId) (k : Cont) (i j : Nat)
+    (hph : ((ρ.cfg i).st s).phase = .parked dst false k) (hlt : i < j)
+    (hbefore : ∀ t, i ≤ t → t < j → waitKind ((ρ.cfg t).st s) = some (.blockingSend dst))
+    (hdiff : waitKind ((ρ.cfg j).st s) ≠ some (.blockingSend dst)) :
+    phaseFuel (((ρ.cfg j).st s).phase) < phaseFuel (((ρ.cfg i).st s).phase) := by
+  have hle : i ≤ j - 1 := by omega
+  have hpre := blocking_stays I hL ρ s dst k i ((j - 1) - i) hph
+    (fun t h1 h2 => hbefore t h1 (by
+      have hn : i + ((j - 1) - i) = j - 1 := Nat.add_sub_of_le hle
+      omega))
+  have hidx : i + ((j - 1) - i) = j - 1 := Nat.add_sub_of_le hle
+  have hph1 : ((ρ.cfg (j - 1)).st s).phase = .parked dst false k := by simpa [hidx] using hpre
+  have hR := cfg_reachable ρ (j - 1)
+  have hM := (inv_reachable I N (ρ.cfg (j - 1)) hL hR).2.1
+  have hO := (inv_reachable I N (ρ.cfg (j - 1)) hL hR).2.2
+  have hv := ρ.valid (j - 1)
+  have hj1 : (j - 1) + 1 = j := by omega
+  rw [hj1] at hv
+  have hdrop := blocking_fuel I (ρ.act (j - 1)) (ρ.cfg (j - 1)) (ρ.cfg j) s dst k hM hO
+    hv hph1 hdiff
+  have heq : phaseFuel (((ρ.cfg (j - 1)).st s).phase) = phaseFuel (((ρ.cfg i).st s).phase) := by
+    simp [phaseFuel, hph1, hph]
+  omega
+
+/-- The first step that leaves an `awaitReply` drops `phaseFuel`. -/
+theorem await_drops_at (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
+    (s dst : InstId) (k : Cont) (i j : Nat)
+    (hph : ((ρ.cfg i).st s).phase = .awaitReply dst k) (hlt : i < j)
+    (hbefore : ∀ t, i ≤ t → t < j → waitKind ((ρ.cfg t).st s) = some (.callReply dst))
+    (hdiff : waitKind ((ρ.cfg j).st s) ≠ some (.callReply dst)) :
+    phaseFuel (((ρ.cfg j).st s).phase) < phaseFuel (((ρ.cfg i).st s).phase) := by
+  have hle : i ≤ j - 1 := by omega
+  have hpre := await_stays I hL ρ s dst k i ((j - 1) - i) hph
+    (fun t h1 h2 => hbefore t h1 (by omega))
+  have hidx : i + ((j - 1) - i) = j - 1 := Nat.add_sub_of_le hle
+  have hph1 : ((ρ.cfg (j - 1)).st s).phase = .awaitReply dst k := by simpa [hidx] using hpre
+  have hR := cfg_reachable ρ (j - 1)
+  have hM := (inv_reachable I N (ρ.cfg (j - 1)) hL hR).2.1
+  have hO := (inv_reachable I N (ρ.cfg (j - 1)) hL hR).2.2
+  have hv := ρ.valid (j - 1)
+  have hj1 : (j - 1) + 1 = j := by omega
+  rw [hj1] at hv
+  have hdrop := await_fuel I (ρ.act (j - 1)) (ρ.cfg (j - 1)) (ρ.cfg j) s dst k hM hO
+    hv hph1 hdiff
+  have heq : phaseFuel (((ρ.cfg (j - 1)).st s).phase) = phaseFuel (((ρ.cfg i).st s).phase) := by
+    simp [phaseFuel, hph1, hph]
+  omega
 
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
