@@ -2678,5 +2678,158 @@ theorem occ_pay (I : Impl) (w w' : World) (sender : InstId) (name : String) (hO 
   · intro i hl1
     exact hclear i hl1
 
+theorem charge_keeps (a : Actor) (dst : String) :
+    (chargeSender a dst).life = a.life ∧ (chargeSender a dst).typestate = a.typestate ∧
+      (chargeSender a dst).phase = a.phase ∧ (chargeSender a dst).box = a.box ∧
+      (chargeSender a dst).parked = a.parked := by
+  simp [chargeSender, bumpToken]
+
+theorem charge_tok (a : Actor) (name d : String) (h : 1 ≤ a.tokens name) :
+    (chargeSender a name).tokens d + (if d = name then 1 else 0) = a.tokens d := by
+  by_cases hd : d = name
+  · simp [hd, charge_at a name h]
+  · simp [hd, charge_skip a name d hd]
+
+theorem sends_to_tail (name d : String) (e : Eff) (es : List Eff) (label : String) (hint : Nat)
+    (he : e = .send name label hint ∨ e = .call name label hint ∨ e = .trySend name label hint) :
+    sendsTo d es + (if d = name then 1 else 0) ≤ sendsTo d (e :: es) := by
+  rcases he with rfl | rfl | rfl <;> (
+    simp only [sendsTo]
+    by_cases h : name = d
+    · have hb : (name == d) = true := beq_iff_eq.mpr h
+      simp [hb, h]
+      omega
+    · have hb : (name == d) = false := by
+        cases hbb : name == d with
+        | false => rfl
+        | true => exact absurd (beq_iff_eq.mp hbb) h
+      have hd : ¬ d = name := fun heq => h heq.symm
+      simp [hb, hd])
+
+theorem pending_stored (a : Actor) (dst : InstId) (b : Bool) (k' : Cont) (es : List Eff) (d : String)
+    (hk : k'.rest = es)
+    (hph : a.phase = .awaitReply dst k' ∨ a.phase = .parked dst b k' ∨ a.phase = (proceed a k').phase) :
+    pending a d = sendsTo d es := by
+  rcases hph with h | h | h
+  · simp [pending, contRest, h, hk]
+  · simp [pending, contRest, h, hk]
+  · cases hk' : k'.rest with
+    | nil =>
+      unfold proceed at h
+      simp [hk'] at h
+      have hes : es = [] := hk.symm.trans hk'
+      simp [pending, contRest, h, hes]
+    | cons e es =>
+      unfold proceed at h
+      simp [hk'] at h
+      simp [pending, contRest, h, hk, hk']
+
+theorem owed_keep_mail (st : InstId → Actor) (id : InstId) (a : Actor) (dstName : String) (s : InstId)
+    (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster)
+    (hb : a.box = (st id).box) (hp : a.parked = (st id).parked) :
+    owed (fun i => if i = id then a else st i) dstName s roster = owed st dstName s roster := by
+  have hslot := slot_eq_box st dstName s id a hb hp
+  have hrep := owed_replace st dstName s id a roster nodup hmem
+  omega
+
+theorem slot_append_park (st : InstId → Actor) (dstName : String) (sender id : InstId) (p : Parked)
+    (hname : tname id == dstName) (hs : p.sender = sender) :
+    slot (fun i => if i = id then { st id with parked := (st id).parked ++ [p] } else st i) dstName sender id
+      = slot st dstName sender id + 1 := by
+  simp only [slot, hname]
+  simp [countParked_append, hs, Nat.add_assoc]
+
+theorem owed_append_park (st : InstId → Actor) (dstName : String) (sender dst : InstId) (p : Parked)
+    (roster : List InstId) (nodup : roster.Nodup) (hmem : dst ∈ roster)
+    (hname : tname dst == dstName) (hs : p.sender = sender) :
+    owed (fun i => if i = dst then { st dst with parked := (st dst).parked ++ [p] } else st i) dstName sender roster
+      = owed st dstName sender roster + 1 := by
+  have hcross := owed_replace st dstName sender dst { st dst with parked := (st dst).parked ++ [p] } roster nodup hmem
+  have hslot := slot_append_park st dstName sender dst p hname hs
+  omega
+
+theorem owed_append_park_other (st : InstId → Actor) (dstName : String) (s dst : InstId) (p : Parked)
+    (roster : List InstId) (nodup : roster.Nodup) (hmem : dst ∈ roster) (hname : tname dst = dstName)
+    (hs : p.sender ≠ s) :
+    owed (fun i => if i = dst then { st dst with parked := (st dst).parked ++ [p] } else st i) dstName s roster =
+      owed st dstName s roster := by
+  have hb : (tname dst == dstName) = true := by simpa [beq_iff_eq] using hname
+  have hslot : slot (fun i => if i = dst then { st dst with parked := (st dst).parked ++ [p] } else st i)
+      dstName s dst = slot st dstName s dst := by
+    have hne : (p.sender == s) = false := by
+      cases hbb : p.sender == s with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hbb) hs
+    simp [slot, hb, countParked_append, hne]
+    exact hs
+  have hrep := owed_replace st dstName s dst { st dst with parked := (st dst).parked ++ [p] } roster nodup hmem
+  omega
+
+theorem enqueue_dead (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (h : (w.st dst).life ≠ .alive) :
+    enqueueOrPark w D sender dst msg isCall k = setActor w sender (proceed (w.st sender) k) := by
+  simp [enqueueOrPark, h]
+
+theorem enqueue_room_self_call (w : World) (D : Description) (sender : InstId) (msg : Msg) (k : Cont)
+    (hlive : (w.st sender).life = .alive)
+    (hpark : (w.st sender).parked = [])
+    (hcap : (w.st sender).box.length < capBulk D w.N sender) :
+    enqueueOrPark w D sender sender msg true k =
+      setActor w sender
+        { chargeSender (w.st sender) (tname sender) with
+          box := (chargeSender (w.st sender) (tname sender)).box ++ [msg],
+          phase := .awaitReply sender k } := by
+  simp [enqueueOrPark, hlive, hpark, hcap]
+
+theorem enqueue_room_self_send (w : World) (D : Description) (sender : InstId) (msg : Msg) (k : Cont)
+    (hlive : (w.st sender).life = .alive)
+    (hpark : (w.st sender).parked = [])
+    (hcap : (w.st sender).box.length < capBulk D w.N sender) :
+    enqueueOrPark w D sender sender msg false k =
+      setActor w sender
+        (proceed { chargeSender (w.st sender) (tname sender) with
+          box := (chargeSender (w.st sender) (tname sender)).box ++ [msg] } k) := by
+  simp [enqueueOrPark, hlive, hpark, hcap]
+
+theorem enqueue_room_other_call (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
+    (hlive : (w.st dst).life = .alive) (hne : sender ≠ dst)
+    (hpark : (w.st dst).parked = [])
+    (hcap : (w.st dst).box.length < capBulk D w.N dst) :
+    enqueueOrPark w D sender dst msg true k =
+      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender
+        { chargeSender (w.st sender) (tname dst) with phase := .awaitReply dst k } := by
+  simp [enqueueOrPark, hlive, hne, hpark, hcap]
+
+theorem enqueue_room_other_send (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
+    (hlive : (w.st dst).life = .alive) (hne : sender ≠ dst)
+    (hpark : (w.st dst).parked = [])
+    (hcap : (w.st dst).box.length < capBulk D w.N dst) :
+    enqueueOrPark w D sender dst msg false k =
+      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender
+        (proceed (chargeSender (w.st sender) (tname dst)) k) := by
+  simp [enqueueOrPark, hlive, hne, hpark, hcap]
+
+theorem enqueue_park_self (w : World) (D : Description) (sender : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont)
+    (hlive : (w.st sender).life = .alive)
+    (hroom : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender)) :
+    enqueueOrPark w D sender sender msg isCall k =
+      setActor w sender
+        { chargeSender (w.st sender) (tname sender) with
+          parked := (chargeSender (w.st sender) (tname sender)).parked ++
+            [{ sender := sender, msg := msg, isCall := isCall }],
+          phase := .parked sender isCall k } := by
+  simp [enqueueOrPark, hlive, hroom]
+
+theorem enqueue_park_other (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont)
+    (hlive : (w.st dst).life = .alive) (hne : sender ≠ dst)
+    (hroom : ¬ ((w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst)) :
+    enqueueOrPark w D sender dst msg isCall k =
+      setActor (setActor w dst { (w.st dst) with parked := (w.st dst).parked ++
+          [{ sender := sender, msg := msg, isCall := isCall }] }) sender
+        { chargeSender (w.st sender) (tname dst) with phase := .parked dst isCall k } := by
+  simp [enqueueOrPark, hlive, hne, hroom]
+
 end Deadlock
 
