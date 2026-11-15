@@ -3096,24 +3096,28 @@ theorem shift_mail_ne (w : World) (id : InstId) (p : Parked) (ps : List Parked) 
       · by_cases hdS : d = p.sender
         · exact Or.inl ⟨x, by
             rw [hdS] at hx
-            rw [hdS]
-            rw [← shift_boxS w id p ps kS hsnd]
+            rw [hdS, shift_boxS w id p ps kS hsnd]
             exact hx, hcf⟩
-        · exact Or.inl ⟨x, by rw [← (shift_other w id p ps kS d hd hdS).2.1]; exact hx, hcf⟩
+        · exact Or.inl ⟨x, by
+            rw [(shift_other w id p ps kS d hd hdS).2.1]
+            exact hx, hcf⟩
     · by_cases hd : d = id
       · rw [hd, hpark] at hq
         cases hq with
         | head =>
-          simp [hfrom] at hcf
+          rw [hfrom] at hcf
           injection hcf with heqc
           exact False.elim (hc heqc.symm)
         | tail _ ht =>
           exact Or.inr ⟨q, by rw [hd, shift_parkId w id p ps kS hsnd]; exact ht, hcf⟩
       · by_cases hdS : d = p.sender
         · exact Or.inr ⟨q, by
-            rw [hdS, ← shift_parkS w id p ps kS hsnd]
+            rw [hdS] at hq
+            rw [hdS, shift_parkS w id p ps kS hsnd]
             exact hq, hcf⟩
-        · exact Or.inr ⟨q, by rw [← (shift_other w id p ps kS d hd hdS).2.2.1]; exact hq, hcf⟩
+        · exact Or.inr ⟨q, by
+            rw [(shift_other w id p ps kS d hd hdS).2.2.1]
+            exact hq, hcf⟩
 
 theorem shift_awaiting (w : World) (id : InstId) (p : Parked) (ps : List Parked) (kS : Cont)
     (hT : CallTagInv w) (hpark : (w.st id).parked = p :: ps)
