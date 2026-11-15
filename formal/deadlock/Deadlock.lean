@@ -9,6 +9,7 @@ import Deadlock.Compat
 import Deadlock.RunInv
 import Deadlock.Pres
 import Deadlock.Step
+import Deadlock.Mail
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
