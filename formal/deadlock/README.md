@@ -285,9 +285,12 @@ for a send the actor did not itself perform.
   that is still `.run` is a strictly shorter tail, and `not_forever_run` says a
   fair run cannot keep a live actor in `.run` forever. `effect_resumes` and
   `peer_resumes` say fairness takes the `finish` of an effect or peer wait and
-  the actor continues on the tail, still alive. A blocking send or call reply
-  reaching idle, `Fair.bulk`, `CellFresh`, and the dead-instance lift are not
-  proved.
+  the actor continues on the tail, still alive. `exec_drops` says one step of a
+  nonempty program strictly lowers the phase measure, including a crash or a
+  killing `terminate`. `reaches_block` puts those together: a live actor later
+  becomes idle, dies, crashes, or blocks on a send or a call. Discharging that
+  block by `Fair.bulk`, ruling the priority-lane crash out, `CellFresh`, and
+  the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
