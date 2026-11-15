@@ -342,4 +342,77 @@ theorem exec_cell_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label
     simp [wakeReaders, w1]
     exact hw
 
+theorem credit_mail (I : Impl) (w : World) (tmpl : String) (sender : InstId) (hM : MailInv w) :
+    MailInv (creditSender w tmpl sender) := by
+  unfold creditSender
+  exact mail_set_same w sender (bumpToken (w.st sender) tmpl (.ofNat 1)) hM
+    (by simp [bumpToken]) (by simp [bumpToken])
+
+theorem terminable_not_role (I : Impl) (hL : LocalOk I) (r : String) (t : Template)
+    (ht : templateOf I.desc r = some t) (hk : t.terminable = true) (g : CompatGroup)
+    (hg : g ∈ compatGroups I.desc.compatibility) : r ∉ g.roles := by
+  intro hr
+  have hw := (compat_group_closed I.desc g (compat_empty_of_local I hL) hg).1
+  obtain ⟨t', ht', _, hterm, _⟩ := role_static I.desc g r hw hr
+  have : t' = t := by
+    rw [ht] at ht'
+    cases ht'
+    rfl
+  rw [this] at hterm
+  cases ht : t.terminable <;> simp [hterm] at hk
+
+theorem refund_msgs_inv (I : Impl) (w : World) (dst : String) (ms : List Msg)
+    (hS : SemInv I w) (hM : MailInv w) :
+    SemInv I (refundMsgs w dst ms) ∧ MailInv (refundMsgs w dst ms) := by
+  induction ms generalizing w with
+  | nil => simpa [refundMsgs] using ⟨hS, hM⟩
+  | cons m ms ih =>
+    rw [refundMsgs, List.foldl_cons]
+    exact ih _ (credit_sem I w dst m.sender hS) (credit_mail I w dst m.sender hM)
+
+theorem refund_park_inv (I : Impl) (w : World) (dst : String) (ps : List Parked)
+    (hS : SemInv I w) (hM : MailInv w) :
+    SemInv I (refundParked w dst ps) ∧ MailInv (refundParked w dst ps) := by
+  induction ps generalizing w with
+  | nil => simpa [refundParked] using ⟨hS, hM⟩
+  | cons p ps ih =>
+    rw [refundParked, List.foldl_cons]
+    exact ih _ (credit_sem I w dst p.msg.sender hS) (credit_mail I w dst p.msg.sender hM)
+
+theorem resume_false_ok (D : Description) (sid : InstId) (a : Actor) (dst : InstId)
+    (hc : contTy a) (hg : programOk D sid a) (hw : waitEdge D sid a) :
+    let b := resumeSender a false dst
+    b.typestate = a.typestate ∧ b.life = a.life ∧ contTy b ∧ programOk D sid b ∧ waitEdge D sid b ∧
+      notParked b.phase ∧ b.parked = a.parked := by
+  cases hph : a.phase with
+  | parked _ _ k =>
+    simp [resumeSender, hph]
+    have hty : a.typestate = k.toState := by simpa [contTy, hph] using hc
+    have hprog : effectsOk D (tname sid) a.typestate k.rest = true := by simpa [programOk, hph] using hg
+    have hp := proceed_ok D sid a k hty hprog
+    exact ⟨hp.1, hp.2.1, hp.2.2.1, hp.2.2.2.1, hp.2.2.2.2, proceed_not_parked a k, proceed_parked a k⟩
+  | idle => simp [resumeSender, hph, notParked, hc, hg, hw]
+  | run _ => simp [resumeSender, hph, notParked, hc, hg, hw]
+  | awaitReply _ _ => simp [resumeSender, hph, notParked, hc, hg, hw]
+  | awaitEffect _ => simp [resumeSender, hph, notParked, hc, hg, hw]
+  | awaitPeer _ => simp [resumeSender, hph, notParked, hc, hg, hw]
+  | crashed => simp [resumeSender, hph, notParked, hc, hg, hw]
+
+/-- Terminate that the template does not allow leaves the world unchanged. -/
+theorem exec_term_skip_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
+    (hS : SemInv I w) (hM : MailInv w)
+    (hphase : (w.st id).phase = .run { k with rest := .terminate :: es })
+    (hno : ∀ t, templateOf I.desc (tname id) = some t →
+      ¬ (t.terminable = true ∧ hasParkedCall (w.st id).parked = false)) :
+    SemInv I (execRun I w id (w.st id) { k with rest := .terminate :: es }) ∧
+      MailInv (execRun I w id (w.st id) { k with rest := .terminate :: es }) := by
+  simp [execRun]
+  cases ht : templateOf I.desc (tname id) with
+  | none =>
+    simp [ht]
+    exact ⟨hS, hM⟩
+  | some t =>
+    simp [hno t ht]
+    exact ⟨hS, hM⟩
+
 end Deadlock
