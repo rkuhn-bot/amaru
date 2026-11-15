@@ -279,9 +279,11 @@ for a send the actor did not itself perform.
   `finish` and a priority receive. `terminable_no_parked_call` is the
   `callTermFails` half: no parked call can name that template.
   `terminate_commits` then says the refused branch does not run, the actor
-  dies idle, whenever `TermOk` holds. `TermOk` is not yet proved for a bulk
-  receive, an `exec`, or a spawn, so a reachable `terminate` head is not yet
-  known to satisfy it. The length drop for every head, the idle induction,
+  dies idle, whenever `TermOk` holds. `TermOk` is preserved by bulk receive,
+  `exec`, and spawn as well, so `inv3_reachable` carries it at every reachable
+  world and `terminate_commits` applies there. `exec_shortens` says every head
+  that is still `.run` is a strictly shorter tail, and `not_forever_run` says a
+  fair run cannot keep a live actor in `.run` forever. The idle induction,
   `Fair.bulk`, `CellFresh`, and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.

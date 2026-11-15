@@ -85,3 +85,6 @@ import Deadlock.Rank
 #print axioms Deadlock.step_keeps_run
 #print axioms Deadlock.terminate_commits
 #print axioms Deadlock.terminable_no_parked_call
+#print axioms Deadlock.inv3_reachable
+#print axioms Deadlock.exec_shortens
+#print axioms Deadlock.not_forever_run
