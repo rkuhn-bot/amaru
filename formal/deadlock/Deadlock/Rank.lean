@@ -4136,6 +4136,194 @@ theorem spawn_keeps_parked (I : Impl) (w w' : World) (template : String)
         simpa [wR, setActor, hi] using hm
     · cases h
 
+/-- Where a sender sits in a parked list. An absent sender is reported at `length`. -/
+def parkIndex : List Parked → InstId → Nat
+  | [], _ => 0
+  | p :: ps, s => if p.sender == s then 0 else parkIndex ps s + 1
+
+theorem parkIndex_nil (s : InstId) : parkIndex [] s = 0 := rfl
+
+theorem parkIndex_head (p : Parked) (ps : List Parked) (s : InstId) (h : p.sender = s) :
+    parkIndex (p :: ps) s = 0 := by
+  simp [parkIndex, h]
+
+theorem parkIndex_skip (p : Parked) (ps : List Parked) (s : InstId) (h : p.sender ≠ s) :
+    parkIndex (p :: ps) s = parkIndex ps s + 1 := by
+  have hb : (p.sender == s) = false := by simpa [beq_iff_eq] using h
+  simp [parkIndex, hb]
+
+theorem parkIndex_append (ps : List Parked) (s : InstId) (q : Parked)
+    (h : parkIndex ps s < ps.length) : parkIndex (ps ++ [q]) s = parkIndex ps s := by
+  induction ps with
+  | nil => simp [parkIndex] at h
+  | cons p ps ih =>
+    by_cases hs : p.sender = s
+    · simp [parkIndex, hs]
+    · have hb : (p.sender == s) = false := by simpa [beq_iff_eq] using hs
+      have hlt : parkIndex ps s < ps.length := by
+        simp [parkIndex, hb, List.length] at h
+        omega
+      simp [parkIndex, hb, ih hlt]
+
+theorem parkIndex_mem (ps : List Parked) (s : InstId) (h : parkIndex ps s < ps.length) :
+    ∃ p, p ∈ ps ∧ p.sender = s := by
+  induction ps with
+  | nil => simp [parkIndex] at h
+  | cons p ps ih =>
+    by_cases hs : p.sender = s
+    · exact ⟨p, List.Mem.head _, hs⟩
+    · have hb : (p.sender == s) = false := by simpa [beq_iff_eq] using hs
+      have hlt : parkIndex ps s < ps.length := by
+        simp [parkIndex, hb, List.length] at h
+        omega
+      obtain ⟨q, hq, hqs⟩ := ih hlt
+      exact ⟨q, List.Mem.tail _ hq, hqs⟩
+
+/-- A step of one mailbox: leave it, append behind every current entry, or take the head. -/
+def QueueStep (old new : List Parked) : Prop :=
+  new = old ∨ (∃ a, new = old ++ [a]) ∨ (∃ p ps, old = p :: ps ∧ new = ps)
+
+theorem queue_place (old new : List Parked) (s : InstId) (h : QueueStep old new)
+    (hin : parkIndex old s < old.length) :
+    (parkIndex new s < new.length ∧ parkIndex new s ≤ parkIndex old s) ∨
+      ∃ p ps, old = p :: ps ∧ new = ps ∧ p.sender = s ∧ parkIndex old s = 0 := by
+  rcases h with h | h | ⟨p, ps, hold, hnew⟩
+  · rw [h]
+    exact Or.inl ⟨hin, Nat.le_refl _⟩
+  · obtain ⟨a, hnew⟩ := h
+    rw [hnew]
+    have hidx := parkIndex_append old s a hin
+    refine Or.inl ⟨?_, ?_⟩
+    · rw [hidx, List.length_append]
+      simp
+      exact Nat.lt_succ_of_lt hin
+    · rw [hidx]
+      exact Nat.le_refl _
+  · rw [hold] at hin
+    rw [hold, hnew]
+    by_cases hs : p.sender = s
+    · exact Or.inr ⟨p, ps, rfl, rfl, hs, parkIndex_head p ps s hs⟩
+    · have hidx := parkIndex_skip p ps s hs
+      have hlt : parkIndex ps s < ps.length := by
+        rw [hidx, List.length_cons] at hin
+        omega
+      exact Or.inl ⟨hlt, by rw [hidx]; omega⟩
+
+theorem bulk_drops_head (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk I w id = some w')
+    (p : Parked) (ps : List Parked) (hp : (w.st id).parked = p :: ps) :
+    (w'.st id).parked = ps := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        have hpk := deliver_parked I w id _ p.msg w1 a1 hdel
+        by_cases hs : id = p.sender
+        · rw [hs]
+          simp [setActor_self, resume_parked, credit_parked, hpk]
+        · simp [hs, credit_parked, setActor, hpk]
+    | cons m ms =>
+      simp [hbox, hp] at h
+      split at h
+      · cases h
+      · next w1 a1 hdel =>
+        cases h
+        let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+        by_cases hs : id = p.sender
+        · rw [hs]
+          simp [setActor_self, resume_parked, credit_parked, admitted]
+        · simp [hs, admitted, credit_parked, setActor]
+
+/-- A parked entry is only ever added at the end of the list. -/
+theorem enqueue_queue (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) :
+    QueueStep ((w.st i).parked) ((enqueueOrPark w D sender dst msg isCall k).st i).parked := by
+  unfold enqueueOrPark
+  by_cases hlive : (w.st dst).life = .alive
+  · simp [hlive]
+    by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · simp [hroom]
+      cases isCall
+      · by_cases hsame : sender = dst
+        · rw [hsame]
+          by_cases hi : i = dst
+          · rw [hi]
+            simp [setActor, charge_parked, proceed_parked]
+            exact Or.inl rfl
+          · simp [setActor, hi]
+            exact Or.inl rfl
+        · by_cases hi : i = dst
+          · rw [hi, if_neg hsame]
+            have hflip : ¬ dst = sender := fun h => hsame h.symm
+            have hempty : (w.st dst).parked = [] := hroom.1
+            simp [setActor, hempty, charge_parked, proceed_parked]
+            rw [if_neg hflip]
+            exact Or.inl rfl
+          · by_cases his : i = sender
+            · rw [his, if_neg hsame]
+              simp [setActor, hi, charge_parked, proceed_parked]
+              exact Or.inl rfl
+            · rw [if_neg hsame]
+              simp [setActor, hi, his]
+              exact Or.inl rfl
+      · by_cases hsame : sender = dst
+        · rw [hsame]
+          by_cases hi : i = dst
+          · rw [hi]
+            simp [setActor, charge_parked]
+            exact Or.inl rfl
+          · simp [setActor, hi]
+            exact Or.inl rfl
+        · by_cases hi : i = dst
+          · rw [hi, if_neg hsame]
+            have hflip : ¬ dst = sender := fun h => hsame h.symm
+            have hempty : (w.st dst).parked = [] := hroom.1
+            simp [setActor, hempty, charge_parked, proceed_parked]
+            rw [if_neg hflip]
+            exact Or.inl rfl
+          · by_cases his : i = sender
+            · rw [his, if_neg hsame]
+              simp [setActor, hi, charge_parked]
+              exact Or.inl rfl
+            · rw [if_neg hsame]
+              simp [setActor, hi, his]
+              exact Or.inl rfl
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · rw [hsame]
+        by_cases hi : i = dst
+        · rw [hi]
+          simp [setActor, charge_parked]
+          exact Or.inr (Or.inl ⟨{ sender := dst, msg := msg, isCall := isCall }, rfl⟩)
+        · simp [setActor, hi]
+          exact Or.inl rfl
+      · by_cases hi : i = dst
+        · rw [if_neg hsame, hi]
+          have hflip : ¬ dst = sender := fun h => hsame h.symm
+          simp [setActor, charge_parked]
+          rw [if_neg hflip]
+          exact Or.inr (Or.inl ⟨{ sender := sender, msg := msg, isCall := isCall }, rfl⟩)
+        · by_cases his : i = sender
+          · rw [his, if_neg hsame]
+            simp [setActor, hi, charge_parked]
+            exact Or.inl rfl
+          · rw [if_neg hsame]
+            simp [setActor, hi, his]
+            exact Or.inl rfl
+  · simp [hlive]
+    by_cases hi : i = sender
+    · rw [hi]
+      simp [setActor, proceed_parked]
+      exact Or.inl rfl
+    · simp [setActor, hi]
+      exact Or.inl rfl
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
