@@ -261,9 +261,15 @@ for a send the actor did not itself perform.
   replacement would count again. `deadlock_kind` reduces a deadlock to a
   blocking send or a call reply that stays waiting; an effect wait is taken
   by fairness, and no phase is a cell wait. A live partner of either wait
-  sits at a strictly lower residual rank (`park_height`, `reply_height`).
-  The induction that this partner is itself stuck, `CellFresh`, and the
-  dead-instance lift are not proved.
+  sits at a strictly lower residual rank (`park_below`, `reply_below`), so a
+  least-rank actor is not blocked on a live partner. A call edge cannot
+  target a terminable template. Killing `terminate` resumes a parked send
+  (`release_resumes_send`) and skips a parked call; an admitted call sits in
+  the box, so that same step would leave its caller in `awaitReply` on the
+  now-dead callee. `GraphOk` rules that description out, because the callee
+  of a call is not terminable and the killing step is the only assignment of
+  `life = dead`. The inductive step that a lower partner eventually receives
+  or replies, `CellFresh`, and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

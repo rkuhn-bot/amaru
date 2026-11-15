@@ -666,12 +666,12 @@ theorem residual_of_edge (D : Description) (e : Edge) (st : String) (he : e ∈ 
     | tail _ ht =>
       exact ih _ ht
 
-theorem park_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+theorem park_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hO : OccInv I w) (id dst : InstId) (k : Cont)
+    (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
     (hph : (w.st id).phase = .parked dst false k) (hlive : (w.st dst).life = .alive) :
-    ∃ hs : List (Node × Nat),
-      heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
-        heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
+    heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
+      heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
   obtain ⟨_, e, he, hsrc, hss, hdstn, hkind, heff, _, hpart⟩ :=
     projects_park I hL hG N w hR id dst false k hph
   obtain ⟨p, hp, _, _⟩ := (inv_reachable I N w hL hR).2.1.bwd id dst false k hph
@@ -689,20 +689,27 @@ theorem park_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) 
     rcases hpart with hd | hmem
     · simp [hdis] at hd
     · exact hmem hlive
-  obtain ⟨hs, hok⟩ := hG.ranked
   have hmem := residual_of_edge I.desc e (w.st dst).typestate he hdis hst
   have hdrop := heightsOkB_mem (residualEdges I.desc) hs hok
     (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := (w.st dst).typestate } : Node))
     hmem
-  rw [hsrc, hss, hdstn] at hdrop
-  exact ⟨hs, hdrop⟩
+  simpa [hsrc, hss, hdstn] using hdrop
 
-theorem reply_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
-    (hR : Reachable I N w) (id dst : InstId) (k : Cont)
-    (hph : (w.st id).phase = .awaitReply dst k) (hlive : (w.st dst).life = .alive) :
+theorem park_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .parked dst false k) (hlive : (w.st dst).life = .alive) :
     ∃ hs : List (Node × Nat),
       heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
         heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
+  obtain ⟨hs, hok⟩ := hG.ranked
+  exact ⟨hs, park_below I hL hG N w hR hO id dst k hs hok hph hlive⟩
+
+theorem reply_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (id dst : InstId) (k : Cont) (hs : List (Node × Nat))
+    (hok : heightsOkB (residualEdges I.desc) hs = true)
+    (hph : (w.st id).phase = .awaitReply dst k) (hlive : (w.st dst).life = .alive) :
+    heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
+      heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
   obtain ⟨_, e, he, hsrc, hss, hdstn, hkind, heff, _, hpart⟩ :=
     projects_reply I hL hG N w hR id dst k hph
   have hdis : discharged I.desc e = false := by
@@ -713,12 +720,19 @@ theorem reply_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     rcases hpart with hd | hmem
     · simp [hdis] at hd
     · exact hmem hlive
-  obtain ⟨hs, hok⟩ := hG.ranked
   have hmem := residual_of_edge I.desc e (w.st dst).typestate he hdis hst
   have hdrop := heightsOkB_mem (residualEdges I.desc) hs hok
     (({ template := e.src, state := e.srcState } : Node), ({ template := e.dst, state := (w.st dst).typestate } : Node))
     hmem
-  rw [hsrc, hss, hdstn] at hdrop
-  exact ⟨hs, hdrop⟩
+  simpa [hsrc, hss, hdstn] using hdrop
+
+theorem reply_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .awaitReply dst k) (hlive : (w.st dst).life = .alive) :
+    ∃ hs : List (Node × Nat),
+      heightOf hs ({ template := tname dst, state := (w.st dst).typestate } : Node) <
+        heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
+  obtain ⟨hs, hok⟩ := hG.ranked
+  exact ⟨hs, reply_below I hL hG N w hR id dst k hs hok hph hlive⟩
 
 end Deadlock

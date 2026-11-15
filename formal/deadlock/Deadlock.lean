@@ -13,6 +13,7 @@ import Deadlock.Mail
 import Deadlock.Projects
 import Deadlock.Occ
 import Deadlock.Inv2
+import Deadlock.Rank
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
@@ -76,3 +77,7 @@ import Deadlock.Inv2
 #print axioms Deadlock.deadlock_kind
 #print axioms Deadlock.park_height
 #print axioms Deadlock.reply_height
+#print axioms Deadlock.call_edge_unterminable
+#print axioms Deadlock.await_callee_unterminable
+#print axioms Deadlock.release_resumes_send
+#print axioms Deadlock.minimal_not_blocked
