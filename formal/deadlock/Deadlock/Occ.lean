@@ -1692,4 +1692,26 @@ theorem occ_prio (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (
             simp [a0]
             exact Nat.le_trans (hfloor d) hold)
 
+theorem slot_drop_box (st : InstId → Actor) (dst : String) (sender id : InstId) (m : Msg) (ms : List Msg)
+    (hname : tname id = dst) (hs : m.sender = sender) (hbox : (st id).box = m :: ms) :
+    slot (fun i => if i = id then { st id with box := ms } else st i) dst sender id + 1 =
+      slot st dst sender id := by
+  have hb : (tname id == dst) = true := by simpa [beq_iff_eq] using hname
+  simp [slot, hb, hbox, countFrom, hs, Nat.add_comm]
+  omega
+
+theorem owed_drop_box (st : InstId → Actor) (dst : String) (sender id : InstId) (m : Msg) (ms : List Msg)
+    (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster) (hname : tname id = dst)
+    (hs : m.sender = sender) (hbox : (st id).box = m :: ms) :
+    owed (fun i => if i = id then { st id with box := ms } else st i) dst sender roster + 1 =
+      owed st dst sender roster := by
+  have hslot := slot_drop_box st dst sender id m ms hname hs hbox
+  have hrep := owed_replace st dst sender id { st id with box := ms } roster nodup hmem
+  omega
+
+theorem bump_add (a : Actor) (dst d : String) :
+    (bumpToken a dst (.ofNat 1)).tokens d = a.tokens d + if d = dst then 1 else 0 := by
+  simp [bumpToken]
+  by_cases h : d = dst <;> simp [h]
+
 end Deadlock

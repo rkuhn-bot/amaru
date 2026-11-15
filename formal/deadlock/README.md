@@ -228,7 +228,9 @@ for a send the actor did not itself perform.
   `enqueueOrPark` is unreachable. `occ_init` holds at `initWorld` when template
   names are unique. `occ_set` keeps it when one actor is replaced without changing
   its life, queues, or tokens, provided the new typestate still fits in those
-  tokens. The `apply` constructors are not yet connected to that lemma. The check is not
+  tokens. `occ_finish` and `occ_prio` are the `finish` and priority-receive
+  cases. `recvBulk`, the running-head effects, and `spawn` are not connected
+  yet. The check is not
   known to be unsound: a terminable template
   cannot bulk-send, so a dead instance does not keep credit a replacement
   would count again. That missing preservation is why `¬ Deadlock` is not
@@ -308,3 +310,5 @@ From `#print axioms` (Lean 4.35.0), no `sorryAx`:
 | `projects`, `ty_reachable`, `inv_reachable`, `step_inv`, `findTr_mem` | `propext`, `Classical.choice`, `Quot.sound` |
 | `live_le_occ`, `l1_fit`, `l1_park_unreachable`, `occ_init` | `propext`, `Classical.choice`, `Quot.sound` |
 | `occ_set` | `propext`, `Quot.sound` |
+| `occ_finish` | `propext`, `Quot.sound` |
+| `occ_prio` | `propext`, `Classical.choice`, `Quot.sound` |
