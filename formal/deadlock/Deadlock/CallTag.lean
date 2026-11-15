@@ -3148,11 +3148,10 @@ theorem shift_awaiting (w : World) (id : InstId) (p : Parked) (ps : List Parked)
     rw [← hd0, hc]
     exact Or.inl ⟨hmail, (not_iff howe).mpr hpre.2.1, (not_iff hpend).mpr hpre.2.2⟩
   · by_cases hcId : c = id
-    · have hbad : ((shiftWorld w id p ps kS).st id).phase = .awaitReply d k := by
-        rw [← hcId]; exact hph'
-      rw [shift_phId w id p ps kS hsnd] at hbad
-      -- id may already have been awaiting; transport instead of contradicting
-      have hph0 : (w.st c).phase = .awaitReply d k := by rw [hcId, ← shift_phId w id p ps kS hsnd, hcId]; exact hph'
+    · have hph0 : (w.st c).phase = .awaitReply d k := by
+        have h := hph'
+        rw [hcId, shift_phId w id p ps kS hsnd] at h
+        rwa [← hcId] at h
       have hpre := hT.awaiting c d k hph0
       have hmail := shift_mail_ne w id p ps kS hpark hfrom hsnd d c hc
       have howe := shift_owes w id p ps kS hph hsnd d c
