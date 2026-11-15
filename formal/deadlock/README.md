@@ -322,9 +322,15 @@ for a send the actor did not itself perform.
   is the same queue walk for either parked bit: a call cannot stay parked
   once its callee is idle with mail infinitely often.   `mailbox_alive` says a reachable parked list belongs to a live owner.
   `parked_typestate_stays` says an actor that stays parked or in `awaitReply`
-  keeps its typestate. `send_height_below` puts those together: a blocking
-  send keeps the waiter's height, and `park_below` places the callee's node
-  at every later time strictly below that height. The pointwise rank
+  keeps its typestate. `send_height_below` puts those together for a blocking
+  send. `call_stays` keeps a call on the same continuation, including when
+  admission rewrites `.parked dst true k` into `.awaitReply dst k`.
+  `call_drops_at` is the fuel drop at the first step that leaves that kind,
+  and `call_height_below` places the callee strictly below the caller through
+  both the parked call and the later `awaitReply`. `idle_when_free` says an
+  actor that stays alive, and whose wait kind keeps changing, later reaches
+  idle: each change drops `phaseFuel`, and a call uses the frozen continuation
+  so the drop is against the fuel at the start of the wait. The pointwise rank
   induction, the callee's idle visits, the handler reply, `never_stuck`,
   `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not

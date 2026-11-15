@@ -128,3 +128,8 @@ import Deadlock.Rank
 #print axioms Deadlock.waiting_ty_step
 #print axioms Deadlock.parked_typestate_stays
 #print axioms Deadlock.send_height_below
+#print axioms Deadlock.call_stays
+#print axioms Deadlock.call_drops_at
+#print axioms Deadlock.call_height_below
+#print axioms Deadlock.call_callee_alive
+#print axioms Deadlock.idle_when_free
