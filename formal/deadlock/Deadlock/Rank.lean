@@ -4963,6 +4963,40 @@ theorem queued_forever_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {
           (fun t ht => halive t (Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) ht)))
           hnext hltn
 
+theorem terminate_unblocks (I : Impl) (w : World) (id : InstId) (t : Template) (tail : List Eff)
+    (toState : String) (replyTo : Option InstId) (s : InstId) (k : Cont) (hM : MailInv w)
+    (ht : templateOf I.desc (tname id) = some t)
+    (hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true)
+    (hph : (w.st s).phase = .parked id false k) (hne : s ≠ id) :
+    waitKind ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩).st s) ≠
+      some (.blockingSend id) := by
+  obtain ⟨p, hp, hs, hc⟩ := hM.bwd s id false k hph
+  let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+    (tname id) (w.st id).parked
+  have hphb : (base.st s).phase = .parked id false k := by
+    simp [base, readCells_st, phase_refund, phase_refundP, hph]
+  let dead : Actor :=
+    { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+  have hphs : ((setActor base id dead).st s).phase = .parked id false k := by
+    simp [setActor, hne, hphb]
+  have hrel := release_resumes_send (setActor base id dead) id (w.st id).parked s k
+    ⟨p, hp, hs, hc⟩ hne hphs
+  have hstep : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ =
+      releaseParked (setActor base id dead) id (w.st id).parked := by
+    simp [execRun, ht, hkill, base, dead]
+  rw [hstep]
+  cases hk : k.rest with
+  | nil =>
+    simp [proceed, hk] at hrel
+    unfold waitKind
+    rw [hrel]
+    simp
+  | cons _ _ =>
+    simp [proceed, hk] at hrel
+    unfold waitKind
+    rw [hrel]
+    simp
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)
