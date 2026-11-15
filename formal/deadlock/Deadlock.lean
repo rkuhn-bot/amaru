@@ -39,3 +39,6 @@ import Deadlock.Mail
 #print axioms Deadlock.exec_cell_sem
 #print axioms Deadlock.exec_term_skip_sem
 #print axioms Deadlock.exec_term_die_sem
+#print axioms Deadlock.deliver_inv
+#print axioms Deadlock.receive_prio_inv
+#print axioms Deadlock.receive_bulk_inv

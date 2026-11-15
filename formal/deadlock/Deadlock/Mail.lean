@@ -21,6 +21,8 @@ structure MailInv (w : World) : Prop where
     ∃ p, p ∈ (w.st dst).parked ∧ p.sender = id ∧ p.isCall = isCall
   uniq : ∀ mb1 mb2 p1 p2, p1 ∈ (w.st mb1).parked → p2 ∈ (w.st mb2).parked →
     p1.sender = p2.sender → mb1 = mb2 ∧ p1 = p2
+  /-- A sender occupies one slot: the parked list has no duplicate entries. -/
+  once : ∀ mb, (w.st mb).parked.Nodup
 
 theorem not_queued (w : World) (id : InstId) (hM : MailInv w) (hf : notParked (w.st id).phase) :
     ∀ mb p, p ∈ (w.st mb).parked → p.sender ≠ id := by
@@ -30,7 +32,7 @@ theorem not_queued (w : World) (id : InstId) (hM : MailInv w) (hf : notParked (w
   simp [notParked, hk] at hf
 
 theorem mail_copy (w w' : World) (hM : MailInv w) (h : ∀ i, w'.st i = w.st i) : MailInv w' := by
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     rw [h] at hp
     obtain ⟨k, hk⟩ := hM.fwd mb p hp
@@ -43,6 +45,8 @@ theorem mail_copy (w w' : World) (hM : MailInv w) (h : ∀ i, w'.st i = w.st i) 
     rw [h] at h1
     rw [h] at h2
     exact hM.uniq mb1 mb2 p1 p2 h1 h2 hs
+  · intro mb
+    simpa [h mb] using hM.once mb
 
 theorem init_parked (I : Impl) (N : Nat) (id : InstId) : ((initWorld I N).st id).parked = [] := by
   rw [init_base_st]
@@ -52,20 +56,22 @@ theorem init_parked (I : Impl) (N : Nat) (id : InstId) : ((initWorld I N).st id)
   · simp [absentActor]
 
 theorem mail_init (I : Impl) (N : Nat) : MailInv (initWorld I N) := by
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     simp [init_parked] at hp
   · intro id dst c k hk
     simp [init_phase] at hk
   · intro mb1 mb2 p1 p2 h1 h2 _
     simp [init_parked] at h1
+  · intro mb
+    simp [init_parked]
 
 /-- Replace an actor that is not parked, without making it parked or changing its queue. -/
 theorem mail_set_free (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
     (hold : notParked (w.st id).phase) (hnew : notParked a.phase)
     (hlist : a.parked = (w.st id).parked) : MailInv (setActor w id a) := by
   have hnq := not_queued w id hM hold
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = id
     · rw [hmb, setActor_self, hlist] at hp
@@ -106,12 +112,18 @@ theorem mail_set_free (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
         exact ⟨hu.1.trans hm2.symm, hu.2⟩
       · rw [setActor_other w id mb2 a hm2] at h2
         exact hM.uniq mb1 mb2 p1 p2 h1 h2 hs
+  · intro mb
+    by_cases hmb : mb = id
+    · rw [hmb, setActor_self, hlist]
+      exact hM.once id
+    · rw [setActor_other w id mb a hmb]
+      exact hM.once mb
 
 /-- Same phase and the same queue: tokens, the bulk box, and priority do not affect mail. -/
 theorem mail_set_same (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
     (hphase : a.phase = (w.st id).phase) (hlist : a.parked = (w.st id).parked) :
     MailInv (setActor w id a) := by
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = id
     · rw [hmb, setActor_self, hlist] at hp
@@ -159,6 +171,28 @@ theorem mail_set_same (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
         exact ⟨hu.1.trans hm2.symm, hu.2⟩
       · rw [setActor_other w id mb2 a hm2] at h2
         exact hM.uniq mb1 mb2 p1 p2 h1 h2 hsnd
+  · intro mb
+    by_cases hmb : mb = id
+    · rw [hmb, setActor_self, hlist]
+      exact hM.once id
+    · rw [setActor_other w id mb a hmb]
+      exact hM.once mb
+
+theorem nodup_snoc {α : Type} {l : List α} {a : α} (hl : l.Nodup) (ha : a ∉ l) : (l ++ [a]).Nodup := by
+  induction l with
+  | nil => simp
+  | cons x xs ih =>
+    rw [List.nodup_cons] at hl
+    have htail := ih hl.2 (fun h => ha (List.mem_cons_of_mem _ h))
+    rw [List.cons_append, List.nodup_cons]
+    refine ⟨?_, htail⟩
+    intro hmem
+    rw [List.mem_append, List.mem_singleton] at hmem
+    cases hmem with
+    | inl h => exact hl.1 h
+    | inr h =>
+      cases h
+      exact ha List.mem_cons_self
 
 theorem charge_parked (a : Actor) (d : String) : (chargeSender a d).parked = a.parked := by
   simp [chargeSender, bumpToken]
@@ -180,7 +214,7 @@ theorem mail_park_self (w : World) (sender : InstId) (a : Actor) (entry : Parked
     (hentry : entry.sender = sender ∧ entry.isCall = c) :
     MailInv (setActor w sender a) := by
   have hnq := not_queued w sender hM hfree
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = sender
     · rw [hmb, setActor_self, hlist] at hp
@@ -249,6 +283,14 @@ theorem mail_park_self (w : World) (sender : InstId) (a : Actor) (entry : Parked
         · rw [setActor_other w sender mb2 a hmb] at h2
           exact h2
       exact hM.uniq _ _ _ _ hold1 hold2 hsnd
+  · intro mb
+    by_cases hmb : mb = sender
+    · rw [hmb, setActor_self, hlist]
+      refine nodup_snoc (hM.once sender) ?_
+      intro hin
+      exact hnq sender entry hin hentry.1
+    · rw [setActor_other w sender mb a hmb]
+      exact hM.once mb
 
 /-- Park `sender` on a different mailbox. The entry and the phase are the final state. -/
 theorem mail_park_other (w : World) (dst sender : InstId) (a stored : Actor) (entry : Parked)
@@ -266,7 +308,7 @@ theorem mail_park_other (w : World) (dst sender : InstId) (a stored : Actor) (en
   have stO : ∀ i, i ≠ sender → i ≠ dst → final.st i = w.st i := by
     intro i hs hd
     rw [setActor_other _ sender i a hs, setActor_other _ dst i stored hd]
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hms : mb = sender
     · rw [hms, stS, hsPk] at hp
@@ -365,6 +407,17 @@ theorem mail_park_other (w : World) (dst sender : InstId) (a stored : Actor) (en
           · rw [stO mb hms hmd] at hp
             exact hp
       exact hM.uniq _ _ _ _ (oldOf h1 h1s) (oldOf h2 h2s) hsnd
+  · intro mb
+    by_cases hms : mb = sender
+    · rw [hms, stS, hsPk]
+      exact hM.once sender
+    · by_cases hmd : mb = dst
+      · rw [hmd, stD, hdstPk]
+        refine nodup_snoc (hM.once dst) ?_
+        intro hin
+        exact hnq dst entry hin hentry.1
+      · rw [stO mb hms hmd]
+        exact hM.once mb
 
 theorem await_not_parked (a : Actor) (dst : InstId) (k : Cont) :
     notParked ({ a with phase := Phase.awaitReply dst k }).phase := by
@@ -447,7 +500,7 @@ theorem mail_of_clear (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
     (hother : ∀ i, i ≠ id → (∀ p ∈ ps, p.sender ≠ i) → (w.st i).phase = (w0.st i).phase) :
     MailInv w := by
   have hnq := not_queued w0 id hM hfree
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     have hmb : mb ≠ id := by
       intro h
@@ -486,5 +539,79 @@ theorem mail_of_clear (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
     have h1n : mb1 ≠ id := by intro h; rw [h, hidPk] at h1; cases h1
     have h2n : mb2 ≠ id := by intro h; rw [h, hidPk] at h2; cases h2
     exact hM.uniq mb1 mb2 p1 p2 (by simpa [hpk mb1 h1n] using h1) (by simpa [hpk mb2 h2n] using h2) hs
+  · intro mb
+    by_cases hmb : mb = id
+    · rw [hmb, hidPk]
+      simp
+    · simpa [hpk mb hmb] using hM.once mb
+
+/-- Drop the head of one parked queue and leave that sender's phase. The tail stays. -/
+theorem mail_drop (w0 w : World) (id : InstId) (p : Parked) (ps : List Parked) (hM : MailInv w0)
+    (hfree : notParked (w0.st id).phase) (hqueue : (w0.st id).parked = p :: ps)
+    (hidPh : notParked (w.st id).phase) (hidPk : (w.st id).parked = ps)
+    (hpk : ∀ i, i ≠ id → (w.st i).parked = (w0.st i).parked)
+    (hresume : notParked (w.st p.sender).phase)
+    (hother : ∀ i, i ≠ id → i ≠ p.sender → (w.st i).phase = (w0.st i).phase) : MailInv w := by
+  have hnq := not_queued w0 id hM hfree
+  have hhead : p ∈ (w0.st id).parked := by rw [hqueue]; exact List.mem_cons_self
+  have hsnd : p.sender ≠ id := hnq id p hhead
+  have hnodup : p ∉ ps := by
+    have hnd := hM.once id
+    rw [hqueue, List.nodup_cons] at hnd
+    exact hnd.1
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro mb q hq
+    by_cases hmb : mb = id
+    · rw [hmb, hidPk] at hq
+      have hq0 : q ∈ (w0.st id).parked := by rw [hqueue]; exact List.mem_cons_of_mem _ hq
+      obtain ⟨k, hk⟩ := hM.fwd id q hq0
+      have hne : q.sender ≠ p.sender := by
+        intro heq
+        have hqeq := (hM.uniq id id q p hq0 hhead heq).2
+        rw [hqeq] at hq
+        exact hnodup hq
+      rw [hmb, hother q.sender (hnq id q hq0) hne]
+      exact ⟨k, hk⟩
+    · have hq0 : q ∈ (w0.st mb).parked := by simpa [hpk mb hmb] using hq
+      obtain ⟨k, hk⟩ := hM.fwd mb q hq0
+      have hwho : q.sender ≠ p.sender := by
+        intro heq
+        exact hmb (hM.uniq id mb p q hhead hq0 heq.symm).1.symm
+      rw [hother q.sender (hnq mb q hq0) hwho]
+      exact ⟨k, hk⟩
+  · intro sid dst c k hk
+    have hsid : sid ≠ id := by
+      intro h
+      rw [h] at hk
+      simp [notParked, hk] at hidPh
+    by_cases hwho : sid = p.sender
+    · rw [hwho] at hk
+      simp [notParked, hk] at hresume
+    · have hk0 : (w0.st sid).phase = .parked dst c k := by
+        rw [← hother sid hsid hwho]
+        exact hk
+      obtain ⟨q, hq, hsender, hc⟩ := hM.bwd sid dst c k hk0
+      by_cases hd : dst = id
+      · have hqlist : q ∈ p :: ps := by simpa [hd, hqueue] using hq
+        rcases List.mem_cons.mp hqlist with rfl | htail
+        · exact False.elim (hwho hsender.symm)
+        · exact ⟨q, by simpa [hd, hidPk] using htail, hsender, hc⟩
+      · exact ⟨q, by simpa [hpk dst hd] using hq, hsender, hc⟩
+  · intro mb1 mb2 q1 q2 h1 h2 hs
+    have old : ∀ {mb q}, q ∈ (w.st mb).parked → q ∈ (w0.st mb).parked := by
+      intro mb q hq
+      by_cases hmb : mb = id
+      · rw [hmb] at hq ⊢
+        rw [hidPk] at hq
+        rw [hqueue]
+        exact List.mem_cons_of_mem _ hq
+      · simpa [hpk mb hmb] using hq
+    exact hM.uniq mb1 mb2 q1 q2 (old h1) (old h2) hs
+  · intro mb
+    by_cases hmb : mb = id
+    · have hnd := hM.once id
+      rw [hqueue, List.nodup_cons] at hnd
+      simpa [hmb, hidPk] using hnd.2
+    · simpa [hpk mb hmb] using hM.once mb
 
 end Deadlock

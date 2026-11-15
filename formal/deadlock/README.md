@@ -198,10 +198,13 @@ for a send the actor did not itself perform.
   terminate that the template refuses. `exec_term_die_sem` is a killing
   terminate: the mailbox is refunded, the actor is dead with an empty queue,
   and every parked sender is resumed, and both invariants hold of that
-  combined state. `receiveBulk` / `receivePrio` are not yet connected, so a
-  reachable world is not yet known to satisfy `SemInv`, and `projects` is not
-  derived. The state after the queue is cleared and before those resumes is
-  not claimed to satisfy `MailInv`.
+  combined state. `deliver_inv` moves a core along `sem_move` when delivery
+  finds a transition, and a peer only when no group role changes.
+  `receive_prio_inv` and `receive_bulk_inv` keep both invariants, including a
+  bulk receive that admits a parked sender and resumes that sender together.
+  Spawn, and the single `step_inv` that would feed `semInv_reachable` and
+  `projects`, are not yet connected. The state after a queue is cleared and
+  before its senders resume is not claimed to satisfy `MailInv`.
 - **Occupancy.** Lemma 1 still deletes a blocking send from the residual graph
   without a proved bound that the mailbox never parks. A height argument does
   not see that wait. That is why `¬ Deadlock` is not claimed yet; it is a
