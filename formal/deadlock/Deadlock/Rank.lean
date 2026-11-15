@@ -152,4 +152,180 @@ theorem minimal_not_blocked (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N
     have hle := hmin ({ template := tname dst, state := (w.st dst).typestate } : Node)
     omega
 
+/-- An accepts-call program is a straight line: one `reply`, and no `terminate`
+before it. There is no other path through the handler. -/
+theorem call_program_replies (I : Impl) (hL : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions)
+    (hacc : tr.acceptsCall = true) (t : Template) (ht : templateOf I.desc tr.template = some t) :
+    replyCount tr.program = 1 ∧ terminateBeforeReply tr.program = false := by
+  have hok := transitionOk_of_mem I hL tr hm
+  simp only [transitionOk, ht, hacc, ite_true] at hok
+  repeat rw [Bool.and_eq_true] at hok
+  have hrep := hok.1.1.2
+  have hcount : replyCount tr.program = 1 := beq_iff_eq.mp hrep.1
+  have hbefore : terminateBeforeReply tr.program = false := by
+    cases hb : terminateBeforeReply tr.program
+    · rfl
+    · simp [hb] at hrep
+  exact ⟨hcount, hbefore⟩
+
+theorem bulk_keeps_run (I : Impl) (w : World) (id : InstId) (w' : World) (s : InstId) (k : Cont)
+    (hp : (w.st s).phase = .run k) (hne : s ≠ id) (h : receiveBulk I w id = some w') :
+    (w'.st s).phase = .run k := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ p.msg w1 a1 s hdel
+          have hph1 : (w1.st s).phase = .run k := by simpa [hst] using hp
+          have hset : ((setActor w1 id a1).st s).phase = .run k := by
+            simp [setActor, hne, hph1]
+          have hcred := credit_preserves_run (setActor w1 id a1) (tname id) p.msg.sender s k hset
+          by_cases hs : s = p.sender
+          · have hrun := resumeSender_run ((creditSender (setActor w1 id a1) (tname id) p.msg.sender).st p.sender)
+              p.isCall id k (by simpa [hs] using hcred)
+            simpa [setActor, hs] using hrun
+          · simpa [setActor, hs] using hcred
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ m w1 a1 s hdel
+          exact credit_preserves_run (setActor w1 id a1) (tname id) m.sender s k
+            (by simp [setActor, hne, hst, hp])
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ m w1 a1 s hdel
+          have hph1 : (w1.st s).phase = .run k := by simpa [hst] using hp
+          by_cases hs : s = p.sender
+          · have hset : ((setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps }).st s).phase = .run k := by
+              simp [setActor, hne, hph1]
+            have hcred := credit_preserves_run _ (tname id) m.sender s k hset
+            have hrun := resumeSender_run _ p.isCall id k (by simpa [hs] using hcred)
+            simpa [setActor, hs] using hrun
+          · have hset : ((setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps }).st s).phase = .run k := by
+              simp [setActor, hne, hph1]
+            have hcred := credit_preserves_run _ (tname id) m.sender s k hset
+            simpa [setActor, hs] using hcred
+
+/-- One step of someone else does not replace a running continuation. -/
+theorem step_keeps_run (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) (s : InstId)
+    (k : Cont) (hp : (w.st s).phase = .run k) (hl : (w.st s).life = .alive)
+    (h : apply I a w = some w') (hnot : a ≠ .exec s) : (w'.st s).phase = .run k := by
+  cases a with
+  | exec id =>
+    have hne : s ≠ id := by
+      intro hs
+      apply hnot
+      simp [hs]
+    simp [apply] at h
+    unfold execHead at h
+    by_cases hlive : (w.st id).life = .alive
+    · simp [hlive] at h
+      cases hph : (w.st id).phase with
+      | run k0 =>
+        simp [hph] at h
+        cases h
+        exact execRun_preserves_other_run I w id (w.st id) k0 k s hne hp hph
+      | idle => simp [hph] at h
+      | parked _ _ _ => simp [hph] at h
+      | awaitReply _ _ => simp [hph] at h
+      | awaitEffect _ => simp [hph] at h
+      | awaitPeer _ => simp [hph] at h
+      | crashed => simp [hph] at h
+    · simp [hlive] at h
+  | finish id =>
+    simp [apply, finishWait] at h
+    split at h
+    · next k0 heq =>
+      cases h
+      have hne : s ≠ id := by
+        intro hs
+        rw [← hs] at heq
+        simp [hp] at heq
+      simp [setActor, hne, hp]
+    · next k0 heq =>
+      cases h
+      have hne : s ≠ id := by
+        intro hs
+        rw [← hs] at heq
+        simp [hp] at heq
+      simp [setActor, hne, hp]
+    · cases h
+  | spawn template =>
+    simp [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        have hmem := hO.aliveIn s hl
+        have hfresh : s ≠ InstId.peer template (w.nextIx template) := by
+          intro hs
+          have hix := hO.indexed template (w.nextIx template)
+          rw [← hs] at hix
+          exact absurd (hix hmem) (by omega)
+        simp [readCells_st, setActor, hfresh, withTokens, hp]
+      · cases h
+  | recvPrio id =>
+    simp [apply] at h
+    have hne : s ≠ id := by
+      intro hs
+      rw [← hs] at h
+      simp [receivePrio, hp] at h
+      split at h <;> cases h
+    unfold receivePrio at h
+    cases hprio : (w.st id).prio with
+    | nil => simp [hprio] at h
+    | cons m ms =>
+      simp [hprio] at h
+      split at h
+      · simp at h
+      · next w1 a1 hdel =>
+        cases h.2
+        have hst := deliver_st I w id _ m w1 a1 s hdel
+        simp [setActor, hne, hst, hp]
+  | recvBulk id =>
+    simp [apply] at h
+    have hne : s ≠ id := by
+      intro hs
+      rw [← hs] at h
+      simp [receiveBulk, hp] at h
+    exact bulk_keeps_run I w id w' s k hp hne h
+
+theorem proceed_run_rest (a : Actor) (k k' : Cont) (h : (proceed a k).phase = .run k') :
+    k'.rest = k.rest ∧ k.rest ≠ [] := by
+  cases hk : k.rest with
+  | nil => simp [proceed, hk] at h
+  | cons _ _ =>
+    simp [proceed, hk] at h
+    exact ⟨by rw [← h]; simp [hk], by simp [hk]⟩
+
+theorem after_shorter (k k' : Cont) (a : Actor) (hrest : k.rest ≠ [])
+    (h : (proceed a (afterHead k)).phase = .run k') : k'.rest.length < k.rest.length := by
+  have htail : (afterHead k).rest = k.rest.tail := by simp [afterHead]
+  have ⟨heq, hne⟩ := proceed_run_rest a (afterHead k) k' h
+  rw [heq, htail]
+  cases hk : k.rest with
+  | nil => exact absurd hk hrest
+  | cons _ es => simp [hk]
+
 end Deadlock

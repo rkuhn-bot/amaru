@@ -81,3 +81,5 @@ import Deadlock.Rank
 #print axioms Deadlock.await_callee_unterminable
 #print axioms Deadlock.release_resumes_send
 #print axioms Deadlock.minimal_not_blocked
+#print axioms Deadlock.call_program_replies
+#print axioms Deadlock.step_keeps_run

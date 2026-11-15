@@ -268,8 +268,13 @@ for a send the actor did not itself perform.
   the box, so that same step would leave its caller in `awaitReply` on the
   now-dead callee. `GraphOk` rules that description out, because the callee
   of a call is not terminable and the killing step is the only assignment of
-  `life = dead`. The inductive step that a lower partner eventually receives
-  or replies, `CellFresh`, and the dead-instance lift are not proved.
+  `life = dead`. `call_program_replies` is the handler fact: one `reply`, and
+  no `terminate` before it, so the program has a single path to the reply.
+  `step_keeps_run` says any step other than that actor's own `exec` leaves a
+  running continuation in place, which is the measure's stability. What is
+  not proved is that the actor's own head then shortens the program, that a
+  lower partner therefore becomes idle, and that `Fair.bulk` then delivers
+  the parked entry. `CellFresh` and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
@@ -289,8 +294,17 @@ by the semantic rework, and the old examples keep their verdicts.
   `internal`, `peer` are non-blocking.
 - `scope` matches multiplicity.
 - `freshNames` is true. No template has `untimedPeer`. Priority bound `≤`
-  priority capacity. Every `call` has `repliesInDequeue` and its target is not
-  `terminable`. A call with `repliesInDequeue: false` is `lost-reply.json`.
+  priority capacity. Every `call` has `repliesInDequeue`. A call with
+  `repliesInDequeue: false` is `lost-reply.json`.
+- **No call targets a terminable template** (`callTermFails`, part of
+  `GraphOk.lifecycle`). An admitted call sits in the callee's box and the
+  caller is in `awaitReply`; it is not a parked entry. Killing `terminate`
+  refunds that box with a credit only, and `releaseParked` skips `isCall`
+  entries and does not read the box, so the caller would stay in `awaitReply`
+  on a dead callee. `performReply` never runs for a callee that is not alive.
+  The check rejects the edge, and `call_edge_unterminable` is that fact for a
+  description that passes. A parked send is different: `release_resumes_send`
+  runs `proceed` on the sender.
 - A `superseding` edge is a non-blocking `cell` whose flags are all true,
   including `dirtyBit` and `readPoints`. A missing flag is `lost-wake.json`.
 - An `ingress` edge is a non-blocking `trySend` with `ingressLegal` such that
