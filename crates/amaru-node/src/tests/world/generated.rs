@@ -29,7 +29,9 @@ use amaru_consensus::{
 };
 use amaru_kernel::{
     BlockHeight, Hash, Header, IsHeader, NetworkPoint, PREPROD_ERA_HISTORY, PREPROD_GLOBAL_PARAMETERS, Peer, Point,
-    Slot, any_headers_chain_with_root, cardano::network_block::make_encoded_block,
+    Slot, any_headers_chain_with_root,
+    cardano::network_block::{make_encoded_block, make_encoded_chain},
+    make_header,
     utils::tests::run_strategy_with_seed,
 };
 use amaru_metrics::LedgerMetrics;
@@ -38,7 +40,9 @@ use amaru_ouroboros::{
 };
 use amaru_protocols::store_effects::{ResourceHeaderStore, ResourceParameters};
 use amaru_pure_stage::{
+    register_effect_deserializer,
     simulation::{SimulationRunning, running::OverrideResult},
+    tm_external_effect_any,
     trace_buffer::TraceBuffer,
 };
 use tokio::runtime::{Handle, Runtime};
@@ -431,6 +435,62 @@ fn run_blockfetch_generated_chain(n: NonZeroU8, base_port: u16) {
     assert_accepted_at(&log, injector_addr, run.seed, "injector must accept");
     assert_adopted_head(&world, 1, &head, run.seed, "node");
     assert_has_bodies(&world, 1, &headers, run.seed, "node");
+}
+
+/// A fresh node whose ledger tip and chain store are both Origin, with one honest
+/// upstream serving a three-block chain that begins at Origin.
+///
+/// Within the block-fetch horizon the node must validate the body of the first
+/// block. Recovery returns without `FetchNextFrom` when both ends are Origin, and
+/// `may_fetch_blocks` stays false, so chain selection never asks for that block.
+#[test]
+fn test_fresh_origin_node_validates_first_fetched_block() {
+    let _validate_block = register_effect_deserializer::<ValidateBlockEffect>();
+    let run = SyncRun::new_seeded("fresh_origin", Some(0xF5E5_0A11));
+    let injector_addr = loopback(9900);
+    let node_addr = node_listen(9900, 0);
+    let blocks = origin_child_chain();
+    let headers: Vec<Header> = blocks.iter().map(|block| block.header.clone()).collect();
+    let first = headers[0].clone();
+
+    let store = Arc::new(InMemoryChainStore::new());
+    for block in &blocks {
+        store.store_header(&block.header).expect("store origin-child header");
+        store.store_block(&block.header.hash(), &block.raw).expect("store origin-child body");
+        store.roll_forward_chain(&block.header.point()).expect("extend injector chain");
+    }
+
+    let (injector, shared) = run.spawn_injector(store, injector_addr);
+    let node = generated_node(run.seed, 0, node_addr).with_upstream_peer(peer_at(injector_addr));
+    let mut world = run.injector_world(injector, shared, vec![run.spawn_catch_up(0, node)], &headers);
+    world.run_until_horizon(BLOCKFETCH_HORIZON_NANOS);
+
+    let saw_header = peer_saw_roll_forward(&world, 1, &first.hash());
+    assert!(
+        saw_header,
+        "precondition: chainsync must deliver the first origin-child header {}; seed={:#x}",
+        first.point(),
+        run.seed
+    );
+
+    let saw_block_validation =
+        peer_trace(&world, 1).iter().any(|entry| tm_external_effect_any::<ValidateBlockEffect>() == *entry);
+    let tip =
+        world.graphs()[1].resources().get::<ResourceHeaderStore>().expect("node chain store").get_best_chain_tip();
+    assert!(
+        saw_block_validation || tip == first.point(),
+        "fresh origin node must validate or adopt {} within the block-fetch horizon; tip={tip} saw_block_validation={saw_block_validation}; seed={:#x}",
+        first.point(),
+        run.seed
+    );
+    world.stop();
+}
+
+/// Three Conway blocks whose first header is a child of Origin.
+fn origin_child_chain() -> Vec<amaru_kernel::cardano::network_block::EncodedTestBlock> {
+    let start = 68_774_401;
+    let seeds = (0..3).map(|index| make_header(index + 1, start + index, None));
+    make_encoded_chain(seeds, &PREPROD_ERA_HISTORY)
 }
 
 /// Same burst as [`BUNCHED_HANDSHAKE_SEED`], on the duplex inbound from A to B.
