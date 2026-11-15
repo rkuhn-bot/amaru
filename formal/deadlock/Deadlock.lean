@@ -137,3 +137,5 @@ import Deadlock.Rank
 #print axioms Deadlock.call_parked_stuck_false
 #print axioms Deadlock.call_admitted
 #print axioms Deadlock.enqueue_parked_mem
+#print axioms Deadlock.call_tag_init
+#print axioms Deadlock.call_tag_stable
