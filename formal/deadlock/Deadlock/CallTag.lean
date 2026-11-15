@@ -3261,8 +3261,11 @@ theorem shift_parkedOnly (w : World) (id : InstId) (p : Parked) (ps : List Parke
     cases hph'
   · have hph0 : (w.st c).phase = .parked d true k := by
       by_cases hcId : c = id
-      · rw [hcId, ← shift_phId w id p ps kS hsnd, hcId]; exact hph'
-      · rw [← (shift_other w id p ps kS c hcId hc).1]; exact hph'
+      · have h := hph'
+        rw [hcId, shift_phId w id p ps kS hsnd] at h
+        rwa [← hcId] at h
+      · rw [(shift_other w id p ps kS c hcId hc).1] at hph'
+        exact hph'
     have hpre := hT.parkedOnly c d k hph0
     refine ⟨?_, ?_⟩
     · obtain ⟨q, hq, hsend, hcf⟩ := hpre.1
@@ -3271,22 +3274,34 @@ theorem shift_parkedOnly (w : World) (id : InstId) (p : Parked) (ps : List Parke
         cases hq with
         | head => exact False.elim (hc hsend.symm)
         | tail _ ht =>
-          exact ⟨q, by rw [hd, shift_parkId w id p ps kS hsnd]; exact ht, hsend, hcf⟩
+          exact ⟨q, by
+            rw [hd, shift_parkId w id p ps kS hsnd]
+            exact ht, hsend, hcf⟩
       · by_cases hdS : d = p.sender
-        · exact ⟨q, by rw [hdS, ← shift_parkS w id p ps kS hsnd]; exact hq, hsend, hcf⟩
-        · exact ⟨q, by rw [← (shift_other w id p ps kS d hd hdS).2.2.1]; exact hq, hsend, hcf⟩
+        · exact ⟨q, by
+            rw [hdS] at hq
+            rw [hdS, shift_parkS w id p ps kS hsnd]
+            exact hq, hsend, hcf⟩
+        · exact ⟨q, by
+            rw [(shift_other w id p ps kS d hd hdS).2.2.1]
+            exact hq, hsend, hcf⟩
     · intro ⟨m, hm, hcf⟩
       by_cases hd : d = id
       · rw [hd, shift_boxId w id p ps kS hsnd] at hm
         rw [List.mem_append] at hm
         rcases hm with hin | heq
-        · exact hpre.2 ⟨m, hin, hcf⟩
+        · exact hpre.2 ⟨m, by
+            rw [← hd] at hin
+            exact hin, hcf⟩
         · simp at heq
           rw [heq, hfrom] at hcf
-          exact False.elim (hc hcf)
+          injection hcf with heqc
+          exact False.elim (hc heqc.symm)
       · by_cases hdS : d = p.sender
         · rw [hdS, shift_boxS w id p ps kS hsnd] at hm
-          exact hpre.2 ⟨m, by rw [hdS]; exact hm, hcf⟩
+          exact hpre.2 ⟨m, by
+            rw [← hdS] at hm
+            exact hm, hcf⟩
         · rw [(shift_other w id p ps kS d hd hdS).2.1] at hm
           exact hpre.2 ⟨m, hm, hcf⟩
 
