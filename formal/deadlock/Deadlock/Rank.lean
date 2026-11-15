@@ -2193,4 +2193,55 @@ theorem reaches_block (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat
           exact ⟨j2, Nat.le_trans (Nat.le_trans him (Nat.le_succ m)) hj2, hq⟩
         · exact ⟨m + 1, Nat.le_trans him (Nat.le_succ _), Or.inl hlive⟩
 
+theorem erase_succ_length {α} [DecidableEq α] (ys : List α) (x : α) (hx : x ∈ ys) :
+    (ys.erase x).length + 1 = ys.length := by
+  induction ys with
+  | nil => cases hx
+  | cons y ys ih =>
+    by_cases hxy : y == x
+    · simp [List.erase, hxy]
+    · have hx' : x ∈ ys := by
+        cases hx with
+        | head =>
+          have : (x == x) = true := by rw [beq_iff_eq]
+          exact absurd this hxy
+        | tail _ ht => exact ht
+      simp [List.erase, hxy]
+      have ih' := ih hx'
+      omega
+
+theorem nodup_mem_length {α} [DecidableEq α] (xs ys : List α)
+    (hnd : xs.Nodup) (h : ∀ x ∈ xs, x ∈ ys) : xs.length ≤ ys.length := by
+  induction xs generalizing ys with
+  | nil => exact Nat.zero_le _
+  | cons x xs ih =>
+    have hx : x ∈ ys := h x (List.Mem.head _)
+    have hpair := List.nodup_cons.mp hnd
+    have hsub : ∀ y ∈ xs, y ∈ ys.erase x := by
+      intro y hy
+      have hne : y ≠ x := by
+        intro heq
+        exact hpair.1 (heq ▸ hy)
+      exact (List.mem_erase_of_ne hne).mpr (h y (List.Mem.tail _ hy))
+    have ih' : xs.length ≤ (ys.erase x).length := ih (ys.erase x) hpair.2 hsub
+    have hlen : (ys.erase x).length + 1 = ys.length := erase_succ_length ys x hx
+    have hgoal : xs.length + 1 ≤ ys.length := by omega
+    simpa [List.length_cons] using hgoal
+
+/-- A lane of distinct labels drawn from a set no bigger than the capacity cannot
+overflow by taking one more label from that set. -/
+theorem prio_no_crash (cap : Nat) (labels prio : List String) (label : String)
+    (hsub : ∀ x ∈ prio, x ∈ labels) (hnd : prio.Nodup) (hlen : labels.length ≤ cap)
+    (hfull : cap ≤ prio.length) (hfresh : label ∉ prio) (hmem : label ∈ labels) : False := by
+  have hsub' : ∀ x ∈ prio, x ∈ labels.erase label := by
+    intro x hx
+    have hne : x ≠ label := by
+      intro heq
+      exact hfresh (by simpa [heq] using hx)
+    exact (List.mem_erase_of_ne hne).mpr (hsub x hx)
+  have hshort := nodup_mem_length prio (labels.erase label) hnd hsub'
+  have herase := erase_succ_length labels label hmem
+  have hle := nodup_mem_length prio labels hnd hsub
+  omega
+
 end Deadlock

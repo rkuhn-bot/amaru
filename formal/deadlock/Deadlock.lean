@@ -92,3 +92,4 @@ import Deadlock.Rank
 #print axioms Deadlock.peer_resumes
 #print axioms Deadlock.exec_drops
 #print axioms Deadlock.reaches_block
+#print axioms Deadlock.prio_no_crash
