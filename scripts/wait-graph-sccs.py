@@ -176,13 +176,13 @@ def report(mode: str, edges: list[dict], index: dict[tuple[str, str, str], dict]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Delete discharged wait-graph edges and recompute SCCs.")
-    parser.add_argument("--graph", type=Path, default=Path("/opt/cursor/artifacts/wait-graph-v4.json"))
+    parser.add_argument("--graph", type=Path, default=Path("scripts/wait-graph-v5.json"))
     parser.add_argument("--discharge", type=Path, default=None)
     parser.add_argument("--mode", choices=("now", "after", "both"), default="both")
     args = parser.parse_args()
     discharge = args.discharge
     if discharge is None:
-        discharge = args.graph.with_name("wait-graph-v4-discharge.json")
+        discharge = args.graph.with_name(args.graph.stem + "-discharge.json")
     graph = load(args.graph)
     table = load(discharge)
     edges = graph["edges"]

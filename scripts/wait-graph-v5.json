@@ -1,0 +1,1059 @@
+{
+  "commit": "33d62a6f1ccde08d77fbc202a2cfb888d0b3f7c6",
+  "note": "Every production stage send, call, and send_any on 33d62a6f, plus StageRefs carried in those messages and the submit API. blocking false is a oneshot reply. Per-connection protocols are one node each; N copies share that shape. A child spawned with eff.stage inherits Effects.mailbox_size, which for manager's children is the graph default 10, while manager's own mailbox is 10+U+D.",
+  "excluded": [
+    {
+      "name": "mithril_block_source",
+      "reason": "built by the mithril sync path, not by build_node"
+    },
+    {
+      "name": "pure-stage test stages",
+      "reason": "tests and simulations are not in the node graph"
+    },
+    {
+      "name": "FindBestCandidate / store anchor read",
+      "reason": "an external effect on the chain store, not a stage send; the anchor cell therefore deletes no edge"
+    }
+  ],
+  "capacities": {
+    "graph_default_bulk": 10,
+    "manager_and_peer_selection": "10+max_outbound+max_inbound = 23",
+    "connection_and_its_default_children": 10,
+    "mux": 24,
+    "chainsync_initiator": 14,
+    "blockfetch_initiator": "max(10, 2n+4)",
+    "N_max": "max_inbound+max_outbound = 13 at defaults",
+    "manager_after_B2": "4*N_max+2*max_outbound+4 = 62",
+    "connection_after_B3": 6,
+    "mempool_after_B4": "max_inbound+L+1",
+    "blockfetch_initiator_after_B5": 4,
+    "cleanup_filter_B6": 67,
+    "peer_selection_after_B1": 17
+  },
+  "edges": [
+    {
+      "from": "handshake",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "handshake",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "chainsync_initiator",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "chainsync_initiator",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "chainsync_responder",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "chainsync_responder",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "tx_submission_initiator",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "tx_submission_initiator",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "tx_submission_responder",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "tx_submission_responder",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "keepalive_initiator",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "keepalive_initiator",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "keepalive_responder",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "keepalive_responder",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "peer_sharing_initiator",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "peer_sharing_initiator",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "peer_sharing_responder",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:228",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:232",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:274",
+        "crates/amaru-protocols/src/protocol/miniprotocol.rs:278"
+      ],
+      "note": "call parks the protocol until mux admits the request; the Sent reply is a oneshot"
+    },
+    {
+      "from": "mux",
+      "to": "peer_sharing_responder",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "blockfetch_initiator",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:276",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:280",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:288",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:346",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:391",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:397"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mux",
+      "to": "blockfetch_initiator",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "blockfetch_responder",
+      "to": "mux",
+      "message": "WantNext/Send",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/blockfetch/responder.rs:231",
+        "crates/amaru-protocols/src/blockfetch/responder.rs:238",
+        "crates/amaru-protocols/src/blockfetch/responder.rs:244",
+        "crates/amaru-protocols/src/blockfetch/responder.rs:252"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mux",
+      "to": "blockfetch_responder",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mux",
+      "to": "done_trap",
+      "message": "Registered/FromNetwork",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:660",
+        "crates/amaru-protocols/src/mux.rs:846",
+        "crates/amaru-protocols/src/mux.rs:858"
+      ],
+      "note": "the trap does not send back; a later frame terminates it"
+    },
+    {
+      "from": "mux",
+      "to": "mux_reader",
+      "message": "Read",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:392",
+        "crates/amaru-protocols/src/mux.rs:463"
+      ],
+      "note": "the reading flag keeps one Read outstanding"
+    },
+    {
+      "from": "mux_reader",
+      "to": "mux",
+      "message": "FromNetwork",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:573"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mux",
+      "to": "mux_writer",
+      "message": "OutgoingSdu",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:449",
+        "crates/amaru-protocols/src/mux.rs:474"
+      ],
+      "note": "the sending flag keeps one OutgoingSdu outstanding"
+    },
+    {
+      "from": "mux_writer",
+      "to": "mux",
+      "message": "Written",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:382"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mux",
+      "to": "handshake",
+      "message": "Sent",
+      "blocking": false,
+      "via": "oneshot",
+      "lines": [
+        "crates/amaru-protocols/src/mux.rs:881"
+      ],
+      "note": "representative oneshot; every protocol's Sent reply takes this path"
+    },
+    {
+      "from": "handshake",
+      "to": "connection",
+      "message": "HandshakeResult",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/handshake/initiator.rs:92",
+        "crates/amaru-protocols/src/handshake/initiator.rs:98",
+        "crates/amaru-protocols/src/handshake/initiator.rs:107",
+        "crates/amaru-protocols/src/handshake/responder.rs:82"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "mux",
+      "message": "Register/SetSduTimeout",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:403",
+        "crates/amaru-protocols/src/connection.rs:471",
+        "crates/amaru-protocols/src/chainsync/mod.rs:67",
+        "crates/amaru-protocols/src/chainsync/mod.rs:91",
+        "crates/amaru-protocols/src/tx_submission/mod.rs:118",
+        "crates/amaru-protocols/src/keepalive/mod.rs:93",
+        "crates/amaru-protocols/src/peer_sharing/mod.rs:109",
+        "crates/amaru-protocols/src/peer_sharing/responder.rs:67",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:465",
+        "crates/amaru-protocols/src/blockfetch/responder.rs:304",
+        "crates/amaru-protocols/src/mux.rs:275"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "chainsync_initiator",
+      "message": "Done",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:594"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "chainsync_responder",
+      "message": "NewTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:258"
+      ],
+      "note": "the responder keeps only the latest upstream tip; the send is still blocking and the fix set adds no cell"
+    },
+    {
+      "from": "connection",
+      "to": "blockfetch_initiator",
+      "message": "RequestRange/Close",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:252",
+        "crates/amaru-protocols/src/connection.rs:598"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "tx_submission_initiator",
+      "message": "Close",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:602"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "keepalive_initiator",
+      "message": "Close",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:608"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "peer_sharing_initiator",
+      "message": "Close",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:612"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "track_peers",
+      "message": "Terminated",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:320"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connection",
+      "to": "manager",
+      "message": "HandshakeComplete",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/connection.rs:454"
+      ],
+      "note": ""
+    },
+    {
+      "from": "manager",
+      "to": "connection",
+      "message": "Initialize/Disconnect/FetchBlocks/NewTip/SetLocalUse",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/manager/mod.rs:498",
+        "crates/amaru-protocols/src/manager/mod.rs:604",
+        "crates/amaru-protocols/src/manager/mod.rs:626",
+        "crates/amaru-protocols/src/manager/mod.rs:776",
+        "crates/amaru-protocols/src/manager/mod.rs:789",
+        "crates/amaru-protocols/src/manager/mod.rs:844",
+        "crates/amaru-protocols/src/manager/mod.rs:866",
+        "crates/amaru-protocols/src/manager/mod.rs:888",
+        "crates/amaru-protocols/src/manager/mod.rs:946"
+      ],
+      "note": ""
+    },
+    {
+      "from": "manager",
+      "to": "connection",
+      "message": "HandshakeComplete reply",
+      "blocking": false,
+      "via": "oneshot",
+      "lines": [
+        "crates/amaru-protocols/src/manager/mod.rs:519",
+        "crates/amaru-protocols/src/manager/mod.rs:560"
+      ],
+      "note": ""
+    },
+    {
+      "from": "chainsync_initiator",
+      "to": "track_peers",
+      "message": "ChainSyncInitiatorMsg",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/chainsync/initiator.rs:169"
+      ],
+      "note": ""
+    },
+    {
+      "from": "track_peers",
+      "to": "chainsync_initiator",
+      "message": "RequestNext/Done",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:877",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:911",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:931",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:1015",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:1049",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:1063",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:1069"
+      ],
+      "note": ""
+    },
+    {
+      "from": "tx_submission_initiator",
+      "to": "mempool",
+      "message": "WaitForAtLeast",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/tx_submission/initiator.rs:107",
+        "crates/amaru-protocols/src/tx_submission/initiator.rs:365"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mempool",
+      "to": "tx_submission_initiator",
+      "message": "WaitForAtLeastReached",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-consensus/src/stages/mempool/stage.rs:70",
+        "crates/amaru-consensus/src/stages/mempool/stage.rs:187"
+      ],
+      "note": "caller is the initiator me_ref contramap; the send parks the mempool on the initiator mailbox"
+    },
+    {
+      "from": "tx_submission_responder",
+      "to": "mempool",
+      "message": "InsertBatch",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-protocols/src/tx_submission/responder.rs:608"
+      ],
+      "note": ""
+    },
+    {
+      "from": "tx_submission_responder",
+      "to": "mempool",
+      "message": "SubscribeCapacity",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/tx_submission/responder.rs:692"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mempool",
+      "to": "tx_submission_responder",
+      "message": "CapacityAvailable",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-consensus/src/stages/mempool/stage.rs:195"
+      ],
+      "note": ""
+    },
+    {
+      "from": "mempool",
+      "to": "tx_submission_responder",
+      "message": "InsertBatch reply",
+      "blocking": false,
+      "via": "oneshot",
+      "lines": [
+        "crates/amaru-consensus/src/stages/mempool/stage.rs:99"
+      ],
+      "note": ""
+    },
+    {
+      "from": "submit_api",
+      "to": "mempool",
+      "message": "Insert",
+      "blocking": true,
+      "via": "call",
+      "lines": [
+        "crates/amaru-node/src/submit_api.rs:85"
+      ],
+      "note": "HTTP handler, not a stage; Sender::call parks until admission and the oneshot reply"
+    },
+    {
+      "from": "mempool",
+      "to": "submit_api",
+      "message": "Insert reply",
+      "blocking": false,
+      "via": "oneshot",
+      "lines": [
+        "crates/amaru-consensus/src/stages/mempool/stage.rs:85"
+      ],
+      "note": ""
+    },
+    {
+      "from": "blockfetch_initiator",
+      "to": "cleanup_replies",
+      "message": "Block/NoBlocks/Done",
+      "blocking": true,
+      "via": "send_any",
+      "lines": [
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:312",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:348",
+        "crates/amaru-protocols/src/blockfetch/initiator.rs:364"
+      ],
+      "note": ""
+    },
+    {
+      "from": "track_peers",
+      "to": "select_chain",
+      "message": "NewTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:868"
+      ],
+      "note": ""
+    },
+    {
+      "from": "forge_block",
+      "to": "select_chain",
+      "message": "TipFromUpstream",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/forge_block/protocol.rs:455"
+      ],
+      "note": "present when forging credentials are configured"
+    },
+    {
+      "from": "select_chain",
+      "to": "fetch_blocks",
+      "message": "NewBestTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/select_chain/mod.rs:305",
+        "crates/amaru-consensus/src/stages/select_chain/mod.rs:400",
+        "crates/amaru-consensus/src/stages/select_chain/mod.rs:478"
+      ],
+      "note": ""
+    },
+    {
+      "from": "fetch_blocks",
+      "to": "select_chain",
+      "message": "FetchNextFrom",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:396",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:407",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:652",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:750",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:758"
+      ],
+      "note": ""
+    },
+    {
+      "from": "validate_block",
+      "to": "select_chain",
+      "message": "BlockValidationResult",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/validate_block/mod.rs:111",
+        "crates/amaru-consensus/src/stages/validate_block/mod.rs:142"
+      ],
+      "note": ""
+    },
+    {
+      "from": "fetch_blocks",
+      "to": "validate_block",
+      "message": "DownloadedBlock",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:310",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:395",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:641"
+      ],
+      "note": ""
+    },
+    {
+      "from": "validate_block",
+      "to": "adopt_chain",
+      "message": "AdoptChain",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/validate_block/mod.rs:119"
+      ],
+      "note": ""
+    },
+    {
+      "from": "validate_block",
+      "to": "block_source",
+      "message": "Validation",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/validate_block/mod.rs:117",
+        "crates/amaru-consensus/src/stages/validate_block/mod.rs:149"
+      ],
+      "note": ""
+    },
+    {
+      "from": "adopt_chain",
+      "to": "manager",
+      "message": "NewTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:266"
+      ],
+      "note": ""
+    },
+    {
+      "from": "adopt_chain",
+      "to": "block_source",
+      "message": "AdoptedTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:268"
+      ],
+      "note": ""
+    },
+    {
+      "from": "adopt_chain",
+      "to": "mempool",
+      "message": "NewTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:264"
+      ],
+      "note": ""
+    },
+    {
+      "from": "adopt_chain",
+      "to": "forge_block",
+      "message": "AdoptedTip",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/adopt_chain/mod.rs:274"
+      ],
+      "note": ""
+    },
+    {
+      "from": "fetch_blocks",
+      "to": "manager",
+      "message": "FetchBlocks",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:440",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:544"
+      ],
+      "note": ""
+    },
+    {
+      "from": "fetch_blocks",
+      "to": "peer_selection",
+      "message": "Adversarial",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:574"
+      ],
+      "note": ""
+    },
+    {
+      "from": "manager",
+      "to": "cleanup_replies",
+      "message": "PeersAsked/NoPeersAvailable",
+      "blocking": true,
+      "via": "carried-ref",
+      "lines": [
+        "crates/amaru-protocols/src/manager/mod.rs:795",
+        "crates/amaru-protocols/src/manager/mod.rs:798"
+      ],
+      "note": ""
+    },
+    {
+      "from": "cleanup_replies",
+      "to": "fetch_blocks",
+      "message": "Block/NoBlocks/PeersAsked/NoPeersAvailable",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:855",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:859",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:863",
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:877"
+      ],
+      "note": ""
+    },
+    {
+      "from": "cleanup_replies",
+      "to": "block_source",
+      "message": "BlockReceived",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:875"
+      ],
+      "note": ""
+    },
+    {
+      "from": "cleanup_replies",
+      "to": "peer_selection",
+      "message": "Adversarial",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/fetch_blocks/mod.rs:871"
+      ],
+      "note": ""
+    },
+    {
+      "from": "block_source",
+      "to": "peer_selection",
+      "message": "Adversarial",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/block_source/mod.rs:128",
+        "crates/amaru-consensus/src/stages/block_source/mod.rs:152"
+      ],
+      "note": ""
+    },
+    {
+      "from": "track_peers",
+      "to": "peer_selection",
+      "message": "Adversarial",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:786",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:960",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:1071"
+      ],
+      "note": ""
+    },
+    {
+      "from": "peer_selection",
+      "to": "manager",
+      "message": "AddPeer/RemovePeer/Disconnect/SetLocalUse",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:339",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:359",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:466",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:504",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:782",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:894",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:945",
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1219"
+      ],
+      "note": ""
+    },
+    {
+      "from": "peer_selection",
+      "to": "peer_selection",
+      "message": "Resolved",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:664"
+      ],
+      "note": ""
+    },
+    {
+      "from": "peer_selection",
+      "to": "ledger_check",
+      "message": "()",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-consensus/src/stages/peer_selection/mod.rs:1203"
+      ],
+      "note": "the child writes the performance resource and reschedules itself; it sends nothing back"
+    },
+    {
+      "from": "manager",
+      "to": "connector",
+      "message": "Connect",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/manager/mod.rs:359"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connector",
+      "to": "manager",
+      "message": "ConnectionResult",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/manager/connector.rs:101"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connector",
+      "to": "connect_worker",
+      "message": "ConnectJob",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/manager/connector.rs:74",
+        "crates/amaru-protocols/src/manager/connector.rs:81"
+      ],
+      "note": ""
+    },
+    {
+      "from": "connect_worker",
+      "to": "connector",
+      "message": "WorkerDone",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/manager/connector.rs:124"
+      ],
+      "note": ""
+    },
+    {
+      "from": "manager",
+      "to": "accept",
+      "message": "PullAccept",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/manager/mod.rs:442"
+      ],
+      "note": ""
+    },
+    {
+      "from": "accept",
+      "to": "manager",
+      "message": "Accepted",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-protocols/src/accept.rs:29"
+      ],
+      "note": ""
+    },
+    {
+      "from": "ledger",
+      "to": "track_peers",
+      "message": "StakeDistUpdated",
+      "blocking": true,
+      "via": "direct",
+      "lines": [
+        "crates/amaru-ledger/src/state.rs:1288",
+        "crates/amaru-node/src/stages/build_node.rs:504"
+      ],
+      "note": ""
+    },
+    {
+      "from": "track_peers",
+      "to": "ledger",
+      "message": "VolatileTipEffect",
+      "blocking": true,
+      "via": "effect",
+      "lines": [
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:993",
+        "crates/amaru-consensus/src/stages/track_peers/mod.rs:1086"
+      ],
+      "note": "epoch_transition joins the rewards thread while that thread is blocked in the callback"
+    }
+  ]
+}
