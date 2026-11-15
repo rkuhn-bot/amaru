@@ -4657,6 +4657,20 @@ theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = so
           exact Or.inl rfl
       · cases h
 
+/-- Dropping a head in front of `s` moves `s` one place closer to the head. -/
+theorem recv_closer (I : Impl) (w w' : World) (dst : InstId) (h : receiveBulk I w dst = some w')
+    (p : Parked) (ps : List Parked) (hp : (w.st dst).parked = p :: ps) (s : InstId)
+    (hne : p.sender ≠ s) (hin : parkIndex (p :: ps) s < (p :: ps).length) :
+    parkIndex ((w'.st dst).parked) s + 1 = parkIndex (p :: ps) s ∧
+      parkIndex ((w'.st dst).parked) s < ((w'.st dst).parked).length := by
+  have hdrop := bulk_drops_head I w w' dst h p ps hp
+  have hidx := parkIndex_skip p ps s hne
+  have hlt : parkIndex ps s < ps.length := by
+    rw [hidx, List.length_cons] at hin
+    omega
+  rw [hdrop]
+  exact ⟨hidx.symm, hlt⟩
+
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)
     (h : receiveBulk I w id = some w') (p : Parked) (ps : List Parked)

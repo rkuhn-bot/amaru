@@ -103,3 +103,7 @@ import Deadlock.Rank
 #print axioms Deadlock.bulk_resumes_send
 #print axioms Deadlock.bulk_admits_call
 #print axioms Deadlock.recv_clears_head_send
+#print axioms Deadlock.enqueue_queue
+#print axioms Deadlock.queue_place
+#print axioms Deadlock.recv_closer
+#print axioms Deadlock.alive_queue
