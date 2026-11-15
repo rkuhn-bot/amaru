@@ -320,11 +320,13 @@ for a send the actor did not itself perform.
   the kind changes, so the drop is at the first differing step. `await_stays`
   and `await_drops_at` do the same for `awaitReply`. `parked_forever_false`
   is the same queue walk for either parked bit: a call cannot stay parked
-  once its callee is idle with mail infinitely often. `mailbox_alive` says a
-  reachable parked list belongs to a live owner. The rank induction that
-  turns the lower callee's idle visits into `never_stuck`, the handler
-  reply, `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not
-  proved.
+  once its callee is idle with mail infinitely often.   `mailbox_alive` says a reachable parked list belongs to a live owner.
+  `parked_typestate_stays` says an actor that stays parked or in `awaitReply`
+  keeps its typestate. `send_height_below` puts those together: a blocking
+  send keeps the waiter's height, and `park_below` places the callee's node
+  at every later time strictly below that height. The pointwise rank
+  induction, the callee's idle visits, the handler reply, `never_stuck`,
+  `deadlock_freedom`, `CellFresh`, and the dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

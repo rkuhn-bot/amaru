@@ -1337,6 +1337,24 @@ theorem wakes_life (ids : List InstId) (D : Description) (w : World) (dst label 
     simp only [List.foldl_cons]
     rw [ih, try_wake_life]
 
+theorem try_wake_ty (D : Description) (w : World) (dstId : InstId) (label : String) (writer i : InstId) :
+    ((tryWake D w dstId label writer).st i).typestate = (w.st i).typestate := by
+  by_cases hif : ((w.st dstId).life == .alive &&
+      decide ((w.st dstId).prio.length < capPrio D w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · simp [tryWake, hif, setActor]
+    by_cases hi : i = dstId <;> simp [hi]
+  · simp [tryWake, hif]
+
+theorem wakes_ty (ids : List InstId) (D : Description) (w : World) (dst label : String)
+    (writer i : InstId) :
+    ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).typestate = (w.st i).typestate := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    rw [ih, try_wake_ty]
+
 /-- An `exec` of `id` does not rewrite `s` when `s` is neither parked nor awaiting `id`'s reply. -/
 theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (s : InstId)
     (hs : s ≠ id) (hnpark : ∀ d c ck, (w.st s).phase ≠ .parked d c ck)
@@ -6745,6 +6763,519 @@ theorem mailbox_alive (I : Impl) (hL : LocalOk I) (N : Nat) (w : World) (hR : Re
           | inl hempty => exact hempty
           | inr hne0 => exact absurd (ih id hne0) hdead0
         exact absurd (dead_no_mail I a w w' id happ hdead0 hempty) hne
+
+/-- Parked or waiting for a reply. These phases do not carry a new typestate. -/
+def PhaseWait (ph : Phase) : Prop :=
+  (∃ dst c k, ph = .parked dst c k) ∨ (∃ dst k, ph = .awaitReply dst k)
+
+theorem proceed_not_wait (a : Actor) (k : Cont) : ¬PhaseWait (proceed a k).phase := by
+  cases hk : k.rest <;> simp [proceed, PhaseWait, hk]
+
+theorem resume_ty (a : Actor) (b : Bool) (dst : InstId) (h : PhaseWait (resumeSender a b dst).phase) :
+    (resumeSender a b dst).typestate = a.typestate := by
+  cases hph : a.phase with
+  | parked _ _ k =>
+    cases b with
+    | true => simp [resumeSender, hph]
+    | false =>
+      exact absurd (by simpa [resumeSender, hph] using h) (proceed_not_wait a k)
+  | idle => simp [resumeSender, hph]
+  | run _ => simp [resumeSender, hph]
+  | awaitReply _ _ => simp [resumeSender, hph]
+  | awaitEffect _ => simp [resumeSender, hph]
+  | awaitPeer _ => simp [resumeSender, hph]
+  | crashed => simp [resumeSender, hph]
+
+/-- Enqueue copies typestate whenever the actor is still parked or awaiting. -/
+theorem enqueue_ty_wait (w : World) (D : Description) (sender dst i : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont)
+    (hwait : PhaseWait ((enqueueOrPark w D sender dst msg isCall k).st i).phase) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).typestate = (w.st i).typestate := by
+  cases isCall with
+  | true =>
+    unfold enqueueOrPark at hwait ⊢
+    by_cases hlive : (w.st dst).life = .alive
+    · simp [hlive] at hwait ⊢
+      by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+      · simp [hroom] at hwait ⊢
+        by_cases hsame : sender = dst
+        · rw [if_pos hsame] at hwait ⊢
+          simp [setActor, chargeSender, bumpToken]
+          by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken]
+        · rw [if_neg hsame] at hwait ⊢
+          have hflip : ¬dst = sender := fun h => hsame h.symm
+          by_cases hi : i = sender
+          · simp [setActor, hi, chargeSender, bumpToken]
+          · by_cases hid : i = dst <;> simp [setActor, hi, hid, hflip]
+      · simp [hroom] at hwait ⊢
+        by_cases hsame : sender = dst
+        · rw [if_pos hsame] at hwait ⊢
+          simp [setActor, chargeSender, bumpToken]
+          by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken]
+        · rw [if_neg hsame] at hwait ⊢
+          have hflip : ¬dst = sender := fun h => hsame h.symm
+          by_cases hi : i = sender
+          · simp [setActor, hi, chargeSender, bumpToken]
+          · by_cases hid : i = dst <;> simp [setActor, hi, hid, hflip]
+    · simp [hlive, setActor] at hwait ⊢
+      by_cases hi : i = sender
+      · simp [hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ k)
+      · simp [hi]
+  | false =>
+    unfold enqueueOrPark at hwait ⊢
+    by_cases hlive : (w.st dst).life = .alive
+    · simp [hlive] at hwait ⊢
+      by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+      · simp [hroom] at hwait ⊢
+        by_cases hsame : sender = dst
+        · rw [if_pos hsame] at hwait ⊢
+          simp [setActor, chargeSender, bumpToken] at hwait ⊢
+          by_cases hi : i = sender
+          · simp [hi] at hwait ⊢
+            exact absurd hwait (proceed_not_wait _ k)
+          · simp [hi]
+        · rw [if_neg hsame] at hwait ⊢
+          have hflip : ¬dst = sender := fun h => hsame h.symm
+          by_cases hi : i = sender
+          · simp [setActor, hi, chargeSender, bumpToken] at hwait ⊢
+            exact absurd hwait (proceed_not_wait _ k)
+          · by_cases hid : i = dst <;> simp [setActor, hi, hid, hflip]
+      · simp [hroom] at hwait ⊢
+        by_cases hsame : sender = dst
+        · rw [if_pos hsame] at hwait ⊢
+          simp [setActor, chargeSender, bumpToken]
+          by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken]
+        · rw [if_neg hsame] at hwait ⊢
+          have hflip : ¬dst = sender := fun h => hsame h.symm
+          by_cases hi : i = sender
+          · simp [setActor, hi, chargeSender, bumpToken]
+          · by_cases hid : i = dst <;> simp [setActor, hi, hid, hflip]
+    · simp [hlive, setActor] at hwait ⊢
+      by_cases hi : i = sender
+      · simp [hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ k)
+      · simp [hi]
+
+theorem reply_ty_wait (w : World) (sender : InstId) (k : Cont) (i : InstId)
+    (hwait : PhaseWait ((performReply w sender k).st i).phase) :
+    ((performReply w sender k).st i).typestate = (w.st i).typestate := by
+  unfold performReply at hwait ⊢
+  cases hr : k.replyTo with
+  | none =>
+    simp [hr] at hwait
+    by_cases hi : i = sender
+    · simp [setActor, hi] at hwait ⊢
+      exact absurd hwait (proceed_not_wait _ (afterHead k))
+    · simp [setActor, hi]
+  | some caller =>
+    simp [hr] at hwait
+    cases hph : (w.st caller).phase with
+    | awaitReply dst ck =>
+      simp [hph] at hwait
+      by_cases hd : dst = sender
+      · simp [hd] at hwait
+        by_cases hi : i = sender
+        · simp [setActor, hi] at hwait ⊢
+          exact absurd hwait (proceed_not_wait _ (afterHead k))
+        · by_cases hc : i = caller
+          · have hcs : ¬caller = sender := fun h => hi (hc.trans h)
+            simp [setActor, hi, hc, hcs] at hwait ⊢
+            exact absurd hwait (proceed_not_wait _ ck)
+          · simp [setActor, hi, hc, hph, hd]
+      · simp [hd] at hwait
+        by_cases hi : i = sender
+        · simp [setActor, hi] at hwait ⊢
+          exact absurd hwait (proceed_not_wait _ (afterHead k))
+        · simp [setActor, hi, hph, hd]
+    | idle =>
+      simp [hph] at hwait
+      by_cases hi : i = sender
+      · simp [setActor, hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ (afterHead k))
+      · simp [setActor, hi, hph]
+    | run ck =>
+      simp [hph] at hwait
+      by_cases hi : i = sender
+      · simp [setActor, hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ (afterHead k))
+      · simp [setActor, hi, hph]
+    | parked _ _ _ =>
+      simp [hph] at hwait
+      by_cases hi : i = sender
+      · simp [setActor, hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ (afterHead k))
+      · simp [setActor, hi, hph]
+    | awaitEffect _ =>
+      simp [hph] at hwait
+      by_cases hi : i = sender
+      · simp [setActor, hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ (afterHead k))
+      · simp [setActor, hi, hph]
+    | awaitPeer _ =>
+      simp [hph] at hwait
+      by_cases hi : i = sender
+      · simp [setActor, hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ (afterHead k))
+      · simp [setActor, hi, hph]
+    | crashed =>
+      simp [hph] at hwait
+      by_cases hi : i = sender
+      · simp [setActor, hi] at hwait ⊢
+        exact absurd hwait (proceed_not_wait _ (afterHead k))
+      · simp [setActor, hi, hph]
+
+theorem release_preserves_nonwait (w : World) (id : InstId) (ps : List Parked) (s : InstId)
+    (hn : ¬PhaseWait ((w.st s).phase)) : ¬PhaseWait ((releaseParked w id ps).st s).phase := by
+  induction ps generalizing w with
+  | nil => simpa [releaseParked] using hn
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w hn
+    · rw [if_neg hskip]
+      by_cases hs : s = p.sender
+      · cases hph : (w.st p.sender).phase with
+        | parked _ _ k =>
+          exact ih _ (by simpa [setActor, hs, resumeSender, hph] using proceed_not_wait (w.st p.sender) k)
+        | idle => exact ih _ (by simpa [setActor, hs, resumeSender, hph] using hn)
+        | run k => exact ih _ (by simpa [setActor, hs, resumeSender, hph] using hn)
+        | awaitReply _ _ => exact ih _ (by simpa [setActor, hs, resumeSender, hph] using hn)
+        | awaitEffect _ => exact ih _ (by simpa [setActor, hs, resumeSender, hph] using hn)
+        | awaitPeer _ => exact ih _ (by simpa [setActor, hs, resumeSender, hph] using hn)
+        | crashed => exact ih _ (by simpa [setActor, hs, resumeSender, hph] using hn)
+      · exact ih _ (by simpa [setActor, hs] using hn)
+
+theorem release_ty_wait (w : World) (id : InstId) (ps : List Parked) (s : InstId)
+    (hpost : PhaseWait ((releaseParked w id ps).st s).phase) :
+    ((releaseParked w id ps).st s).typestate = (w.st s).typestate := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons] at hpost ⊢
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip] at hpost ⊢
+      exact ih _ hpost
+    · rw [if_neg hskip] at hpost ⊢
+      by_cases hs : s = p.sender
+      · cases hph : (w.st p.sender).phase with
+        | parked _ _ k =>
+          exact absurd hpost (release_preserves_nonwait _ id ps s
+            (by simpa [setActor, hs, resumeSender, hph] using proceed_not_wait (w.st p.sender) k))
+        | idle =>
+          have hidr : resumeSender (w.st p.sender) false id = w.st p.sender := by simp [resumeSender, hph]
+          rw [hidr] at hpost ⊢
+          have hself : setActor w p.sender (w.st p.sender) = w := by
+            simp [setActor]; congr; funext i; by_cases h : i = p.sender <;> simp [h]
+          rw [hself] at hpost ⊢
+          exact ih _ hpost
+        | run k =>
+          have hidr : resumeSender (w.st p.sender) false id = w.st p.sender := by simp [resumeSender, hph]
+          rw [hidr] at hpost ⊢
+          have hself : setActor w p.sender (w.st p.sender) = w := by
+            simp [setActor]; congr; funext i; by_cases h : i = p.sender <;> simp [h]
+          rw [hself] at hpost ⊢
+          exact ih _ hpost
+        | awaitReply _ k =>
+          have hidr : resumeSender (w.st p.sender) false id = w.st p.sender := by simp [resumeSender, hph]
+          rw [hidr] at hpost ⊢
+          have hself : setActor w p.sender (w.st p.sender) = w := by
+            simp [setActor]; congr; funext i; by_cases h : i = p.sender <;> simp [h]
+          rw [hself] at hpost ⊢
+          exact ih _ hpost
+        | awaitEffect _ =>
+          have hidr : resumeSender (w.st p.sender) false id = w.st p.sender := by simp [resumeSender, hph]
+          rw [hidr] at hpost ⊢
+          have hself : setActor w p.sender (w.st p.sender) = w := by
+            simp [setActor]; congr; funext i; by_cases h : i = p.sender <;> simp [h]
+          rw [hself] at hpost ⊢
+          exact ih _ hpost
+        | awaitPeer _ =>
+          have hidr : resumeSender (w.st p.sender) false id = w.st p.sender := by simp [resumeSender, hph]
+          rw [hidr] at hpost ⊢
+          have hself : setActor w p.sender (w.st p.sender) = w := by
+            simp [setActor]; congr; funext i; by_cases h : i = p.sender <;> simp [h]
+          rw [hself] at hpost ⊢
+          exact ih _ hpost
+        | crashed =>
+          have hidr : resumeSender (w.st p.sender) false id = w.st p.sender := by simp [resumeSender, hph]
+          rw [hidr] at hpost ⊢
+          have hself : setActor w p.sender (w.st p.sender) = w := by
+            simp [setActor]; congr; funext i; by_cases h : i = p.sender <;> simp [h]
+          rw [hself] at hpost ⊢
+          exact ih _ hpost
+      · have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id)) hpost
+        exact hmid.trans (by simp [setActor, hs])
+
+/-- One step does not change the typestate of an actor that stays parked or awaiting. -/
+theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
+    (h : apply I a w = some w')
+    (hpre : PhaseWait ((w.st s).phase)) (hpost : PhaseWait ((w'.st s).phase)) :
+    (w'.st s).typestate = (w.st s).typestate := by
+  cases a with
+  | finish j =>
+    simp only [apply] at h
+    unfold finishWait at h
+    cases hp : (w.st j).phase with
+    | awaitEffect kF =>
+      simp [hp] at h
+      cases h
+      by_cases hs : s = j
+      · rw [hs] at hpost
+        simp [setActor] at hpost
+        exact absurd hpost (proceed_not_wait _ kF)
+      · simp [setActor, hs]
+    | awaitPeer kF =>
+      simp [hp] at h
+      cases h
+      by_cases hs : s = j
+      · rw [hs] at hpost
+        simp [setActor] at hpost
+        exact absurd hpost (proceed_not_wait _ kF)
+      · simp [setActor, hs]
+    | idle => simp [hp] at h
+    | run _ => simp [hp] at h
+    | parked _ _ _ => simp [hp] at h
+    | awaitReply _ _ => simp [hp] at h
+    | crashed => simp [hp] at h
+  | spawn template =>
+    simp only [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        simp only [readCells_st]
+        by_cases hi : s = InstId.peer template (w.nextIx template)
+        · simp [readCells_st, setActor, hi, withTokens, PhaseWait] at hpost
+        · simp [readCells_st, setActor, hi]
+      · cases h
+  | recvPrio j =>
+    by_cases hs : s = j
+    · rw [hs] at hpre
+      simp only [apply] at h
+      unfold receivePrio at h
+      cases hp : (w.st j).prio with
+      | nil => simp [hp] at h
+      | cons _ _ =>
+        simp [hp] at h
+        rcases hpre with ⟨_, _, _, hph⟩ | ⟨_, _, hph⟩ <;> simp [hph] at h
+    · simp only [apply] at h
+      unfold receivePrio at h
+      cases hp : (w.st j).prio with
+      | nil => simp [hp] at h
+      | cons m ms =>
+        by_cases hready : (w.st j).life ≠ .alive ∨ (w.st j).phase ≠ .idle
+        · simp [hp, hready] at h
+        · simp [hp, hready] at h
+          split at h
+          · cases h
+          · next w1 a1 hdel =>
+            cases h
+            have hst := deliver_st I w j _ m w1 a1 s hdel
+            simpa [setActor, hs] using congrArg (·.typestate) hst
+  | recvBulk j =>
+    by_cases hs : s = j
+    · rw [hs] at hpre
+      simp only [apply] at h
+      unfold receiveBulk at h
+      rcases hpre with ⟨_, _, _, hph⟩ | ⟨_, _, hph⟩ <;> simp [hph] at h
+    · simp only [apply] at h
+      unfold receiveBulk at h
+      by_cases hready : (w.st j).life ≠ .alive ∨ (w.st j).phase ≠ .idle
+      · simp [hready] at h
+      · simp [hready] at h
+        cases hbox : (w.st j).box with
+        | nil =>
+          cases hpark : (w.st j).parked with
+          | nil => simp [hbox, hpark] at h
+          | cons q qs =>
+            simp [hbox, hpark] at h
+            split at h
+            · cases h
+            · next w1 a1 hdel =>
+              cases h
+              have hst := deliver_st I w j _ q.msg w1 a1 s hdel
+              have hset : ((setActor w1 j a1).st s).typestate = (w.st s).typestate := by
+                simpa [setActor, hs] using congrArg (·.typestate) hst
+              have hcred := (credit_life (setActor w1 j a1) (tname j) q.msg.sender s).2.1
+              by_cases hsender : s = q.sender
+              · rw [← hsender] at hpost ⊢
+                simp [setActor] at hpost ⊢
+                exact (resume_ty _ q.isCall j hpost).trans (hcred.trans hset)
+              · simp [setActor, hsender]
+                exact hcred.trans hset
+        | cons m ms =>
+          cases hpark : (w.st j).parked with
+          | nil =>
+            simp [hbox, hpark] at h
+            split at h
+            · cases h
+            · next w1 a1 hdel =>
+              cases h
+              have hst := deliver_st I w j _ m w1 a1 s hdel
+              have hset : ((setActor w1 j a1).st s).typestate = (w.st s).typestate := by
+                simpa [setActor, hs] using congrArg (·.typestate) hst
+              exact ((credit_life (setActor w1 j a1) (tname j) m.sender s).2.1).trans hset
+          | cons q qs =>
+            simp [hbox, hpark] at h
+            split at h
+            · cases h
+            · next w1 a1 hdel =>
+              cases h
+              have hst := deliver_st I w j _ m w1 a1 s hdel
+              let admitted : Actor := { a1 with box := a1.box ++ [q.msg], parked := qs }
+              have hset : ((setActor w1 j admitted).st s).typestate = (w.st s).typestate := by
+                simpa [setActor, admitted, hs] using congrArg (·.typestate) hst
+              have hcred := (credit_life (setActor w1 j admitted) (tname j) m.sender s).2.1
+              by_cases hsender : s = q.sender
+              · rw [← hsender] at hpost ⊢
+                simp [setActor] at hpost ⊢
+                exact (resume_ty _ q.isCall j hpost).trans (hcred.trans hset)
+              · simp [setActor, hsender]
+                exact hcred.trans hset
+  | exec j =>
+    by_cases hs : s = j
+    · rw [hs] at hpre
+      simp only [apply] at h
+      unfold execHead at h
+      rcases hpre with ⟨_, _, _, hph⟩ | ⟨_, _, hph⟩ <;> simp [hph] at h
+    · simp only [apply] at h
+      unfold execHead at h
+      by_cases hlj : (w.st j).life = .alive
+      · simp [hlj] at h
+        cases hp : (w.st j).phase with
+        | run kE =>
+          simp [hp] at h
+          cases h
+          cases hk : kE.rest with
+          | nil => simp [execRun, hk, setActor, hs]
+          | cons e tail =>
+            cases e with
+            | send name label hint =>
+              simp [execRun, hk] at hpost ⊢
+              cases hr : route w I.desc name hint with
+              | none =>
+                simp [hr, setActor, hs] at hpost ⊢
+              | some dstId =>
+                simp [hr] at hpost ⊢
+                exact enqueue_ty_wait w I.desc j dstId s
+                  ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead kE) hpost
+            | call name label hint =>
+              simp [execRun, hk] at hpost ⊢
+              cases hr : route w I.desc name hint with
+              | none => simp [hr, setActor, hs] at hpost ⊢
+              | some dstId =>
+                simp [hr] at hpost ⊢
+                exact enqueue_ty_wait w I.desc j dstId s
+                  ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead kE) hpost
+            | trySend name label hint =>
+              simp [execRun, hk] at hpost ⊢
+              cases hr : route w I.desc name hint with
+              | none => simp [hr, setActor, hs] at hpost ⊢
+              | some dstId =>
+                simp [hr]
+                split
+                · by_cases hid : dstId = j
+                  · simp [setActor, hid, hs, chargeSender, bumpToken, proceed]
+                  · by_cases hi : s = dstId
+                    · simp [setActor, hi, hid, hs, chargeSender, bumpToken, proceed]
+                    · simp [setActor, hi, hs, chargeSender, bumpToken, proceed]
+                · simp [setActor, hs, proceed]
+            | reply =>
+              simp [execRun, hk] at hpost ⊢
+              exact reply_ty_wait w j kE s hpost
+            | selfSchedule _ =>
+              simp [execRun, hk]
+              split
+              · simp [setActor, hs, proceed]
+              · split
+                · simp [setActor, hs, proceed]
+                · simp [setActor, hs]
+            | cell name label value =>
+              simp only [execRun, hk]
+              split
+              · simp [setCell, setActor, hs, proceed]
+              · let w1 : World := setActor (setCell w name label
+                    { value := max (w.cell name label).value value, dirty := true }) j
+                  (proceed ((setCell w name label
+                    { value := max (w.cell name label).value value, dirty := true }).st j) (afterHead kE))
+                have hbase : (w1.st s).typestate = (w.st s).typestate := by
+                  simp [w1, setCell, setActor, hs, proceed]
+                rw [wakeReaders]
+                exact (wakes_ty (readersOf w1 name) I.desc w1 name label j s).trans hbase
+            | internal => simp [execRun, hk, setActor, hs]
+            | peer => simp [execRun, hk, setActor, hs]
+            | terminate =>
+              cases ht : templateOf I.desc (tname j) with
+              | none => simp [execRun, hk, ht]
+              | some t =>
+                by_cases hflag : (t.terminable && !hasParkedCall (w.st j).parked) = true
+                · let base :=
+                    refundParked (refundMsgs (readCells I.desc w j) (tname j) (w.st j).box) (tname j)
+                      (w.st j).parked
+                  let deadA : Actor :=
+                    { base.st j with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+                  have hbase : (base.st s).typestate = (w.st s).typestate := by
+                    have hread := congrArg (·.typestate) (readCells_st I.desc w j s)
+                    have href := (refund_life (readCells I.desc w j) (tname j) (w.st j).box s).2.1
+                    have hrefp :=
+                      (refundP_life (refundMsgs (readCells I.desc w j) (tname j) (w.st j).box) (tname j)
+                        (w.st j).parked s).2.1
+                    simp [base, hread, href, hrefp]
+                  have hset : ((setActor base j deadA).st s).typestate = (w.st s).typestate := by
+                    simp [setActor, hs, hbase]
+                  have hstep : execRun I w j (w.st j) kE =
+                      releaseParked (setActor base j deadA) j (w.st j).parked := by
+                    simp [execRun, hk, ht, hflag, base, deadA]
+                  rw [hstep] at hpost ⊢
+                  exact (release_ty_wait (setActor base j deadA) j (w.st j).parked s hpost).trans hset
+                · simp [execRun, hk, ht, hflag]
+        | idle => simp [hp] at h
+        | parked _ _ _ => simp [hp] at h
+        | awaitReply _ _ => simp [hp] at h
+        | awaitEffect _ => simp [hp] at h
+        | awaitPeer _ => simp [hp] at h
+        | crashed => simp [hp] at h
+      · simp [hlj] at h
+
+/-- While `s` stays parked or awaiting, its typestate does not change. -/
+theorem parked_typestate_stays (I : Impl) {N : Nat} (ρ : Run I N)
+    (s : InstId) (i n : Nat)
+    (hwait : ∀ t, i ≤ t → t ≤ i + n → PhaseWait (((ρ.cfg t).st s).phase)) :
+    ((ρ.cfg (i + n)).st s).typestate = ((ρ.cfg i).st s).typestate := by
+  induction n with
+  | zero => simp
+  | succ n ih =>
+    have hprev := ih (fun t h1 h2 => hwait t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+    have hstep := waiting_ty_step I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) s
+      (ρ.valid (i + n))
+      (hwait (i + n) (Nat.le_add_right i n) (by omega))
+      (hwait (i + n + 1) (by omega) (by omega))
+    exact hstep.trans hprev
+
+/-- A blocking send keeps the waiter's height, and the live callee stays strictly below it. -/
+theorem send_height_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
+    (s dst : InstId) (k : Cont) (i n : Nat)
+    (hph : ((ρ.cfg i).st s).phase = .parked dst false k)
+    (hkind : ∀ t, i ≤ t → t ≤ i + n → waitKind ((ρ.cfg t).st s) = some (.blockingSend dst))
+    (hlive : ∀ t, i ≤ t → t ≤ i + n → ((ρ.cfg t).st dst).life = .alive) :
+    rankAt hs (ρ.cfg (i + n)) s = rankAt hs (ρ.cfg i) s ∧
+      rankAt hs (ρ.cfg (i + n)) dst < rankAt hs (ρ.cfg i) s := by
+  have hphn := blocking_stays I hL ρ s dst k i n hph hkind
+  have hty := parked_typestate_stays I ρ s i n (fun t h1 h2 => by
+    obtain ⟨k0, hk0⟩ := blocking_parked ((ρ.cfg t).st s) dst (hkind t h1 h2)
+    exact Or.inl ⟨dst, false, k0, hk0⟩)
+  have hrank : rankAt hs (ρ.cfg (i + n)) s = rankAt hs (ρ.cfg i) s := by
+    simp [rankAt, hty]
+  refine ⟨hrank, ?_⟩
+  rw [← hrank]
+  have hO := (inv3_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).1.2.1
+  simpa [rankAt] using park_below I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) hO s dst k
+    hs hok hphn (hlive (i + n) (Nat.le_add_right _ _) (Nat.le_refl _))
 
 /-- That resume is not the same wait: a blocking send at the parked head is over. -/
 theorem recv_clears_head_send (I : Impl) (w w' : World) (id : InstId)

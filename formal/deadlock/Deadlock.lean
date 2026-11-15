@@ -125,3 +125,6 @@ import Deadlock.Rank
 #print axioms Deadlock.parked_forever_false
 #print axioms Deadlock.mailbox_alive
 #print axioms Deadlock.call_below
+#print axioms Deadlock.waiting_ty_step
+#print axioms Deadlock.parked_typestate_stays
+#print axioms Deadlock.send_height_below
