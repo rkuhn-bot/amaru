@@ -88,3 +88,5 @@ import Deadlock.Rank
 #print axioms Deadlock.inv3_reachable
 #print axioms Deadlock.exec_shortens
 #print axioms Deadlock.not_forever_run
+#print axioms Deadlock.effect_resumes
+#print axioms Deadlock.peer_resumes

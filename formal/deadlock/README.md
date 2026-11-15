@@ -283,8 +283,11 @@ for a send the actor did not itself perform.
   `exec`, and spawn as well, so `inv3_reachable` carries it at every reachable
   world and `terminate_commits` applies there. `exec_shortens` says every head
   that is still `.run` is a strictly shorter tail, and `not_forever_run` says a
-  fair run cannot keep a live actor in `.run` forever. The idle induction,
-  `Fair.bulk`, `CellFresh`, and the dead-instance lift are not proved.
+  fair run cannot keep a live actor in `.run` forever. `effect_resumes` and
+  `peer_resumes` say fairness takes the `finish` of an effect or peer wait and
+  the actor continues on the tail, still alive. A blocking send or call reply
+  reaching idle, `Fair.bulk`, `CellFresh`, and the dead-instance lift are not
+  proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

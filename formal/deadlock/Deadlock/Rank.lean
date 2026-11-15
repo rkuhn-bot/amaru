@@ -1206,4 +1206,593 @@ theorem not_forever_run (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : N
       (fun j hj => hl j (Nat.le_trans (Nat.le_trans him (Nat.le_succ _)) hj))
       (fun j hj => hr j (Nat.le_trans (Nat.le_trans him (Nat.le_succ _)) hj))
 
+/-- `resumeSender` rewrites a parked phase only. Any other phase is left as it stands. -/
+theorem resume_id_of_not_parked (a : Actor) (b : Bool) (dst : InstId)
+    (hn : ∀ d c k, a.phase ≠ .parked d c k) : resumeSender a b dst = a := by
+  cases h : a.phase with
+  | parked d c k => exact absurd h (hn d c k)
+  | idle => simp [resumeSender, h]
+  | run k => simp [resumeSender, h]
+  | awaitReply d k => simp [resumeSender, h]
+  | awaitEffect k => simp [resumeSender, h]
+  | awaitPeer k => simp [resumeSender, h]
+  | crashed => simp [resumeSender, h]
+
+theorem release_keeps_nonparked (w : World) (id : InstId) (ps : List Parked) (s : InstId)
+    (hn : ∀ d c k, (w.st s).phase ≠ .parked d c k) :
+    ((releaseParked w id ps).st s).phase = (w.st s).phase ∧
+      ((releaseParked w id ps).st s).life = (w.st s).life := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w hn
+    · rw [if_neg hskip]
+      let w' := setActor w p.sender (resumeSender (w.st p.sender) false id)
+      have hpl : (w'.st s).phase = (w.st s).phase ∧ (w'.st s).life = (w.st s).life := by
+        by_cases hs : s = p.sender
+        · have hid := resume_id_of_not_parked (w.st p.sender) false id (by
+            intro d c k hbad
+            exact hn d c k (by simpa [hs] using hbad))
+          simp [w', hs, hid, setActor]
+        · simp [w', setActor, hs]
+      have hn' : ∀ d c k, (w'.st s).phase ≠ .parked d c k := by
+        intro d c k hbad
+        exact hn d c k (hpl.1 ▸ hbad)
+      have ih' := ih w' hn'
+      exact ⟨ih'.1.trans hpl.1, ih'.2.trans hpl.2⟩
+
+/-- A reply rewrites the caller only out of `awaitReply`, and the sender is `sender`. -/
+theorem reply_keeps_quiet (w : World) (sender s : InstId) (k : Cont)
+    (hp : ∀ d ck, (w.st s).phase ≠ .awaitReply d ck) (hs : s ≠ sender) :
+    ((performReply w sender k).st s).phase = (w.st s).phase ∧
+      ((performReply w sender k).st s).life = (w.st s).life := by
+  unfold performReply
+  cases hr : k.replyTo with
+  | none =>
+    refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
+  | some caller =>
+    by_cases hc : caller = s
+    · rw [hc]
+      cases hph : (w.st s).phase with
+      | awaitReply dst ck => exact absurd hph (hp dst ck)
+      | idle => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | run _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | awaitEffect _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | awaitPeer _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | parked _ _ _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | crashed => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+    · cases hph : (w.st caller).phase with
+      | awaitReply dst ck =>
+        by_cases hd : dst = sender
+        · refine ⟨?_, ?_⟩
+          · simp only [hph, hd, if_true]
+            rw [setActor_other _ sender s _ hs, setActor_other _ caller s _ (Ne.symm hc)]
+          · simp only [hph, hd, if_true]
+            rw [setActor_other _ sender s _ hs, setActor_other _ caller s _ (Ne.symm hc)]
+        · refine ⟨?_, ?_⟩ <;> simp [hph, hd, setActor_other, hs, proceed_life]
+      | idle => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | run _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | awaitEffect _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | awaitPeer _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | parked _ _ _ => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+      | crashed => refine ⟨?_, ?_⟩ <;> simp [hph, setActor_other, hs, proceed_life]
+
+theorem enqueue_life (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).life = (w.st i).life := by
+  cases isCall <;>
+    (unfold enqueueOrPark
+     by_cases hlive : (w.st dst).life = .alive
+     · simp [hlive]
+       by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+       · simp [hroom]
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame]
+           simp [setActor]
+           by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken, proceed_life]
+         · rw [if_neg hsame]
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip]
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, proceed_life]
+           · by_cases hid : i = dst
+             · simp [hid, hlive]
+               rw [if_neg hflip]
+             · rw [if_neg hi, if_neg hid]
+       · simp [hroom]
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame]
+           simp [setActor]
+           by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken]
+         · rw [if_neg hsame]
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip]
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken]
+           · by_cases hid : i = dst
+             · simp [hid, hlive]
+               rw [if_neg hflip]
+             · rw [if_neg hi, if_neg hid]
+     · simp [hlive, setActor, proceed_life]
+       by_cases hi : i = sender <;> simp [hi, proceed_life])
+
+theorem try_wake_life (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) : ((tryWake D w dstId label writer).st i).life = (w.st i).life := by
+  by_cases hif : ((w.st dstId).life == .alive &&
+      decide ((w.st dstId).prio.length < capPrio D w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · simp [tryWake, hif, setActor]
+    by_cases hi : i = dstId <;> simp [hi]
+  · simp [tryWake, hif]
+
+theorem wakes_life (ids : List InstId) (D : Description) (w : World) (dst label : String)
+    (writer i : InstId) :
+    ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).life = (w.st i).life := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    rw [ih, try_wake_life]
+
+/-- An `exec` of `id` does not rewrite `s` when `s` is neither parked nor awaiting `id`'s reply. -/
+theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (s : InstId)
+    (hs : s ≠ id) (hnpark : ∀ d c ck, (w.st s).phase ≠ .parked d c ck)
+    (hnreply : ∀ d ck, (w.st s).phase ≠ .awaitReply d ck) :
+    ((execRun I w id a k).st s).phase = (w.st s).phase ∧
+      ((execRun I w id a k).st s).life = (w.st s).life := by
+  cases hk : k.rest with
+  | nil =>
+    refine ⟨?_, ?_⟩ <;> simp [execRun, hk, setActor_other, hs]
+  | cons eff rest =>
+    cases eff with
+    | send dst label hint =>
+      simp [execRun, hk]
+      cases hr : route w I.desc dst hint with
+      | none => refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
+      | some dstId =>
+        refine ⟨enqueue_phase_other w I.desc id dstId _ false _ s hs,
+          enqueue_life w I.desc id dstId _ false _ s⟩
+    | trySend dst label hint =>
+      simp [execRun, hk]
+      cases hr : route w I.desc dst hint with
+      | none => refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
+      | some dstId =>
+        simp [hr]
+        split
+        · by_cases hc : s = dstId
+          · by_cases hi : dstId = id
+            · exact absurd (hc.trans hi) hs
+            · rw [hc]
+              refine ⟨?_, ?_⟩
+              · rw [setActor_other _ id dstId _ hi]
+                simp [setActor, hi]
+              · rw [setActor_other _ id dstId _ hi]
+                simp [setActor, hi, chargeSender, bumpToken, proceed_life]
+          · refine ⟨?_, ?_⟩
+            · rw [setActor_other _ id s _ hs, setActor_other _ dstId s _ hc, setActor_other _ id s _ hs]
+            · rw [setActor_other _ id s _ hs, setActor_other _ dstId s _ hc, setActor_other _ id s _ hs]
+        · refine ⟨?_, ?_⟩ <;> simp [setActor_other, hs, proceed_life]
+    | call dst label hint =>
+      simp [execRun, hk]
+      cases hr : route w I.desc dst hint with
+      | none => refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
+      | some dstId =>
+        refine ⟨enqueue_phase_other w I.desc id dstId _ true _ s hs,
+          enqueue_life w I.desc id dstId _ true _ s⟩
+    | reply =>
+      simpa [execRun, hk] using reply_keeps_quiet w id s k hnreply hs
+    | selfSchedule label =>
+      simp [execRun, hk]
+      split
+      · refine ⟨?_, ?_⟩ <;> simp [setActor_other, hs, proceed_life]
+      · split
+        · refine ⟨?_, ?_⟩ <;> simp [setActor_other, hs, proceed_life]
+        · refine ⟨?_, ?_⟩ <;> simp [setActor_other, hs]
+    | cell dst label value =>
+      simp only [execRun, hk]
+      split
+      · refine ⟨?_, ?_⟩ <;> simp [setCell, setActor_other, hs, proceed_life]
+      · rw [wakeReaders]
+        refine ⟨?_, ?_⟩
+        · rw [wakes_phase _ _ _ dst label id s]
+          simp [setCell, setActor_other, hs, proceed_life]
+        · rw [wakes_life _ _ _ dst label id s]
+          simp [setCell, setActor_other, hs, proceed_life]
+    | internal => refine ⟨?_, ?_⟩ <;> simp [execRun, hk, setActor_other, hs]
+    | peer => refine ⟨?_, ?_⟩ <;> simp [execRun, hk, setActor_other, hs]
+    | terminate =>
+      simp [execRun, hk]
+      split
+      · rename_i t ht
+        by_cases hkill : t.terminable = true ∧ hasParkedCall a.parked = false
+        · rw [if_pos hkill]
+          let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) a.box) (tname id) a.parked
+          have hbase : (base.st s).phase = (w.st s).phase ∧ (base.st s).life = (w.st s).life := by
+            refine ⟨?_, ?_⟩
+            · simp [base, phase_refundP, phase_refund, readCells_st]
+            · have hread : (readCells I.desc w id).st s = w.st s := readCells_st _ _ _ _
+              have href := (refund_life (readCells I.desc w id) (tname id) a.box s).1
+              have hrefp :=
+                (refundP_life (refundMsgs (readCells I.desc w id) (tname id) a.box) (tname id) a.parked s).1
+              simp [base, hread, href, hrefp]
+          let dead : Actor := { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+          have hdead : ((setActor base id dead).st s).phase = (w.st s).phase ∧
+              ((setActor base id dead).st s).life = (w.st s).life := by
+            refine ⟨?_, ?_⟩
+            · simp [setActor, hs, hbase.1]
+            · simp [setActor, hs, hbase.2]
+          have hn' : ∀ d c ck, ((setActor base id dead).st s).phase ≠ .parked d c ck := by
+            intro d c ck hbad
+            exact hnpark d c ck (hdead.1 ▸ hbad)
+          have hrel := release_keeps_nonparked (setActor base id dead) id a.parked s hn'
+          exact ⟨hrel.1.trans hdead.1, hrel.2.trans hdead.2⟩
+        · rw [if_neg hkill]
+          exact ⟨rfl, rfl⟩
+      · exact ⟨rfl, rfl⟩
+
+/-- A receive does not rewrite `s` when `s` is not the receiver and not parked. -/
+theorem bulk_keeps_quiet (I : Impl) (w : World) (id : InstId) (w' : World) (s : InstId)
+    (hne : s ≠ id) (hnpark : ∀ d c k, (w.st s).phase ≠ .parked d c k)
+    (h : receiveBulk I w id = some w') :
+    (w'.st s).phase = (w.st s).phase ∧ (w'.st s).life = (w.st s).life := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ p.msg w1 a1 s hdel
+          by_cases hs : s = p.sender
+          · have hset : ((setActor w1 id a1).st s).phase = (w.st s).phase ∧
+                ((setActor w1 id a1).st s).life = (w.st s).life := by
+              refine ⟨?_, ?_⟩ <;> simp [setActor, hne, hst]
+            have hcred := credit_life (setActor w1 id a1) (tname id) p.msg.sender s
+            have hph0 : ((creditSender (setActor w1 id a1) (tname id) p.msg.sender).st s).phase =
+                (w.st s).phase := hcred.2.2.1.trans hset.1
+            have hid := resume_id_of_not_parked
+              ((creditSender (setActor w1 id a1) (tname id) p.msg.sender).st p.sender) p.isCall id
+              (by
+                intro d c k hbad
+                exact hnpark d c k (hph0.symm.trans (by simpa [hs] using hbad)))
+            refine ⟨?_, ?_⟩
+            · rw [hid]
+              simpa [setActor, hs] using hph0
+            · rw [hid]
+              simpa [setActor, hs] using hcred.1.trans hset.2
+          · have hset : ((setActor w1 id a1).st s).phase = (w.st s).phase ∧
+                ((setActor w1 id a1).st s).life = (w.st s).life := by
+              refine ⟨?_, ?_⟩ <;> simp [setActor, hne, hst]
+            have hcred := credit_life (setActor w1 id a1) (tname id) p.msg.sender s
+            refine ⟨?_, ?_⟩
+            · simpa [setActor, hs] using hcred.2.2.1.trans hset.1
+            · simpa [setActor, hs] using hcred.1.trans hset.2
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ m w1 a1 s hdel
+          have hcred := credit_life (setActor w1 id a1) (tname id) m.sender s
+          refine ⟨?_, ?_⟩
+          · simpa [setActor, hne, hst] using hcred.2.2.1
+          · simpa [setActor, hne, hst] using hcred.1
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w id _ m w1 a1 s hdel
+          let admitted := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          by_cases hs : s = p.sender
+          · have hset : ((setActor w1 id admitted).st s).phase = (w.st s).phase ∧
+                ((setActor w1 id admitted).st s).life = (w.st s).life := by
+              refine ⟨?_, ?_⟩ <;> simp [admitted, setActor, hne, hst]
+            have hcred := credit_life (setActor w1 id admitted) (tname id) m.sender s
+            have hph0 : ((creditSender (setActor w1 id admitted) (tname id) m.sender).st s).phase =
+                (w.st s).phase := hcred.2.2.1.trans hset.1
+            have hid := resume_id_of_not_parked
+              ((creditSender (setActor w1 id admitted) (tname id) m.sender).st p.sender) p.isCall id
+              (by
+                intro d c k hbad
+                exact hnpark d c k (hph0.symm.trans (by simpa [hs] using hbad)))
+            refine ⟨?_, ?_⟩
+            · rw [hid]
+              simpa [setActor, hs] using hph0
+            · rw [hid]
+              simpa [setActor, hs] using hcred.1.trans hset.2
+          · have hset : ((setActor w1 id admitted).st s).phase = (w.st s).phase ∧
+                ((setActor w1 id admitted).st s).life = (w.st s).life := by
+              refine ⟨?_, ?_⟩ <;> simp [admitted, setActor, hne, hst]
+            have hcred := credit_life (setActor w1 id admitted) (tname id) m.sender s
+            refine ⟨?_, ?_⟩
+            · simpa [setActor, hs] using hcred.2.2.1.trans hset.1
+            · simpa [setActor, hs] using hcred.1.trans hset.2
+
+/-- A step other than this actor's own `finish` leaves an effect or peer wait untouched. -/
+theorem step_keeps_quiet (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) (s : InstId)
+    (hnpark : ∀ d c k, (w.st s).phase ≠ .parked d c k)
+    (hnreply : ∀ d ck, (w.st s).phase ≠ .awaitReply d ck)
+    (hnidle : (w.st s).phase ≠ .idle) (hnrun : ∀ k, (w.st s).phase ≠ .run k)
+    (hl : (w.st s).life = .alive) (h : apply I a w = some w') (hnot : a ≠ .finish s) :
+    (w'.st s).phase = (w.st s).phase ∧ (w'.st s).life = (w.st s).life := by
+  cases a with
+  | exec id =>
+    have hne : s ≠ id := by
+      intro hs
+      have hhead := h
+      rw [← hs] at hhead
+      simp [apply, execHead, hl, hnrun] at hhead
+    simp [apply] at h
+    unfold execHead at h
+    by_cases hlive : (w.st id).life = .alive
+    · simp [hlive] at h
+      cases hph : (w.st id).phase with
+      | run k0 =>
+        simp [hph] at h
+        cases h
+        exact exec_keeps_quiet I w id (w.st id) k0 s hne hnpark hnreply
+      | idle => simp [hph] at h
+      | parked _ _ _ => simp [hph] at h
+      | awaitReply _ _ => simp [hph] at h
+      | awaitEffect _ => simp [hph] at h
+      | awaitPeer _ => simp [hph] at h
+      | crashed => simp [hph] at h
+    · simp [hlive] at h
+  | finish id =>
+    have hne : s ≠ id := by
+      intro hs
+      apply hnot
+      simp [hs]
+    simp [apply, finishWait] at h
+    split at h
+    · cases h
+      refine ⟨?_, ?_⟩ <;> simp [setActor, hne, proceed_life]
+    · cases h
+      refine ⟨?_, ?_⟩ <;> simp [setActor, hne, proceed_life]
+    · cases h
+  | spawn template =>
+    simp [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        have hmem := hO.aliveIn s hl
+        have hfresh : s ≠ InstId.peer template (w.nextIx template) := by
+          intro hs
+          have hix := hO.indexed template (w.nextIx template)
+          rw [← hs] at hix
+          exact absurd (hix hmem) (by omega)
+        refine ⟨?_, ?_⟩ <;> simp [readCells_st, setActor, hfresh, withTokens]
+      · cases h
+  | recvPrio id =>
+    simp [apply] at h
+    have hne : s ≠ id := by
+      intro hs
+      have hhead := h
+      rw [← hs] at hhead
+      simp [receivePrio] at hhead
+      cases hprio : (w.st s).prio with
+      | nil => simp [hprio] at hhead
+      | cons m ms =>
+        simp [hprio, hl] at hhead
+        by_cases hph : (w.st s).phase = .idle
+        · exact hnidle hph
+        · simp [hph] at hhead
+    unfold receivePrio at h
+    cases hprio : (w.st id).prio with
+    | nil => simp [hprio] at h
+    | cons m ms =>
+      simp [hprio] at h
+      split at h
+      · simp at h
+      · next w1 a1 hdel =>
+        cases h.2
+        have hst := deliver_st I w id _ m w1 a1 s hdel
+        refine ⟨?_, ?_⟩ <;> simp [setActor, hne, hst]
+  | recvBulk id =>
+    simp [apply] at h
+    have hne : s ≠ id := by
+      intro hs
+      have hhead := h
+      rw [← hs] at hhead
+      simp [receiveBulk, hl] at hhead
+      by_cases hph : (w.st s).phase = .idle
+      · exact hnidle hph
+      · simp [hph] at hhead
+    exact bulk_keeps_quiet I w id w' s hne hnpark h
+
+/-- Until this actor's own `finish`, an effect or peer wait keeps its phase and stays alive. -/
+theorem quiet_prefix {I : Impl} (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (s : InstId) (i n : Nat) (ph : Phase)
+    (hp : ((ρ.cfg i).st s).phase = ph)
+    (hnpark : ∀ d c k, ph ≠ .parked d c k) (hnreply : ∀ d ck, ph ≠ .awaitReply d ck)
+    (hnidle : ph ≠ .idle) (hnrun : ∀ k, ph ≠ .run k)
+    (hl : ((ρ.cfg i).st s).life = .alive)
+    (hnot : ∀ t, i ≤ t → t < i + n → ρ.act t ≠ .finish s) :
+    ((ρ.cfg (i + n)).st s).phase = ph ∧ ((ρ.cfg (i + n)).st s).life = .alive := by
+  induction n with
+  | zero =>
+    simpa using And.intro hp hl
+  | succ n ih =>
+    have hprev := ih (fun t h1 h2 => hnot t h1 (Nat.lt_trans h2 (Nat.lt_succ_self _)))
+    have hO := (inv3_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).1.2.1
+    have hstep := step_keeps_quiet I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) hO s
+      (fun d c k hbad => hnpark d c k (by simpa [hprev.1] using hbad))
+      (fun d ck hbad => hnreply d ck (by simpa [hprev.1] using hbad))
+      (by simpa [hprev.1] using hnidle)
+      (fun k hbad => hnrun k (by simpa [hprev.1] using hbad))
+      hprev.2 (ρ.valid (i + n))
+      (hnot (i + n) (Nat.le_add_right i n) (Nat.lt_succ_self _))
+    simpa [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using
+      And.intro (hstep.1.trans hprev.1) (hstep.2.trans hprev.2)
+
+def scanAct (act : Nat → Action) (target : Action) : Nat → Nat → Nat
+  | 0, k => k
+  | fuel + 1, k => if act k = target then k else scanAct act target fuel (k + 1)
+
+theorem scanAct_spec (act : Nat → Action) (target : Action) (fuel k : Nat)
+    (h : ∃ d, d ≤ fuel ∧ act (k + d) = target) :
+    k ≤ scanAct act target fuel k ∧ act (scanAct act target fuel k) = target ∧
+      ∀ t, k ≤ t → t < scanAct act target fuel k → act t ≠ target := by
+  induction fuel generalizing k with
+  | zero =>
+    obtain ⟨d, hd, hact⟩ := h
+    have hd0 : d = 0 := by omega
+    simp [scanAct]
+    constructor
+    · simpa [hd0] using hact
+    · intro t h1 h2
+      omega
+  | succ fuel ih =>
+    simp [scanAct]
+    by_cases hhere : act k = target
+    · simp [hhere]
+      intro t h1 h2
+      omega
+    · simp [hhere]
+      obtain ⟨d, hd, hact⟩ := h
+      have hnext : ∃ d, d ≤ fuel ∧ act (k + 1 + d) = target := by
+        have hd0 : 0 < d := by
+          apply Nat.pos_of_ne_zero
+          intro hz
+          apply hhere
+          simpa [hz] using hact
+        refine ⟨d - 1, by omega, ?_⟩
+        have : k + d = k + 1 + (d - 1) := by omega
+        simpa [this] using hact
+      have ih' := ih (k + 1) hnext
+      constructor
+      · exact Nat.le_trans (Nat.le_succ k) ih'.1
+      constructor
+      · exact ih'.2.1
+      · intro t ht1 ht2
+        by_cases htk : t = k
+        · simpa [htk] using hhere
+        · exact ih'.2.2 t (by omega) (by omega)
+
+theorem proceed_fuel (a : Actor) (k : Cont) :
+    phaseFuel (proceed a k).phase ≤ 2 * k.rest.length := by
+  cases hk : k.rest <;> simp [proceed, phaseFuel, hk]
+
+theorem await_effect_fuel (k : Cont) : phaseFuel (.awaitEffect k) = 2 * k.rest.length + 1 := by
+  simp [phaseFuel]
+
+theorem await_peer_fuel (k : Cont) : phaseFuel (.awaitPeer k) = 2 * k.rest.length + 1 := by
+  simp [phaseFuel]
+
+/-- Fairness takes the `finish` of an `awaitEffect`. The actor comes back on the tail, still alive. -/
+theorem effect_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (hF : Fair ρ) (s : InstId) (i : Nat) (k : Cont)
+    (hp : ((ρ.cfg i).st s).phase = .awaitEffect k) (hl : ((ρ.cfg i).st s).life = .alive) :
+    ∃ j, i ≤ j ∧ ((ρ.cfg (j + 1)).st s).phase = (proceed ((ρ.cfg j).st s) k).phase ∧
+      ((ρ.cfg (j + 1)).st s).life = .alive := by
+  have hhit : ∃ j, i ≤ j ∧ ρ.act j = .finish s := by
+    cases Classical.em (∃ j, i ≤ j ∧ ρ.act j = .finish s) with
+    | inl h => exact h
+    | inr hmiss =>
+      have hstay : ∀ n, ((ρ.cfg (i + n)).st s).phase = .awaitEffect k ∧
+          ((ρ.cfg (i + n)).st s).life = .alive := by
+        intro n
+        exact quiet_prefix hL hG ρ s i n (.awaitEffect k) hp
+          (fun _ _ _ h => by cases h) (fun _ _ h => by cases h) (by intro h; cases h)
+          (fun _ h => by cases h) hl
+          (fun t h1 _ hbad => hmiss ⟨t, h1, hbad⟩)
+      have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) := by
+        intro j hj
+        have hst := hstay (j - i)
+        have hph : ((ρ.cfg j).st s).phase = .awaitEffect k := by
+          simpa [Nat.add_sub_of_le hj] using hst.1
+        exact enabled_finish_effect I (ρ.cfg j) s (by simp [waitKind, hph])
+      obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
+      exact absurd ⟨j, hj, hact⟩ hmiss
+  obtain ⟨j0, hj0, hact0⟩ := hhit
+  have hscan := scanAct_spec ρ.act (.finish s) (j0 - i) i ⟨j0 - i, Nat.le_refl _, by
+    simpa [Nat.add_sub_of_le hj0] using hact0⟩
+  let m := scanAct ρ.act (.finish s) (j0 - i) i
+  have him : i ≤ m := hscan.1
+  have hact : ρ.act m = .finish s := hscan.2.1
+  have hpre := quiet_prefix hL hG ρ s i (m - i) (.awaitEffect k) hp
+    (fun _ _ _ h => by cases h) (fun _ _ h => by cases h) (by intro h; cases h)
+    (fun _ h => by cases h) hl
+    (fun t h1 h2 hbad => hscan.2.2 t h1 (by
+      have hsum : i + (m - i) = m := Nat.add_sub_of_le him
+      omega) hbad)
+  have hph : ((ρ.cfg m).st s).phase = .awaitEffect k := by
+    simpa [Nat.add_sub_of_le him] using hpre.1
+  have hl' : ((ρ.cfg m).st s).life = .alive := by
+    simpa [Nat.add_sub_of_le him] using hpre.2
+  have happ := ρ.valid m
+  simp [apply, hact, finishWait, hph] at happ
+  refine ⟨m, him, ?_, ?_⟩
+  · rw [← happ]
+    simp [setActor]
+  · rw [← happ]
+    simpa [setActor, proceed_life] using hl'
+
+/-- Fairness takes the `finish` of an `awaitPeer`. The actor comes back on the tail, still alive. -/
+theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (hF : Fair ρ) (s : InstId) (i : Nat) (k : Cont)
+    (hp : ((ρ.cfg i).st s).phase = .awaitPeer k) (hl : ((ρ.cfg i).st s).life = .alive) :
+    ∃ j, i ≤ j ∧ ((ρ.cfg (j + 1)).st s).phase = (proceed ((ρ.cfg j).st s) k).phase ∧
+      ((ρ.cfg (j + 1)).st s).life = .alive := by
+  have hhit : ∃ j, i ≤ j ∧ ρ.act j = .finish s := by
+    cases Classical.em (∃ j, i ≤ j ∧ ρ.act j = .finish s) with
+    | inl h => exact h
+    | inr hmiss =>
+      have hstay : ∀ n, ((ρ.cfg (i + n)).st s).phase = .awaitPeer k ∧
+          ((ρ.cfg (i + n)).st s).life = .alive := by
+        intro n
+        exact quiet_prefix hL hG ρ s i n (.awaitPeer k) hp
+          (fun _ _ _ h => by cases h) (fun _ _ h => by cases h) (by intro h; cases h)
+          (fun _ h => by cases h) hl
+          (fun t h1 _ hbad => hmiss ⟨t, h1, hbad⟩)
+      have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) := by
+        intro j hj
+        have hst := hstay (j - i)
+        have hph : ((ρ.cfg j).st s).phase = .awaitPeer k := by
+          simpa [Nat.add_sub_of_le hj] using hst.1
+        exact enabled_finish_peer I (ρ.cfg j) s (by simp [waitKind, hph])
+      obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
+      exact absurd ⟨j, hj, hact⟩ hmiss
+  obtain ⟨j0, hj0, hact0⟩ := hhit
+  have hscan := scanAct_spec ρ.act (.finish s) (j0 - i) i ⟨j0 - i, Nat.le_refl _, by
+    simpa [Nat.add_sub_of_le hj0] using hact0⟩
+  let m := scanAct ρ.act (.finish s) (j0 - i) i
+  have him : i ≤ m := hscan.1
+  have hact : ρ.act m = .finish s := hscan.2.1
+  have hpre := quiet_prefix hL hG ρ s i (m - i) (.awaitPeer k) hp
+    (fun _ _ _ h => by cases h) (fun _ _ h => by cases h) (by intro h; cases h)
+    (fun _ h => by cases h) hl
+    (fun t h1 h2 hbad => hscan.2.2 t h1 (by
+      have hsum : i + (m - i) = m := Nat.add_sub_of_le him
+      omega) hbad)
+  have hph : ((ρ.cfg m).st s).phase = .awaitPeer k := by
+    simpa [Nat.add_sub_of_le him] using hpre.1
+  have hl' : ((ρ.cfg m).st s).life = .alive := by
+    simpa [Nat.add_sub_of_le him] using hpre.2
+  have happ := ρ.valid m
+  simp [apply, hact, finishWait, hph] at happ
+  refine ⟨m, him, ?_, ?_⟩
+  · rw [← happ]
+    simp [setActor]
+  · rw [← happ]
+    simpa [setActor, proceed_life] using hl'
+
 end Deadlock
