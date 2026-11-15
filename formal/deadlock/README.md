@@ -333,11 +333,13 @@ for a send the actor did not itself perform.
   so the drop is against the fuel at the start of the wait.   `send_stuck_false`
   and `call_parked_stuck_false` are the two queue contradictions under that
   hypothesis: a receiver that stays strictly below the waiter, alive, and idle
-  with mail infinitely often cannot leave the waiter parked. `call_admitted`
+  with mail infinitely often cannot leave the waiter parked.   `call_admitted`
   uses the second one: a stuck call reaches `awaitReply` on the same
-  continuation and stays there. The handler's reply after that admission, the
-  pointwise rank induction, `never_stuck`, `deadlock_freedom`, `CellFresh`,
-  and the dead-instance lift are not proved.
+  continuation and stays there. `enqueue_parked_mem` says an enqueue adds at
+  most the entry it was given, which is what a later tag on `callFrom` needs.
+  The handler's reply after admission, the pointwise rank induction,
+  `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift
+  are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
