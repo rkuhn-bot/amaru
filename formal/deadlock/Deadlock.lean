@@ -95,3 +95,4 @@ import Deadlock.Rank
 #print axioms Deadlock.prio_no_crash
 #print axioms Deadlock.declared_le_cap
 #print axioms Deadlock.lane_has_room
+#print axioms Deadlock.prog_src_reachable

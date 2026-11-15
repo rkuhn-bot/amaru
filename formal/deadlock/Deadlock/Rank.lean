@@ -2528,4 +2528,472 @@ theorem lane_upsert (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (l
         cases hnew
         exact hmem
 
+theorem enqueue_prio (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).prio = (w.st i).prio := by
+  cases isCall <;>
+    (unfold enqueueOrPark
+     by_cases hlive : (w.st dst).life = .alive
+     · simp [hlive]
+       by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+       · simp [hroom]
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame]
+           simp [setActor, chargeSender, bumpToken, proceed_prio]
+           by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken, proceed_prio]
+         · rw [if_neg hsame]
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip, chargeSender, bumpToken, proceed_prio]
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, proceed_prio]
+           · by_cases hid : i = dst
+             · simp [hid]
+               rw [if_neg hflip]
+             · rw [if_neg hi, if_neg hid]
+       · simp [hroom]
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame]
+           simp [setActor, chargeSender, bumpToken]
+           by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken]
+         · rw [if_neg hsame]
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip, chargeSender, bumpToken]
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken]
+           · by_cases hid : i = dst
+             · simp [hid]
+               rw [if_neg hflip]
+             · rw [if_neg hi, if_neg hid]
+     · simp [hlive, setActor, proceed_prio]
+       by_cases hi : i = sender <;> simp [hi, proceed_prio])
+
+theorem cell_head_label (dst label : String) (value : Nat) (es : List Eff) :
+    label ∈ cellWakeLabels dst (.cell dst label value :: es) := by
+  simp [cellWakeLabels]
+
+theorem self_head_label (label : String) (es : List Eff) :
+    label ∈ selfLabels (.selfSchedule label :: es) := by
+  simp [selfLabels]
+
+/-- The list an actor is still carrying after `exec` is the list it carried before,
+a one-effect tail of that list, or the program of a listed transition. -/
+theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
+    (hph : (w.st id).phase = .run k) (i : InstId) (es : List Eff)
+    (hc : carried ((execRun I w id (w.st id) k).st i).phase = some es) :
+    (∃ es0, carried ((w.st i).phase) = some es0 ∧ (es = es0 ∨ ∃ e, es0 = e :: es)) ∨
+      ∃ tr ∈ I.transitions, tr.template = tname i ∧ es = tr.program := by
+  cases k with
+  | mk rest toState replyTo =>
+    cases hrest : rest with
+    | nil =>
+      simp [execRun, hrest, setActor] at hc
+      by_cases hi : i = id
+      · simp [hi, carried] at hc
+      · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
+    | cons e tail =>
+      have hold : carried ((w.st id).phase) = some (e :: tail) := by simp [carried, hph, hrest]
+      cases e with
+      | send dst label hint =>
+        simp [execRun, hrest] at hc
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simp [hr, setActor] at hc
+          by_cases hi : i = id
+          · rw [hi] at hc ⊢
+            have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
+            exact Or.inl ⟨.send dst label hint :: tail, hold,
+              Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
+          · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
+        | some dstId =>
+          simp [hr] at hc
+          by_cases hi : i = id
+          · rw [hi] at hc ⊢
+            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) es hc
+            exact Or.inl ⟨.send dst label hint :: tail, hold,
+              Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
+          · have hsame := enqueue_phase_other w I.desc id dstId ⟨label, id, none⟩ false
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hi
+            exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
+      | call dst label hint =>
+        simp [execRun, hrest] at hc
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simp [hr, setActor] at hc
+          by_cases hi : i = id
+          · rw [hi] at hc ⊢
+            have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
+            exact Or.inl ⟨.call dst label hint :: tail, hold,
+              Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
+          · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
+        | some dstId =>
+          simp [hr] at hc
+          by_cases hi : i = id
+          · rw [hi] at hc ⊢
+            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true
+              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) es hc
+            exact Or.inl ⟨.call dst label hint :: tail, hold,
+              Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
+          · have hsame := enqueue_phase_other w I.desc id dstId ⟨label, id, some id⟩ true
+              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hi
+            exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
+      | trySend dst label hint =>
+        simp [execRun, hrest] at hc
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simp [hr, setActor] at hc
+          by_cases hi : i = id
+          · rw [hi] at hc ⊢
+            have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
+            exact Or.inl ⟨.trySend dst label hint :: tail, hold,
+              Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+          · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
+        | some dstId =>
+          simp [hr] at hc
+          split at hc
+          · by_cases hi : i = id
+            · rw [hi] at hc ⊢
+              by_cases hdst : dstId = id
+              · simp [hdst, setActor] at hc
+                have heq := carried_proceed _ _ es hc
+                exact Or.inl ⟨.trySend dst label hint :: tail, hold,
+                  Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+              · simp [hdst, setActor] at hc
+                have heq := carried_proceed _ _ es hc
+                exact Or.inl ⟨.trySend dst label hint :: tail, hold,
+                  Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+            · by_cases hd : i = dstId
+              · have hne : dstId ≠ id := fun h => hi (hd.trans h)
+                have hswap : id ≠ dstId := fun h => hne h.symm
+                simp [setActor, hi, hd, hne, hswap] at hc
+                exact Or.inl ⟨es, by simpa [hd] using hc, Or.inl rfl⟩
+              · simp [setActor, hi, hd] at hc
+                exact Or.inl ⟨es, hc, Or.inl rfl⟩
+          · by_cases hi : i = id
+            · rw [hi] at hc ⊢
+              have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
+              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
+                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+            · exact Or.inl ⟨es, by simpa [setActor, hi] using hc, Or.inl rfl⟩
+      | reply =>
+        simp [execRun, hrest] at hc
+        by_cases hi : i = id
+        · rw [hi] at hc ⊢
+          have heq := reply_sender_rest w id _ es hc
+          exact Or.inl ⟨.reply :: tail, hold, Or.inr ⟨.reply, by simp [afterHead, heq]⟩⟩
+        · unfold performReply at hc
+          cases hto : replyTo with
+          | none =>
+            simp [hto, setActor, hi] at hc
+            exact Or.inl ⟨es, hc, Or.inl rfl⟩
+          | some caller =>
+            simp [hto] at hc
+            cases hcall : (w.st caller).phase with
+            | awaitReply dst ck =>
+              by_cases hd : dst = id
+              · simp [hcall, hd, setActor, hi] at hc
+                by_cases hc2 : i = caller
+                · rw [hc2] at hc
+                  have heq := carried_proceed _ ck es (by simpa [setActor] using hc)
+                  exact Or.inl ⟨ck.rest, by simp [carried, hc2, hcall], Or.inl (by simp [heq])⟩
+                · simp [hc2] at hc
+                  exact Or.inl ⟨es, hc, Or.inl rfl⟩
+              · simp [hcall, hd, setActor, hi] at hc
+                exact Or.inl ⟨es, hc, Or.inl rfl⟩
+            | idle =>
+              simp [hcall, setActor, hi] at hc
+              exact Or.inl ⟨es, hc, Or.inl rfl⟩
+            | run _ =>
+              simp [hcall, setActor, hi] at hc
+              exact Or.inl ⟨es, hc, Or.inl rfl⟩
+            | awaitEffect _ =>
+              simp [hcall, setActor, hi] at hc
+              exact Or.inl ⟨es, hc, Or.inl rfl⟩
+            | awaitPeer _ =>
+              simp [hcall, setActor, hi] at hc
+              exact Or.inl ⟨es, hc, Or.inl rfl⟩
+            | parked _ _ _ =>
+              simp [hcall, setActor, hi] at hc
+              exact Or.inl ⟨es, hc, Or.inl rfl⟩
+            | crashed =>
+              simp [hcall, setActor, hi] at hc
+              exact Or.inl ⟨es, hc, Or.inl rfl⟩
+      | selfSchedule label =>
+        simp [execRun, hrest] at hc
+        split at hc
+        · by_cases hi : i = id
+          · rw [hi] at hc ⊢
+            have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
+            exact Or.inl ⟨.selfSchedule label :: tail, hold,
+              Or.inr ⟨.selfSchedule label, by simp [afterHead, heq]⟩⟩
+          · exact Or.inl ⟨es, by simpa [setActor, hi] using hc, Or.inl rfl⟩
+        · split at hc
+          · by_cases hi : i = id
+            · rw [hi] at hc ⊢
+              have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
+              exact Or.inl ⟨.selfSchedule label :: tail, hold,
+                Or.inr ⟨.selfSchedule label, by simp [afterHead, heq]⟩⟩
+            · exact Or.inl ⟨es, by simpa [setActor, hi] using hc, Or.inl rfl⟩
+          · by_cases hi : i = id
+            · simp [setActor, hi, carried] at hc
+            · exact Or.inl ⟨es, by simpa [setActor, hi] using hc, Or.inl rfl⟩
+      | cell dst label value =>
+        simp [execRun, hrest, setCell] at hc
+        by_cases hi : i = id
+        · rw [hi] at hc ⊢
+          cases hdirty : (w.cell dst label).dirty with
+          | false =>
+            rw [if_neg (show ¬ ((w.cell dst label).dirty = true) from by simp [hdirty])] at hc
+            rw [wakeReaders] at hc
+            rw [wakes_phase (readersOf _ dst) I.desc _ dst label id id] at hc
+            simp [setActor] at hc
+            have heq := carried_proceed _ _ es hc
+            exact Or.inl ⟨.cell dst label value :: tail, hold,
+              Or.inr ⟨.cell dst label value, by simp [afterHead, heq]⟩⟩
+          | true =>
+            simp [hdirty, setActor] at hc
+            have heq := carried_proceed _ _ es hc
+            exact Or.inl ⟨.cell dst label value :: tail, hold,
+              Or.inr ⟨.cell dst label value, by simp [afterHead, heq]⟩⟩
+        · cases hdirty : (w.cell dst label).dirty with
+          | false =>
+            rw [if_neg (show ¬ ((w.cell dst label).dirty = true) from by simp [hdirty])] at hc
+            rw [wakeReaders] at hc
+            rw [wakes_phase (readersOf _ dst) I.desc _ dst label id i] at hc
+            simp [setActor, hi] at hc
+            exact Or.inl ⟨es, hc, Or.inl rfl⟩
+          | true =>
+            simp [hdirty, setActor, hi] at hc
+            exact Or.inl ⟨es, hc, Or.inl rfl⟩
+      | internal =>
+        simp [execRun, hrest, setActor] at hc
+        by_cases hi : i = id
+        · rw [hi] at hc ⊢
+          simp [carried, afterHead] at hc
+          exact Or.inl ⟨.internal :: tail, hold, Or.inr ⟨.internal, congrArg (List.cons .internal) hc⟩⟩
+        · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
+      | peer =>
+        simp [execRun, hrest, setActor] at hc
+        by_cases hi : i = id
+        · rw [hi] at hc ⊢
+          simp [carried, afterHead] at hc
+          exact Or.inl ⟨.peer :: tail, hold, Or.inr ⟨.peer, congrArg (List.cons .peer) hc⟩⟩
+        · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
+      | terminate =>
+        simp only [execRun, hrest] at hc
+        cases htpl : templateOf I.desc (tname id) with
+        | none =>
+          simp [htpl] at hc
+          exact Or.inl ⟨es, hc, Or.inl rfl⟩
+        | some t =>
+          simp only [htpl] at hc
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · rw [if_pos hkill] at hc
+            by_cases hi : i = id
+            · rw [hi] at hc
+              let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+                (tname id) (w.st id).parked
+              let dead : Actor := { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+              have hv := (release_keeps_victim (setActor base id dead) id (w.st id).parked).1
+              rw [hv] at hc
+              simp [base, dead, setActor, carried] at hc
+            · have hrel := release_carried _ id (w.st id).parked i es hc
+              have hpre : carried ((w.st i).phase) = some es := by
+                simpa [readCells_st, phase_refund, phase_refundP, setActor, hi] using hrel
+              exact Or.inl ⟨es, hpre, Or.inl rfl⟩
+          · rw [if_neg hkill] at hc
+            exact Or.inl ⟨es, hc, Or.inl rfl⟩
+
+theorem prog_src_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : ProgSrc I w)
+    (hph : (w.st id).phase = .run k) : ProgSrc I (execRun I w id (w.st id) k) :=
+  prog_src_of I w _ hS (fun i es hc => carried_origin_exec I w id k hph i es hc)
+
+theorem prog_src_finish (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
+    (h : finishWait w id = some w') : ProgSrc I w' := by
+  apply prog_src_of I w w' hS
+  intro i es hc
+  unfold finishWait at h
+  split at h
+  · next k heq =>
+    cases h
+    by_cases hi : i = id
+    · rw [hi] at hc ⊢
+      simp [setActor] at hc
+      cases hk : k.rest with
+      | nil => simp [proceed, hk, carried] at hc
+      | cons _ _ =>
+        simp [proceed, hk, carried] at hc
+        exact Or.inl ⟨k.rest, by simp [carried, heq], Or.inl (by simp [hc, hk])⟩
+    · simp [setActor, hi] at hc
+      exact Or.inl ⟨es, hc, Or.inl rfl⟩
+  · next k heq =>
+    cases h
+    by_cases hi : i = id
+    · rw [hi] at hc ⊢
+      simp [setActor] at hc
+      cases hk : k.rest with
+      | nil => simp [proceed, hk, carried] at hc
+      | cons _ _ =>
+        simp [proceed, hk, carried] at hc
+        exact Or.inl ⟨k.rest, by simp [carried, heq], Or.inl (by simp [hc, hk])⟩
+    · simp [setActor, hi] at hc
+      exact Or.inl ⟨es, hc, Or.inl rfl⟩
+  · cases h
+
+theorem prog_src_spawn (I : Impl) (w w' : World) (template : String) (hS : ProgSrc I w)
+    (h : spawn I w template = some w') : ProgSrc I w' := by
+  apply prog_src_of I w w' hS
+  intro i es hc
+  unfold spawn at h
+  split at h
+  · cases h
+  · next t _ =>
+    split at h
+    · cases h
+      by_cases hi : i = InstId.peer template (w.nextIx template)
+      · simp [readCells_st, setActor, hi, withTokens, carried] at hc
+      · simp [readCells_st, setActor, hi] at hc
+        exact Or.inl ⟨es, hc, Or.inl rfl⟩
+    · cases h
+
+theorem prog_src_prio (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
+    (h : receivePrio I w id = some w') : ProgSrc I w' := by
+  apply prog_src_of I w w' hS
+  intro i es hc
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      by_cases hi : i = id
+      · rw [hi] at hc ⊢
+        have hc' : carried a1.phase = some es := by simpa [setActor] using hc
+        obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ m w1 a1 es hdel hc'
+        exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+      · have hst := deliver_st I w id _ m w1 a1 i hdel
+        exact Or.inl ⟨es, by simpa [setActor, hi, hst] using hc, Or.inl rfl⟩
+
+theorem prog_src_bulk (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
+    (h : receiveBulk I w id = some w') : ProgSrc I w' := by
+  apply prog_src_of I w w' hS
+  intro i es hc
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          by_cases hid : i = id
+          · rw [hid] at hc ⊢
+            by_cases hs : id = p.sender
+            · rw [hs] at hc
+              have hph : ((creditSender (setActor w1 id a1) (tname id) p.msg.sender).st p.sender).phase =
+                  a1.phase := by simp [phase_credit, setActor, hs]
+              have hold := carried_resume _ p.isCall p.sender es (by simpa [setActor, hs] using hc)
+              have hc1 : carried a1.phase = some es := by
+                simpa [phase_credit, setActor, hs] using hold
+              obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ p.msg w1 a1 es hdel hc1
+              exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+            · have hc1 : carried a1.phase = some es := by simpa [setActor, hs, phase_credit] using hc
+              obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ p.msg w1 a1 es hdel hc1
+              exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+          · by_cases hs : i = p.sender
+            · rw [hs] at hc
+              have hpre := carried_resume _ p.isCall id es (by simpa [setActor] using hc)
+              have hst := deliver_st I w id _ p.msg w1 a1 p.sender hdel
+              have hne : p.sender ≠ id := fun h => hid (hs.trans h)
+              have hc0 : carried ((w.st p.sender).phase) = some es := by
+                simpa [setActor, hne, phase_credit, hst] using hpre
+              exact Or.inl ⟨es, by simpa [hs] using hc0, Or.inl rfl⟩
+            · have hst := deliver_st I w id _ p.msg w1 a1 i hdel
+              exact Or.inl ⟨es, by simpa [setActor, hs, hid, phase_credit, hst] using hc, Or.inl rfl⟩
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          by_cases hid : i = id
+          · rw [hid] at hc ⊢
+            have hc1 : carried a1.phase = some es := by simpa [setActor, phase_credit] using hc
+            obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ m w1 a1 es hdel hc1
+            exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+          · have hst := deliver_st I w id _ m w1 a1 i hdel
+            exact Or.inl ⟨es, by simpa [setActor, hid, phase_credit, hst] using hc, Or.inl rfl⟩
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          let admitted := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hphA : admitted.phase = a1.phase := by simp [admitted]
+          by_cases hid : i = id
+          · rw [hid] at hc ⊢
+            by_cases hs : id = p.sender
+            · rw [hs] at hc
+              have hpre := carried_resume _ p.isCall p.sender es (by simpa [setActor, hs] using hc)
+              have hc1 : carried a1.phase = some es := by simpa [phase_credit, setActor, hphA, hs] using hpre
+              obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ m w1 a1 es hdel hc1
+              exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+            · have hc1 : carried a1.phase = some es := by simpa [setActor, hs, phase_credit, hphA] using hc
+              obtain ⟨tr, hm, htmpl, hprog⟩ := deliver_carries I w id _ m w1 a1 es hdel hc1
+              exact Or.inr ⟨tr, hm, htmpl, hprog⟩
+          · by_cases hs : i = p.sender
+            · rw [hs] at hc
+              have hpre := carried_resume _ p.isCall id es (by simpa [setActor] using hc)
+              have hst := deliver_st I w id _ m w1 a1 p.sender hdel
+              have hne : p.sender ≠ id := fun h => hid (hs.trans h)
+              have hc0 : carried ((w.st p.sender).phase) = some es := by
+                simpa [setActor, hne, phase_credit, hst, hphA] using hpre
+              exact Or.inl ⟨es, by simpa [hs] using hc0, Or.inl rfl⟩
+            · have hst := deliver_st I w id _ m w1 a1 i hdel
+              exact Or.inl ⟨es, by simpa [setActor, hs, hid, phase_credit, hst, hphA] using hc, Or.inl rfl⟩
+
+theorem prog_src_head (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
+    (h : execHead I w id = some w') : ProgSrc I w' := by
+  unfold execHead at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h
+      cases h
+      exact prog_src_exec I w id k hS hph
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
+
+theorem prog_src_apply (I : Impl) (a : Action) (w w' : World) (hS : ProgSrc I w)
+    (h : apply I a w = some w') : ProgSrc I w' := by
+  cases a with
+  | recvBulk id => exact prog_src_bulk I w w' id hS (by simpa [apply] using h)
+  | recvPrio id => exact prog_src_prio I w w' id hS (by simpa [apply] using h)
+  | exec id => exact prog_src_head I w w' id hS (by simpa [apply] using h)
+  | finish id => exact prog_src_finish I w w' id hS (by simpa [apply] using h)
+  | spawn template => exact prog_src_spawn I w w' template hS (by simpa [apply] using h)
+
+theorem prog_src_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) : ProgSrc I w := by
+  induction hR with
+  | init => exact prog_src_init I N
+  | step w w' a _ h ih => exact prog_src_apply I a w w' ih h
+
 end Deadlock

@@ -292,9 +292,11 @@ for a send the actor did not itself perform.
   killing `terminate`. `reaches_block` puts those together: a live actor later
   becomes idle, dies, crashes, or blocks on a send or a call. `lane_has_room`
   says a fresh label from that declared set still fits, so the crash branch
-  does not run once a reachable world is known to keep the lane duplicate-free
-  and inside the set. That preservation, a `Fair.bulk` delivery, `CellFresh`,
-  and the dead-instance lift are not proved.
+  does not run once a reachable world keeps the lane duplicate-free and inside
+  the set. `prog_src_reachable` is the program half: a carried list is a suffix
+  of a listed transition, so its `selfSchedule` and `cell` labels are declared.
+  The lane-contents preservation, a `Fair.bulk` delivery, `CellFresh`, and the
+  dead-instance lift are not proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
