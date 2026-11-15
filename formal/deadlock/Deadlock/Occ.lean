@@ -2142,4 +2142,97 @@ theorem occ_bulk_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : Worl
   · intro _
     rw [hparkA, hpark]
 
+theorem slot_drop_park (st : InstId → Actor) (dst : String) (sender id : InstId) (p : Parked)
+    (ps : List Parked) (hname : tname id = dst) (hs : p.sender = sender)
+    (hpark : (st id).parked = p :: ps) :
+    slot (fun i => if i = id then { st id with parked := ps } else st i) dst sender id + 1 =
+      slot st dst sender id := by
+  have hb : (tname id == dst) = true := by simpa [beq_iff_eq] using hname
+  simp [slot, hb, hpark, countParked, hs, Nat.add_comm]
+  omega
+
+theorem owed_drop_park (st : InstId → Actor) (dst : String) (sender id : InstId) (p : Parked)
+    (ps : List Parked) (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster)
+    (hname : tname id = dst) (hs : p.sender = sender) (hpark : (st id).parked = p :: ps) :
+    owed (fun i => if i = id then { st id with parked := ps } else st i) dst sender roster + 1 =
+      owed st dst sender roster := by
+  have hslot := slot_drop_park st dst sender id p ps hname hs hpark
+  have hrep := owed_replace st dst sender id { st id with parked := ps } roster nodup hmem
+  omega
+
+theorem slot_keep_park (st : InstId → Actor) (dst : String) (sender id : InstId) (p : Parked)
+    (ps : List Parked) (hname : tname id = dst) (hs : p.sender ≠ sender)
+    (hpark : (st id).parked = p :: ps) :
+    slot (fun i => if i = id then { st id with parked := ps } else st i) dst sender id =
+      slot st dst sender id := by
+  have hb : (tname id == dst) = true := by simpa [beq_iff_eq] using hname
+  have hne : (p.sender == sender) = false := by
+    cases hbb : p.sender == sender with
+    | false => rfl
+    | true => exact absurd ((beq_iff_eq).mp hbb) hs
+  simp [slot, hb, hpark, countParked, hne]
+  exact hs
+
+theorem owed_keep_park (st : InstId → Actor) (dst : String) (sender id : InstId) (p : Parked)
+    (ps : List Parked) (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster)
+    (hname : tname id = dst) (hs : p.sender ≠ sender) (hpark : (st id).parked = p :: ps) :
+    owed (fun i => if i = id then { st id with parked := ps } else st i) dst sender roster =
+      owed st dst sender roster := by
+  have hslot := slot_keep_park st dst sender id p ps hname hs hpark
+  have hrep := owed_replace st dst sender id { st id with parked := ps } roster nodup hmem
+  omega
+
+theorem occ_bulk_park (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
+    (p : Parked) (ps : List Parked) (w1 : World) (a1 : Actor) (hO : OccInv I w)
+    (hpark : (w.st id).parked = p :: ps) (hbox : (w.st id).box = [])
+    (halive : (w.st id).life = .alive) (hidle : (w.st id).phase = .idle)
+    (hsame : p.sender = p.msg.sender)
+    (hd : deliver I w id {(w.st id) with parked := ps} p.msg = some (w1, a1)) :
+    OccInv I (creditSender (setActor w1 id a1) (tname id) p.sender) := by
+  have hacc := deliver_account I hL hG w id {(w.st id) with parked := ps} p.msg w1 a1
+    (by simp [halive]) (by simp [hidle]) hd
+  obtain ⟨hl, hb, hparkA, htokA, hfl⟩ := hacc
+  have hmem := hO.aliveIn id halive
+  have hsend := hO.parkFrom id p (by rw [hpark]; exact List.Mem.head _)
+  apply occ_consume I w w1 id p.sender a1 hO
+      (fun i => deliver_st I w id _ p.msg w1 a1 i hd)
+      (deliver_roster I w id _ p.msg w1 a1 hd) (deliver_N I w id _ p.msg w1 a1 hd)
+      (fun n => deliver_ix I w id _ p.msg w1 a1 n hd)
+      (by simpa [halive] using hl) (by intro d; simpa [halive] using htokA d) hmem hsend
+  · intro s
+    by_cases hs : s = p.sender
+    · rw [hs]
+      have hdrop := owed_drop_park w.st (tname id) p.sender id p ps w.roster hO.nodup hmem rfl rfl hpark
+      have hsameO := owed_actor w.st id a1 {(w.st id) with parked := ps} (tname id) p.sender w.roster
+        (by simpa [hbox] using hb) (by simpa using hparkA)
+      simp
+      rw [hsameO]
+      exact hdrop
+    · have hkeep := owed_keep_park w.st (tname id) s id p ps w.roster hO.nodup hmem rfl
+        (fun h => hs h.symm) hpark
+      have hsameO := owed_actor w.st id a1 {(w.st id) with parked := ps} (tname id) s w.roster
+        (by simpa [hbox] using hb) (by simpa using hparkA)
+      simp [hs]
+      rw [hsameO]
+      exact hkeep
+  · intro d hdne s
+    exact owed_off w.st id a1 d s w.roster hO.nodup hmem hdne.symm
+  · intro d
+    have hpend : pending (w.st id) d = 0 := by simp [pending, contRest, hidle, sendsTo]
+    rw [hpend, Nat.add_zero]
+    simpa using hfl d
+  · intro msg hm
+    rw [hb, hbox] at hm
+    cases hm
+  · intro q hq
+    rw [hparkA] at hq
+    exact hO.parkFrom id q (by rw [hpark]; exact List.Mem.tail _ hq)
+  · intro q hq
+    rw [hparkA] at hq
+    exact hO.parkMsg id q (by rw [hpark]; exact List.Mem.tail _ hq)
+  · intro hl1
+    have hempty := hO.clear id hl1
+    rw [hpark] at hempty
+    cases hempty
+
 end Deadlock
