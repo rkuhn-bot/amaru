@@ -3498,17 +3498,10 @@ theorem setActor_same (w : World) (id : InstId) (a b : Actor) :
   funext i
   by_cases hi : i = id <;> simp [hi]
 
-/-- A successful bulk receive preserves call tags. A parked entry's `callFrom`
-agrees with its sender, and a call sitting in the box already has its caller in
-`awaitReply`. -/
+/-- A successful bulk receive preserves call tags. -/
 theorem recvBulk_tag (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
-    (hM : MailInv w) (hT : CallTagInv w)
-    (halign : ∀ q, q ∈ (w.st id).parked →
-      (q.isCall = true → q.msg.callFrom = some q.sender) ∧
-      (q.isCall = false → q.msg.callFrom = none))
-    (hown : ∀ (m : Msg) (c : InstId), m ∈ (w.st id).box → m.callFrom = some c →
-      ∃ k, (w.st c).phase = .awaitReply id k)
-    (h : receiveBulk I w id = some w') : CallTagInv w' := by
+    (hM : MailInv w) (hT : CallTagInv w) (h : receiveBulk I w id = some w') :
+    CallTagInv w' := by
   unfold receiveBulk at h
   by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
   · simp [hready] at h
@@ -3536,12 +3529,12 @@ theorem recvBulk_tag (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
             exact hdel
           cases hc : p.isCall with
           | false =>
-            have hfrom := (halign p (by simp [hp])).2 hc
+            have hfrom := (entry_align w hT hM id p (by simp [hp])).2 hc
             rw [hc] at hph
             simpa [hc] using deliver_parked_send I w w1 id p ps a1 kS hM hT hidle hbox hp hc
               hfrom hph hdel'
           | true =>
-            have hfrom := (halign p (by simp [hp])).1 hc
+            have hfrom := (entry_align w hT hM id p (by simp [hp])).1 hc
             rw [hc] at hph
             simpa [hc] using deliver_parked_tag I hL w w1 id p ps a1 kS hM hT hidle hbox hp
               hfrom hph hdel'
@@ -3600,13 +3593,22 @@ theorem recvBulk_tag (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
               rw [hc] at hph
               have hphS : ((setActor w1 id a1).st p.sender).phase = .parked id true kS := by
                 rw [hphA]; exact hph
+              have hnot : ∀ d (b : Bool) k, a1.phase ≠ .parked d b k := by
+                intro d b k hk
+                rcases hplain.2.2.2 with hIph | ⟨_, hk', _⟩
+                · rw [hIph] at hk
+                  cases hk
+                · rw [hk'] at hk
+                  cases hk
+              have hMail := mail_install w w1 id a1 hM hst hidle
+                (by simpa [hp] using hplain.2.1) hnot
               have := parked_tail_call (setActor w1 id a1) id p ps kS (tname id) m.sender hI
-                hparkA hphS hsnd
-              simpa [setActor_same, setActor, ite_shadow, hc] using this
+                hMail hparkA hphS hsnd
+              simpa [setActor_same, setActor, ite_shadow, shiftBase, hc] using this
           | some c =>
             have hcall := deliver_call I hL w id ({ (w.st id) with box := ms }) m w1 a1 c hdel' hcm
             obtain ⟨kH, hrun, hshape, _, hother⟩ := hcall.2.2.2
-            obtain ⟨kw, hownc⟩ := hown m c (by simp [hbox]) hcm
+            obtain ⟨kw, hownc⟩ := box_awaits w hT id m c (by simp [hbox]) hcm
             have hI := install_call_kept w w1 id a1 m ms c kH kw hT hidle hst
               (by simpa using hcall.1) (by simpa [hp] using hcall.2.1)
               (by simpa using hcall.2.2.1) hbox hcm hrun hshape hother hownc
@@ -3622,8 +3624,14 @@ theorem recvBulk_tag (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
               rw [hc] at hph
               have hphS : ((setActor w1 id a1).st p.sender).phase = .parked id true kS := by
                 rw [hphA]; exact hph
+              have hnot : ∀ d (b : Bool) k, a1.phase ≠ .parked d b k := by
+                intro d b k hk
+                rw [hrun] at hk
+                cases hk
+              have hMail := mail_install w w1 id a1 hM hst hidle
+                (by simpa [hp] using hcall.2.1) hnot
               have := parked_tail_call (setActor w1 id a1) id p ps kS (tname id) m.sender hI
-                hparkA hphS hsnd
-              simpa [setActor_same, setActor, ite_shadow, hc] using this
+                hMail hparkA hphS hsnd
+              simpa [setActor_same, setActor, ite_shadow, shiftBase, hc] using this
 
 end Deadlock

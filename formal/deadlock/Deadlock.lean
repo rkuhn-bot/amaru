@@ -144,10 +144,10 @@ import Deadlock.Rank
 #print axioms Deadlock.prio_tag
 #print axioms Deadlock.deliver_call
 #print axioms Deadlock.credit_tag
-#print axioms Deadlock.admit_phase
 #print axioms Deadlock.install_plain
 #print axioms Deadlock.install_call
 #print axioms Deadlock.bulk_box
 #print axioms Deadlock.deliver_parked_send
 #print axioms Deadlock.deliver_parked_tag
+#print axioms Deadlock.parked_tail_call
 #print axioms Deadlock.recvBulk_tag

@@ -338,24 +338,25 @@ for a send the actor did not itself perform.
   continuation and stays there. `CallTagInv` names the three places that reply
   can sit while the caller is in `awaitReply`: `d`'s mailbox (`callFrom`),
   `d`'s handler with the reply still ahead, or that reply as the next effect.
-  A parked call owns the mailbox entry before admission, which is why a
-  `callFrom` is not stray there either. It holds in the initial world, and
-  `finish`, `spawn`, and priority receive preserve it. A priority message has
-  `callFrom = none`, so the receive only transports the tag. At most one bulk
-  message names a caller. `install_plain` drops a non-call bulk head and
-  `install_call` turns the unique call at that head into the handler obligation.
-  `bulk_box` is those two, then `credit_tag`, for an empty parked list.
-  `admit_phase` rewrites a parked call into `awaitReply` on the same
-  continuation while the mailbox entry is still there. An empty mailbox that
-  delivers a parked head is different: `deliver_parked_send` resumes a non-call
-  sender with `proceed`, and   `deliver_parked_tag` checks the call post-state
-  in one step (handler `replyTo` the sender, sender in `awaitReply`, entry
-  removed). The call message has to name that sender; a swapped pair of parked
-  calls is a `CallTagInv` world the step does not preserve. `recvBulk_tag`
-  covers every successful bulk receive: an empty parked list, an empty box,
-  and both nonempty. The both-nonempty arm installs the box head with the
-  parked list still in place, then moves that head onto the box and resumes
-  its sender. A call that is already in the box has its caller in `awaitReply`.
+  A parked call owns the mailbox entry before admission. A parked entry carries
+  `callFrom = some s` exactly when `s` is parked on that mailbox with the call
+  bit set, and such a caller has that message in the parked list, never in the
+  box. It holds in the initial world, and `finish`, `spawn`, and priority
+  receive preserve it. A priority message has `callFrom = none`, so the receive
+  only transports the tag. At most one bulk message names a caller.
+  `install_plain` drops a non-call bulk head and `install_call` turns the
+  unique call at that head into the handler obligation. `bulk_box` is those
+  two, then `credit_tag`, for an empty parked list. Rewriting a parked call
+  into `awaitReply` while the entry stays parked would break the entry's
+  `callFrom`, so that step is not a preservation lemma. An empty mailbox that
+  delivers a parked head is one post-state: `deliver_parked_send` resumes a
+  non-call sender with `proceed`, and `deliver_parked_tag` installs the handler
+  with `replyTo` the sender, moves the sender to `awaitReply`, and removes the
+  entry. `recvBulk_tag` covers every successful bulk receive with no extra
+  side conditions: an empty parked list, an empty box, and both nonempty. When
+  both are nonempty the box head is installed with the parked list still in
+  place; a non-call head is then appended and its sender resumed, and a call
+  head is appended and its sender moved to `awaitReply` in the same step.
   `exec`, `call_tag_reachable`, the delivery walk, the handler reply,
   `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift
   are not done.
