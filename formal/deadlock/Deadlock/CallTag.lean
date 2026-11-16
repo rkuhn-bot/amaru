@@ -640,27 +640,109 @@ theorem resume_tag (w : World) (id : InstId) (k : Cont) (hT : CallTagInv w)
         · simpa [w', setActor, hc] using h)
       c d k hk
 
-theorem finish_tag (w : World) (id : InstId) (w' : World) (hT : CallTagInv w)
-    (h : finishWait w id = some w') : CallTagInv w' := by
-  unfold finishWait at h
+theorem finish_tag (I : Impl) (w : World) (id : InstId) (w' : World) (hT : CallTagInv w)
+    (h : finishWait I w id = some w') : CallTagInv w' := by
   cases hph : (w.st id).phase with
   | awaitEffect k =>
-    simp [hph] at h
-    cases h
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
     exact resume_tag w id k hT (by simp [carriedCont, hph])
       (fun d kA hbad => by simp [hph] at hbad)
       (fun d b kA hbad => by simp [hph] at hbad)
   | awaitPeer k =>
-    simp [hph] at h
-    cases h
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
     exact resume_tag w id k hT (by simp [carriedCont, hph])
       (fun d kA hbad => by simp [hph] at hbad)
       (fun d b kA hbad => by simp [hph] at hbad)
-  | idle => simp [hph] at h
-  | run _ => simp [hph] at h
-  | parked _ _ _ => simp [hph] at h
-  | awaitReply _ _ => simp [hph] at h
-  | crashed => simp [hph] at h
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
+
+theorem countCall_snoc_none (ms : List Msg) (m : Msg) (c : InstId) (hc : m.callFrom = none) :
+    countCall (ms ++ [m]) c = countCall ms c := by
+  induction ms with
+  | nil => simp [countCall, hc]
+  | cons x xs ih => simp [countCall, ih]
+
+/-- Environment ingress appends a non-call, so every call tag stays where it was. -/
+theorem ingress_tag (I : Impl) (w : World) (dst : InstId) (label : String) (w' : World)
+    (hT : CallTagInv w) (h : receiveIngress I w dst label = some w') : CallTagInv w' := by
+  let msg : Msg := { label := label, sender := dst, callFrom := none }
+  have hphase (i : InstId) : (w'.st i).phase = (w.st i).phase :=
+    (ingress_phase I w w' dst label i h).1
+  have hprio (i : InstId) : (w'.st i).prio = (w.st i).prio :=
+    (ingress_phase I w w' dst label i h).2.2.1
+  have hparked (i : InstId) : (w'.st i).parked = (w.st i).parked :=
+    (ingress_parked I w w' dst label i h).1
+  apply call_tag_stable w w' hT
+  · intro d c
+    constructor
+    · intro hm
+      rcases hm with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+      · rcases ingress_box I w w' dst label d h with ⟨_, hbox⟩ | ⟨_, hbox⟩
+        · rw [hbox] at hm
+          simp [List.mem_append, List.mem_singleton] at hm
+          rcases hm with hm | rfl
+          · exact Or.inl ⟨m, hm, hc⟩
+          · simp [msg] at hc
+        · exact Or.inl ⟨m, by simpa [hbox] using hm, hc⟩
+      · exact Or.inr ⟨p, by simpa [hparked d] using hp, hc⟩
+    · intro hm
+      rcases hm with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+      · rcases ingress_box I w w' dst label d h with ⟨_, hbox⟩ | ⟨_, hbox⟩
+        · exact Or.inl ⟨m, by simp [hbox, List.mem_append, hm], hc⟩
+        · exact Or.inl ⟨m, by simpa [hbox] using hm, hc⟩
+      · exact Or.inr ⟨p, by simpa [hparked d] using hp, hc⟩
+  · intro i c
+    constructor <;> simp [handlerOwes, hphase]
+  · intro i c
+    constructor <;> simp [replyPending, hphase]
+  · intro c d k hph
+    simpa [hphase c] using hph
+  · intro c d k hph
+    simpa [hphase c] using hph
+  · intro c d k hph
+    simpa [hphase c] using hph
+  · intro c d k hph
+    simpa [hphase c] using hph
+  · intro id m hm
+    rw [hprio id] at hm
+    exact hT.prioPlain id m hm
+  · intro d c
+    rcases ingress_box I w w' dst label d h with ⟨_, hbox⟩ | ⟨_, hbox⟩
+    · have hc := countCall_snoc_none (w.st d).box msg c rfl
+      rw [soleCall, hbox, hc, hparked d]
+      exact hT.sole d c
+    · rw [soleCall, hbox, hparked d]
+      exact hT.sole d c
+  · intro d p hp s
+    have hp0 : p ∈ (w.st d).parked := by simpa [hparked d] using hp
+    constructor
+    · intro hc
+      rcases (hT.parkFrom d p hp0 s).mp hc with ⟨hs, k, hk⟩
+      exact ⟨hs, k, by simpa [hphase s] using hk⟩
+    · intro h
+      rcases h with ⟨hs, k, hk⟩
+      exact (hT.parkFrom d p hp0 s).mpr ⟨hs, k, by simpa [hphase s] using hk⟩
+  · intro c d k hph
+    have hpre := hT.parkedOnly c d k (by simpa [hphase c] using hph)
+    refine ⟨?_, ?_⟩
+    · obtain ⟨p, hp, hs, hc⟩ := hpre.1
+      exact ⟨p, by simpa [hparked d] using hp, hs, hc⟩
+    · intro hex
+      obtain ⟨m, hm, hc⟩ := hex
+      rcases ingress_box I w w' dst label d h with ⟨_, hbox⟩ | ⟨_, hbox⟩
+      · rw [hbox] at hm
+        simp [List.mem_append, List.mem_singleton] at hm
+        rcases hm with hm | rfl
+        · exact hpre.2 ⟨m, hm, hc⟩
+        · simp [msg] at hc
+      · exact hpre.2 ⟨m, by simpa [hbox] using hm, hc⟩
 
 /-- A freshly spawned actor is idle and empty, so it adds no call tag. -/
 theorem spawn_tag (I : Impl) (w : World) (template : String) (w' : World)

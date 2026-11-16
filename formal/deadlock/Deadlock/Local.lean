@@ -133,10 +133,43 @@ def stepsCoverB (I : Impl) : Bool :=
       s.template == tr.template && s.fromState == tr.fromState &&
         s.toState == tr.toState && s.label == tr.label
 
+/-- `findTr` returns the first transition with this key. A second one is ignored,
+so a call can be refused while `callTotal` still sees an accepting copy. -/
+def trKey (tr : Transition) : String × String × String :=
+  (tr.template, tr.fromState, tr.label)
+
+def uniqueKeys (I : Impl) : Bool :=
+  let keys := I.transitions.map trKey
+  keys.length == (dedup keys).length
+
+/-- Every bulk label on an edge is handled in every state the relation allows
+the receiver to be in. A missing transition is what `deliver` consumes silently. -/
+def labelHandled (I : Impl) : Bool :=
+  I.desc.edges.all fun e =>
+    if e.effect == .send || e.effect == .call || e.effect == .trySend then
+      (targetStates I.desc e).all fun st =>
+        I.transitions.any fun tr =>
+          tr.template == e.dst && tr.fromState == st && tr.label == e.label &&
+            (e.effect != .call || tr.acceptsCall)
+    else true
+
+/-- A reliable send or call may target only a non-terminable multiplicity-one
+template. Those cores do not die, so the sender cannot proceed past a dead name. -/
+def permanentTarget (I : Impl) : Bool :=
+  I.desc.edges.all fun e =>
+    if (e.effect == .send || e.effect == .call) && e.reliability == .reliable then
+      match templateOf I.desc e.dst with
+      | none => false
+      | some t => t.multiplicity == .one && t.terminable == false
+    else true
+
+def localTail (I : Impl) : Bool :=
+  stepsCoverB I && uniqueKeys I && labelHandled I && permanentTarget I
+
 def localOkB (I : Impl) : Bool :=
   I.transitions.all (transitionOk I) && callTotal I && targetsAll I.desc &&
     occShape I.desc && dstClosed I && prioOk I &&
-    (compatFails I.desc).isEmpty && stepsCoverB I
+    (compatFails I.desc).isEmpty && localTail I
 
 def LocalOk (I : Impl) : Prop := localOkB I = true
 
@@ -176,8 +209,25 @@ theorem local_parts (I : Impl) (h : LocalOk I) :
     I.transitions.all (transitionOk I) = true ∧ callTotal I = true ∧ targetsAll I.desc = true ∧
       occShape I.desc = true ∧ dstClosed I = true ∧ prioOk I = true ∧
       (compatFails I.desc).isEmpty = true ∧ stepsCoverB I = true := by
-  simp only [LocalOk, localOkB, Bool.and_eq_true] at h
-  exact ⟨h.1.1.1.1.1.1.1, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact ⟨h.1.1.1.1.1.1.1, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2,
+    h.2.1.1.1⟩
+
+theorem unique_keys_local (I : Impl) (h : LocalOk I) : uniqueKeys I = true := by
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.1.1.2
+
+theorem label_handled_local (I : Impl) (h : LocalOk I) : labelHandled I = true := by
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.1.2
+
+theorem permanent_target_local (I : Impl) (h : LocalOk I) : permanentTarget I = true := by
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.2
 
 theorem transitionOk_of_mem (I : Impl) (h : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions) :
     transitionOk I tr = true := by

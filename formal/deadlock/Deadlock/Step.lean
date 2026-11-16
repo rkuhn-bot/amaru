@@ -1183,24 +1183,31 @@ theorem spawn_inv (I : Impl) (w : World) (template : String) (w' : World) (hS : 
   ⟨spawn_sem I w w' template hS h, spawn_mail I w template w' hM hfree h⟩
 
 theorem finish_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w) (hM : MailInv w)
-    (h : finishWait w id = some w') : SemInv I w' ∧ MailInv w' := by
-  unfold finishWait at h
-  split at h
-  · next k heq =>
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+    (h : finishWait I w id = some w') : SemInv I w' ∧ MailInv w' := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, heq] using hS.prog id
-    have hfree : notParked (w.st id).phase := by simp [notParked, heq]
+      simpa [programOk, hph] using hS.prog id
+    have hfree : notParked (w.st id).phase := by simp [notParked, hph]
     exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree
-  · next k heq =>
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, heq] using hS.prog id
-    have hfree : notParked (w.st id).phase := by simp [notParked, heq]
+      simpa [programOk, hph] using hS.prog id
+    have hfree : notParked (w.st id).phase := by simp [notParked, hph]
     exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree
-  · cases h
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
 
 /-- One running head: every effect, including a parking send or call and a killing terminate. -/
 theorem exec_head_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w' : World)
@@ -1425,17 +1432,24 @@ theorem open_spawn (I : Impl) (w : World) (template : String) (w' : World) (hO :
       exact open_read I.desc _ pid (open_set _ pid _ hO1 hkeep)
     · simp [hif] at h
 
-theorem open_finish (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
-    (h : finishWait w id = some w') : OpenSlots w' := by
-  unfold finishWait at h
-  split at h
-  · next _ heq =>
-    cases h
-    exact open_busy w id _ hO (by rw [heq]; intro hbad; cases hbad)
-  · next _ heq =>
-    cases h
-    exact open_busy w id _ hO (by rw [heq]; intro hbad; cases hbad)
-  · cases h
+theorem open_finish (I : Impl) (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
+    (h : finishWait I w id = some w') : OpenSlots w' := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    exact open_busy w id _ hO (by rw [hph]; intro hbad; cases hbad)
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    exact open_busy w id _ hO (by rw [hph]; intro hbad; cases hbad)
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
 
 theorem deliver_st (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
     (a1 : Actor) (i : InstId) (h : deliver I w id a m = some (w1, a1)) : w1.st i = w.st i := by
@@ -1787,6 +1801,57 @@ theorem exec_head_open (I : Impl) (w : World) (id : InstId) (w' : World) (hO : O
     · cases h
 
 /-- `SemInv`, `MailInv`, and the unspawned peer indices, together. -/
+theorem ingress_parked (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
+    (h : receiveIngress I w dst label = some w') :
+    (w'.st i).parked = (w.st i).parked ∧ (w'.st i).phase = (w.st i).phase ∧
+      (w'.st i).life = (w.st i).life := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            by_cases hi : i = dst
+            · simp [setActor, hi, chargeSender, bumpToken]
+            · simp [setActor, hi]
+
+theorem ingress_mail (I : Impl) (w w' : World) (dst : InstId) (label : String) (hM : MailInv w)
+    (h : receiveIngress I w dst label = some w') : MailInv w' := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro mb p hp
+    have hpk := (ingress_parked I w w' dst label mb h).1
+    rw [hpk] at hp
+    obtain ⟨k, hk⟩ := hM.fwd mb p hp
+    exact ⟨k, by simpa [(ingress_parked I w w' dst label p.sender h).2.1] using hk⟩
+  · intro id mb c k hk
+    have hph := (ingress_parked I w w' dst label id h).2.1
+    rw [hph] at hk
+    obtain ⟨p, hp, hs, hc⟩ := hM.bwd id mb c k hk
+    exact ⟨p, by simpa [(ingress_parked I w w' dst label mb h).1] using hp, hs, hc⟩
+  · intro mb1 mb2 p1 p2 hp1 hp2 hsame
+    have h1 := (ingress_parked I w w' dst label mb1 h).1
+    have h2 := (ingress_parked I w w' dst label mb2 h).1
+    rw [h1] at hp1
+    rw [h2] at hp2
+    exact hM.uniq mb1 mb2 p1 p2 hp1 hp2 hsame
+  · intro mb
+    simpa [(ingress_parked I w w' dst label mb h).1] using hM.once mb
+
+theorem open_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (hO : OpenSlots w)
+    (h : receiveIngress I w dst label = some w') : OpenSlots w' := by
+  intro template i hi
+  have hix : w'.nextIx = w.nextIx := (ingress_phase I w w' dst label (InstId.peer template i) h).2.2.2.2.2.2.1
+  have hst := ingress_parked I w w' dst label (InstId.peer template i) h
+  rw [hix] at hi
+  have hold := hO template i hi
+  exact ⟨hst.2.2.trans hold.1, hst.2.1.trans hold.2.1, hst.1.trans hold.2.2⟩
+
 def Inv (I : Impl) (w : World) : Prop :=
   SemInv I w ∧ MailInv w ∧ OpenSlots w
 
@@ -1807,10 +1872,13 @@ theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w'
     exact ⟨(exec_head_inv I hL w id w' hS hM ha).1, (exec_head_inv I hL w id w' hS hM ha).2,
       exec_head_open I w id w' hO ha⟩
   | finish id =>
-    exact ⟨(finish_inv I w w' id hS hM ha).1, (finish_inv I w w' id hS hM ha).2, open_finish w id w' hO ha⟩
+    exact ⟨(finish_inv I w w' id hS hM ha).1, (finish_inv I w w' id hS hM ha).2, open_finish I w id w' hO ha⟩
   | spawn template =>
     exact ⟨(spawn_inv I w template w' hS hM (open_slot w hO template) ha).1,
       (spawn_inv I w template w' hS hM (open_slot w hO template) ha).2, open_spawn I w template w' hO ha⟩
+  | ingress dst label =>
+    exact ⟨ingress_sem I w w' dst label hS ha, ingress_mail I w w' dst label hM ha,
+      open_ingress I w w' dst label hO ha⟩
 
 theorem inv_init (I : Impl) (N : Nat) (hL : LocalOk I) : Inv I (initWorld I N) :=
   ⟨semInv_init I N hL, mail_init I N, open_init I N⟩

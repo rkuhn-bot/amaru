@@ -38,56 +38,62 @@ theorem wait_peer_phase (a : Actor) (h : waitKind a = some .peer) : ∃ k, a.pha
   | awaitEffect _ => simp [waitKind, hphase] at h
   | crashed => simp [waitKind, hphase] at h
 
-theorem finish_clears_effect (w : World) (s : InstId) (w' : World)
-    (h : finishWait w s = some w') (hp : waitKind (w.st s) = some .effect) :
+theorem finish_clears_effect (I : Impl) (w : World) (s : InstId) (w' : World)
+    (h : finishWait I w s = some w') (hp : waitKind (w.st s) = some .effect) :
     waitKind (w'.st s) ≠ some .effect := by
   obtain ⟨k, hk⟩ := wait_effect_phase (w.st s) hp
   simp [finishWait, hk] at h
-  subst h
+  rcases h with ⟨_, hw⟩
+  rw [← hw]
   simpa [setActor_self] using proceed_not_effect (w.st s) k
 
-theorem finish_clears_peer (w : World) (s : InstId) (w' : World)
-    (h : finishWait w s = some w') (hp : waitKind (w.st s) = some .peer) :
+theorem finish_clears_peer (I : Impl) (w : World) (s : InstId) (w' : World)
+    (h : finishWait I w s = some w') (hp : waitKind (w.st s) = some .peer) :
     waitKind (w'.st s) ≠ some .peer := by
   obtain ⟨k, hk⟩ := wait_peer_phase (w.st s) hp
   simp [finishWait, hk] at h
-  subst h
+  rcases h with ⟨_, hw⟩
+  rw [← hw]
   simpa [setActor_self] using proceed_not_peer (w.st s) k
 
 theorem enabled_finish_effect (I : Impl) (w : World) (s : InstId)
-    (hp : waitKind (w.st s) = some .effect) : Enabled I w (.finish s) := by
+    (hp : waitKind (w.st s) = some .effect) (hok : I.env.effectDone w s = true) :
+    Enabled I w (.finish s) := by
   obtain ⟨k, hk⟩ := wait_effect_phase (w.st s) hp
-  simp [Enabled, apply, finishWait, hk]
+  simp [Enabled, apply, finishWait, hk, hok]
 
 theorem enabled_finish_peer (I : Impl) (w : World) (s : InstId)
-    (hp : waitKind (w.st s) = some .peer) : Enabled I w (.finish s) := by
+    (hp : waitKind (w.st s) = some .peer) (hok : I.env.peerDone w s = true) :
+    Enabled I w (.finish s) := by
   obtain ⟨k, hk⟩ := wait_peer_phase (w.st s) hp
-  simp [Enabled, apply, finishWait, hk]
+  simp [Enabled, apply, finishWait, hk, hok]
 
 theorem not_stuck_effect {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s : InstId) (i : Nat)
-    (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .effect) : False := by
+    (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .effect)
+    (hok : ∀ j, i ≤ j → I.env.effectDone (ρ.cfg j) s = true) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .effect := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) :=
-    fun j hj => enabled_finish_effect I (ρ.cfg j) s (hall j hj)
+    fun j hj => enabled_finish_effect I (ρ.cfg j) s (hall j hj) (hok j hj)
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
-  exact finish_clears_effect (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
+  exact finish_clears_effect I (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
     (hall (j + 1) (Nat.le_trans hj (Nat.le_succ j)))
 
 theorem not_stuck_peer {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s : InstId) (i : Nat)
-    (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer) : False := by
+    (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer)
+    (hok : ∀ j, i ≤ j → I.env.peerDone (ρ.cfg j) s = true) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .peer := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) :=
-    fun j hj => enabled_finish_peer I (ρ.cfg j) s (hall j hj)
+    fun j hj => enabled_finish_peer I (ρ.cfg j) s (hall j hj) (hok j hj)
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
-  exact finish_clears_peer (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
+  exact finish_clears_peer I (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
     (hall (j + 1) (Nat.le_trans hj (Nat.le_succ j)))
 
 theorem run_enabled (I : Impl) (w : World) (s : InstId) (k : Cont)

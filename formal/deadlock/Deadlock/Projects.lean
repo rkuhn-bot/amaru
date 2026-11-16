@@ -676,16 +676,39 @@ theorem ty_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : TyOk I.desc (initWo
     simp [absentActor] at hl
 
 theorem finish_ty (I : Impl) (w : World) (id : InstId) (w' : World) (hT : TyOk I.desc w)
-    (hS : SemInv I w) (h : finishWait w id = some w') : TyOk I.desc w' := by
-  unfold finishWait at h
+    (hS : SemInv I w) (h : finishWait I w id = some w') : TyOk I.desc w' := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    exact tyOk_proceed I.desc w id k hT (by simpa [contTy, hph] using hS.cont id)
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    exact tyOk_proceed I.desc w id k hT (by simpa [contTy, hph] using hS.cont id)
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
+
+theorem ingress_ty (I : Impl) (w w' : World) (dst : InstId) (label : String) (hT : TyOk I.desc w)
+    (h : receiveIngress I w dst label = some w') : TyOk I.desc w' := by
+  dsimp [receiveIngress] at h
   split at h
-  · next k heq =>
-    cases h
-    exact tyOk_proceed I.desc w id k hT (by simpa [contTy, heq] using hS.cont id)
-  · next k heq =>
-    cases h
-    exact tyOk_proceed I.desc w id k hT (by simpa [contTy, heq] using hS.cont id)
-  · cases h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            exact tyOk_id I.desc w dst _ hT (by simp [chargeSender, bumpToken]) (by simp [chargeSender, bumpToken])
 
 theorem head_ty (I : Impl) (w : World) (id : InstId) (w' : World) (hT : TyOk I.desc w)
     (hS : SemInv I w) (h : execHead I w id = some w') : TyOk I.desc w' := by
@@ -709,6 +732,7 @@ theorem ty_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w w
   | exec id => exact head_ty I w id w' hT hS h
   | finish id => exact finish_ty I w id w' hT hS h
   | spawn template => exact spawn_ty I hG w template w' hT h
+  | ingress dst label => exact ingress_ty I w w' dst label hT (by simpa [apply] using h)
 
 theorem ty_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : TyOk I.desc w := by
@@ -846,15 +870,24 @@ theorem head_ix (I : Impl) (w : World) (id : InstId) (w' : World) (name : String
       exact exec_ix I w id k name
     · cases h
 
-theorem finish_ix (w : World) (id : InstId) (w' : World) (name : String) (h : finishWait w id = some w') :
+theorem finish_ix (I : Impl) (w : World) (id : InstId) (w' : World) (name : String) (h : finishWait I w id = some w') :
     w'.nextIx name = w.nextIx name := by
-  unfold finishWait at h
-  split at h
-  · cases h
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
     simp [setActor]
-  · cases h
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
     simp [setActor]
-  · cases h
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
 
 theorem receive_prio_ix (I : Impl) (w : World) (id : InstId) (w' : World) (name : String)
     (h : receivePrio I w id = some w') : w'.nextIx name = w.nextIx name := by
@@ -938,8 +971,10 @@ theorem ix_preserved (I : Impl) (w w' : World) (a : Action) (name : String) (t :
   | recvBulk id => exact receive_bulk_ix I w id w' name h
   | recvPrio id => exact receive_prio_ix I w id w' name h
   | exec id => exact head_ix I w id w' name h
-  | finish id => exact finish_ix w id w' name h
+  | finish id => exact finish_ix I w id w' name h
   | spawn template => exact spawn_ix I w template w' name t ht hmul h
+  | ingress dst label =>
+    exact congrFun (ingress_phase I w w' dst label (InstId.core name) (by simpa [apply] using h)).2.2.2.2.2.2.1 name
 
 theorem ix_zero (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) (name : String) (t : Template)
     (ht : templateOf I.desc name = some t) (hmul : t.multiplicity = .one) : w.nextIx name = 0 := by

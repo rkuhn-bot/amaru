@@ -147,9 +147,22 @@ structure Transition where
   release : Nat
   deriving DecidableEq, Repr, Inhabited
 
+/-- Environment permission for `finish`. `Assumptions` is the only constraint
+on these flags; the step relation does not grant them. -/
+structure Env where
+  effectDone : World → InstId → Bool
+  peerDone : World → InstId → Bool
+
+/-- An environment that always lets a finished effect or peer wait proceed.
+Real deployments substitute a flag constrained by `Assumptions`. -/
+def Env.always : Env where
+  effectDone := fun _ _ => true
+  peerDone := fun _ _ => true
+
 structure Impl where
   desc : Description
   transitions : List Transition
+  env : Env := Env.always
 
 def capBulk (D : Description) (N : Nat) (id : InstId) : Nat :=
   match templateOf D (tname id) with
@@ -456,11 +469,156 @@ def execHead (I : Impl) (w : World) (id : InstId) : Option World :=
     | .run k => some (execRun I w id a k)
     | _ => none
 
-def finishWait (w : World) (id : InstId) : Option World :=
+/-- `finish` fires only when the environment oracle says the wait is over.
+`Assumptions.internal_complete` / `peer_complete` are the only reasons those
+flags are true. -/
+def finishWait (I : Impl) (w : World) (id : InstId) : Option World :=
   match (w.st id).phase with
-  | .awaitEffect k => some (setActor w id (proceed (w.st id) k))
-  | .awaitPeer k => some (setActor w id (proceed (w.st id) k))
+  | .awaitEffect k =>
+    if I.env.effectDone w id then some (setActor w id (proceed (w.st id) k)) else none
+  | .awaitPeer k =>
+    if I.env.peerDone w id then some (setActor w id (proceed (w.st id) k)) else none
   | _ => none
+
+/-- A declared ingress edge: a non-blocking `trySend` the environment may deliver. -/
+def hasIngress (D : Description) (dst label : String) : Bool :=
+  D.edges.any fun e =>
+    e.ingress && e.dst == dst && e.label == label && e.effect == .trySend
+
+/-- `true` when the named template is declared terminable. -/
+def terminableB (D : Description) (name : String) : Bool :=
+  match templateOf D name with
+  | some t => t.terminable
+  | none => false
+
+/-- Environment delivery into a live idle ingress stage. It charges one self-slot
+and appends a bulk message when the mailbox has room and the target still has a
+token above the floor of its typestate. A full mailbox, a dead target, a
+terminable target, or a spent budget makes the action disabled, so the message
+is never dropped and a terminable actor does not take on outstanding work. -/
+def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Option World :=
+  let a := w.st dst
+  let cap := capBulk I.desc w.N dst
+  let floor := budget I.desc (tname dst) (tname dst) - debt I.desc (tname dst) a.typestate (tname dst)
+  if a.life ≠ .alive || a.phase ≠ .idle then none
+  else if hasIngress I.desc (tname dst) label = false then none
+  else if a.parked ≠ [] || cap ≤ a.box.length then none
+  else if terminableB I.desc (tname dst) then none
+  else if a.tokens (tname dst) < floor + 1 then none
+  else
+    let msg : Msg := { label := label, sender := dst, callFrom := none }
+    let charged := chargeSender a (tname dst)
+    some (setActor w dst { charged with box := a.box ++ [msg] })
+
+theorem ingress_phase (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
+    (h : receiveIngress I w dst label = some w') :
+    (w'.st i).phase = (w.st i).phase ∧ (w'.st i).life = (w.st i).life ∧
+      (w'.st i).prio = (w.st i).prio ∧ w'.cell = w.cell ∧ w'.roster = w.roster ∧
+      w'.N = w.N ∧ w'.nextIx = w.nextIx ∧ w'.observed = w.observed := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            refine ⟨?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl⟩
+            all_goals
+              by_cases hi : i = dst
+              · simp [setActor, hi, chargeSender, bumpToken]
+              · simp [setActor, hi]
+
+/-- A successful `finish` is the continuation after an effect or peer wait. -/
+theorem finish_proceed (I : Impl) (w w' : World) (id : InstId)
+    (h : finishWait I w id = some w') :
+    ∃ k, ((w.st id).phase = .awaitEffect k ∨ (w.st id).phase = .awaitPeer k) ∧
+      w' = setActor w id (proceed (w.st id) k) := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    exact ⟨k, Or.inl rfl, hw.symm⟩
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    exact ⟨k, Or.inr rfl, hw.symm⟩
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
+
+/-- Ingress appends one non-call to the target box and leaves every other box. -/
+theorem ingress_box (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
+    (h : receiveIngress I w dst label = some w') :
+    (i = dst ∧ (w'.st i).box = (w.st i).box ++ [{ label := label, sender := dst, callFrom := none }]) ∨
+      (i ≠ dst ∧ (w'.st i).box = (w.st i).box) := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            by_cases hi : i = dst
+            · exact Or.inl ⟨hi, by simp [setActor, hi, chargeSender, bumpToken]⟩
+            · exact Or.inr ⟨hi, by simp [setActor, hi]⟩
+
+/-- Ingress does not change typestate. -/
+theorem ingress_ty_eq (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
+    (h : receiveIngress I w dst label = some w') :
+    (w'.st i).typestate = (w.st i).typestate := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            by_cases hi : i = dst
+            · simp [setActor, hi, chargeSender, bumpToken]
+            · simp [setActor, hi]
+
+/-- A delivered ingress names a live idle actor. -/
+theorem ingress_ready (I : Impl) (w w' : World) (dst : InstId) (label : String)
+    (h : receiveIngress I w dst label = some w') :
+    (w.st dst).life = .alive ∧ (w.st dst).phase = .idle := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · next hguard =>
+    split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · have hnot : ¬((w.st dst).life ≠ .alive ∨ (w.st dst).phase ≠ .idle) := by
+              simpa using hguard
+            refine ⟨?_, ?_⟩
+            · by_cases hl : (w.st dst).life = .alive
+              · exact hl
+              · exact False.elim (hnot (Or.inl hl))
+            · by_cases hp : (w.st dst).phase = .idle
+              · exact hp
+              · exact False.elim (hnot (Or.inr hp))
 
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
@@ -482,6 +640,7 @@ inductive Action where
   | exec (s : InstId)
   | finish (s : InstId)
   | spawn (template : String)
+  | ingress (dst : InstId) (label : String)
   deriving DecidableEq, Repr
 
 def apply (I : Impl) (a : Action) (w : World) : Option World :=
@@ -489,8 +648,9 @@ def apply (I : Impl) (a : Action) (w : World) : Option World :=
   | .recvBulk s => receiveBulk I w s
   | .recvPrio s => receivePrio I w s
   | .exec s => execHead I w s
-  | .finish s => finishWait w s
+  | .finish s => finishWait I w s
   | .spawn template => spawn I w template
+  | .ingress dst label => receiveIngress I w dst label
 
 def Enabled (I : Impl) (w : World) (a : Action) : Prop := apply I a w ≠ none
 
@@ -537,8 +697,12 @@ def CanReceive (w : World) (id : InstId) : Prop :=
 structure Fair {I : Impl} {N : Nat} (ρ : Run I N) : Prop where
   weak : ∀ (a : Action) (i : Nat), forced a = true →
     (∀ j, i ≤ j → Enabled I (ρ.cfg j) a) → ∃ j, i ≤ j ∧ ρ.act j = a
+  /-- Strong fairness of bulk receive, stated on `Enabled`. `CanReceive` is not
+  enough: a call at the head can make the mailbox look ready while `deliver`
+  refuses it. `uniqueKeys` plus `callTotal` are what turn readiness into
+  `Enabled`. -/
   bulk : ∀ (s : InstId),
-    (∀ i, ∃ j, i ≤ j ∧ CanReceive (ρ.cfg j) s) →
+    (∀ i, ∃ j, i ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk s)) →
     (∀ i, ∃ j, i ≤ j ∧ ρ.act j = .recvBulk s)
   /-- The runtime drains a priority lane that is enabled infinitely often.
   `recvBulk` stays enabled beside `recvPrio`; this is the policy that the
@@ -569,6 +733,11 @@ def Stuck {I : Impl} {N : Nat} (ρ : Run I N) (s : InstId) (i : Nat) : Prop :=
   SameWait ((ρ.cfg i).st s) ((ρ.cfg i).st s) ∧
     ∀ j, i ≤ j → SameWait ((ρ.cfg i).st s) ((ρ.cfg j).st s)
 
+/-- A run is deadlocked when some actor is stuck on a blocking send, a call
+reply, or an internal effect. A `.peer` wait is excluded: it ends only when
+`Assumptions.peer_complete` lets `finish` fire, which is the environment
+oracle, not a height argument. No phase has wait kind `.cell`
+(`waitKind_ne_cell`). -/
 def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   ∃ s i, Stuck ρ s i ∧
     match waitKind ((ρ.cfg i).st s) with
@@ -577,23 +746,6 @@ def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
     | some .cell => True
     | some .effect => True
     | _ => False
-
-def PartialDeadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
-  ∃ s i, Stuck ρ s i ∧ ∃ t j, t ≠ s ∧ i ≤ j ∧
-    match ρ.act j with
-    | .recvBulk u => u = t
-    | .recvPrio u => u = t
-    | .exec u => u = t
-    | .finish u => u = t
-    | .spawn _ => False
-
-def GlobalDeadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
-  ∃ i, (∃ s, alive (ρ.cfg i) s) ∧ ∀ s, alive (ρ.cfg i) s → Stuck ρ s i
-
-def CallerMailboxFull (D : Description) (w : World) (s : InstId) : Prop :=
-  match (w.st s).phase with
-  | .awaitReply _ _ => (w.st s).box.length = capBulk D w.N s
-  | _ => False
 
 theorem waitKind_ne_cell (a : Actor) : waitKind a ≠ some .cell := by
   intro hEq
@@ -605,8 +757,6 @@ theorem waitKind_ne_cell (a : Actor) : waitKind a ≠ some .cell := by
   | awaitEffect _ => simp [waitKind, h] at hEq
   | awaitPeer _ => simp [waitKind, h] at hEq
   | crashed => simp [waitKind, h] at hEq
-
-def WaitingOnCell (a : Actor) : Prop := waitKind a = some .cell
 
 /-- Program length, used as the measure that makes a busy actor reach idle. -/
 def phaseFuel : Phase → Nat

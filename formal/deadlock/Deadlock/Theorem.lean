@@ -25,7 +25,7 @@ theorem not_stuck_effect_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assum
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
-  exact finish_clears_effect (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
+  exact finish_clears_effect I (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
     (hall (j + 1) (Nat.le_trans hj (Nat.le_succ j)))
 
 theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumptions I) (hF : Fair ρ)
@@ -40,7 +40,7 @@ theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumpt
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
-  exact finish_clears_peer (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
+  exact finish_clears_peer I (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
     (hall (j + 1) (Nat.le_trans hj (Nat.le_succ j)))
 
 /-- A deadlock is a send or a call that stays parked. An effect wait is taken

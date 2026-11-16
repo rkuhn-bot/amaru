@@ -1267,15 +1267,20 @@ theorem proceed_pending (a : Actor) (k : Cont) (d : String)
   | cons _ _ =>
     rcases h with hp | hp <;> simp [contRest, hk, hp]
 
+theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (hO : OccInv I w)
+    (h : receiveIngress I w dst label = some w') : OccInv I w' := by
+  sorry
+
 /-- `finish` only advances a wait. The typestate is already the continuation's
 target, and the remaining sends do not grow. -/
 theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS : SemInv I w)
-    (h : finishWait w id = some w') : OccInv I w' := by
-  unfold finishWait at h
-  split at h
-  · next k heq =>
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+    (h : finishWait I w id = some w') : OccInv I w' := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     let a := proceed (w.st id) k
     exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
       (proceed_tokens _ _) (by
@@ -1283,14 +1288,16 @@ theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS
         have hmem := hO.aliveIn id (by rw [proceed_life] at hl; exact hl)
         have hold := hO.slack id d hmem (by rw [proceed_life] at hl; exact hl)
         have hty' := proceed_keeps_ty (w.st id) k hty
-        have hpend := proceed_pending (w.st id) k d (Or.inl heq)
+        have hpend := proceed_pending (w.st id) k d (Or.inl hph)
         rw [hty']
         have htok := proceed_tokens (w.st id) k d
         rw [htok]
         exact Nat.le_trans (Nat.add_le_add_left hpend _) hold)
-  · next k heq =>
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     let a := proceed (w.st id) k
     exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
       (proceed_tokens _ _) (by
@@ -1298,12 +1305,16 @@ theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS
         have hmem := hO.aliveIn id (by rw [proceed_life] at hl; exact hl)
         have hold := hO.slack id d hmem (by rw [proceed_life] at hl; exact hl)
         have hty' := proceed_keeps_ty (w.st id) k hty
-        have hpend := proceed_pending (w.st id) k d (Or.inr heq)
+        have hpend := proceed_pending (w.st id) k d (Or.inr hph)
         rw [hty']
         have htok := proceed_tokens (w.st id) k d
         rw [htok]
         exact Nat.le_trans (Nat.add_le_add_left hpend _) hold)
-  · cases h
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
 
 theorem occ_same (I : Impl) (w w' : World) (hO : OccInv I w) (hst : ∀ i, w'.st i = w.st i)
     (hr : w'.roster = w.roster) (hN : w'.N = w.N) (hix : ∀ n, w'.nextIx n = w.nextIx n) :

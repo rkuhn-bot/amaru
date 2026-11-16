@@ -50,6 +50,8 @@ theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
     simpa [apply] using occ_finish I w w' id hO hS h
   | spawn template =>
     simpa [apply] using occ_spawn I w w' template hO h
+  | ingress dst label =>
+    simpa [apply] using occ_ingress I w w' dst label hO h
 
 theorem nobulk_drop (es : List Eff) (n : Nat) (h : noBulkSend es = true) : noBulkSend (es.drop n) = true := by
   induction n generalizing es with
@@ -173,34 +175,50 @@ theorem phase_refundP (w : World) (dst : String) (ps : List Parked) (i : InstId)
   (refundP_life w dst ps i).2.2.1
 
 theorem bulk_finish (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w)
-    (h : finishWait w id = some w') : BulkFree I w' := by
+    (h : finishWait I w id = some w') : BulkFree I w' := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    apply bulk_or I w _ hB
+    intro i ht
+    by_cases hi : i = id
+    · rw [hi] at ht ⊢
+      have hrest : noBulkSend k.rest = true := by simpa [contRest, hph] using hB id ht
+      cases hk : k.rest with
+      | nil => simp [setActor, proceed, hk, contRest, nobulk_empty]
+      | cons _ _ =>
+        simp [setActor, proceed, hk, contRest]
+        exact Or.inl (by simpa [hk] using hrest)
+    · simp [setActor, hi]
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    apply bulk_or I w _ hB
+    intro i ht
+    by_cases hi : i = id
+    · rw [hi] at ht ⊢
+      have hrest : noBulkSend k.rest = true := by simpa [contRest, hph] using hB id ht
+      cases hk : k.rest with
+      | nil => simp [setActor, proceed, hk, contRest, nobulk_empty]
+      | cons _ _ =>
+        simp [setActor, proceed, hk, contRest]
+        exact Or.inl (by simpa [hk] using hrest)
+    · simp [setActor, hi]
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
+
+/-- An ingress delivery leaves every phase where it was, so a bulk-free world stays bulk-free. -/
+theorem bulk_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (hB : BulkFree I w)
+    (h : receiveIngress I w dst label = some w') : BulkFree I w' := by
   apply bulk_or I w w' hB
-  intro i ht
-  unfold finishWait at h
-  split at h
-  · next k heq =>
-    cases h
-    by_cases hi : i = id
-    · rw [hi] at ht ⊢
-      have hrest : noBulkSend k.rest = true := by simpa [contRest, heq] using hB id ht
-      cases hk : k.rest with
-      | nil => simp [setActor, proceed, hk, contRest, nobulk_empty]
-      | cons _ _ =>
-        simp [setActor, proceed, hk, contRest]
-        exact Or.inl (by simpa [hk] using hrest)
-    · simp [setActor, hi]
-  · next k heq =>
-    cases h
-    by_cases hi : i = id
-    · rw [hi] at ht ⊢
-      have hrest : noBulkSend k.rest = true := by simpa [contRest, heq] using hB id ht
-      cases hk : k.rest with
-      | nil => simp [setActor, proceed, hk, contRest, nobulk_empty]
-      | cons _ _ =>
-        simp [setActor, proceed, hk, contRest]
-        exact Or.inl (by simpa [hk] using hrest)
-    · simp [setActor, hi]
-  · cases h
+  intro id _
+  exact Or.inr (ingress_phase I w w' dst label id h).1
 
 theorem bulk_spawn (I : Impl) (w w' : World) (template : String) (hB : BulkFree I w)
     (h : spawn I w template = some w') : BulkFree I w' := by
@@ -617,6 +635,7 @@ theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB :
   | exec id => simpa [apply] using bulk_head I w w' id hB h
   | finish id => simpa [apply] using bulk_finish I w w' id hB h
   | spawn template => simpa [apply] using bulk_spawn I w w' template hB h
+  | ingress dst label => simpa [apply] using bulk_ingress I w w' dst label hB h
 
 theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : Inv2 I w := by

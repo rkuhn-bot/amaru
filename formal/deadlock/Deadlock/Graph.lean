@@ -400,10 +400,19 @@ def kindOk (e : Edge) : Bool :=
   | .peer, .nonBlocking => true
   | _, _ => false
 
-def kindFails (D : Description) : List String :=
+/-- A reliable `trySend` that is not ingress drops when the mailbox is full.
+Only a superseding edge, or an ingress edge delivered by `Action.ingress`, may do that. -/
+def reliableTryFails (D : Description) : List String :=
   D.edges.filterMap fun e =>
+    if e.effect == .trySend && e.reliability == .reliable && !e.ingress then
+      some s!"fail: reliable trySend {e.label} may be dropped; mark it ingress or superseding"
+    else none
+
+def kindFails (D : Description) : List String :=
+  (D.edges.filterMap fun e =>
     if kindOk e then none
-    else some s!"fail: edge {e.label} mixes {reprStr e.effect} with {reprStr e.kind}"
+    else some s!"fail: edge {e.label} mixes {reprStr e.effect} with {reprStr e.kind}") ++
+    reliableTryFails D
 
 def scopeOk (D : Description) (e : Edge) : Bool :=
   match templateOf D e.src, templateOf D e.dst, e.scope with

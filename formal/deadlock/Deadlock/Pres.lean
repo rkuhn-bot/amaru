@@ -323,25 +323,60 @@ theorem effects_tail_of (D : Description) (template state : String) (e : Eff) (e
     (h : effectsOk D template state (e :: es) = true) : effectsOk D template state es = true :=
   effectsOk_tail D template state e es h
 
-theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
-    (h : finishWait w id = some w') : SemInv I w' := by
-  unfold finishWait at h
+theorem ingress_sem (I : Impl) (w w' : World) (dst : InstId) (label : String) (hS : SemInv I w)
+    (h : receiveIngress I w dst label = some w') : SemInv I w' := by
+  dsimp [receiveIngress] at h
   split at h
-  · next k heq =>
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            let a0 := w.st dst
+            let charged := chargeSender a0 (tname dst)
+            let msg : Msg := { label := label, sender := dst, callFrom := none }
+            let a' : Actor := { charged with box := a0.box ++ [msg] }
+            have hty : a'.typestate = a0.typestate := by simp [a', charged, chargeSender, bumpToken]
+            have hlife : a'.life = a0.life := by simp [a', charged, chargeSender, bumpToken]
+            have hcont : contTy a' := by
+              simpa [contTy, a', charged, chargeSender, bumpToken] using hS.cont dst
+            have hprog : programOk I.desc dst a' := by
+              simpa [programOk, a', charged, chargeSender, bumpToken] using hS.prog dst
+            have hwait : waitEdge I.desc dst a' := by
+              simpa [waitEdge, a', charged, chargeSender, bumpToken] using hS.waited dst
+            simpa [a', msg, charged, a0] using sem_set I w dst a' hS hty hlife hcont hprog hwait
+
+theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
+    (h : finishWait I w id = some w') : SemInv I w' := by
+  cases hph : (w.st id).phase with
+  | awaitEffect k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, heq] using hS.prog id
+      simpa [programOk, hph] using hS.prog id
     have hp := proceed_ok I.desc id (w.st id) k hty hprog
     exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-  · next k heq =>
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, heq] using hS.cont id
+  | awaitPeer k =>
+    simp [finishWait, hph] at h
+    rcases h with ⟨_, hw⟩
+    rw [← hw]
+    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, heq] using hS.prog id
+      simpa [programOk, hph] using hS.prog id
     have hp := proceed_ok I.desc id (w.st id) k hty hprog
     exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-  · cases h
+  | idle => simp [finishWait, hph] at h
+  | run _ => simp [finishWait, hph] at h
+  | parked _ _ _ => simp [finishWait, hph] at h
+  | awaitReply _ _ => simp [finishWait, hph] at h
+  | crashed => simp [finishWait, hph] at h
 
 theorem peer_ne_core (template : String) (ix : Nat) (r : String) :
     InstId.peer template ix ≠ InstId.core r := by
