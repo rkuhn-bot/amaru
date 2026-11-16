@@ -939,6 +939,131 @@ theorem term_ok_head (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (h
     | crashed => simp [hph] at h
   · simp [hlive] at h
 
+theorem failWaiter_carried (w : World) (dead i s : InstId) :
+    carried ((failWaiter w dead i).st s).phase = none ∨
+      carried ((failWaiter w dead i).st s).phase = carried ((w.st s).phase) := by
+  unfold failWaiter
+  by_cases hdead : ((w.st i).life != .alive) = true
+  · simp [hdead]
+  · simp only [hdead, ite_false]
+    by_cases hs : s = i
+    · subst hs
+      cases hph : (w.st i).phase with
+      | parked d b k =>
+        simp only [hph]
+        by_cases hd : (d == dead) = true
+        · simp only [hd, ite_true]
+          cases hk : k.rest <;> simp [setActor, proceed, carried, hph, hk]
+        · have hf : (d == dead) = false := by
+            cases hb : (d == dead) with
+            | false => rfl
+            | true => exact absurd hb hd
+          simp [hf]
+      | awaitReply d k =>
+        simp only [hph]
+        by_cases hd : (d == dead) = true
+        · simp only [hd, ite_true, setActor, carried]
+        · have hf : (d == dead) = false := by
+            cases hb : (d == dead) with
+            | false => rfl
+            | true => exact absurd hb hd
+          simp [hf]
+      | idle => simp [hph]
+      | run _ => simp [hph]
+      | awaitEffect _ => simp [hph]
+      | awaitPeer _ => simp [hph]
+      | crashed => simp [hph]
+    · simp [setActor, hs]
+
+theorem failFold_carried (w : World) (dead s : InstId) (ids : List InstId) :
+    carried ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = none ∨
+      carried ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase =
+        carried ((w.st s).phase) := by
+  induction ids generalizing w with
+  | nil => exact Or.inr rfl
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rcases failWaiter_carried w dead i s with hnone | heq
+    · have hph : holdsPhase ((failWaiter w dead i).st s).phase = true := by
+        cases hp : ((failWaiter w dead i).st s).phase with
+        | idle => simp [holdsPhase]
+        | crashed => simp [holdsPhase]
+        | run _ => simp [carried, hp] at hnone
+        | parked _ _ _ => simp [carried, hp] at hnone
+        | awaitReply _ _ => simp [carried, hp] at hnone
+        | awaitEffect _ => simp [carried, hp] at hnone
+        | awaitPeer _ => simp [carried, hp] at hnone
+      exact Or.inl (by rw [(failFold_holds (failWaiter w dead i) dead s ids hph).1]; exact hnone)
+    · rcases ih (failWaiter w dead i) with hnone | hrest
+      · exact Or.inl hnone
+      · exact Or.inr (hrest.trans heq)
+
+theorem killOne_carried (w : World) (D : Description) (id s : InstId) :
+    carried ((killOne w D id).st s).phase = none ∨
+      carried ((killOne w D id).st s).phase = carried ((w.st s).phase) := by
+  by_cases hs : s = id
+  · exact Or.inl (by rw [hs, (killOne_self w D id).2.1]; simp [carried])
+  · let w1 := readCells D w id
+    have hst1 : w1.st s = w.st s := cellsSt D w id s
+    let w2 := refundMsgs w1 (tname id) (w.st id).box
+    have h2 := refundMsgs_rest w1 (tname id) (w.st id).box s
+    let w3 := refundParked w2 (tname id) (w.st id).parked
+    have h3 := refundParked_rest w2 (tname id) (w.st id).parked s
+    have hpre : carried ((w3.st s).phase) = carried ((w.st s).phase) := by
+      rw [h3.1, h2.1, congrArg (·.phase) hst1]
+    rcases failFold_carried w3 id s w3.roster with hnone | heq
+    · let w4 := failWaiters w3 id
+      let w5 := forgetSender w4 id
+      have h5 := forgetFold_mail w4 id s w4.roster
+      have hbody : killOne w D id =
+          setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+        simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+      rw [hbody, setActor_other _ _ _ _ hs]
+      have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+      exact Or.inl (by rw [h5p]; simpa [w4, failWaiters] using hnone)
+    · let w4 := failWaiters w3 id
+      let w5 := forgetSender w4 id
+      have h5 := forgetFold_mail w4 id s w4.roster
+      have hbody : killOne w D id =
+          setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+        simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+      rw [hbody, setActor_other _ _ _ _ hs]
+      have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+      exact Or.inr (by rw [h5p]; exact (by simpa [w4, failWaiters] using heq).trans hpre)
+
+theorem killFold_carried (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId) :
+    carried ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+        none ∨
+      carried ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+        carried ((w.st s).phase) := by
+  induction ids generalizing w with
+  | nil => exact Or.inr rfl
+  | cons j ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true]
+      rcases killOne_carried w D j s with hstep | heq
+      · rcases ih (killOne w D j) with hnone | hrest
+        · exact Or.inl hnone
+        · exact Or.inl (hrest.trans hstep)
+      · rcases ih (killOne w D j) with hnone | hrest
+        · exact Or.inl hnone
+        · exact Or.inr (hrest.trans heq)
+    · have hf : (isMember D j sub key && (w.st j).life == .alive) = false := by
+        cases hb : isMember D j sub key && (w.st j).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hcond
+      simp only [hf, ite_false]
+      exact ih w
+
+theorem killSubtree_carried (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId) :
+    carried ((killSubtree w D sub key).st s).phase = none ∨
+      carried ((killSubtree w D sub key).st s).phase = carried ((w.st s).phase) := by
+  simpa [killSubtree, killMembers, plant_st] using killFold_carried w D sub key w.roster s
+
 theorem term_ok_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hT : TermOk I w)
     (h : apply I a w = some w') : TermOk I w' := by
   cases a with
@@ -950,7 +1075,13 @@ theorem term_ok_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (h
   | exec id => simpa [apply] using term_ok_head I hL w w' id hT h
   | finish id => simpa [apply] using term_ok_finish I hL w w' id hT h
   | spawn template => simpa [apply] using term_ok_spawn I hL w w' template hT h
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro id es hc ht
+    rcases killSubtree_carried w I.desc sub key id with hnone | heq
+    · simp [hnone] at hc
+    · rw [heq] at hc
+      exact hT id es hc ht
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hT
@@ -3254,7 +3385,13 @@ theorem prog_src_head (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
 theorem prog_src_apply (I : Impl) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (h : apply I a w = some w') : ProgSrc I w' := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro id es hc
+    rcases killSubtree_carried w I.desc sub key id with hnone | heq
+    · simp [hnone] at hc
+    · rw [heq] at hc
+      exact hS id es hc
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -3800,7 +3937,12 @@ theorem lane_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : Worl
 theorem lane_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (h : apply I a w = some w') : LaneOk I w' := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro id
+    rcases killSubtree_prio_step w I.desc sub key id with heq | hnil
+    · simpa [heq] using hLane id
+    · simp [hnil, laneLabels]
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -4213,7 +4355,10 @@ theorem apply_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a :
     (w w' : World) (hpre : NoCrash w) (hLane : LaneOk I w) (hS : ProgSrc I w)
     (h : apply I a w = some w') : NoCrash w' := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro i
+    exact killSubtree_no_crash w I.desc sub key i (hpre i)
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -6162,7 +6307,13 @@ theorem prio_box_msg (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio 
 theorem mail_step (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (hA : MailAccepted I w) (h : apply I a w = some w') : MailAccepted I w' := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    refine ⟨?_, ?_⟩
+    · intro id m hm
+      exact hA.1 id m ((killSubtree_box_sub w I.desc sub key id).subset hm)
+    · intro id p hp
+      exact hA.2 id p ((killSubtree_parked_sub w I.desc sub key id).subset hp)
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -8537,7 +8688,13 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
     (hpre : PhaseWait ((w.st s).phase)) (hpost : PhaseWait ((w'.st s).phase)) :
     (w'.st s).typestate = (w.st s).typestate := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at hpost ⊢
+    have hwait : isWait ((killSubtree w I.desc sub key).st s).phase := by
+      rcases hpost with ⟨d, c, k, hk⟩ | ⟨d, k, hk⟩
+      · exact Or.inl ⟨d, c, k, hk⟩
+      · exact Or.inr ⟨d, k, hk⟩
+    exact (killSubtree_keeps_wait w I.desc sub key s hwait).2
   | stutter =>
     cases stutter_unchanged I w w' h
     rfl
@@ -11622,7 +11779,13 @@ theorem no_new_mailCall (I : Impl) (a : Action) (w w' : World) (c d : InstId) (k
     (hph' : (w'.st c).phase = .awaitReply d k)
     (hno : ¬ anyCall w c) : ¬ anyCall w' c := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro hcall
+    apply hno
+    rcases hcall with ⟨i, m, hm, hc⟩ | ⟨i, p, hp, hc⟩
+    · exact Or.inl ⟨i, m, (killSubtree_box_sub w I.desc sub key i).subset hm, hc⟩
+    · exact Or.inr ⟨i, p, (killSubtree_parked_sub w I.desc sub key i).subset hp, hc⟩
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -12980,7 +13143,9 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
     (w'.cell dst label).value = (w.cell dst label).value ∧
       ((w.cell dst label).dirty = false → (w'.cell dst label).dirty = false) := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    exact killSubtree_quiet w I.desc sub key dst label
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨rfl, fun hd => hd⟩
