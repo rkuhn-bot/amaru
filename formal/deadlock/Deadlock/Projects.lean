@@ -694,6 +694,140 @@ theorem head_ty (I : Impl) (w : World) (id : InstId) (w' : World) (hT : TyOk I.d
       exact exec_ty I w id k hT hS hph
     · cases h
 
+theorem contTy_eq (a b : Actor) (hph : b.phase = a.phase) (hty : b.typestate = a.typestate)
+    (hc : contTy a) : contTy b := by
+  unfold contTy at hc ⊢
+  rw [hph, hty]
+  exact hc
+
+/-- Failing a waiter keeps its typestate. An empty continuation goes idle at the
+state the continuation already named. -/
+theorem failWaiter_ty (w : World) (dead i s : InstId) (hc : contTy (w.st s)) :
+    ((failWaiter w dead i).st s).typestate = (w.st s).typestate ∧
+      contTy ((failWaiter w dead i).st s) := by
+  by_cases hs : s = i
+  · rw [hs] at hc ⊢
+    unfold failWaiter
+    split
+    · exact ⟨rfl, hc⟩
+    · cases hph : (w.st i).phase with
+      | parked d _ k =>
+        simp [hph]
+        split
+        · cases hk : k.rest with
+          | nil =>
+            have hty : (w.st i).typestate = k.toState := by simpa [contTy, hph] using hc
+            refine ⟨?_, ?_⟩
+            · simp [setActor_self, proceed, hk, hty]
+            · simp [contTy, setActor_self, proceed, hk]
+          | cons _ _ =>
+            have hty : (w.st i).typestate = k.toState := by simpa [contTy, hph] using hc
+            refine ⟨?_, ?_⟩
+            · simp [setActor_self, proceed, hk]
+            · simpa [contTy, setActor_self, proceed, hk] using hty
+        · exact ⟨rfl, hc⟩
+      | awaitReply _ _ =>
+        simp [hph]
+        split
+        · exact ⟨by simp [setActor_self], by simp [contTy, setActor_self]⟩
+        · exact ⟨rfl, hc⟩
+      | idle =>
+        simp [hph]
+        exact hc
+      | run _ =>
+        simp [hph]
+        exact hc
+      | awaitEffect _ =>
+        simp [hph]
+        exact hc
+      | awaitPeer _ =>
+        simp [hph]
+        exact hc
+      | crashed =>
+        simp [hph]
+        exact hc
+  · rw [failWaiter_other w dead i s hs]
+    exact ⟨rfl, hc⟩
+
+theorem failFold_ty (w : World) (dead s : InstId) (ids : List InstId) (hc : contTy (w.st s)) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).typestate = (w.st s).typestate ∧
+      contTy ((ids.foldl (fun w i => failWaiter w dead i) w).st s) := by
+  induction ids generalizing w with
+  | nil => exact ⟨rfl, hc⟩
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have h1 := failWaiter_ty w dead i s hc
+    have h2 := ih (failWaiter w dead i) h1.2
+    exact ⟨h2.1.trans h1.1, h2.2⟩
+
+theorem killOne_ty (w : World) (D : Description) (id s : InstId) (hne : s ≠ id)
+    (hc : contTy (w.st s)) :
+    ((killOne w D id).st s).typestate = (w.st s).typestate ∧
+      contTy ((killOne w D id).st s) := by
+  let w1 := readCells D w id
+  have hst1 : w1.st s = w.st s := cellsSt D w id s
+  have hc1 : contTy (w1.st s) := by simpa [hst1] using hc
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have h2 := refundMsgs_rest w1 (tname id) (w.st id).box s
+  have hph2 : (w2.st s).phase = (w1.st s).phase := by simpa [w2] using h2.1
+  have hty2 : (w2.st s).typestate = (w1.st s).typestate := by simpa [w2] using h2.2.2.2.2.2
+  have hc2 : contTy (w2.st s) := contTy_eq (w1.st s) (w2.st s) hph2 hty2 hc1
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have h3 := refundParked_rest w2 (tname id) (w.st id).parked s
+  have hph3 : (w3.st s).phase = (w2.st s).phase := by simpa [w3] using h3.1
+  have hty3 : (w3.st s).typestate = (w2.st s).typestate := by simpa [w3] using h3.2.2.2.2.2
+  have hc3 : contTy (w3.st s) := contTy_eq (w2.st s) (w3.st s) hph3 hty3 hc2
+  let w4 := failWaiters w3 id
+  have h4 := failFold_ty w3 id s w3.roster hc3
+  have hc4 : contTy (w4.st s) := by simpa [w4, failWaiters] using h4.2
+  have hty4 : (w4.st s).typestate = (w.st s).typestate := by
+    have h4t : (w4.st s).typestate = (w3.st s).typestate := by simpa [w4, failWaiters] using h4.1
+    exact h4t.trans (hty3.trans (hty2.trans (congrArg (·.typestate) hst1)))
+  let w5 := forgetSender w4 id
+  have h5 := forgetFold_mail w4 id s w4.roster
+  have hph5 : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+  have hty5r : (w5.st s).typestate = (w4.st s).typestate := by simpa [w5, forgetSender] using h5.2.2.2.2
+  have hc5 : contTy (w5.st s) := contTy_eq (w4.st s) (w5.st s) hph5 hty5r hc4
+  have hty5 : (w5.st s).typestate = (w.st s).typestate := hty5r.trans hty4
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody, setActor_other _ _ _ _ hne]
+  exact ⟨hty5, hc5⟩
+
+theorem killFold_ty (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId)
+    (hlive : ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life =
+      .alive)
+    (hc : contTy (w.st s)) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).typestate =
+      (w.st s).typestate := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons] at hlive ⊢
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true] at hlive ⊢
+      by_cases hs : s = j
+      · subst hs
+        exact absurd hlive (killFold_stays_dead (killOne w D s) D sub key js s
+          (by rw [(killOne_self w D s).1]; intro h; cases h))
+      · have hstep := killOne_ty w D j s hs hc
+        exact (ih (killOne w D j) hlive hstep.2).trans hstep.1
+    · simp only [hcond] at hlive ⊢
+      exact ih w hlive hc
+
+theorem killSubtree_ty (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hlive : ((killSubtree w D sub key).st s).life = .alive) (hc : contTy (w.st s)) :
+    ((killSubtree w D sub key).st s).typestate = (w.st s).typestate := by
+  have hlive' : ((w.roster.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life =
+      .alive := by
+    simpa [killSubtree, killMembers, plant_st] using hlive
+  simpa [killSubtree, killMembers, plant_st] using killFold_ty w D sub key w.roster s hlive' hc
+
 theorem ty_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w w' : World) (a : Action)
     (hR : Reachable I N w) (h : apply I a w = some w') (hT : TyOk I.desc w) : TyOk I.desc w' := by
   have hS := (inv_reachable I N w hL hR).1
@@ -705,7 +839,12 @@ theorem ty_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w w
   | finish id => exact finish_ty I w id w' hT hS h
   | spawn template => exact spawn_ty I hG w template w' hT h
   | ingress dst label => exact ingress_ty I w w' dst label hT (by simpa [apply] using h)
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro id hl
+    have hpre : (w.st id).life = .alive := (killSubtree_if_alive w I.desc sub key id hl).1
+    have hty := killSubtree_ty w I.desc sub key id hl (hS.cont id)
+    simpa [hty] using hT id hpre
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hT

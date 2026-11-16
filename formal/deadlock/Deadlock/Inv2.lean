@@ -631,6 +631,101 @@ theorem bulk_prio (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (hB :
         (deliver_nobulk I hL w id _ m w1 a1 hdel)
         (fun i => deliver_st I w id _ m w1 a1 i hdel) hB
 
+/-- Failing a waiter either keeps its continuation or drops it. Either way a
+terminable program stays free of bulk sends. -/
+theorem nobulk_failWaiter (w : World) (dead i s : InstId)
+    (h : noBulkSend (contRest (w.st s).phase) = true) :
+    noBulkSend (contRest ((failWaiter w dead i).st s).phase) = true := by
+  by_cases hs : s = i
+  · rw [hs] at h ⊢
+    unfold failWaiter
+    split
+    · exact h
+    · cases hph : (w.st i).phase with
+      | parked d _ k =>
+        have hrest : noBulkSend k.rest = true := by simpa [contRest, hph] using h
+        simp [hph]
+        split
+        · cases hk : k.rest with
+          | nil =>
+            simp [setActor_self, proceed, hk, contRest]
+            exact nobulk_empty
+          | cons _ _ => simpa [setActor_self, proceed, hk, contRest] using hrest
+        · exact h
+      | awaitReply _ _ =>
+        simp [hph]
+        split
+        · simp [setActor_self, contRest]
+          exact nobulk_empty
+        · simpa [contRest, hph] using h
+      | idle => simpa [hph, contRest] using h
+      | run k => simpa [hph, contRest] using h
+      | awaitEffect k => simpa [hph, contRest] using h
+      | awaitPeer k => simpa [hph, contRest] using h
+      | crashed => simpa [hph, contRest] using h
+  · rw [failWaiter_other w dead i s hs]
+    exact h
+
+theorem nobulk_failFold (w : World) (dead s : InstId) (ids : List InstId)
+    (h : noBulkSend (contRest (w.st s).phase) = true) :
+    noBulkSend (contRest ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase) = true := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    exact ih (failWaiter w dead i) (nobulk_failWaiter w dead i s h)
+
+theorem nobulk_killOne (w : World) (D : Description) (id s : InstId)
+    (h : noBulkSend (contRest (w.st s).phase) = true) :
+    noBulkSend (contRest ((killOne w D id).st s).phase) = true := by
+  by_cases hs : s = id
+  · rw [hs, (killOne_self w D id).2.1]
+    simp [contRest]
+    exact nobulk_empty
+  · let w1 := readCells D w id
+    have hst1 : w1.st s = w.st s := cellsSt D w id s
+    have h1 : noBulkSend (contRest (w1.st s).phase) = true := by simpa [hst1] using h
+    let w2 := refundMsgs w1 (tname id) (w.st id).box
+    have h2 := refundMsgs_rest w1 (tname id) (w.st id).box s
+    have hph2 : (w2.st s).phase = (w1.st s).phase := by simpa [w2] using h2.1
+    have h2n : noBulkSend (contRest (w2.st s).phase) = true := by simpa [hph2] using h1
+    let w3 := refundParked w2 (tname id) (w.st id).parked
+    have h3 := refundParked_rest w2 (tname id) (w.st id).parked s
+    have hph3 : (w3.st s).phase = (w2.st s).phase := by simpa [w3] using h3.1
+    have h3n : noBulkSend (contRest (w3.st s).phase) = true := by simpa [hph3] using h2n
+    let w4 := failWaiters w3 id
+    have h4n : noBulkSend (contRest (w4.st s).phase) = true := by
+      simpa [w4, failWaiters] using nobulk_failFold w3 id s w3.roster h3n
+    let w5 := forgetSender w4 id
+    have h5 := forgetFold_mail w4 id s w4.roster
+    have hph5 : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+    have h5n : noBulkSend (contRest (w5.st s).phase) = true := by simpa [hph5] using h4n
+    have hbody : killOne w D id =
+        setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+      simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+    rw [hbody, setActor_other _ _ _ _ hs]
+    exact h5n
+
+theorem nobulk_killFold (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId) (h : noBulkSend (contRest (w.st s).phase) = true) :
+    noBulkSend (contRest ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase) =
+      true := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true]
+      exact ih (killOne w D j) (nobulk_killOne w D j s h)
+    · simp only [hcond]
+      exact ih w h
+
+theorem nobulk_killSubtree (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (h : noBulkSend (contRest (w.st s).phase) = true) :
+    noBulkSend (contRest ((killSubtree w D sub key).st s).phase) = true := by
+  simpa [killSubtree, killMembers, plant_st] using nobulk_killFold w D sub key w.roster s h
+
 theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB : BulkFree I w)
     (h : apply I a w = some w') : BulkFree I w' := by
   cases a with
@@ -640,7 +735,10 @@ theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB :
   | finish id => simpa [apply] using bulk_finish I w w' id hB h
   | spawn template => simpa [apply] using bulk_spawn I w w' template hB h
   | ingress dst label => simpa [apply] using bulk_ingress I w w' dst label hB h
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    intro id ht
+    exact nobulk_killSubtree w I.desc sub key id (hB id ht)
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hB
