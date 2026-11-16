@@ -3789,4 +3789,119 @@ theorem killSubtree_prio_step (w : World) (D : Description) (sub : String) (key 
     · exact Or.inr (killSubtree_died w D sub key s hl hl').2.2.2.2.1
   · exact Or.inl (killSubtree_if_dead w D sub key s hl).2.2.1
 
+/-- A mailbox the fold never visits keeps its parked list. -/
+theorem forgetFold_skip (w : World) (dead s : InstId) (ids : List InstId) (hs : s ∉ ids) :
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).parked =
+      (w.st s).parked := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    have htail : s ∉ ids := fun h => hs (List.Mem.tail _ h)
+    have hne : s ≠ id := fun h => hs (by simpa [h] using List.Mem.head _)
+    by_cases hkeep : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = true
+    · simp only [hkeep, ite_true]
+      exact ih w htail
+    · have hf : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = false := by
+        cases hb : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) <;>
+          simp_all
+      simp only [hf, ite_false]
+      let w' := setActor w id { (w.st id) with parked := (w.st id).parked.filter fun p => p.sender != dead }
+      have hpark : (w'.st s).parked = (w.st s).parked := by simp [w', setActor, hne]
+      have hih := ih w' htail
+      simpa [w', hpark] using hih
+
+/-- Visiting `s` drops parked entries whose sender is `dead`. -/
+theorem forgetFold_parked_eq (w : World) (dead s : InstId) (ids : List InstId) (hs : s ∈ ids) :
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).parked =
+      (w.st s).parked.filter fun p => p.sender != dead := by
+  induction ids generalizing w with
+  | nil => cases hs
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hhead : s = id
+    · subst hhead
+      by_cases hkeep : ((w.st s).parked.filter (fun p => p.sender != dead) == (w.st s).parked) = true
+      · simp only [hkeep, ite_true]
+        have heq : (w.st s).parked.filter (fun p => p.sender != dead) = (w.st s).parked := by
+          simpa [beq_iff_eq] using hkeep
+        by_cases htail : s ∈ ids
+        · exact (ih w htail).trans (by
+            have hidem := List.filter_filter (p := fun p : Parked => p.sender != dead)
+              (q := fun p : Parked => p.sender != dead) (l := (w.st s).parked)
+            simpa [Bool.and_self, heq] using hidem.symm)
+        · have hskip := forgetFold_skip w dead s ids htail
+          simpa [heq] using hskip
+      · have hf : ((w.st s).parked.filter (fun p => p.sender != dead) == (w.st s).parked) = false := by
+          cases hb : ((w.st s).parked.filter (fun p => p.sender != dead) == (w.st s).parked) <;>
+            simp_all
+        simp only [hf, ite_false]
+        let w' := setActor w s { (w.st s) with parked := (w.st s).parked.filter fun p => p.sender != dead }
+        have hset : (w'.st s).parked = (w.st s).parked.filter fun p => p.sender != dead := by
+          simp [w', setActor]
+        have hidem :
+            ((w.st s).parked.filter fun p => p.sender != dead).filter (fun p => p.sender != dead) =
+              (w.st s).parked.filter fun p => p.sender != dead := by
+          have hfilt := List.filter_filter (p := fun p : Parked => p.sender != dead)
+            (q := fun p : Parked => p.sender != dead) (l := (w.st s).parked)
+          simpa [Bool.and_self] using hfilt
+        by_cases htail : s ∈ ids
+        · have hih := ih w' htail
+          rw [hset] at hih
+          exact hih.trans hidem
+        · have hskip := forgetFold_skip w' dead s ids htail
+          rw [hset] at hskip
+          exact hskip
+    · have htail : s ∈ ids := by
+        rcases List.mem_cons.mp hs with h | h
+        · exact absurd h hhead
+        · exact h
+      by_cases hkeep : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = true
+      · simp only [hkeep, ite_true]
+        exact ih w htail
+      · have hf : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = false := by
+          cases hb : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) <;>
+            simp_all
+        simp only [hf, ite_false]
+        let w' := setActor w id { (w.st id) with parked := (w.st id).parked.filter fun p => p.sender != dead }
+        have hpark : (w'.st s).parked = (w.st s).parked := by simp [w', setActor, hhead]
+        have hih := ih w' htail
+        simpa [w', hpark] using hih
+
+theorem killOne_parked_eq (w : World) (D : Description) (id i : InstId) (hne : i ≠ id)
+    (hi : i ∈ w.roster) :
+    ((killOne w D id).st i).parked = (w.st i).parked.filter fun p => p.sender != id := by
+  let w1 := readCells D w id
+  have hst1 : w1.st i = w.st i := cellsSt D w id i
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have h2 := refundMsgs_rest w1 (tname id) (w.st id).box i
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have h3 := refundParked_rest w2 (tname id) (w.st id).parked i
+  let w4 := failWaiters w3 id
+  have h4 := failFold_mail w3 id i w3.roster
+  let w5 := forgetSender w4 id
+  have hmem : i ∈ w4.roster := by
+    have hr : w4.roster = w.roster := by
+      simp [w4, w3, w2, w1, failWaiters, failWaiters_roster, refundParked_roster, refundMsgs_roster,
+        cellsRoster]
+    simpa [hr] using hi
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody, setActor_other _ _ _ _ hne]
+  have hpark : (w4.st i).parked = (w.st i).parked := by
+    have h4p : (w4.st i).parked = (w3.st i).parked := by
+      simpa [w4, failWaiters] using h4.2.2
+    exact h4p.trans (h3.2.2.2.2.1.trans (h2.2.2.2.2.1.trans (congrArg (·.parked) hst1)))
+  have heq := forgetFold_parked_eq w4 id i w4.roster hmem
+  simpa [w5, forgetSender, hpark] using heq
+
 end Deadlock
