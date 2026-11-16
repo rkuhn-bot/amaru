@@ -215,6 +215,9 @@ theorem step_keeps_run (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) 
     (k : Cont) (hp : (w.st s).phase = .run k) (hl : (w.st s).life = .alive)
     (h : apply I a w = some w') (hnot : a ≠ .exec s) : (w'.st s).phase = .run k := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress dst label =>
     simp [apply] at h
     simpa [(ingress_phase I w w' dst label s h).1] using hp
@@ -949,6 +952,9 @@ theorem term_ok_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (h
   | exec id => simpa [apply] using term_ok_head I hL w w' id hT h
   | finish id => simpa [apply] using term_ok_finish I hL w w' id hT h
   | spawn template => simpa [apply] using term_ok_spawn I hL w w' template hT h
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact hT
 
 theorem term_ok_reachable (I : Impl) (hL : LocalOk I) (N : Nat) (w : World)
     (hR : Reachable I N w) : TermOk I w := by
@@ -1517,6 +1523,9 @@ theorem step_keeps_quiet (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w
     (hl : (w.st s).life = .alive) (h : apply I a w = some w') (hnot : a ≠ .finish s) :
     (w'.st s).phase = (w.st s).phase ∧ (w'.st s).life = (w.st s).life := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact ⟨rfl, rfl⟩
   | ingress dst label =>
     simp [apply] at h
     exact ⟨(ingress_phase I w w' dst label s h).1, (ingress_phase I w w' dst label s h).2.1⟩
@@ -2026,6 +2035,9 @@ theorem step_run_alive (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) 
     (k : Cont) (hp : (w.st s).phase = .run k) (hl : (w.st s).life = .alive)
     (h : apply I a w = some w') (hnot : a ≠ .exec s) : (w'.st s).life = .alive := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress dst label =>
     simp [apply] at h
     simpa [(ingress_phase I w w' dst label s h).2.1] using hl
@@ -2993,6 +3005,9 @@ theorem prog_src_head (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
 theorem prog_src_apply (I : Impl) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (h : apply I a w = some w') : ProgSrc I w' := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress dst label =>
     apply prog_src_of I w w' hS
     intro i es hc
@@ -3536,6 +3551,9 @@ theorem lane_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : Worl
 theorem lane_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (h : apply I a w = some w') : LaneOk I w' := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress dst label =>
     exact lane_same I w w' hLane
       (fun i => (ingress_phase I w w' dst label i (by simpa [apply] using h)).2.2.1)
@@ -3955,6 +3973,9 @@ theorem apply_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a :
     (w w' : World) (hpre : NoCrash w) (hLane : LaneOk I w) (hS : ProgSrc I w)
     (h : apply I a w = some w') : NoCrash w' := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress dst label =>
     intro i
     simpa [(ingress_phase I w w' dst label i (by simpa [apply] using h)).1] using hpre i
@@ -4694,6 +4715,9 @@ theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = so
     (hO : OpenSlots w) (mb : InstId) (hlive : (w'.st mb).life = .alive) :
     QueueStep ((w.st mb).parked) ((w'.st mb).parked) := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact Or.inl rfl
   | ingress dst label =>
     exact Or.inl ((ingress_parked I w w' dst label mb (by simpa [apply] using h)).1)
   | recvBulk id =>
@@ -4862,6 +4886,9 @@ theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = som
     parkIndex ((w'.st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
       parkIndex ((w'.st dst).parked) s < ((w'.st dst).parked).length := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact ⟨Nat.le_refl _, hin⟩
   | ingress who label =>
     have hpk := (ingress_parked I w w' who label dst (by simpa [apply] using h)).1
     rw [hpk]
@@ -5889,6 +5916,9 @@ theorem prio_box_msg (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio 
 theorem mail_step (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (hA : MailAccepted I w) (h : apply I a w = some w') : MailAccepted I w' := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress dst label =>
     simp only [apply] at h
     refine ⟨?_, ?_⟩
@@ -6610,6 +6640,9 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
         templateOf I.desc (tname i) = some t ∧
         (t.terminable && !hasParkedCall (w.st i).parked) = true := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact False.elim (hdead hl)
   | ingress who label =>
     have hlife := (ingress_phase I w w' who label i (by simpa [apply] using h)).2.1
     exact False.elim (hdead (hlife.trans hl))
@@ -6856,6 +6889,9 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
     (hph : (w.st s).phase = .parked dst false k) :
     (w'.st s).phase = .parked dst false k ∨ (w'.st s).phase = (proceed (w.st s) k).phase := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact Or.inl hph
   | ingress who label =>
     simp only [apply] at h
     exact Or.inl ((ingress_phase I w w' who label s h).1.trans hph)
@@ -7216,6 +7252,9 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
     (hph : (w.st s).phase = .awaitReply dst k) :
     (w'.st s).phase = .awaitReply dst k ∨ (w'.st s).phase = (proceed (w.st s) k).phase := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact Or.inl hph
   | ingress who label =>
     simp only [apply] at h
     exact Or.inl ((ingress_phase I w w' who label s h).1.trans hph)
@@ -7644,6 +7683,9 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
     (h : apply I a w = some w') (hdead : (w.st id).life ≠ .alive)
     (hempty : (w.st id).parked = []) : (w'.st id).parked = [] := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress who label =>
     simpa [(ingress_parked I w w' who label id (by simpa [apply] using h)).1] using hempty
   | finish j => simpa [hempty] using finish_parked I w w' j id (by simpa [apply] using h)
@@ -8097,6 +8139,9 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
     (hpre : PhaseWait ((w.st s).phase)) (hpost : PhaseWait ((w'.st s).phase)) :
     (w'.st s).typestate = (w.st s).typestate := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    rfl
   | ingress who label =>
     simp only [apply] at h
     exact ingress_ty_eq I w w' who label s h
@@ -8373,6 +8418,9 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
     (hph : (w.st s).phase = .parked dst true k) :
     (w'.st s).phase = .parked dst true k ∨ (w'.st s).phase = .awaitReply dst k := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact Or.inl hph
   | ingress who label =>
     simp only [apply] at h
     exact Or.inl ((ingress_phase I w w' who label s h).1.trans hph)
@@ -9506,6 +9554,9 @@ theorem call_tag_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
   | init => exact call_tag_init I N
   | step w w' a prev happ ih =>
     cases a with
+    | stutter =>
+      cases stutter_unchanged I w w' happ
+      exact ih
     | ingress dst label =>
       exact ingress_tag I w dst label w' ih (by simpa [apply] using happ)
     | finish id =>
@@ -10241,6 +10292,9 @@ theorem box_pos_mono (I : Impl) (a : Action) (w w' : World) (h : apply I a w = s
       callPos (w'.st d).box c < (w'.st d).box.length := by
   have hgrow : BoxGrow (w.st d).box (w'.st d).box := by
     cases a with
+    | stutter =>
+      cases stutter_unchanged I w w' h
+      exact Or.inl rfl
     | ingress who label =>
       rcases ingress_box I w w' who label d (by simpa [apply] using h) with ⟨_, hbox⟩ | ⟨_, hbox⟩
       · exact Or.inr ⟨{ label := label, sender := who, callFrom := none }, hbox⟩
@@ -11177,6 +11231,9 @@ theorem no_new_mailCall (I : Impl) (a : Action) (w w' : World) (c d : InstId) (k
     (hph' : (w'.st c).phase = .awaitReply d k)
     (hno : ¬ anyCall w c) : ¬ anyCall w' c := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress who label =>
     intro hyes
     have hrecv : receiveIngress I w who label = some w' := by simpa [apply] using h
@@ -11255,6 +11312,9 @@ theorem dead_stays_idle (I : Impl) (a : Action) (w w' : World) (i : InstId)
     (h : apply I a w = some w') (hdead : (w.st i).life ≠ .alive)
     (hidle : (w.st i).phase = .idle) : (w'.st i).phase = .idle := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress who label =>
     simp only [apply] at h
     exact (ingress_phase I w w' who label i h).1.trans hidle
@@ -11402,6 +11462,9 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
     (h : apply I a w = some w') (hdead : (w.st id).life ≠ .alive)
     (hempty : (w.st id).box = []) : (w'.st id).box = [] := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress who label =>
     simp only [apply] at h
     by_cases hi : id = who
@@ -12226,6 +12289,9 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
     (hpre : (w.st r).life = .alive) (hlive : (w'.st r).life = .alive)
     (hm : m ∈ (w.st r).prio) : m ∈ (w'.st r).prio := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    assumption
   | ingress who label =>
     simp only [apply] at h
     simpa [(ingress_phase I w w' who label r h).2.2.1] using hm
@@ -12566,6 +12632,9 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
     (w'.cell dst label).value = (w.cell dst label).value ∧
       ((w.cell dst label).dirty = false → (w'.cell dst label).dirty = false) := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact ⟨rfl, fun hd => hd⟩
   | ingress who label0 =>
     simp only [apply] at h
     have hc := (ingress_phase I w w' who label0 (InstId.core dst) h).2.2.2.1
@@ -12804,6 +12873,9 @@ theorem born_step (I : Impl) (a : Action) (w w' : World) (i : InstId)
     (h : apply I a w = some w')     (hdead : (w.st i).life ≠ .alive) (hlive : (w'.st i).life = .alive) :
     ∃ template, a = .spawn template ∧ i = InstId.peer template (w.nextIx template) := by
   cases a with
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact False.elim (hdead hlive)
   | ingress who label =>
     have hlife := (ingress_phase I w w' who label i (by simpa [apply] using h)).2.1
     exact absurd (hlife.symm.trans hlive) hdead

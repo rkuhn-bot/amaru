@@ -44,11 +44,11 @@ def parkImpl : Impl where
      parkTr "producer" "busy" "Go" "busy" [],
      parkTr "sink" "idle" "M" "idle" []]
 
-theorem park_graph : render parkDesc = "pass" := by native_decide
+theorem park_graph : render parkDesc = "pass" := by decide
 
-theorem park_local : localOkB parkImpl = true := by native_decide
+theorem park_local : localOkB parkImpl = true := by decide
 
-theorem park_checked : checkBool parkDesc = true := by native_decide
+theorem park_checked : checkBool parkDesc = true := by decide
 
 theorem park_graph_ok : GraphOk parkDesc := checkBool_sound parkDesc park_checked
 
@@ -81,11 +81,11 @@ def producerTag (w : Option World) : Nat :=
 def parkActs : List Action :=
   [.ingress producerId "Go", .recvBulk producerId, .exec producerId, .exec producerId]
 
-theorem parks_on_second_send : producerTag (afterActs parkActs) = 1 := by native_decide
+theorem parks_on_second_send : producerTag (afterActs parkActs) = 1 := by decide
 
 /-- The sink then receives, which admits the parked send and resumes the producer. -/
 theorem resumes_after_receive :
-    producerTag (afterActs (parkActs ++ [.recvBulk sinkId])) = 2 := by native_decide
+    producerTag (afterActs (parkActs ++ [.recvBulk sinkId])) = 2 := by decide
 
 theorem run_reachable (I : Impl) (N : Nat) (w0 : World) (h0 : Reachable I N w0)
     (acts : List Action) (w : World) (h : runFrom I (some w0) acts = some w) : Reachable I N w := by

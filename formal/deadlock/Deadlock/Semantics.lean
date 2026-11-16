@@ -704,7 +704,16 @@ inductive Action where
   | finish (s : InstId)
   | spawn (template : String)
   | ingress (dst : InstId) (label : String)
+  /-- Scheduler idle. Enabled only when no roster actor can `recv`, `exec`, or `finish`.
+  Ingress may still be enabled; taking it is the environment's choice. -/
+  | stutter
   deriving DecidableEq, Repr
+
+/-- A roster actor has a step the runtime is obliged to consider. -/
+def runtimeBusy (I : Impl) (w : World) : Bool :=
+  w.roster.any fun id =>
+    (receiveBulk I w id).isSome || (receivePrio I w id).isSome ||
+    (execHead I w id).isSome || (finishWait I w id).isSome
 
 def apply (I : Impl) (a : Action) (w : World) : Option World :=
   match a with
@@ -714,6 +723,11 @@ def apply (I : Impl) (a : Action) (w : World) : Option World :=
   | .finish s => finishWait I w s
   | .spawn template => spawn I w template
   | .ingress dst label => receiveIngress I w dst label
+  | .stutter => if runtimeBusy I w then none else some w
+
+theorem stutter_unchanged (I : Impl) (w w' : World) (h : apply I .stutter w = some w') : w' = w := by
+  simp [apply, runtimeBusy] at h
+  exact h.2.symm
 
 def Enabled (I : Impl) (w : World) (a : Action) : Prop := apply I a w ≠ none
 
@@ -722,6 +736,7 @@ have to keep injecting when an ingress stays enabled. -/
 def forced : Action → Bool
   | .spawn _ => false
   | .ingress _ _ => false
+  | .stutter => false
   | _ => true
 
 def coreRoster (D : Description) : List InstId :=

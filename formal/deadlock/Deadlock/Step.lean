@@ -1877,6 +1877,9 @@ theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w'
   | ingress dst label =>
     exact ⟨ingress_sem I w w' dst label hS ha, ingress_mail I w w' dst label hM ha,
       open_ingress I w w' dst label hO ha⟩
+  | stutter =>
+    cases stutter_unchanged I w w' ha
+    exact ⟨hS, hM, hO⟩
 
 theorem inv_init (I : Impl) (N : Nat) (hL : LocalOk I) : Inv I (initWorld I N) :=
   ⟨semInv_init I N hL, mail_init I N, open_init I N⟩

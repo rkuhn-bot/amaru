@@ -52,6 +52,9 @@ theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
     simpa [apply] using occ_spawn I w w' template hO h
   | ingress dst label =>
     simpa [apply] using occ_ingress I w w' dst label hO h
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact hO
 
 theorem nobulk_drop (es : List Eff) (n : Nat) (h : noBulkSend es = true) : noBulkSend (es.drop n) = true := by
   induction n generalizing es with
@@ -635,6 +638,9 @@ theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB :
   | finish id => simpa [apply] using bulk_finish I w w' id hB h
   | spawn template => simpa [apply] using bulk_spawn I w w' template hB h
   | ingress dst label => simpa [apply] using bulk_ingress I w w' dst label hB h
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact hB
 
 theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : Inv2 I w := by

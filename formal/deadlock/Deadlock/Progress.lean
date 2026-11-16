@@ -26,6 +26,7 @@ def actionSubject : Action → Option InstId
   | .finish s => some s
   | .ingress s _ => some s
   | .spawn _ => none
+  | .stutter => none
 
 /-- `id` is blocked on `dst`. -/
 def WaitsOn (w : World) (id dst : InstId) : Prop :=
@@ -46,6 +47,7 @@ def OnChain (w : World) (root : InstId) (act : Action) : Prop :=
       match act with
       | .ingress _ _ => False
       | .spawn _ => False
+      | .stutter => False
       | _ => True
   | none => False
 
@@ -99,6 +101,7 @@ theorem on_partner (w : World) (id dst : InstId) (act : Action) (hwait : WaitsOn
     exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
   | ingress _ _ => exact h.2.elim
   | spawn _ => exact False.elim (by simp [actionSubject] at h)
+  | stutter => exact False.elim (by simp [actionSubject] at h)
 
 theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
     (dst : String) (t : Template) (ht : templateOf I.desc dst = some t)
@@ -364,6 +367,9 @@ theorem one_peer_absent (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
               have hmul : (Multiplicity.one == Multiplicity.perPeer) = false := by decide
               simp [hsame, hone, hmul] at hgo
           · simp [hgo] at ha
+      | stutter =>
+        cases stutter_unchanged I w w' (by simpa [apply] using ha)
+        exact hin
     exact ih hback
 
 theorem edge_reliable (D : Description) (hS : structLines D = []) (e : Edge) (he : e ∈ D.edges)

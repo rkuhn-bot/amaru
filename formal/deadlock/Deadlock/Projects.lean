@@ -732,6 +732,9 @@ theorem ty_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w w
   | finish id => exact finish_ty I w id w' hT hS h
   | spawn template => exact spawn_ty I hG w template w' hT h
   | ingress dst label => exact ingress_ty I w w' dst label hT (by simpa [apply] using h)
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    exact hT
 
 theorem ty_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : TyOk I.desc w := by
@@ -973,6 +976,9 @@ theorem ix_preserved (I : Impl) (w w' : World) (a : Action) (name : String) (t :
   | spawn template => exact spawn_ix I w template w' name t ht hmul h
   | ingress dst label =>
     exact congrFun (ingress_phase I w w' dst label (InstId.core name) (by simpa [apply] using h)).2.2.2.2.2.2.1 name
+  | stutter =>
+    cases stutter_unchanged I w w' h
+    rfl
 
 theorem ix_zero (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) (name : String) (t : Template)
     (ht : templateOf I.desc name = some t) (hmul : t.multiplicity = .one) : w.nextIx name = 0 := by

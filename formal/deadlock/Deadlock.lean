@@ -19,6 +19,8 @@ import Deadlock.Rank
 import Deadlock.Progress
 import Deadlock.Chain
 import Deadlock.Counter
+import Deadlock.FairRun
+import Deadlock.Deliver
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed
