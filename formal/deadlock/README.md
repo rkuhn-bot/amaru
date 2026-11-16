@@ -368,8 +368,10 @@ for a send the actor did not itself perform.
   only appends to the box or leaves it, so the call's position never increases
   and the message stays until delivery. While the callee stays alive and can
   receive infinitely often, some later bulk receive installs the handler.
-  The handler's reply, `never_stuck`, `deadlock_freedom`, `CellFresh`, and the
-  dead-instance lift are not done.
+  If that handler's next effect is already the reply, it runs the reply and the
+  caller leaves `awaitReply`. A handler that still has work before the reply,
+  `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift are
+  not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

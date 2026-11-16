@@ -9288,4 +9288,73 @@ theorem call_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Na
         hnext hlen1
       exact ⟨j1, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj1, hmail1, howe1, hphj⟩
 
+/-- Executing a reply whose target is waiting on this sender ends that wait. -/
+theorem reply_exec_leaves (I : Impl) (w : World) (d c : InstId) (k ck : Cont) (es : List Eff)
+    (hph : (w.st d).phase = .run k) (hl : (w.st d).life = .alive)
+    (hrest : k.rest = .reply :: es) (hto : k.replyTo = some c)
+    (hwait : (w.st c).phase = .awaitReply d ck) :
+    waitKind ((execRun I w d (w.st d) k).st c) ≠ some (.callReply d) := by
+  have hcne : c ≠ d := by
+    intro heq
+    rw [heq] at hwait
+    simp [hph] at hwait
+  simp [execRun, hrest, performReply, hto, hwait, setActor, hcne, proceed_not_call]
+
+/-- A handler whose next effect is the reply does execute it, and the caller leaves
+`awaitReply`. -/
+theorem pending_reply_runs (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ) (c d : InstId) (k ck : Cont) (es : List Eff) (i : Nat)
+    (hph : ((ρ.cfg i).st d).phase = .run k) (hl : ((ρ.cfg i).st d).life = .alive)
+    (hrest : k.rest = .reply :: es) (hto : k.replyTo = some c)
+    (hwait : ((ρ.cfg i).st c).phase = .awaitReply d ck)
+    (hlive : ∀ t, i ≤ t → ((ρ.cfg t).st d).life = .alive)
+    (hstay : ∀ t, i ≤ t → ((ρ.cfg t).st c).phase = .awaitReply d ck) :
+    ∃ j, i ≤ j ∧ waitKind (((ρ.cfg (j + 1)).st c)) ≠ some (.callReply d) := by
+  have hhit : ∃ j, i ≤ j ∧ ρ.act j = .exec d := by
+    cases Classical.em (∃ j, i ≤ j ∧ ρ.act j = .exec d) with
+    | inl h => exact h
+    | inr hmiss =>
+      have hstayR : ∀ u, i ≤ u → ((ρ.cfg u).st d).phase = .run k ∧ ((ρ.cfg u).st d).life = .alive := by
+        intro u hu
+        have hgot := run_holds hL hG ρ d i (u - i) k hph hl
+          (fun v h1 _ hbad => hmiss ⟨v, h1, hbad⟩)
+        simpa [Nat.add_sub_of_le hu] using hgot
+      exact False.elim (not_forever_run I hL hG ρ hF d i (fun j hj => (hstayR j hj).2)
+        (fun j hj => ⟨k, (hstayR j hj).1⟩))
+  obtain ⟨j0, hj0, hact0⟩ := hhit
+  have hscan := scanExec_spec ρ.act d (j0 - i) i ⟨j0 - i, Nat.le_refl _, by
+    simpa [Nat.add_sub_of_le hj0] using hact0⟩
+  let m := scanExec ρ.act d (j0 - i) i
+  have him : i ≤ m := hscan.1
+  have hact : ρ.act m = .exec d := hscan.2.1
+  have hpre := run_holds hL hG ρ d i (m - i) k hph hl
+    (fun t h1 _ hbad => hscan.2.2 t h1 (by
+      have hsum : i + (m - i) = m := Nat.add_sub_of_le him
+      omega) hbad)
+  have hhere : ((ρ.cfg m).st d).phase = .run k := by
+    simpa [Nat.add_sub_of_le him] using hpre.1
+  have hlm : ((ρ.cfg m).st d).life = .alive := by
+    simpa [Nat.add_sub_of_le him] using hpre.2
+  have hrun : execRun I (ρ.cfg m) d ((ρ.cfg m).st d) k = ρ.cfg (m + 1) := by
+    have hhead := ρ.valid m
+    simp [apply, hact, execHead, hlm, hhere] at hhead
+    exact hhead
+  have hleft := reply_exec_leaves I (ρ.cfg m) d c k ck es hhere hlm hrest hto (hstay m him)
+  rw [hrun] at hleft
+  exact ⟨m, him, hleft⟩
+
+/-- A caller that stays in `awaitReply` cannot be waiting on a handler whose next
+effect is already the reply: that handler runs the reply and the wait ends. -/
+theorem await_reply_head_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ) (c d : InstId) (k ck : Cont) (es : List Eff) (i : Nat)
+    (hph : ((ρ.cfg i).st d).phase = .run k) (hl : ((ρ.cfg i).st d).life = .alive)
+    (hrest : k.rest = .reply :: es) (hto : k.replyTo = some c)
+    (hlive : ∀ t, i ≤ t → ((ρ.cfg t).st d).life = .alive)
+    (hstay : ∀ t, i ≤ t → ((ρ.cfg t).st c).phase = .awaitReply d ck) : False := by
+  obtain ⟨j, hj, hleft⟩ := pending_reply_runs I hL hG ρ hF c d k ck es i hph hl hrest hto
+    (hstay i (Nat.le_refl _)) hlive hstay
+  have hstill : ((ρ.cfg (j + 1)).st c).phase = .awaitReply d ck :=
+    hstay (j + 1) (Nat.le_trans hj (Nat.le_succ j))
+  simp [waitKind, hstill] at hleft
+
 end Deadlock
