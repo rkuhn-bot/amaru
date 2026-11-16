@@ -4541,4 +4541,142 @@ theorem enqueue_call_tag (w : World) (D : Description) (sender dst : InstId) (ms
   · rw [enqueue_dead w D sender dst msg true (afterHead kRun) hlive]
     exact run_tail_tag w sender kRun e es hT hph hrest hne hterm
 
+theorem not_shape_zero (c : InstId) (k : Cont) (h : replyCount k.rest = 0) : ¬replyShape c k := by
+  intro hs
+  have hc := hs.2.1
+  rw [h] at hc
+  omega
+
+/-- A reply whose `replyTo` is empty only advances the handler. The tail has no
+reply left, and the handler was not holding one. -/
+theorem reply_advance_tag (w : World) (sender : InstId) (k : Cont) (es : List Eff)
+    (hT : CallTagInv w) (hph : (w.st sender).phase = .run k) (hrest : k.rest = .reply :: es)
+    (hcount : replyCount k.rest = 1) (hto : k.replyTo = none) :
+    CallTagInv (setActor w sender (proceed (w.st sender) (afterHead k))) := by
+  have htail : replyCount es = 0 := by
+    simp [replyCount, hrest] at hcount
+    omega
+  let k' := afterHead k
+  have hkrest : k'.rest = es := by simp [k', afterHead, hrest]
+  let w' := setActor w sender (proceed (w.st sender) k')
+  have hst (i : InstId) (hi : i ≠ sender) : w'.st i = w.st i := by simp [w', setActor, hi]
+  have hbox (i : InstId) : (w'.st i).box = (w.st i).box := by
+    by_cases hi : i = sender
+    · simp [w', hi, setActor, proceed_fields]
+    · simp [hst i hi]
+  have hparked (i : InstId) : (w'.st i).parked = (w.st i).parked := by
+    by_cases hi : i = sender
+    · simp [w', hi, setActor, proceed_fields]
+    · simp [hst i hi]
+  have hprioL (i : InstId) : (w'.st i).prio = (w.st i).prio := by
+    by_cases hi : i = sender
+    · simp [w', hi, setActor, proceed_fields]
+    · simp [hst i hi]
+  have hquiet (c : InstId) : ¬handlerOwes c (w.st sender).phase ∧ ¬replyPending c (w.st sender).phase := by
+    constructor
+    · intro ⟨k0, hk0, hs, _⟩
+      simp [carriedCont, hph] at hk0
+      cases hk0
+      simp only [replyShape] at hs
+      rw [hto] at hs
+      cases hs.1
+    · intro ⟨k0, hk0, hs, _⟩
+      simp [carriedCont, hph] at hk0
+      cases hk0
+      simp only [replyShape] at hs
+      rw [hto] at hs
+      cases hs.1
+  have hquiet' (c : InstId) :
+      ¬handlerOwes c (w'.st sender).phase ∧ ¬replyPending c (w'.st sender).phase := by
+    constructor
+    · intro ⟨k0, hk0, hs, _⟩
+      cases hes : es with
+      | nil => simp [w', setActor, proceed, k', hkrest, hes, carriedCont] at hk0
+      | cons _ _ =>
+        simp [w', setActor, proceed, k', hkrest, hes, carriedCont] at hk0
+        cases hk0
+        exact not_shape_zero c k' (by simp [hkrest, htail]) hs
+    · intro ⟨k0, hk0, hs, _⟩
+      cases hes : es with
+      | nil => simp [w', setActor, proceed, k', hkrest, hes, carriedCont] at hk0
+      | cons _ _ =>
+        simp [w', setActor, proceed, k', hkrest, hes, carriedCont] at hk0
+        cases hk0
+        exact not_shape_zero c k' (by simp [hkrest, htail]) hs
+  apply call_tag_stable w w' hT
+  · intro d c
+    exact mail_iff_lists w w' hbox hparked d c
+  · intro i c
+    by_cases hi : i = sender
+    · constructor
+      · intro h
+        rw [hi] at h
+        exact False.elim ((hquiet' c).1 h)
+      · intro h
+        rw [hi] at h
+        exact False.elim ((hquiet c).1 h)
+    · exact owes_iff_carried _ _ (by simp [hst i hi, carriedCont]) c
+  · intro i c
+    by_cases hi : i = sender
+    · constructor
+      · intro h
+        rw [hi] at h
+        exact False.elim ((hquiet' c).2 h)
+      · intro h
+        rw [hi] at h
+        exact False.elim ((hquiet c).2 h)
+    · exact pending_iff_carried _ _ (by simp [hst i hi, carriedCont]) c
+  · intro c d kA hph'
+    by_cases hc : c = sender
+    · cases hes : es with
+      | nil => simp [w', hc, setActor, proceed, k', hkrest, hes] at hph'
+      | cons _ _ => simp [w', hc, setActor, proceed, k', hkrest, hes] at hph'
+    · simpa [hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = sender
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = sender
+    · cases hes : es with
+      | nil => simp [w', hc, setActor, proceed, k', hkrest, hes] at hph'
+      | cons _ _ => simp [w', hc, setActor, proceed, k', hkrest, hes] at hph'
+    · simpa [hst c hc] using hph'
+  · intro c d kA hph'
+    by_cases hc : c = sender
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro i m hm
+    exact hT.prioPlain i m (by rw [hprioL i] at hm; exact hm)
+  · intro d c
+    unfold soleCall
+    rw [hbox d, hparked d]
+    exact hT.sole d c
+  · intro d p hp s
+    exact parkFrom_transport w w' hT hparked
+      (by
+        intro s0 d0 k0
+        constructor
+        · intro hk
+          by_cases hs0 : s0 = sender
+          · cases hes : es with
+            | nil => simp [w', hs0, setActor, proceed, k', hkrest, hes] at hk
+            | cons _ _ => simp [w', hs0, setActor, proceed, k', hkrest, hes] at hk
+          · simpa [hst s0 hs0] using hk
+        · intro hk
+          by_cases hs0 : s0 = sender
+          · simp [hs0, hph] at hk
+          · simpa [← hst s0 hs0] using hk)
+      d p hp s
+  · intro c d kA hk
+    exact parkedOnly_transport w w' hT hparked (by intro i m hm; rw [hbox i] at hm; exact hm)
+      (by
+        intro c0 _ _ hk0
+        by_cases hc0 : c0 = sender
+        · cases hes : es with
+          | nil => simp [w', hc0, setActor, proceed, k', hkrest, hes] at hk0
+          | cons _ _ => simp [w', hc0, setActor, proceed, k', hkrest, hes] at hk0
+        · simpa [hst c0 hc0] using hk0)
+      c d kA hk
+
 end Deadlock
