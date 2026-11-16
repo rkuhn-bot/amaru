@@ -2059,4 +2059,289 @@ theorem sublist_nil {α : Type} {xs : List α} (h : xs.Sublist ([] : List α)) :
   cases h
   rfl
 
+/-- An actor a kill actually removes ends dead, idle, and with an empty mailbox. -/
+theorem killFold_died (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId) (hl : (w.st s).life = .alive)
+    (hd : ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life ≠
+        .alive) :
+    isMember D s sub key = true ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life =
+        .dead ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+        .idle ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).box =
+        [] ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).prio =
+        [] ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).parked =
+        [] := by
+  induction ids generalizing w with
+  | nil =>
+    simp at hd
+    exact absurd hl hd
+  | cons j js ih =>
+    simp only [List.foldl_cons] at hd ⊢
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true] at hd ⊢
+      by_cases hs : s = j
+      · subst hs
+        have hself := killOne_self w D s
+        have hdead : ((killOne w D s).st s).life ≠ .alive := by
+          rw [hself.1]
+          decide
+        have hrest := killFold_if_dead (killOne w D s) D sub key js s hdead
+        have hmem : isMember D j sub key = true := by
+          simp only [Bool.and_eq_true, beq_iff_eq] at hcond
+          exact hcond.1
+        refine ⟨hmem, hrest.1.trans hself.1, ?_, hrest.2.1.trans hself.2.2.1,
+          hrest.2.2.1.trans hself.2.2.2.1, ?_⟩
+        · have hh : holdsPhase ((killOne w D s).st s).phase = true := by
+            simp [holdsPhase, hself.2.1]
+          exact (hrest.2.2.2.2 hh).1.trans hself.2.1
+        · exact sublist_nil (hself.2.2.2.2 ▸ hrest.2.2.2.1)
+      · have hlife : ((killOne w D j).st s).life = .alive :=
+          (killOne_other_rest w D j s hs).2.2.symm ▸ hl
+        exact ih (killOne w D j) hlife hd
+    · simp only [hcond, ite_false] at hd ⊢
+      exact ih w hl hd
+
+theorem killSubtree_died (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hl : (w.st s).life = .alive)
+    (hd : ((killSubtree w D sub key).st s).life ≠ .alive) :
+    isMember D s sub key = true ∧ ((killSubtree w D sub key).st s).life = .dead ∧
+      ((killSubtree w D sub key).st s).phase = .idle ∧
+      ((killSubtree w D sub key).st s).box = [] ∧
+      ((killSubtree w D sub key).st s).prio = [] ∧
+      ((killSubtree w D sub key).st s).parked = [] := by
+  have hd' : ((killMembers w D sub key).st s).life ≠ .alive := by
+    simpa [killSubtree, plant_st] using hd
+  have hmem := killFold_died w D sub key w.roster s hl (by simpa [killMembers] using hd')
+  simpa [killSubtree, killMembers, plant_st] using hmem
+
+theorem filterMap_none {α β : Type} (f : α → Option β) : ∀ xs : List α, xs.filterMap f = [] →
+    ∀ a ∈ xs, f a = none
+  | [], _, _, ha => by cases ha
+  | x :: xs, h, a, ha => by
+    simp only [List.filterMap] at h
+    cases hf : f x with
+    | none =>
+      simp only [hf] at h
+      cases ha with
+      | head => exact hf
+      | tail _ ha => exact filterMap_none f xs h a ha
+    | some b => simp [hf] at h
+
+theorem findSome_template (xs : List Template) (name : String) (t : Template)
+    (h : xs.findSome? (fun u => if u.name == name then some u else none) = some t) :
+    t ∈ xs ∧ t.name = name := by
+  induction xs with
+  | nil => simp at h
+  | cons u us ih =>
+    rw [List.findSome?_cons] at h
+    by_cases hn : (u.name == name) = true
+    · simp only [hn, ite_true] at h
+      cases h
+      exact ⟨List.Mem.head _, by simpa [beq_iff_eq] using hn⟩
+    · have hf : (u.name == name) = false := by
+        cases hbb : u.name == name <;> simp_all
+      simp only [hf, ite_false] at h
+      obtain ⟨hm, hname⟩ := ih h
+      exact ⟨List.Mem.tail _ hm, hname⟩
+
+theorem templateOf_mem (D : Description) (name : String) (t : Template)
+    (h : templateOf D name = some t) : t ∈ D.templates ∧ t.name = name := by
+  simpa [templateOf] using findSome_template D.templates name t h
+
+/-- A passing subtree check makes every member terminable. A non-terminable role
+is not part of a subtree, so a kill does not select it. -/
+theorem member_terminable (D : Description) (hsub : subtreeFails D = []) (id : InstId)
+    (sub : String) (key : Nat) (hm : isMember D id sub key = true) :
+    terminableB D (tname id) = true := by
+  cases id with
+  | core _ => simp [isMember] at hm
+  | peer role k =>
+    simp only [isMember, tname, Bool.and_eq_true, beq_iff_eq] at hm
+    obtain ⟨_, hsubne, htree⟩ := hm
+    cases ht : templateOf D role with
+    | none => simp [templateSubtree, ht] at htree
+    | some t =>
+      have hmem := templateOf_mem D role t ht
+      have htree' : t.subtree = sub := by simpa [templateSubtree, ht] using htree
+      let classify : Template → Option String := fun u =>
+        if u.subtree == "" then
+          if u.timeoutKills then some s!"fail: {u.name} sets timeoutKills without a subtree"
+          else if templatePure D u.name then some (pureKillMsg u.name)
+          else none
+        else if u.multiplicity != .perPeer then
+          some s!"fail: subtree {u.subtree} member {u.name} is not per-peer"
+        else if !u.terminable then
+          some s!"fail: subtree {u.subtree} member {u.name} is not terminable"
+        else if !(D.templates.any fun v => v.subtree == u.subtree && v.timeoutKills) then
+          some s!"fail: subtree {u.subtree} has no timeoutKills role"
+        else if u.supervisor != "" &&
+            (match templateOf D u.supervisor with
+              | some s => !(s.multiplicity == .one)
+              | none => true) then
+          some s!"fail: subtree {u.subtree} supervisor {u.supervisor} is not a permanent core"
+        else if templatePure D u.name && !u.timeoutKills then
+          some (pureKillMsg u.name)
+        else none
+      have hmap : D.templates.filterMap classify = [] := by
+        simp only [subtreeFails, classify] at hsub
+        exact hsub
+      have hnone : classify t = none := filterMap_none classify D.templates hmap t hmem.1
+      have hsubne' : sub ≠ "" := by simpa [bne, beq_iff_eq] using hsubne
+      have hne : (t.subtree == "") = false := by simpa [beq_iff_eq, htree'] using hsubne'
+      have hterm : t.terminable = true := by
+        cases ht' : t.terminable with
+        | true => rfl
+        | false =>
+          have hbad : classify t ≠ none := by
+            simp only [classify]
+            rw [hne, ht']
+            cases hper : t.multiplicity == .perPeer
+            · simp only [bne, hper, Bool.not_false, ite_true]
+              intro h
+              cases h
+            · simp only [bne, hper, Bool.not_true, ite_false, ite_true]
+              intro h
+              cases h
+          exact absurd hnone hbad
+      simp [terminableB, tname, ht, hterm]
+
+/-- `readCells` records the current value and clears dirty. It does not raise a value
+or set a clean bit. -/
+theorem readCells_quiet (D : Description) (w : World) (id : InstId) (d l : String) :
+    ((readCells D w id).cell d l).value = (w.cell d l).value ∧
+      ((w.cell d l).dirty = false → ((readCells D w id).cell d l).dirty = false) := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => exact ⟨rfl, fun h => h⟩
+  | cons lab labs ih =>
+    simp only [List.foldl_cons]
+    let c := w.cell (tname id) lab
+    let w1 := setCell w (tname id) lab { c with dirty := false }
+    have hv1 : ∀ d l, (w1.cell d l).value = (w.cell d l).value := by
+      intro d l
+      simp only [w1, setCell, c]
+      by_cases hhit : d = tname id ∧ l = lab
+      · simp [hhit]
+      · simp [hhit]
+    have hd1 : ∀ d l, (w.cell d l).dirty = false → (w1.cell d l).dirty = false := by
+      intro d l h
+      simp only [w1, setCell, c]
+      by_cases hhit : d = tname id ∧ l = lab
+      · simp [hhit]
+      · simp [hhit, h]
+    have hih := ih (setObserved w1 id lab c.value)
+    have hc : (setObserved w1 id lab c.value).cell = w1.cell := rfl
+    refine ⟨?_, ?_⟩
+    · rw [hih.1, hc]
+      exact hv1 d l
+    · intro h
+      exact hih.2 (by rw [hc]; exact hd1 d l h)
+
+theorem failWaiter_cell (w : World) (dead i : InstId) (d l : String) :
+    (failWaiter w dead i).cell d l = w.cell d l := by
+  unfold failWaiter
+  split
+  · rfl
+  · cases hph : (w.st i).phase with
+    | parked dst b k =>
+      simp only [hph]
+      split <;> simp [setActor]
+    | awaitReply dst k =>
+      simp only [hph]
+      split <;> simp [setActor]
+    | idle => simp [hph]
+    | run k => simp [hph]
+    | awaitEffect k => simp [hph]
+    | awaitPeer k => simp [hph]
+    | crashed => simp [hph]
+
+theorem foldFail_cell (w : World) (dead : InstId) (ids : List InstId) (d l : String) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).cell d l) = w.cell d l := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rw [ih, failWaiter_cell]
+
+theorem foldForget_cell (w : World) (dead : InstId) (ids : List InstId) (d l : String) :
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w).cell d l) =
+      w.cell d l := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rw [ih]
+    split <;> simp [setActor]
+
+theorem refundMsgs_cell (w : World) (name : String) (ms : List Msg) (d l : String) :
+    ((refundMsgs w name ms).cell d l) = w.cell d l := by
+  induction ms generalizing w with
+  | nil => unfold refundMsgs; rfl
+  | cons m ms ih =>
+    unfold refundMsgs
+    simp only [List.foldl_cons]
+    rw [← refundMsgs, ih]
+    simp [creditSender, setActor]
+
+theorem refundParked_cell (w : World) (name : String) (ps : List Parked) (d l : String) :
+    ((refundParked w name ps).cell d l) = w.cell d l := by
+  induction ps generalizing w with
+  | nil => unfold refundParked; rfl
+  | cons p ps ih =>
+    unfold refundParked
+    simp only [List.foldl_cons]
+    rw [← refundParked, ih]
+    simp [creditSender, setActor]
+
+theorem killOne_cell (w : World) (D : Description) (id : InstId) :
+    (killOne w D id).cell = (readCells D w id).cell := by
+  unfold killOne
+  funext d l
+  simp only [setActor]
+  unfold forgetSender failWaiters
+  rw [foldForget_cell, foldFail_cell, refundParked_cell, refundMsgs_cell]
+
+theorem killOne_quiet (w : World) (D : Description) (id : InstId) (d l : String) :
+    ((killOne w D id).cell d l).value = (w.cell d l).value ∧
+      ((w.cell d l).dirty = false → ((killOne w D id).cell d l).dirty = false) := by
+  rw [killOne_cell]
+  exact readCells_quiet D w id d l
+
+theorem killFold_quiet (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (d l : String) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).cell d l).value =
+      (w.cell d l).value ∧
+      ((w.cell d l).dirty = false →
+        ((ids.foldl (fun w id =>
+          if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).cell d l).dirty =
+          false) := by
+  induction ids generalizing w with
+  | nil => exact ⟨rfl, fun h => h⟩
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · next _ =>
+      obtain ⟨hv, hd⟩ := ih (killOne w D id)
+      exact ⟨hv.trans (killOne_quiet w D id d l).1, fun h => hd ((killOne_quiet w D id d l).2 h)⟩
+    · exact ih w
+
+theorem killSubtree_quiet (w : World) (D : Description) (sub : String) (key : Nat) (d l : String) :
+    ((killSubtree w D sub key).cell d l).value = (w.cell d l).value ∧
+      ((w.cell d l).dirty = false → ((killSubtree w D sub key).cell d l).dirty = false) := by
+  simpa [killSubtree, killMembers, plant_cell] using killFold_quiet w D sub key w.roster d l
+
 end Deadlock
