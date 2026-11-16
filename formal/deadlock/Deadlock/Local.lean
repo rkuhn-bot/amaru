@@ -170,8 +170,19 @@ def permanentTarget (I : Impl) : Bool :=
       | some t => t.multiplicity == .one && t.terminable == false
     else true
 
+def noSelfSchedule : List Eff → Bool
+  | [] => true
+  | .selfSchedule _ :: _ => false
+  | _ :: es => noSelfSchedule es
+
+/-- A pure untimed template does not arm its own priority lane. The peer wait
+is not finishable, so a self-scheduled label would never be received. -/
+def pureSchedOk (I : Impl) : Bool :=
+  I.transitions.all fun tr =>
+    if templatePure I.desc tr.template then noSelfSchedule tr.program else true
+
 def localTail (I : Impl) : Bool :=
-  stepsCoverB I && uniqueKeys I && labelHandled I && permanentTarget I
+  stepsCoverB I && uniqueKeys I && labelHandled I && permanentTarget I && pureSchedOk I
 
 def localOkB (I : Impl) : Bool :=
   I.transitions.all (transitionOk I) && callTotal I && targetsAll I.desc &&
@@ -183,7 +194,8 @@ def LocalOk (I : Impl) : Prop := localOkB I = true
 /-- Trust boundary. Nothing in here is a theorem about Rust.
 `rust_refines` says the node's programs are `I.transitions`.
 An internal effect completes as a `finish` step. A timed peer wait completes
-the same way. An untimed peer wait does not, so the peer may stay silent.
+the same way. An untimed peer wait completes when a timed peer in its cohort
+can end the chain. A pure untimed peer wait does not, so that peer may stay silent.
 Scheduler fairness is the separate `Fair` hypothesis and does not force ingress. -/
 structure Assumptions (I : Impl) : Prop where
   rust_refines :
@@ -213,19 +225,24 @@ theorem local_parts (I : Impl) (h : LocalOk I) :
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
   exact ⟨h.1.1.1.1.1.1.1, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2,
-    h.2.1.1.1⟩
+    h.2.1.1.1.1⟩
 
 theorem unique_keys_local (I : Impl) (h : LocalOk I) : uniqueKeys I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.1.2
+  exact h.2.1.1.1.2
 
 theorem label_handled_local (I : Impl) (h : LocalOk I) : labelHandled I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.2
+  exact h.2.1.1.2
 
 theorem permanent_target_local (I : Impl) (h : LocalOk I) : permanentTarget I = true := by
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.1.2
+
+theorem pure_sched_local (I : Impl) (h : LocalOk I) : pureSchedOk I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
   exact h.2.2

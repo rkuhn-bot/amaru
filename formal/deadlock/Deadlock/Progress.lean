@@ -490,7 +490,7 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
     (w : World) (hR : Reachable I N w) (hs : List (Node × Nat))
     (hok : heightsOkB (residualEdges I.desc) hs = true) (n : Nat) (id : InstId)
     (hn : heightOf hs (nodeAt w id) < n) (hB : Blocked w id) :
-    ∃ act, OnChain w id act ∧ Enabled I w act := by
+    (∃ act, OnChain w id act ∧ Enabled I w act) ∨ PurePeerEnd I.desc w id := by
   induction n generalizing id with
   | zero => omega
   | succ n ih =>
@@ -506,10 +506,13 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
       unfold Blocked at hB
       simp [hph] at hB
     | awaitEffect k =>
-      exact ⟨.finish id, on_finish_self w id, effect_finish_enabled I w id k hph⟩
+      exact Or.inl ⟨.finish id, on_finish_self w id, effect_finish_enabled I w id k hph⟩
     | awaitPeer k =>
-      exact ⟨.finish id, on_finish_self w id,
-        peer_finish_enabled I w id k hph (graph_peer_timed I.desc hG.peers id)⟩
+      cases hf : peerFinishable I.desc id with
+      | true =>
+        exact Or.inl ⟨.finish id, on_finish_self w id, peer_finish_enabled I w id k hph hf⟩
+      | false =>
+        exact Or.inr ⟨k, hph, hf⟩
     | parked dst isCall k =>
       have hliveD := park_target_alive I hL hG N w hR id dst isCall k hph
       have hdrop : heightOf hs (nodeAt w dst) < heightOf hs (nodeAt w id) := by
@@ -523,33 +526,37 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
         have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
           obtain ⟨p, hp, _, _⟩ := (inv_reachable I N w hL hR).2.1.bwd id dst isCall k hph
           exact Or.inr (fun hempty => by simp [hempty] at hp)
-        exact ⟨.recvBulk dst,
+        exact Or.inl ⟨.recvBulk dst,
           on_partner w id dst (.recvBulk dst) (waits_on_park w id dst isCall k hph) (on_self_bulk w dst),
           can_receive_enabled I hL w dst
           ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
           ⟨⟨hliveD, hphD⟩, hmail⟩⟩
       | run kD =>
-        exact ⟨.exec dst,
+        exact Or.inl ⟨.exec dst,
           on_partner w id dst (.exec dst) (waits_on_park w id dst isCall k hph) (on_self_exec w dst),
           run_enabled I w dst kD hphD hliveD⟩
       | awaitEffect kD =>
-        exact ⟨.finish dst,
+        exact Or.inl ⟨.finish dst,
           on_partner w id dst (.finish dst) (waits_on_park w id dst isCall k hph) (on_finish_self w dst),
           effect_finish_enabled I w dst kD hphD⟩
       | awaitPeer kD =>
-        exact ⟨.finish dst,
+        have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+          (Or.inl ⟨isCall, k, hph⟩)
+        exact Or.inl ⟨.finish dst,
           on_partner w id dst (.finish dst) (waits_on_park w id dst isCall k hph) (on_finish_self w dst),
-          peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)⟩
+          peer_finish_enabled I w dst kD hphD hfin⟩
       | crashed =>
         exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
       | parked _ _ _ =>
-        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
-          ⟨hliveD, by simp [hphD]⟩
-        exact ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
+        rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
+        · exact Or.inl ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
+        · rw [hphD] at hkP; cases hkP
       | awaitReply _ _ =>
-        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
-          ⟨hliveD, by simp [hphD]⟩
-        exact ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
+        rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
+        · exact Or.inl ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
+        · rw [hphD] at hkP; cases hkP
     | awaitReply dst k =>
       have hliveD := reply_target_alive I hL hG N w hR id dst k hph
       have hdrop := reply_below I hL hG N w hR id dst k hs hok hph hliveD
@@ -565,39 +572,43 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
             simp [carriedCont, hphD] at hcar
           · rcases hpend.2.2 with ⟨_, hcar, _⟩
             simp [carriedCont, hphD] at hcar
-        exact ⟨.recvBulk dst,
+        exact Or.inl ⟨.recvBulk dst,
           on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph) (on_self_bulk w dst),
           can_receive_enabled I hL w dst
           ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
           ⟨⟨hliveD, hphD⟩, hmail⟩⟩
       | run kD =>
-        exact ⟨.exec dst,
+        exact Or.inl ⟨.exec dst,
           on_partner w id dst (.exec dst) (waits_on_reply w id dst k hph) (on_self_exec w dst),
           run_enabled I w dst kD hphD hliveD⟩
       | awaitEffect kD =>
-        exact ⟨.finish dst,
+        exact Or.inl ⟨.finish dst,
           on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
           effect_finish_enabled I w dst kD hphD⟩
       | awaitPeer kD =>
-        exact ⟨.finish dst,
+        have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+          (Or.inr ⟨k, hph⟩)
+        exact Or.inl ⟨.finish dst,
           on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
-          peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)⟩
+          peer_finish_enabled I w dst kD hphD hfin⟩
       | crashed =>
         exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
       | parked _ _ _ =>
-        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
-          ⟨hliveD, by simp [hphD]⟩
-        exact ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
+        rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
+        · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
+        · rw [hphD] at hkP; cases hkP
       | awaitReply _ _ =>
-        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
-          ⟨hliveD, by simp [hphD]⟩
-        exact ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
+        rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
+        · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
+        · rw [hphD] at hkP; cases hkP
 
 /-- In a reachable world every live wait has an enabled step whose subject is
 on that actor's wait chain. An ingress into an unrelated core does not count. -/
 theorem blocked_progress (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id) :
-    ∃ act, OnChain w id act ∧ Enabled I w act := by
+    (∃ act, OnChain w id act ∧ Enabled I w act) ∨ PurePeerEnd I.desc w id := by
   obtain ⟨hs, hok⟩ := hG.ranked
   exact blocked_go I hL hG hA N w hR hs hok (heightOf hs (nodeAt w id) + 1) id (by omega) hB
 
@@ -841,21 +852,23 @@ theorem off_idle_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N 
 
 
 
-/-- A finite execution that has stopped is not holding a live blocked actor.
-Stopping means `runtimeBusy` is false: no forced `recv`, `exec`, or `finish`. -/
+/-- A stopped execution has no live wait except a pure untimed peer. `finish` is
+disabled there, and no cohort timeout can end it. Stopping means `runtimeBusy`
+is false: no forced `recv`, `exec`, or `finish`. -/
 theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
-    {N : Nat} (e : FinExec I N) (id : InstId) : ¬ Blocked (e.cfg e.len) id := by
-  intro hB
+    {N : Nat} (e : FinExec I N) (id : InstId) (hB : Blocked (e.cfg e.len) id) :
+    PurePeerEnd I.desc (e.cfg e.len) id := by
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
-  obtain ⟨act, hon, hen⟩ := blocked_progress I hG hL hA N (e.cfg e.len) hR id hB
-  have hf : forced act = true := by
-    cases act <;> simp_all [OnChain, actionSubject, forced]
-  have hoff : ∀ s, s ∉ (e.cfg e.len).roster →
-      ((e.cfg e.len).st s).life ≠ .alive ∧ ((e.cfg e.len).st s).phase = .idle := by
-    intro s hs
-    have h := off_idle_reachable I N (e.cfg e.len) hR s hs
-    exact ⟨h.2, h.1⟩
-  exact quiet_no_forced I (e.cfg e.len) hoff e.maximal act hf hen
+  rcases blocked_progress I hG hL hA N (e.cfg e.len) hR id hB with ⟨act, hon, hen⟩ | hpure
+  · have hf : forced act = true := by
+      cases act <;> simp_all [OnChain, actionSubject, forced]
+    have hoff : ∀ s, s ∉ (e.cfg e.len).roster →
+        ((e.cfg e.len).st s).life ≠ .alive ∧ ((e.cfg e.len).st s).phase = .idle := by
+      intro s hs
+      have h := off_idle_reachable I N (e.cfg e.len) hR s hs
+      exact ⟨h.2, h.1⟩
+    exact False.elim (quiet_no_forced I (e.cfg e.len) hoff e.maximal act hf hen)
+  · exact hpure
 
 /-- A live reader with `label` still on its priority lane can take a step.
 Idle, that step is `recvPrio`, which runs `readCells` and clears the wake. -/
@@ -872,18 +885,29 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
   | awaitEffect k =>
     exact ⟨.finish r, effect_finish_enabled I w r k hph, rfl, fun hbad => by simp [hph] at hbad⟩
   | awaitPeer k =>
-    exact ⟨.finish r, peer_finish_enabled I w r k hph (graph_peer_timed I.desc hG.peers r),
-      rfl, fun hbad => by simp [hph] at hbad⟩
+    cases hf : peerFinishable I.desc r with
+    | true =>
+      exact ⟨.finish r, peer_finish_enabled I w r k hph hf, rfl, fun hbad => by simp [hph] at hbad⟩
+    | false =>
+      have hLane := lane_reachable I hL hG N w hR
+      have hempty : (w.st r).prio = [] := by
+        have hp := pure_of_silent I.desc r hf
+        exact prio_empty_of_pure I hL hG w hLane r hp
+      simp [hasLabel, hempty] at hhas
   | parked _ _ _ =>
-    obtain ⟨act, hon, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
-    have hf : forced act = true := by
-      cases act <;> simp_all [OnChain, actionSubject, forced]
-    exact ⟨act, hen, hf, fun hbad => by simp [hph] at hbad⟩
+    rcases blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩ with
+      ⟨act, hon, hen⟩ | ⟨kP, hkP, _⟩
+    · have hf : forced act = true := by
+        cases act <;> simp_all [OnChain, actionSubject, forced]
+      exact ⟨act, hen, hf, fun hbad => by simp [hph] at hbad⟩
+    · rw [hph] at hkP; cases hkP
   | awaitReply _ _ =>
-    obtain ⟨act, hon, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
-    have hf : forced act = true := by
-      cases act <;> simp_all [OnChain, actionSubject, forced]
-    exact ⟨act, hen, hf, fun hbad => by simp [hph] at hbad⟩
+    rcases blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩ with
+      ⟨act, hon, hen⟩ | ⟨kP, hkP, _⟩
+    · have hf : forced act = true := by
+        cases act <;> simp_all [OnChain, actionSubject, forced]
+      exact ⟨act, hen, hf, fun hbad => by simp [hph] at hbad⟩
+    · rw [hph] at hkP; cases hkP
   | crashed =>
     exact False.elim ((reachable_not_crashed I hL hG N w hR) r (by simp [hph]))
 

@@ -60,9 +60,9 @@ theorem effect_finish_enabled (I : Impl) (w : World) (id : InstId) (k : Cont)
   simp [Enabled, apply, finishWait, h]
 
 theorem peer_finish_enabled (I : Impl) (w : World) (id : InstId) (k : Cont)
-    (h : (w.st id).phase = .awaitPeer k) (hu : peerUntimed I.desc id = false) :
+    (h : (w.st id).phase = .awaitPeer k) (hf : peerFinishable I.desc id = true) :
     Enabled I w (.finish id) := by
-  simp [Enabled, apply, finishWait, h, hu]
+  simp [Enabled, apply, finishWait, h, hf]
 
 theorem enabled_finish_effect (I : Impl) (w : World) (s : InstId)
     (hp : waitKind (w.st s) = some .effect) : Enabled I w (.finish s) := by
@@ -70,10 +70,10 @@ theorem enabled_finish_effect (I : Impl) (w : World) (s : InstId)
   exact effect_finish_enabled I w s k hk
 
 theorem enabled_finish_peer (I : Impl) (w : World) (s : InstId)
-    (hp : waitKind (w.st s) = some .peer) (hu : peerUntimed I.desc s = false) :
+    (hp : waitKind (w.st s) = some .peer) (hf : peerFinishable I.desc s = true) :
     Enabled I w (.finish s) := by
   obtain ⟨k, hk⟩ := wait_peer_phase (w.st s) hp
-  exact peer_finish_enabled I w s k hk hu
+  exact peer_finish_enabled I w s k hk hf
 
 theorem not_stuck_effect {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s : InstId) (i : Nat)
     (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .effect) : False := by
@@ -90,12 +90,12 @@ theorem not_stuck_effect {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s :
 
 theorem not_stuck_peer {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s : InstId) (i : Nat)
     (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer)
-    (hu : peerUntimed I.desc s = false) : False := by
+    (hf : peerFinishable I.desc s = true) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .peer := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) :=
-    fun j hj => enabled_finish_peer I (ρ.cfg j) s (hall j hj) hu
+    fun j hj => enabled_finish_peer I (ρ.cfg j) s (hall j hj) hf
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ

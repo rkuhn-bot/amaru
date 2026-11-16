@@ -46,7 +46,7 @@ theorem call_answered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
       · simp [SameWait, waitKind, hph]
       · intro j hj
         simp [SameWait, waitKind, hstay j hj, hph]
-    exact False.elim (never_stuck I hL hG hA ρ hF c i hS)
+    exact False.elim (never_stuck I hL hG hA ρ hF c i hS (Or.inr (by simp [waitKind, hph])))
 
 /-- Bulk mail in delivery order: the box, then parked messages. -/
 def bulkQ (a : Actor) : List Msg := a.box ++ a.parked.map (·.msg)
@@ -677,6 +677,7 @@ theorem box_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
         exact hex ⟨t, ht, hact⟩
       have hfree : ∀ t, i ≤ t → ¬Stuck ρ id t := fun t ht hS =>
         never_stuck I hL hG hA ρ hF id t hS
+          (Or.inl (permanent_finishable I.desc hG.peers id hterm))
       have hio : ∀ s, ∃ j, s ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk id) := by
         intro s
         obtain ⟨j, hj, hId⟩ := idle_when_free I hL hG hA ρ hF id i halive hfree
@@ -861,7 +862,8 @@ theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i 
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
 
 theorem fair_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
-    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (id : InstId) (n : Nat)
+    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (id : InstId)
+    (hf : peerFinishable I.desc id = true) (n : Nat)
     (hn : n < ((ρ.cfg i).st id).box.length) :
     ∃ j, i ≤ j ∧
       (n < drainDrops ρ id i (fun t => !((ρ.cfg t).st id).box.isEmpty) (j - i) ∨
@@ -882,9 +884,13 @@ theorem fair_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumpt
     have hio : ∀ t, ∃ j, t ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk id) := by
       intro t
       let u := Nat.max t i
-      obtain ⟨j, hj, hId⟩ := below_idle I hL hG hA ρ hF hs hok (maxHeight hs + 1) i id
+      obtain ⟨j, hj, hset⟩ := below_idle I hL hG hA ρ hF hs hok (maxHeight hs + 1) i id
         (rank_bound hs (ρ.cfg i) id) halive (fun u _ => rank_bound hs (ρ.cfg u) id)
         u (Nat.le_max_right _ _)
+      have hId : Idle (ρ.cfg j) id := by
+        rcases hset with hId | ⟨_, _, hp⟩
+        · exact hId
+        · simp [hf] at hp
       have hbox : ((ρ.cfg j).st id).box ≠ [] :=
         hne j (Nat.le_trans (Nat.le_max_right t i) hj)
       exact ⟨j, Nat.le_trans (Nat.le_max_left t i) hj,
@@ -903,7 +909,8 @@ theorem fair_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumpt
     simpa [Nat.add_sub_cancel_left] using hk
 
 theorem fair_parked (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
-    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (id : InstId) (n : Nat)
+    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (id : InstId)
+    (hf : peerFinishable I.desc id = true) (n : Nat)
     (hn : n < ((ρ.cfg i).st id).parked.length) :
     ∃ j, i ≤ j ∧
       (n < drainDrops ρ id i (fun t => !((ρ.cfg t).st id).parked.isEmpty) (j - i) ∨
@@ -924,9 +931,13 @@ theorem fair_parked (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
     have hio : ∀ t, ∃ j, t ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk id) := by
       intro t
       let u := Nat.max t i
-      obtain ⟨j, hj, hId⟩ := below_idle I hL hG hA ρ hF hs hok (maxHeight hs + 1) i id
+      obtain ⟨j, hj, hset⟩ := below_idle I hL hG hA ρ hF hs hok (maxHeight hs + 1) i id
         (rank_bound hs (ρ.cfg i) id) halive (fun u _ => rank_bound hs (ρ.cfg u) id)
         u (Nat.le_max_right _ _)
+      have hId : Idle (ρ.cfg j) id := by
+        rcases hset with hId | ⟨_, _, hp⟩
+        · exact hId
+        · simp [hf] at hp
       have hpark : ((ρ.cfg j).st id).parked ≠ [] :=
         hne j (Nat.le_trans (Nat.le_max_right t i) hj)
       exact ⟨j, Nat.le_trans (Nat.le_max_left t i) hj,
@@ -1737,6 +1748,7 @@ theorem park_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         exact hex ⟨t, ht, hact⟩
       have hfree : ∀ t, i ≤ t → ¬Stuck ρ id t := fun t ht hS =>
         never_stuck I hL hG hA ρ hF id t hS
+          (Or.inl (permanent_finishable I.desc hG.peers id hterm))
       have hio : ∀ s, ∃ j, s ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk id) := by
         intro s
         obtain ⟨j, hj, hId⟩ := idle_when_free I hL hG hA ρ hF id i halive hfree
@@ -2291,6 +2303,7 @@ theorem prio_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         exact hex ⟨t, ht, hact⟩
       have hfree : ∀ t, i ≤ t → ¬Stuck ρ id t := fun t ht hS =>
         never_stuck I hL hG hA ρ hF id t hS
+          (Or.inl (permanent_finishable I.desc hG.peers id hterm))
       have hio : ∀ s, ∃ j, s ≤ j ∧ Enabled I (ρ.cfg j) (.recvPrio id) := by
         intro s
         obtain ⟨j, hj, hId⟩ := idle_when_free I hL hG hA ρ hF id i halive hfree

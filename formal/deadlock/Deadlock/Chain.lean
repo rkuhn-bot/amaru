@@ -435,6 +435,7 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
     (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
     (n : Nat)
     (ihn : ∀ m w id, m < n → heightOf hs (nodeAt w id) < m → Reachable I N w → Blocked w id →
+      ¬ PurePeerEnd I.desc w id →
       ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
         Reachable I N w' ∧ ¬ Blocked w' id ∧
         work ((w'.st id).phase) < work ((w.st id).phase))
@@ -579,7 +580,9 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
             Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
           simp [runFrom, happ]
     | awaitPeer kD =>
-      have hen := peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)
+      have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+        (Or.inl ⟨false, k, hph⟩)
+      have hen := peer_finish_enabled I w dst kD hphD hfin
       cases happ : apply I (.finish dst) w with
       | none => exact False.elim (hen happ)
       | some w' =>
@@ -617,6 +620,7 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         Nat.lt_of_le_of_lt (Nat.succ_le_of_lt hbelow) hn
       obtain ⟨acts, w1, hC, hrun, hR1, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hnD (Nat.lt_succ_self _) hR ⟨hliveD, by simp [hphD]⟩
+          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := absorb_send I hL hG N dst id k w acts hC hR hph
       rcases hor with hdone | hfull
       · rcases hdone with ⟨hnot, hwk⟩
@@ -636,6 +640,7 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         Nat.lt_of_le_of_lt (Nat.succ_le_of_lt hbelow) hn
       obtain ⟨acts, w1, hC, hrun, hR1, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hnD (Nat.lt_succ_self _) hR ⟨hliveD, by simp [hphD]⟩
+          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := absorb_send I hL hG N dst id k w acts hC hR hph
       rcases hor with hdone | hfull
       · rcases hdone with ⟨hnot, hwk⟩
@@ -719,6 +724,7 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
     (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
     (n : Nat)
     (ihn : ∀ m w id, m < n → heightOf hs (nodeAt w id) < m → Reachable I N w → Blocked w id →
+      ¬ PurePeerEnd I.desc w id →
       ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
         Reachable I N w' ∧ ¬ Blocked w' id ∧
         work ((w'.st id).phase) < work ((w.st id).phase))
@@ -743,6 +749,7 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
       obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
           ⟨hliveD, by simp [hphD]⟩
+          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := reply_absorb I hL hG N dst id k w acts hC hR hph
       rcases hor with hdone | hfull
       · rcases hdone with ⟨hnot, hwk⟩
@@ -762,6 +769,7 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
       obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
           ⟨hliveD, by simp [hphD]⟩
+          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := reply_absorb I hL hG N dst id k w acts hC hR hph
       rcases hor with hdone | hfull
       · rcases hdone with ⟨hnot, hwk⟩
@@ -808,7 +816,9 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
             by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
     | awaitPeer kD =>
-      have hen := peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)
+      have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+        (Or.inr ⟨k, hph⟩)
+      have hen := peer_finish_enabled I w dst kD hphD hfin
       cases happ : apply I (.finish dst) w with
       | none => exact False.elim (hen happ)
       | some w' =>
@@ -1011,14 +1021,16 @@ theorem call_debt_drop_work (I : Impl) (w w' : World) (id dst : InstId)
     ((parkIndex ((w.st dst).parked) id + 1) * slotOf I)
   exact Nat.lt_of_le_of_lt hle hlt
 
-/-- A finite chain execution from a reachable blocked actor. Every step's subject
-is on that actor's wait chain. Internal effects on the chain are ordinary steps.
-The actor is not blocked at the end. Under `GraphOk` every peer wait is timed, so
-the chain does not stop on a silent peer. -/
+/-- A finite chain execution from a reachable blocked actor that is not a pure
+untimed peer end. Every step's subject is on that actor's wait chain. Internal
+effects and a finishable peer wait are ordinary steps. The actor is not blocked
+at the end. A partner in `awaitPeer` is finishable: a pure untimed template is
+not a legal wait target. -/
 theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
     (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
     (n : Nat)
     (ihn : ∀ m w id, m < n → heightOf hs (nodeAt w id) < m → Reachable I N w → Blocked w id →
+      ¬ PurePeerEnd I.desc w id →
       ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
         Reachable I N w' ∧ ¬ Blocked w' id ∧
         work ((w'.st id).phase) < work ((w.st id).phase))
@@ -1058,6 +1070,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
       obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
           ⟨hliveD, by simp [hphD]⟩
+          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := call_absorb I hL hG N dst id k w acts hC hR hph
       rcases hor with hadmit | hfull
       · exact finishReply wA acts1 hC1 hrun1 hRA hadmit.1 hadmit.2
@@ -1075,6 +1088,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
       obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
           ⟨hliveD, by simp [hphD]⟩
+          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := call_absorb I hL hG N dst id k w acts hC hR hph
       rcases hor with hadmit | hfull
       · exact finishReply wA acts1 hC1 hrun1 hRA hadmit.1 hadmit.2
@@ -1119,7 +1133,9 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
             (ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'))
             (by simp [runFrom, happ]) hR' hgo hty
     | awaitPeer kD =>
-      have hen := peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)
+      have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+        (Or.inl ⟨true, k, hph⟩)
+      have hen := peer_finish_enabled I w dst kD hphD hfin
       cases happ : apply I (.finish dst) w with
       | none => exact False.elim (hen happ)
       | some w' =>
@@ -1232,18 +1248,20 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
             (by simp [runFrom, happ]) hR' hgo hty
 
 theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (_hA : Assumptions I)
-    (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id) :
+    (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id)
+    (hnotP : ¬ PurePeerEnd I.desc w id) :
     ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
       Reachable I N w' ∧ ¬ Blocked w' id := by
   obtain ⟨hs, hok⟩ := hG.ranked
   have hfull : ∀ n w id, heightOf hs (nodeAt w id) < n → Reachable I N w → Blocked w id →
+      ¬ PurePeerEnd I.desc w id →
       ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
         Reachable I N w' ∧ ¬ Blocked w' id ∧
         work ((w'.st id).phase) < work ((w.st id).phase) := by
     intro n
     induction n using Nat.strongRecOn with
     | ind n ihn =>
-      intro w id hn hR hB
+      intro w id hn hR hB hnotP
       cases hph : (w.st id).phase with
       | idle => simp [Blocked, hph] at hB
       | crashed => simp [Blocked, hph] at hB
@@ -1255,9 +1273,12 @@ theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (_hA 
         exact ⟨[.finish id], _, ChainRun.cons w (.finish id) _ [] (on_finish_self w id) hfin (ChainRun.nil _),
           by simp [runFrom, hfin], Reachable.step w _ (.finish id) hR hfin, hnot, by simpa [hph] using hwk⟩
       | awaitPeer k =>
-        have hu := graph_peer_timed I.desc hG.peers id
+        have hf : peerFinishable I.desc id = true := by
+          cases hf : peerFinishable I.desc id with
+          | true => rfl
+          | false => exact False.elim (hnotP ⟨k, hph, hf⟩)
         have hfin : apply I (.finish id) w = some (setActor w id (proceed (w.st id) k)) := by
-          simp [apply, finishWait, hph, hu]
+          simp [apply, finishWait, hph, hf]
         obtain ⟨hnot, hwk⟩ := finish_unblocks I w _ id (by simpa [apply] using hfin) hB
         exact ⟨[.finish id], _, ChainRun.cons w (.finish id) _ [] (on_finish_self w id) hfin (ChainRun.nil _),
           by simp [runFrom, hfin], Reachable.step w _ (.finish id) hR hfin, hnot, by simpa [hph] using hwk⟩
@@ -1265,29 +1286,37 @@ theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (_hA 
         cases isCall with
         | false =>
           simpa [hph] using send_go I hG hL N hs hok n
-            (fun m w id hm hlt hR hB => ihn m hm w id hlt hR hB)
+            (fun m w id hm hlt hR hB hnot => ihn m hm w id hlt hR hB hnot)
             (sendDebt I w id dst) w id dst k hn hph hR (Nat.le_refl _)
         | true =>
           simpa [hph] using call_go I hG hL N hs hok n
-            (fun m w id hm hlt hR hB => ihn m hm w id hlt hR hB)
+            (fun m w id hm hlt hR hB hnot => ihn m hm w id hlt hR hB hnot)
             (callParkDebt I w id dst) w id dst k hn hph hR (Nat.le_refl _)
       | awaitReply dst k =>
         simpa [hph] using reply_go I hG hL N hs hok n
-          (fun m w id hm hlt hR hB => ihn m hm w id hlt hR hB)
+          (fun m w id hm hlt hR hB hnot => ihn m hm w id hlt hR hB hnot)
           (replyDebt I w id dst) w id dst k hn hph hR (Nat.le_refl _)
   obtain ⟨acts, w', hC, hrun, hR', hnot, _⟩ :=
-    hfull (heightOf hs (nodeAt w id) + 1) w id (Nat.lt_succ_self _) hR hB
+    hfull (heightOf hs (nodeAt w id) + 1) w id (Nat.lt_succ_self _) hR hB hnotP
   exact ⟨acts, w', hC, hrun, hR', hnot⟩
 
-/-- The chain stops when `id` is no longer blocked. An untimed peer would be the
-other stop, and `GraphOk` rules that flag out (`graph_peer_timed`), so every
-checked chain reaches the first disjunct. -/
+/-- The chain stops when `id` is no longer blocked, or when `id` itself is a
+pure untimed peer end. That end is legitimate: `finish` is disabled, and no
+timed peer in the cohort can end it. It is not an interior wait. `peerFails`
+rejects a blocking send or call into a pure untimed template, and a cohort
+that contains a timed peer makes the waiter finishable, so the chain continues
+through `blocked_unblocks`. -/
 theorem blocked_chain (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id) :
     ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
       Reachable I N w' ∧
       (¬ Blocked w' id ∨ ∃ s k, InChain w' id s ∧ (w'.st s).phase = .awaitPeer k ∧
-        peerUntimed I.desc s = true) := by
-  obtain ⟨acts, w', hC, hrun, hR', hnot⟩ := blocked_unblocks I hG hL hA N w hR id hB
-  exact ⟨acts, w', hC, hrun, hR', Or.inl hnot⟩
+        peerUntimed I.desc s = true ∧ peerFinishable I.desc s = false) := by
+  by_cases hpure : PurePeerEnd I.desc w id
+  · obtain ⟨k, hph, hf⟩ := hpure
+    exact ⟨[], w, ChainRun.nil w, rfl, hR,
+      Or.inr ⟨id, k, InChain.refl id, hph, untimed_of_silent I.desc id hf, hf⟩⟩
+  · obtain ⟨acts, w', hC, hrun, hR', hnot⟩ :=
+      blocked_unblocks I hG hL hA N w hR id hB hpure
+    exact ⟨acts, w', hC, hrun, hR', Or.inl hnot⟩
 end Deadlock

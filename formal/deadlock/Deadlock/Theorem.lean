@@ -29,13 +29,13 @@ theorem not_stuck_effect_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair 
 
 theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
     (s : InstId) (i : Nat) (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer)
-    (hu : peerUntimed I.desc s = false) : False := by
+    (hf : peerFinishable I.desc s = true) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .peer := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) := by
     intro j hj
-    exact enabled_finish_peer I (ρ.cfg j) s (hall j hj) hu
+    exact enabled_finish_peer I (ρ.cfg j) s (hall j hj) hf
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
@@ -60,6 +60,7 @@ theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
     | effect =>
       exact False.elim (not_stuck_effect_assumed ρ hF s i hS hkind)
     | peer =>
-      exact False.elim (not_stuck_peer_assumed ρ hF s i hS hkind (by simp [hkind] at hk; exact hk))
+      exact False.elim (not_stuck_peer_assumed ρ hF s i hS hkind
+        (finishable_of_timed I.desc s (by simp [hkind] at hk; exact hk)))
 
 end Deadlock

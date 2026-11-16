@@ -399,9 +399,11 @@ by the semantic rework, and the old examples keep their verdicts.
 - `send` and `call` are blocking. `trySend`, `reply`, `selfSchedule`, `cell`,
   `internal`, `peer` are non-blocking.
 - `scope` matches multiplicity.
-- `freshNames` is true. No template has `untimedPeer`. Priority bound `≤`
-  priority capacity. Every `call` has `repliesInDequeue`. A call with
-  `repliesInDequeue: false` is `lost-reply.json`.
+- `freshNames` is true. Priority bound `≤` priority capacity. Every `call`
+  has `repliesInDequeue`. A call with `repliesInDequeue: false` is
+  `lost-reply.json`. An `untimedPeer` template is allowed. It is rejected when
+  it is not terminable, when a cell wakes it, or when a blocking send or call
+  targets it and no template in its cohort has a timed peer.
 - **No call targets a terminable template** (`callTermFails`, part of
   `GraphOk.lifecycle`). An admitted call sits in the callee's box and the
   caller is in `awaitReply`; it is not a parked entry. Killing `terminate`

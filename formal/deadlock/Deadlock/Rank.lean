@@ -1744,7 +1744,7 @@ theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Ass
     {N : Nat} (ρ : Run I N)
     (hF : Fair ρ) (s : InstId) (i : Nat) (k : Cont)
     (hp : ((ρ.cfg i).st s).phase = .awaitPeer k) (hl : ((ρ.cfg i).st s).life = .alive)
-    (hu : peerUntimed I.desc s = false) :
+    (hf : peerFinishable I.desc s = true) :
     ∃ j, i ≤ j ∧ ((ρ.cfg (j + 1)).st s).phase = (proceed ((ρ.cfg j).st s) k).phase ∧
       ((ρ.cfg (j + 1)).st s).life = .alive := by
   have hhit : ∃ j, i ≤ j ∧ ρ.act j = .finish s := by
@@ -1763,7 +1763,7 @@ theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Ass
         have hst := hstay (j - i)
         have hph : ((ρ.cfg j).st s).phase = .awaitPeer k := by
           simpa [Nat.add_sub_of_le hj] using hst.1
-        exact peer_finish_enabled I (ρ.cfg j) s k hph hu
+        exact peer_finish_enabled I (ρ.cfg j) s k hph hf
       obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
       exact absurd ⟨j, hj, hact⟩ hmiss
   obtain ⟨j0, hj0, hact0⟩ := hhit
@@ -1797,19 +1797,249 @@ theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Ass
   · rw [hw]
     simpa [setActor, proceed_life] using hl'
 
-theorem graph_peer_timed (D : Description) (h : peerFails D = []) (id : InstId) :
-    peerUntimed D id = false := by
-  cases ht : templateOf D (tname id) with
-  | none => simp [peerUntimed, ht]
+theorem peer_split (D : Description) (h : peerFails D = []) :
+    pureTermFails D = [] ∧ cellPureFails D = [] ∧ interiorFails D = [] := by
+  have h1 : pureTermFails D = [] := by
+    cases h2 : pureTermFails D with
+    | nil => rfl
+    | cons _ _ => simp [peerFails, h2] at h
+  have hrest : cellPureFails D ++ interiorFails D = [] := by
+    simpa [peerFails, h1] using h
+  have h2 : cellPureFails D = [] := by
+    cases h3 : cellPureFails D with
+    | nil => rfl
+    | cons _ _ => simp [h3] at hrest
+  have h3 : interiorFails D = [] := by
+    simpa [h2] using hrest
+  exact ⟨h1, h2, h3⟩
+
+theorem interior_forbidden (D : Description) (h : peerFails D = []) (e : Edge) (he : e ∈ D.edges)
+    (hdep : e.kind = .blocking ∨ e.effect = .call) (t : Template) (ht : templateOf D e.dst = some t)
+    (hp : templatePure D e.dst = true) : False := by
+  have hempty := (peer_split D h).2.2
+  have hflag : (e.kind == .blocking || e.effect == .call) = true := by
+    rcases hdep with hk | heff
+    · simp [(kind_beq e.kind .blocking).mpr hk]
+    · simp [(effect_beq e.effect .call).mpr heff]
+  have hu : t.untimedPeer = true := by
+    simp [templatePure, ht] at hp
+    exact hp.1
+  have hcut : timedCohortEnds D e.dst = false := by
+    simp [templatePure, ht] at hp
+    cases hc : timedCohortEnds D e.dst <;> simp_all
+  have hmem : interiorMsg e.src e.dst ∈ interiorFails D := by
+    refine List.mem_filterMap.mpr ⟨e, he, ?_⟩
+    simp [hflag, ht, hu, hcut]
+  simp [hempty] at hmem
+
+/-- A blocking send or a call targets a finishable peer. A pure untimed template
+is not a legal dependency: `interiorFails` rejects it unless a timed cohort peer
+can end the chain, and that cut is exactly `peerFinishable`. -/
+theorem depended_finishable (D : Description) (h : peerFails D = []) (name : String)
+    (he : ∃ e, e ∈ D.edges ∧ e.dst = name ∧ (e.kind = .blocking ∨ e.effect = .call))
+    (id : InstId) (hid : tname id = name) : peerFinishable D id = true := by
+  cases ht : templateOf D name with
+  | none => simp [peerFinishable, hid, ht]
   | some t =>
-    simp [peerUntimed, ht]
-    by_cases hu : t.untimedPeer = true
-    · have hmem : (s!"fail: template {t.name} has an untimed peer wait; a checked description times peer waits out") ∈
-          peerFails D := by
+    cases hp : templatePure D name with
+    | true =>
+      obtain ⟨e, hem, hdst, hdep⟩ := he
+      exact False.elim (interior_forbidden D h e hem hdep t (by simpa [hdst] using ht)
+        (by simpa [hdst] using hp))
+    | false =>
+      have h := peerFinishable_eq_not_pure D id
+      simpa [hid, hp] using h
+
+theorem target_finishable (I : Impl) (hG : GraphOk I.desc) (w : World) (hI : Inv I w)
+    (src dst : InstId)
+    (hwait : (∃ c k, (w.st src).phase = .parked dst c k) ∨
+      (∃ k, (w.st src).phase = .awaitReply dst k)) :
+    peerFinishable I.desc dst = true := by
+  rcases hwait with ⟨c, k, hph⟩ | ⟨k, hph⟩
+  · obtain ⟨_, e, he, _, _, hdst, hkind, _, _⟩ := described_park I w hI src dst c k hph
+    exact depended_finishable I.desc hG.peers (tname dst) ⟨e, he, hdst, Or.inl hkind⟩ dst rfl
+  · obtain ⟨_, e, he, _, _, hdst, _, heff, _⟩ := described_reply I w hI src dst k hph
+    exact depended_finishable I.desc hG.peers (tname dst) ⟨e, he, hdst, Or.inr heff⟩ dst rfl
+
+theorem permanent_finishable (D : Description) (h : peerFails D = []) (id : InstId)
+    (hterm : terminableB D (tname id) = false) : peerFinishable D id = true := by
+  cases ht : templateOf D (tname id) with
+  | none => simp [peerFinishable, ht]
+  | some t =>
+    have hflag : t.terminable = false := by
+      simp [terminableB, ht] at hterm
+      exact hterm
+    cases hp : templatePure D (tname id) with
+    | false =>
+      have heq := peerFinishable_eq_not_pure D id
+      simpa [hp] using heq
+    | true =>
+      have hname := templateOf_name D (tname id) t ht
+      have hmem : pureTermMsg t.name ∈ pureTermFails D := by
         refine List.mem_filterMap.mpr ⟨t, template_mem D (tname id) t ht, ?_⟩
-        simp [hu]
-      simp [h] at hmem
-    · cases hb : t.untimedPeer <;> simp_all
+        simp [hname, hp, hflag]
+      simp [(peer_split D h).1] at hmem
+
+theorem cell_edge_of_label (D : Description) (name label : String) (h : label ∈ cellLabels D name) :
+    ∃ e, e ∈ D.edges ∧ e.effect = .cell ∧ e.dst = name ∧ e.label = label := by
+  unfold cellLabels at h
+  obtain ⟨e, he, hsome⟩ := List.mem_filterMap.mp h
+  by_cases hc : (e.effect == .cell && e.dst == name) = true
+  · simp [hc] at hsome
+    simp [Bool.and_eq_true] at hc
+    refine ⟨e, he, (effect_beq _ _).mp hc.1, ?_, ?_⟩
+    · simpa [beq_iff_eq] using hc.2
+    · simpa [hsome, beq_iff_eq]
+  · have hf : (e.effect == .cell && e.dst == name) = false := by
+      cases hb : e.effect == .cell && e.dst == name <;> simp_all
+    simp [hf] at hsome
+
+theorem cell_reader_finishable (D : Description) (h : peerFails D = []) (name label : String)
+    (hl : label ∈ cellLabels D name) (id : InstId) (hid : tname id = name) :
+    peerFinishable D id = true := by
+  cases hp : templatePure D name with
+  | false =>
+    have heq := peerFinishable_eq_not_pure D id
+    simpa [hid, hp] using heq
+  | true =>
+    obtain ⟨e, he, heff, hdst, _⟩ := cell_edge_of_label D name label hl
+    have hmem : cellPureMsg e.dst e.label ∈ cellPureFails D := by
+      refine List.mem_filterMap.mpr ⟨e, he, ?_⟩
+      have hbeq : (e.effect == .cell) = true := (effect_beq _ _).mpr heff
+      have hpure : templatePure D e.dst = true := by simpa [hdst] using hp
+      simp [hbeq, hpure]
+    simp [(peer_split D h).2.1] at hmem
+
+theorem selfLabels_of_no : ∀ es, noSelfSchedule es = true → selfLabels es = []
+  | [], _ => rfl
+  | .send _ _ _ :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .trySend _ _ _ :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .call _ _ _ :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .reply :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .selfSchedule _ :: _, h => by simp [noSelfSchedule] at h
+  | .cell _ _ _ :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .internal :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .peer :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+  | .terminate :: es, h => by
+    simp [noSelfSchedule, selfLabels] at h
+    exact selfLabels_of_no es h
+
+theorem flat_self_nil (xs : List Transition) (D : Description) (name : String)
+    (hp : templatePure D name = true)
+    (h : xs.all (fun tr => if templatePure D tr.template then noSelfSchedule tr.program else true) = true) :
+    (xs.filterMap (fun tr => if tr.template == name then some (selfLabels tr.program) else none)).flatten = [] := by
+  induction xs with
+  | nil => simp only [List.filterMap_nil, List.flatten_nil]
+  | cons tr ts ih =>
+    rw [List.all_cons, Bool.and_eq_true] at h
+    by_cases ht : (tr.template == name) = true
+    · have hname : tr.template = name := by simpa [beq_iff_eq] using ht
+      have hno : noSelfSchedule tr.program = true := by simpa [hname, hp] using h.1
+      rw [List.filterMap_cons, if_pos ht, selfLabels_of_no tr.program hno,
+        List.flatten_cons, List.nil_append]
+      exact ih h.2
+    · have hf : (tr.template == name) = false := by
+        cases hb : tr.template == name <;> simp_all
+      have hneg : ¬ ((tr.template == name) = true) := by
+        rw [hf]
+        decide
+      rw [List.filterMap_cons, if_neg hneg]
+      exact ih h.2
+
+theorem no_cell_pure (D : Description) (h : cellPureFails D = []) (reader : String)
+    (hp : templatePure D reader = true) (e : Edge) (he : e ∈ D.edges)
+    (heff : e.effect = .cell) (hdst : e.dst = reader) : False := by
+  have hmem : cellPureMsg e.dst e.label ∈ cellPureFails D := by
+    refine List.mem_filterMap.mpr ⟨e, he, ?_⟩
+    have hbeq : (e.effect == .cell) = true := (effect_beq _ _).mpr heff
+    have hpure : templatePure D e.dst = true := by simpa [hdst] using hp
+    simp [hbeq, hpure]
+  simp [h] at hmem
+
+theorem cellWake_reader (D : Description) (writer state reader : String) (es : List Eff)
+    (hok : effectsOk D writer state es = true) (hno : cellPureFails D = [])
+    (hp : templatePure D reader = true) : cellWakeLabels reader es = [] := by
+  induction es with
+  | nil => rfl
+  | cons e es ih =>
+    cases e with
+    | cell d l v =>
+      simp [effectsOk, Bool.and_eq_true] at hok
+      obtain ⟨edge, he, _, _, hdst, heff, _, _⟩ :=
+        hasEdge_mem D writer state d .cell .nonBlocking l hok.1
+      have hrest := ih hok.2
+      by_cases hd : d = reader
+      · exact False.elim (no_cell_pure D hno reader hp edge he heff (hdst.trans hd))
+      · have hne : (d == reader) = false := by
+          cases hb : d == reader <;> simp_all [beq_iff_eq]
+        simpa [cellWakeLabels, hne] using hrest
+    | send d l n =>
+      simp [effectsOk, cellWakeLabels, Bool.and_eq_true] at hok
+      exact ih hok.2
+    | trySend d l n =>
+      simp [effectsOk, cellWakeLabels, Bool.and_eq_true] at hok
+      exact ih hok.2
+    | call d l n =>
+      simp [effectsOk, cellWakeLabels, Bool.and_eq_true] at hok
+      exact ih hok.2
+    | reply =>
+      simp [effectsOk, cellWakeLabels] at hok
+      exact ih hok
+    | selfSchedule l =>
+      simp [effectsOk, cellWakeLabels] at hok
+      exact ih hok
+    | internal =>
+      simp [effectsOk, cellWakeLabels] at hok
+      exact ih hok
+    | peer =>
+      simp [effectsOk, cellWakeLabels] at hok
+      exact ih hok
+    | terminate =>
+      simp [effectsOk, cellWakeLabels] at hok
+      exact ih hok
+
+theorem map_cell_nil (xs : List Transition) (reader : String)
+    (h : ∀ tr ∈ xs, cellWakeLabels reader tr.program = []) :
+    (xs.map (fun tr => cellWakeLabels reader tr.program)).flatten = [] := by
+  induction xs with
+  | nil => simp
+  | cons tr ts ih =>
+    simp [h tr (List.Mem.head _), ih (fun t hm => h t (List.Mem.tail _ hm))]
+
+theorem cellLabels_pure_nil (D : Description) (h : cellPureFails D = []) (name : String)
+    (hp : templatePure D name = true) : cellLabels D name = [] := by
+  cases hc : cellLabels D name with
+  | nil => rfl
+  | cons l _ =>
+    obtain ⟨e, he, heff, hdst, _⟩ := cell_edge_of_label D name l (by simp [hc])
+    exact False.elim (no_cell_pure D h name hp e he heff hdst)
+
+theorem pure_labels_empty (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (name : String)
+    (hp : templatePure I.desc name = true) : prioLabels I name = [] := by
+  have hparts := peer_split I.desc hG.peers
+  have hself := flat_self_nil I.transitions I.desc name hp (by
+    simpa [pureSchedOk] using pure_sched_local I hL)
+  have hcell := cellLabels_pure_nil I.desc hparts.2.1 name hp
+  have hwake : (I.transitions.map (fun tr => cellWakeLabels name tr.program)).flatten = [] := by
+    refine map_cell_nil I.transitions name ?_
+    intro tr hm
+    exact cellWake_reader I.desc tr.template tr.toState name tr.program
+      (effects_of_transition I hL tr hm) hparts.2.1 hp
+  simp only [prioLabels, hself, hcell, hwake, List.append_nil, dedup, List.foldl_nil]
 
 /-- Idle, crashed, blocked on a partner, or stopped in an untimed peer wait.
 A timed peer wait and an internal effect are not quiescent: `finish` ends them. -/
@@ -2176,7 +2406,8 @@ theorem reaches_block (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
       exact ⟨j2, Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) hj2), hq⟩
     | awaitPeer k =>
       by_cases hu : peerUntimed I.desc s = false
-      · obtain ⟨j, hj, hproc, hlj⟩ := peer_resumes I hL hG hA ρ hF s i k hph hl hu
+      · obtain ⟨j, hj, hproc, hlj⟩ := peer_resumes I hL hG hA ρ hF s i k hph hl
+          (finishable_of_timed I.desc s hu)
         have hlt : phaseFuel (((ρ.cfg (j + 1)).st s).phase) < n := by
           have hnew := proceed_fuel ((ρ.cfg j).st s) k
           rw [← hproc] at hnew
@@ -2364,6 +2595,19 @@ def ProgSrc (I : Impl) (w : World) : Prop :=
 def LaneOk (I : Impl) (w : World) : Prop :=
   ∀ id, (laneLabels ((w.st id).prio)).Nodup ∧
     ∀ m ∈ (w.st id).prio, m.label ∈ prioLabels I (tname id)
+
+theorem prio_empty_of_labels (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId)
+    (hl : prioLabels I (tname id) = []) : (w.st id).prio = [] := by
+  cases hp : (w.st id).prio with
+  | nil => rfl
+  | cons m _ =>
+    have hlab := (hLane id).2 m (by simp [hp])
+    simp [hl] at hlab
+
+theorem prio_empty_of_pure (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
+    (hLane : LaneOk I w) (id : InstId) (hp : templatePure I.desc (tname id) = true) :
+    (w.st id).prio = [] :=
+  prio_empty_of_labels I w hLane id (pure_labels_empty I hL hG (tname id) hp)
 
 theorem self_of_suffix (pre es : List Eff) (l : String) (hl : l ∈ selfLabels es) :
     l ∈ selfLabels (pre ++ es) := by
@@ -8810,7 +9054,7 @@ theorem call_height_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N :
 theorem untimed_peer_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
     (x : InstId) (i n : Nat) (k : Cont)
     (hp : ((ρ.cfg i).st x).phase = .awaitPeer k) (hl : ((ρ.cfg i).st x).life = .alive)
-    (hu : peerUntimed I.desc x = true) (halive : ∀ t, i ≤ t → ((ρ.cfg t).st x).life = .alive) :
+    (hf : peerFinishable I.desc x = false) (halive : ∀ t, i ≤ t → ((ρ.cfg t).st x).life = .alive) :
     ((ρ.cfg (i + n)).st x).phase = .awaitPeer k := by
   induction n with
   | zero => simpa using hp
@@ -8820,7 +9064,7 @@ theorem untimed_peer_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N 
     by_cases hfin : ρ.act (i + n) = .finish x
     · have hv := ρ.valid (i + n)
       rw [hfin] at hv
-      simp [apply, finishWait, hprev, hu] at hv
+      simp [apply, finishWait, hprev, hf] at hv
     · have hstep := step_keeps_quiet I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) hO x
         (fun d c kk hbad => by simp [hprev] at hbad)
         (fun d ck hbad => by simp [hprev] at hbad)
@@ -8861,8 +9105,9 @@ theorem idle_when_free (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         (Nat.le_trans ht (Nat.le_trans hj (Nat.le_succ j))) (Nat.le_refl _)
       exact ⟨j2, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj2, hq⟩
     | awaitPeer k =>
-      by_cases hu : peerUntimed I.desc x = false
-      · obtain ⟨j, hj, hproc, _⟩ := peer_resumes I hL hG hA ρ hF x t k hph (halive t ht) hu
+      cases hf : peerFinishable I.desc x with
+      | true =>
+        obtain ⟨j, hj, hproc, _⟩ := peer_resumes I hL hG hA ρ hF x t k hph (halive t ht) hf
         have hlt : phaseFuel (((ρ.cfg (j + 1)).st x).phase) < n := by
           have hnew := proceed_fuel ((ρ.cfg j).st x) k
           rw [← hproc] at hnew
@@ -8872,11 +9117,10 @@ theorem idle_when_free (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         obtain ⟨j2, hj2, hq⟩ := ih _ hlt (j + 1)
           (Nat.le_trans ht (Nat.le_trans hj (Nat.le_succ j))) (Nat.le_refl _)
         exact ⟨j2, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj2, hq⟩
-      · exact False.elim ((hfree t ht) ⟨⟨by simp [SameWait, waitKind, hph], by simp [waitKind, hph]⟩,
+      | false =>
+        exact False.elim ((hfree t ht) ⟨⟨by simp [SameWait, waitKind, hph], by simp [waitKind, hph]⟩,
           fun j hj => by
-            have hut : peerUntimed I.desc x = true := by
-              cases hb : peerUntimed I.desc x <;> simp_all
-            have hphj := untimed_peer_stays I hL hG ρ x t (j - t) k hph (halive t ht) hut
+            have hphj := untimed_peer_stays I hL hG ρ x t (j - t) k hph (halive t ht) hf
               (fun u hu => halive u (Nat.le_trans ht hu))
             have hidx : t + (j - t) = j := Nat.add_sub_of_le hj
             rw [hidx] at hphj
@@ -9025,8 +9269,24 @@ theorem idle_when_free (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
       obtain ⟨j2, hj2, hq⟩ := ih _ hlt j (Nat.le_trans ht (Nat.le_of_lt hltj)) (Nat.le_refl _)
       exact ⟨j2, Nat.le_trans (Nat.le_of_lt hltj) hj2, hq⟩
 
+/-- Idle, or stopped on a pure untimed peer. A finishable peer is not this end:
+`finish` is enabled, and fairness takes it. -/
+def Settled (D : Description) (w : World) (x : InstId) : Prop :=
+  Idle w x ∨ ∃ k, (w.st x).phase = .awaitPeer k ∧ peerFinishable D x = false
+
+theorem settled_partner_idle (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) {N : Nat}
+    (w : World) (hR : Reachable I N w) (src dst : InstId)
+    (hwait : (∃ c k, (w.st src).phase = .parked dst c k) ∨
+      (∃ k, (w.st src).phase = .awaitReply dst k))
+    (hset : Settled I.desc w dst) : Idle w dst := by
+  rcases hset with hId | ⟨_, hph, hf⟩
+  · exact hId
+  · have hfin := target_finishable I hG w (inv_reachable I N w hL hR) src dst hwait
+    simp [hfin] at hf
+
 /-- A blocking send does not last forever when every actor strictly below the sender
-stays idle infinitely often while it remains below. -/
+settles infinitely often while it remains below. The partner itself settles by
+becoming idle: a pure untimed peer is not a legal target. -/
 theorem send_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
     (ρ : Run I N) (hF : Fair ρ)
     (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true)
@@ -9035,7 +9295,7 @@ theorem send_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
     (hlower : ∀ (t : Nat) (x : InstId), rankAt hs (ρ.cfg t) x < rankAt hs (ρ.cfg i) s →
       (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
       (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < rankAt hs (ρ.cfg i) s) →
-      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x) : False := by
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Settled I.desc (ρ.cfg j) x) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some (.blockingSend dst) := by
     intro j hj
     exact ((hkind.symm.trans (hS.2 j hj).1).symm)
@@ -9058,7 +9318,14 @@ theorem send_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
       (fun t ht1 _ => hall t ht1)
       (fun t ht1 _ => halive t ht1)
     simpa [Nat.add_sub_of_le hu] using hht.2
-  have hidle := hlower i dst (hbelow i (Nat.le_refl _)) halive hbelow
+  have hset := hlower i dst (hbelow i (Nat.le_refl _)) halive hbelow
+  have hidle : ∀ u, i ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) dst := by
+    intro u hu
+    obtain ⟨j, hj, hS⟩ := hset u hu
+    have hjI : i ≤ j := Nat.le_trans hu hj
+    obtain ⟨k', hk'⟩ := hstay j hjI
+    exact ⟨j, hj, settled_partner_idle I hG hL (ρ.cfg j) (cfg_reachable ρ j) s dst
+      (Or.inl ⟨false, k', hk'⟩) hS⟩
   have hcan : ∀ t, ∃ j, t ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk dst) := by
     intro t
     let u := max t i
@@ -9088,7 +9355,7 @@ theorem call_parked_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc
     (hlower : ∀ (t : Nat) (x : InstId), rankAt hs (ρ.cfg t) x < rankAt hs (ρ.cfg i) s →
       (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
       (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < rankAt hs (ρ.cfg i) s) →
-      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x) : False := by
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Settled I.desc (ρ.cfg j) x) : False := by
   have hM := (inv_reachable I N (ρ.cfg i) hL (cfg_reachable ρ i)).2.1
   obtain ⟨p, hp, hps, _⟩ := hM.bwd s dst true k hph
   have hmail : ((ρ.cfg i).st dst).parked ≠ [] := by
@@ -9105,7 +9372,14 @@ theorem call_parked_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc
     have hht := call_height_below I hL hG ρ hs hok s dst k i (u - i) (Or.inl hph)
       (fun t ht1 _ => hkind t ht1) hl0
     simpa [Nat.add_sub_of_le hu] using hht.2
-  have hidle := hlower i dst (hbelow i (Nat.le_refl _)) halive hbelow
+  have hset := hlower i dst (hbelow i (Nat.le_refl _)) halive hbelow
+  have hidle : ∀ u, i ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) dst := by
+    intro u hu
+    obtain ⟨j, hj, hS⟩ := hset u hu
+    have hjI : i ≤ j := Nat.le_trans hu hj
+    obtain ⟨k', hk'⟩ := hstay j hjI
+    exact ⟨j, hj, settled_partner_idle I hG hL (ρ.cfg j) (cfg_reachable ρ j) s dst
+      (Or.inl ⟨true, k', hk'⟩) hS⟩
   have hcan : ∀ t, ∃ j, t ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk dst) := by
     intro t
     let u := max t i
@@ -9133,7 +9407,7 @@ theorem call_admitted (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat
     (hlower : ∀ (t : Nat) (x : InstId), rankAt hs (ρ.cfg t) x < rankAt hs (ρ.cfg i) s →
       (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
       (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < rankAt hs (ρ.cfg i) s) →
-      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x) :
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Settled I.desc (ρ.cfg j) x) :
     ∃ j k, i ≤ j ∧ ((ρ.cfg j).st s).phase = .awaitReply dst k ∧
       ∀ t, j ≤ t → ((ρ.cfg t).st s).phase = .awaitReply dst k := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some (.callReply dst) := by
@@ -11586,7 +11860,7 @@ theorem call_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
     (hlower : ∀ (t : Nat) (y : InstId), rankAt hs (ρ.cfg t) y < rankAt hs (ρ.cfg i) x →
       (∀ u, t ≤ u → ((ρ.cfg u).st y).life = .alive) →
       (∀ u, t ≤ u → rankAt hs (ρ.cfg u) y < rankAt hs (ρ.cfg i) x) →
-      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) y) : False := by
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Settled I.desc (ρ.cfg j) y) : False := by
   obtain ⟨j, k, hj, hph, hfreeze⟩ :=
     call_admitted I hL hG ρ hF hs hok x dst i hS hkind hlower
   have hTj := call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j)
@@ -11626,7 +11900,13 @@ theorem call_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
     have hlt := hht.2
     rw [hrX j hj] at hlt
     simpa [Nat.add_sub_of_le hu] using hlt
-  have hidle := hlower j dst (hlow j (Nat.le_refl _)) halive hlow
+  have hset := hlower j dst (hlow j (Nat.le_refl _)) halive hlow
+  have hidle : ∀ u, j ≤ u → ∃ j', u ≤ j' ∧ Idle (ρ.cfg j') dst := by
+    intro u hu
+    obtain ⟨j', hj', hS⟩ := hset u hu
+    have hph' := hfreeze j' (Nat.le_trans hu hj')
+    exact ⟨j', hj', settled_partner_idle I hG hL (ρ.cfg j') (cfg_reachable ρ j') x dst
+      (Or.inr ⟨k, hph'⟩) hS⟩
   have hcontra (t0 : Nat) (ht0 : j ≤ t0) (hnomail : ¬ mailCall (ρ.cfg t0) dst x) : False := by
     have hT0 := call_tag_reachable I hL hG N (ρ.cfg t0) (cfg_reachable ρ t0)
     have hnoany : ¬ anyCall (ρ.cfg t0) x := by
@@ -11671,43 +11951,62 @@ theorem call_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
       (callPos ((ρ.cfg j).st dst).box x) j hfreeze halive (Nat.le_refl _) hpos hio
     exact hcontra j2 hj2 hno
 
-/-- An actor that stays alive and below height `h` is idle infinitely often. -/
+/-- An actor that stays alive and below height `h` settles infinitely often:
+idle, or stopped on a pure untimed peer. A pure untimed wait is not a deadlock
+and does not become idle. -/
 theorem below_idle (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ)
     (hs : List (Node × Nat)) (hok : heightsOkB (residualEdges I.desc) hs = true) :
     ∀ h t x, rankAt hs (ρ.cfg t) x < h →
       (∀ u, t ≤ u → ((ρ.cfg u).st x).life = .alive) →
       (∀ u, t ≤ u → rankAt hs (ρ.cfg u) x < h) →
-      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Idle (ρ.cfg j) x := by
+      ∀ u, t ≤ u → ∃ j, u ≤ j ∧ Settled I.desc (ρ.cfg j) x := by
   intro h
   induction h using Nat.strongRecOn with
   | ind h ih =>
     intro t x hrank halive hstay u hu
-    have hfree : ∀ v, t ≤ v → ¬ Stuck ρ x v := by
-      intro v hv hStuck
-      have hlower : ∀ (t' : Nat) (y : InstId),
-          rankAt hs (ρ.cfg t') y < rankAt hs (ρ.cfg v) x →
-          (∀ u', t' ≤ u' → ((ρ.cfg u').st y).life = .alive) →
-          (∀ u', t' ≤ u' → rankAt hs (ρ.cfg u') y < rankAt hs (ρ.cfg v) x) →
-          ∀ u', t' ≤ u' → ∃ j, u' ≤ j ∧ Idle (ρ.cfg j) y :=
-        fun t' y hr hlive' hrank' u' hu' =>
-          ih (rankAt hs (ρ.cfg v) x) (hstay v hv) t' y hr hlive' hrank' u' hu'
-      cases hwk : waitKind ((ρ.cfg v).st x) with
-      | none => exact (hStuck.1).2 hwk
-      | some kind =>
-        cases kind with
-        | effect => exact not_stuck_effect_assumed ρ hF x v hStuck hwk
-        | peer =>
-          exact not_stuck_peer_assumed ρ hF x v hStuck hwk (graph_peer_timed I.desc hG.peers x)
-        | blockingSend dst =>
-          exact send_stuck_false I hL hG ρ hF hs hok x dst v hStuck hwk hlower
-        | callReply dst =>
-          exact call_stuck_false I hL hG ρ hF hs hok x dst v hStuck hwk hlower
-    exact idle_when_free I hL hG hA ρ hF x t halive (fun v hv => hfree v hv) u hu
+    by_cases hex : ∃ v, t ≤ v ∧ Stuck ρ x v ∧ peerFinishable I.desc x = false ∧
+        waitKind ((ρ.cfg v).st x) = some .peer
+    · obtain ⟨v, hv, _, hf, hwk⟩ := hex
+      obtain ⟨k, hph⟩ := wait_peer_phase ((ρ.cfg v).st x) hwk
+      let j := max u v
+      have hvj : v ≤ j := Nat.le_max_right u v
+      have hphj := untimed_peer_stays I hL hG ρ x v (j - v) k hph (halive v hv) hf
+        (fun s hs => halive s (Nat.le_trans hv hs))
+      have hidx : v + (j - v) = j := Nat.add_sub_of_le hvj
+      refine ⟨j, Nat.le_max_left u v, Or.inr ⟨k, ?_, hf⟩⟩
+      simpa [hidx] using hphj
+    · have hfree : ∀ v, t ≤ v → ¬ Stuck ρ x v := by
+        intro v hv hStuck
+        have hlower : ∀ (t' : Nat) (y : InstId),
+            rankAt hs (ρ.cfg t') y < rankAt hs (ρ.cfg v) x →
+            (∀ u', t' ≤ u' → ((ρ.cfg u').st y).life = .alive) →
+            (∀ u', t' ≤ u' → rankAt hs (ρ.cfg u') y < rankAt hs (ρ.cfg v) x) →
+            ∀ u', t' ≤ u' → ∃ j, u' ≤ j ∧ Settled I.desc (ρ.cfg j) y :=
+          fun t' y hr hlive' hrank' u' hu' =>
+            ih (rankAt hs (ρ.cfg v) x) (hstay v hv) t' y hr hlive' hrank' u' hu'
+        cases hwk : waitKind ((ρ.cfg v).st x) with
+        | none => exact (hStuck.1).2 hwk
+        | some kind =>
+          cases kind with
+          | effect => exact not_stuck_effect_assumed ρ hF x v hStuck hwk
+          | peer =>
+            have hf : peerFinishable I.desc x = true := by
+              cases hb : peerFinishable I.desc x with
+              | true => rfl
+              | false => exact False.elim (hex ⟨v, hv, hStuck, hb, hwk⟩)
+            exact not_stuck_peer_assumed ρ hF x v hStuck hwk hf
+          | blockingSend dst =>
+            exact send_stuck_false I hL hG ρ hF hs hok x dst v hStuck hwk hlower
+          | callReply dst =>
+            exact call_stuck_false I hL hG ρ hF hs hok x dst v hStuck hwk hlower
+      obtain ⟨j, hj, hId⟩ := idle_when_free I hL hG hA ρ hF x t halive (fun v hv => hfree v hv) u hu
+      exact ⟨j, hj, Or.inl hId⟩
 
 /-- No actor in a fair run stays blocked. -/
 theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
-    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (x : InstId) (t : Nat) (hS : Stuck ρ x t) : False := by
+    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (x : InstId) (t : Nat) (hS : Stuck ρ x t)
+    (hwhy : peerFinishable I.desc x = true ∨ waitKind ((ρ.cfg t).st x) ≠ some .peer) : False := by
   obtain ⟨hs, hok⟩ := hG.ranked
   have halive := stuck_alive I hL hG ρ x t hS
   cases hwk : waitKind ((ρ.cfg t).st x) with
@@ -11716,7 +12015,9 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
     cases kind with
     | effect => exact not_stuck_effect_assumed ρ hF x t hS hwk
     | peer =>
-      exact not_stuck_peer_assumed ρ hF x t hS hwk (graph_peer_timed I.desc hG.peers x)
+      rcases hwhy with hf | hne
+      · exact not_stuck_peer_assumed ρ hF x t hS hwk hf
+      · exact absurd hwk hne
     | blockingSend dst =>
       have hr (u : Nat) (hu : t ≤ u) :
           rankAt hs (ρ.cfg u) x = rankAt hs (ρ.cfg t) x := by
@@ -11726,9 +12027,17 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
           exact Or.inl ⟨dst, false, k, hk⟩)
         rw [← Nat.add_sub_of_le hu]
         simp [rankAt, hty]
-      obtain ⟨j, hj, hId⟩ := below_idle I hL hG hA ρ hF hs hok
+      obtain ⟨j, hj, hset⟩ := below_idle I hL hG hA ρ hF hs hok
         (rankAt hs (ρ.cfg t) x + 1) t x (by omega) halive
         (fun u hu => by rw [hr u hu]; omega) t (Nat.le_refl _)
+      have hId : Idle (ρ.cfg j) x := by
+        rcases hset with hId | ⟨k, hph, _⟩
+        · exact hId
+        · have hkind := (hS.2 j hj).1
+          rw [hwk] at hkind
+          simp only [waitKind, hph] at hkind
+          injection hkind with hkind
+          cases hkind
       have hne : waitKind ((ρ.cfg j).st x) ≠ none := by
         intro hnone
         exact (hS.2 j hj).2 ((hS.2 j hj).1.trans hnone)
@@ -11743,9 +12052,17 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
           · exact Or.inr ⟨dst, k, hk⟩)
         rw [← Nat.add_sub_of_le hu]
         simp [rankAt, hty]
-      obtain ⟨j, hj, hId⟩ := below_idle I hL hG hA ρ hF hs hok
+      obtain ⟨j, hj, hset⟩ := below_idle I hL hG hA ρ hF hs hok
         (rankAt hs (ρ.cfg t) x + 1) t x (by omega) halive
         (fun u hu => by rw [hr u hu]; omega) t (Nat.le_refl _)
+      have hId : Idle (ρ.cfg j) x := by
+        rcases hset with hId | ⟨k, hph, _⟩
+        · exact hId
+        · have hkind := (hS.2 j hj).1
+          rw [hwk] at hkind
+          simp only [waitKind, hph] at hkind
+          injection hkind with hkind
+          cases hkind
       have hne : waitKind ((ρ.cfg j).st x) ≠ none := by
         intro hnone
         exact (hS.2 j hj).2 ((hS.2 j hj).1.trans hnone)
@@ -11755,8 +12072,9 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
 theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) : ¬ Deadlock ρ := by
   intro hD
-  obtain ⟨s, i, _, hS, _⟩ := deadlock_kind ρ hF hD
-  exact never_stuck I hL hG hA ρ hF s i hS
+  obtain ⟨s, i, _, hS, hkind⟩ := deadlock_kind ρ hF hD
+  exact never_stuck I hL hG hA ρ hF s i hS (Or.inr (by
+    rcases hkind with hkind | hkind <;> simp [hkind]))
 
 /-- A finite execution starts at the initial world and stops when the runtime
 has nothing forced left to run. `stutter` may still apply, and so may ingress.
@@ -13033,7 +13351,8 @@ theorem cell_wake_label (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : W
 
 /-- A label that stays on the lane of an actor who stays alive is received. -/
 theorem prio_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
-    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (r : InstId) (label : String) (i0 : Nat)
+    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (r : InstId) (label : String)
+    (hf : peerFinishable I.desc r = true) (i0 : Nat)
     (halive : ∀ t, i0 ≤ t → ((ρ.cfg t).st r).life = .alive)
     (hhas : hasLabel ((ρ.cfg i0).st r).prio label) :
     ∃ k, i0 ≤ k ∧ ρ.act k = .recvPrio r := by
@@ -13049,7 +13368,7 @@ theorem prio_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
       have heq : i0 + (t - i0) = t := by omega
       exact ⟨m0, heq ▸ hmem, hl0⟩
     have hfree : ∀ t, i0 ≤ t → ¬Stuck ρ r t := fun _ _ hS =>
-      never_stuck I hL hG hA ρ hF r _ hS
+      never_stuck I hL hG hA ρ hF r _ hS (Or.inl hf)
     have hio : ∀ n, ∃ j, n ≤ j ∧ Enabled I (ρ.cfg j) (.recvPrio r) := by
       intro n
       obtain ⟨j, hj, hId⟩ := idle_when_free I hL hG hA ρ hF r i0 halive hfree
@@ -13190,7 +13509,8 @@ theorem cell_fresh (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
         (halive i (Nat.le_refl _)) hname
         ((hOcc i).aliveIn r (halive i (Nat.le_refl _))) hclean (hLane i) hlab
       simpa [hw] using hQ
-  obtain ⟨k, hk, hact⟩ := prio_taken I hL hG hA ρ hF r label (i + 1)
+  obtain ⟨k, hk, hact⟩ := prio_taken I hL hG hA ρ hF r label
+    (cell_reader_finishable I.desc hG.peers dst label hlab r hname) (i + 1)
     (fun t ht => halive t (Nat.le_trans (Nat.le_succ i) ht)) hqueue
   have hsee := recv_prio_sees I (ρ.cfg k) (ρ.cfg (k + 1)) r label
     (by simpa [apply, hact] using ρ.valid k) (by simpa [hname] using hlab)

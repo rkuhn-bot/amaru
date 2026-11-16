@@ -590,14 +590,80 @@ def callTermFails (D : Description) : List String :=
         if t.terminable then some s!"fail: call {e.label} targets terminable template {e.dst}"
         else none
 
-/-- Untimed peer waits are outside `GraphOk`: a checked description times out
-every peer. The step relation still leaves `finish` disabled when the flag is
-set, so an unchecked description may keep a silent peer. -/
-def peerFails (D : Description) : List String :=
+/-- Templates that may interact with `name`. In group mode that is the shared
+compat group. In explicit mode it is the templates named together in an allowed
+pair. In `all` mode every template can co-occur, so the cohort is the roster. -/
+def cohortOf (D : Description) (name : String) : List String :=
+  match D.compatibility with
+  | .all => D.templates.map (·.name)
+  | .explicit ps =>
+    dedup (name :: ps.foldl (fun acc a =>
+      if a.src == name || a.dst == name then acc ++ [a.src, a.dst] else acc) [])
+  | .groups gs =>
+    dedup (name :: gs.foldl (fun acc g =>
+      if g.roles.elem name then acc ++ g.roles else acc) [])
+
+/-- A timed peer wait on `name`: the template is not `untimedPeer`, and some
+edge is a `peer` effect. `finish` is the timeout. -/
+def hasTimedPeer (D : Description) (name : String) : Bool :=
+  match templateOf D name with
+  | none => false
+  | some t => !t.untimedPeer && D.edges.any fun e => e.src == name && e.effect == .peer
+
+/-- Some template in the cohort has a timed peer wait. That timeout is what can
+end a chain that would otherwise sit on an untimed peer, for example a
+mini-protocol timeout that kills the peer. -/
+def timedCohortEnds (D : Description) (name : String) : Bool :=
+  (cohortOf D name).any (hasTimedPeer D)
+
+/-- An untimed peer with no timed cohort cut. `finish` stays disabled, so the
+wait is a legitimate end of its own chain and must not sit inside another
+actor's chain or on a permanent mailbox. -/
+def templatePure (D : Description) (name : String) : Bool :=
+  match templateOf D name with
+  | none => false
+  | some t => t.untimedPeer && !timedCohortEnds D name
+
+def pureTermMsg (name : String) : String :=
+  s!"fail: template {name} is an untimed peer end and is not terminable; a permanent mailbox would stall with the peer"
+
+def cellPureMsg (dst label : String) : String :=
+  s!"fail: cell {label} wakes {dst}, whose untimed peer has no timed cut in the cohort"
+
+def interiorMsg (src dst : String) : String :=
+  s!"fail: {src} depends on {dst}, whose untimed peer wait is interior and no timed peer in the cohort can end the chain"
+
+/-- A pure untimed template is not a permanent core. Nothing forces it to leave
+the peer wait, so reliable mail on it would never be received. -/
+def pureTermFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
-    if t.untimedPeer then
-      some s!"fail: template {t.name} has an untimed peer wait; a checked description times peer waits out"
-    else none
+    if templatePure D t.name && !t.terminable then some (pureTermMsg t.name) else none
+
+/-- A pure untimed template is not a cell reader. A wake would sit on the
+priority lane for as long as the peer stays silent. -/
+def cellPureFails (D : Description) : List String :=
+  D.edges.filterMap fun e =>
+    if e.effect == .cell && templatePure D e.dst then some (cellPureMsg e.dst e.label) else none
+
+/-- A blocking send or a call makes the source depend on the destination. An
+untimed peer there is interior to the source's chain. It is allowed only when
+`timedCohortEnds`: a timed peer in the cohort can end the chain. -/
+def interiorFails (D : Description) : List String :=
+  D.edges.filterMap fun e =>
+    if (e.kind == .blocking || e.effect == .call) = false then none
+    else
+      match templateOf D e.dst with
+      | none => none
+      | some t =>
+        if t.untimedPeer && !timedCohortEnds D e.dst then some (interiorMsg e.src e.dst) else none
+
+/-- Untimed peer waits are allowed. `peerFails` rejects three placements: a pure
+untimed template that is not terminable, a cell wake of a pure untimed template,
+and a blocking send or call onto an untimed template whose cohort has no timed
+peer. The last of those is the interior wait. A timed peer in the cohort is the
+cut that makes the dependency legal. -/
+def peerFails (D : Description) : List String :=
+  pureTermFails D ++ cellPureFails D ++ interiorFails D
 
 def overflowFails (D : Description) : List String :=
   D.templates.filterMap fun t =>

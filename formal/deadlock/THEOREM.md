@@ -8,7 +8,8 @@ Nothing in the development uses `sorry` or `admit`.
 Three statements lead.
 
 `blocked_unblocks` is a finite execution along the blocked actor's own wait
-chain. It ends with that actor not `Blocked`.
+chain, when that actor is not a pure untimed peer end. It ends with that
+actor not `Blocked`.
 
 `fair_delivered` is liveness for a `Fair` run of a `GraphOk` and `LocalOk`
 implementation. `Delivered` says every reliable message in the bulk box, the
@@ -32,7 +33,7 @@ ask the environment to keep injecting: `forced` is false for `ingress`,
 ```lean
 theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
     (hA : Assumptions I) (N : Nat) (w : World) (hR : Reachable I N w)
-    (id : InstId) (hB : Blocked w id) :
+    (id : InstId) (hB : Blocked w id) (hnotP : ¬ PurePeerEnd I.desc w id) :
     ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
       Reachable I N w' ∧ ¬ Blocked w' id
 
@@ -62,7 +63,8 @@ theorem blocked_chain ... :
     ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
       Reachable I N w' ∧
       (¬ Blocked w' id ∨ ∃ s k, InChain w' id s ∧
-        (w'.st s).phase = .awaitPeer k ∧ peerUntimed I.desc s = true)
+        (w'.st s).phase = .awaitPeer k ∧ peerUntimed I.desc s = true ∧
+        peerFinishable I.desc s = false)
 ```
 
 `OnChain` holds only for `recvBulk`, `recvPrio`, `exec`, and `finish` whose
@@ -73,22 +75,47 @@ each on the chain in the world where it is taken. `InChain` is that wait relatio
 `Blocked` is a live actor in `.parked` (a blocking send or a parked call),
 `.awaitReply`, `.awaitEffect`, or `.awaitPeer`. The proof is strong induction
 on residual height, and inside one height on a debt of parked index or call
-position plus the partner's remaining program (`work`). An `awaitEffect` or a
-timed `awaitPeer` is one `finish` on the chain: internal completion is that
-step, not an assumption that a flag is true. A send or call waits on a live
+position plus the partner's remaining program (`work`). An `awaitEffect` is
+one `finish` on the chain. A finishable `awaitPeer` is the same step: its own
+timeout, or a timed peer in the cohort. A send or call waits on a live
 partner of strictly smaller height (`park_below`, `call_below`, `reply_below`).
 The partner is drained by `recvBulk`, `exec`, and `finish` on the chain, or the
-induction hypothesis unblocks the partner first. `blocked_chain` records the
-untimed-peer stop; `GraphOk` rejects `untimedPeer` (`peerFails`,
-`graph_peer_timed`), so every checked chain takes the `¬ Blocked` side.
-`finishWait` still returns `none` for an untimed peer, so an unchecked
-description can keep that peer silent.
+induction hypothesis unblocks the partner first.
 
-`blocked_progress` is the one-step form: some enabled action is `OnChain`.
-`fin_exec_no_blocked` is the total-stall corollary. A stopped finite execution
-has no live blocked actor, because a blocked actor would have an enabled chain
+An untimed external peer wait is a legitimate end of a wait chain.
+`PurePeerEnd` is an `awaitPeer` whose `peerFinishable` is false: the template
+is `untimedPeer` and `timedCohortEnds` is false, so `finishWait` returns
+`none`. `blocked_chain` then takes the empty run and the second disjunct, at
+`InChain.refl`, with `peerUntimed = true` and `peerFinishable = false`.
+`blocked_unblocks` is the other case. It assumes `¬ PurePeerEnd` and ends
+with `¬ Blocked`.
+
+That end must not sit inside a chain another actor depends on for liveness,
+unless some timed wait in the chain can end it. `peerFails` is that check,
+and `GraphOk.peers` is `peerFails D = []`:
+
+- `pureTermFails`: a pure untimed template (`templatePure`) is terminable. A
+  permanent mailbox would stall with the peer. `permanent_finishable` is why
+  `finish` stays enabled on a non-terminable actor.
+- `cellPureFails`: a pure untimed template is not a cell reader. A wake would
+  sit on the priority lane while `finish` is disabled.
+- `interiorFails`: a blocking send or a call onto an untimed template is
+  rejected unless `timedCohortEnds`. The cohort is every template when
+  compatibility is `all`, the templates named together in an explicit allowed
+  pair, or the roles of a shared compat group. `hasTimedPeer` is a template
+  that is not `untimedPeer` and has a `peer` edge; `finish` is that timeout.
+  A mini-protocol timeout that can end the chain is this cut. When it is
+  present, `peerFinishable` is true, so `finish` is enabled on the untimed
+  waiter and the chain continues. `target_finishable` is that fact for a
+  reachable park or `awaitReply`.
+
+`blocked_progress` is the one-step form: an enabled action is `OnChain`, or
+the actor is a `PurePeerEnd`. `fin_exec_no_blocked` is the total-stall
+corollary. A stopped finite execution's only live blocked actor is a pure
+untimed peer end, because any other blocked actor would have an enabled chain
 step. It does not by itself rule out a partial deadlock in a world where some
-unrelated actor can still step; `blocked_unblocks` does.
+unrelated actor can still step; `blocked_unblocks` does, for an actor that is
+not a pure untimed end.
 
 `park_reachable` and `park_unblocks` are one `GraphOk` and `LocalOk` world in
 which the producer is parked and the next `recvBulk` leaves it idle.
@@ -117,10 +144,16 @@ theorem cell_fresh (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
     (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ) : CellFresh ρ
 ```
 
-A fair reachable run has no actor blocked forever. The proof is strong
-induction on residual height (`below_idle`), then `never_stuck`. An effect or
-a timed peer wait is ended by `finish`, which the step relation enables
-without reading `Env`. `Assumptions` is only `rust_refines`. A blocking send
+A fair reachable run has no actor blocked forever on a blocking send, a call
+reply, an internal effect, or a timed peer wait. The proof is strong
+induction on residual height (`below_idle`), then `never_stuck`. `below_idle`
+settles a low actor at `Idle`, or at a pure untimed peer (`Settled`). An
+effect or a finishable peer wait is ended by `finish`, which the step
+relation enables without reading `Env`. A pure untimed peer may stay; it is
+not a `Deadlock`. An untimed template whose cohort has a timed peer is
+finishable, so fairness ends that wait as well. `Deadlock` still does not
+count it, because the peer clause asks `peerUntimed = false`. `Assumptions`
+is only `rust_refines`. A blocking send
 or a parked call waits on a strictly lower actor. An `awaitReply` cannot last:
 while the caller stays there it cannot mint a new `callFrom`, so `CallTagInv`
 keeps the callee in `handlerOwes` or `replyPending`, and that phase is not
@@ -234,8 +267,11 @@ def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
 ```
 
 An effect or a timed peer wait is ended by `finish`, which the step relation
-enables without reading `Env`. An untimed peer wait is not a deadlock: the
-peer may stay silent.
+enables without reading `Env`. An untimed peer wait is not a deadlock. When
+`timedCohortEnds` holds, `peerFinishable` is true and `finish` is enabled on
+that waiter too. A pure untimed wait (`peerFinishable = false`) leaves
+`finish` disabled, and the peer may stay silent. That is a chain end, and
+`peerFails` is what keeps it from being interior to another actor's chain.
 
 ### `CellFresh`
 
@@ -307,7 +343,8 @@ structure Assumptions (I : Impl) : Prop where
 This is not a theorem about Rust. `rust_refines` is the exporter obligation.
 In this development the transition list is the model, so the field is the
 identity on that list. An internal effect and a timed peer wait complete as
-`finish` steps. An untimed peer wait does not.
+`finish` steps. An untimed peer wait completes the same way when
+`timedCohortEnds` holds. A pure untimed peer wait does not.
 
 ## Restrictions that are still in force
 

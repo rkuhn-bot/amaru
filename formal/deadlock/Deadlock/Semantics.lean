@@ -153,8 +153,9 @@ structure Transition where
   release : Nat
   deriving DecidableEq, Repr, Inhabited
 
-/-- Unused by the step relation. An internal effect always finishes, a timed
-peer wait finishes as its timeout, and an untimed peer wait never does.
+/-- Unused by the step relation. An internal effect always finishes. A timed
+peer wait finishes as its timeout. An untimed peer finishes when a timed peer
+in its cohort can end the chain; a pure untimed peer wait never does.
 The fields remain so an environment value can still be attached to `Impl`. -/
 structure Env where
   effectDone : World → InstId → Bool
@@ -487,20 +488,62 @@ def execHead (I : Impl) (w : World) (id : InstId) : Option World :=
     | _ => none
 
 /-- `true` when this actor's template declares its peer waits untimed. An untimed
-peer may stay silent; `finish` is not enabled. A timed peer wait ends by timeout,
-which is the `finish` step itself. -/
+peer may stay silent. A timed peer wait ends by timeout, which is the `finish`
+step itself. -/
 def peerUntimed (D : Description) (id : InstId) : Bool :=
   match templateOf D (tname id) with
   | some t => t.untimedPeer
   | none => false
 
-/-- Internal effects complete as an ordinary step. A timed peer wait completes
-the same way (its timeout). An untimed peer wait does not. -/
+/-- `finish` is enabled for this peer wait. A timed template always is. An
+untimed template is when a timed peer in its cohort can end the chain. A pure
+untimed wait (`templatePure`) is not: it is an external stall. -/
+def peerFinishable (D : Description) (id : InstId) : Bool :=
+  match templateOf D (tname id) with
+  | none => true
+  | some t => !t.untimedPeer || timedCohortEnds D (tname id)
+
+/-- The actor is stopped on an untimed peer that no timed cohort peer can end. -/
+def PurePeerEnd (D : Description) (w : World) (id : InstId) : Prop :=
+  ∃ k, (w.st id).phase = .awaitPeer k ∧ peerFinishable D id = false
+
+theorem peerFinishable_eq_not_pure (D : Description) (id : InstId) :
+    peerFinishable D id = !templatePure D (tname id) := by
+  cases ht : templateOf D (tname id) with
+  | none => simp [peerFinishable, templatePure, ht]
+  | some t => simp [peerFinishable, templatePure, ht]
+
+theorem finishable_of_timed (D : Description) (id : InstId) (hu : peerUntimed D id = false) :
+    peerFinishable D id = true := by
+  cases ht : templateOf D (tname id) with
+  | none => simp [peerFinishable, ht]
+  | some t =>
+    simp [peerUntimed, peerFinishable, ht] at hu ⊢
+    simp [hu]
+
+theorem untimed_of_silent (D : Description) (id : InstId) (hf : peerFinishable D id = false) :
+    peerUntimed D id = true := by
+  cases ht : templateOf D (tname id) with
+  | none => simp [peerFinishable, ht] at hf
+  | some t =>
+    simp [peerUntimed, peerFinishable, ht] at hf ⊢
+    cases hb : t.untimedPeer <;> simp_all
+
+theorem pure_of_silent (D : Description) (id : InstId) (hf : peerFinishable D id = false) :
+    templatePure D (tname id) = true := by
+  have h := peerFinishable_eq_not_pure D id
+  cases hp : templatePure D (tname id) with
+  | true => rfl
+  | false => simp [hp, hf] at h
+
+/-- Internal effects complete as an ordinary step. A finishable peer wait
+completes the same way: its own timeout, or a timed peer in the cohort. A pure
+untimed peer wait does not. -/
 def finishWait (I : Impl) (w : World) (id : InstId) : Option World :=
   match (w.st id).phase with
   | .awaitEffect k => some (setActor w id (proceed (w.st id) k))
   | .awaitPeer k =>
-    if peerUntimed I.desc id then none else some (setActor w id (proceed (w.st id) k))
+    if !peerFinishable I.desc id then none else some (setActor w id (proceed (w.st id) k))
   | _ => none
 
 /-- A declared ingress edge: a non-blocking `trySend` the environment may deliver. -/
@@ -855,8 +898,10 @@ def Stuck {I : Impl} {N : Nat} (ρ : Run I N) (s : InstId) (i : Nat) : Prop :=
     ∀ j, i ≤ j → SameWait ((ρ.cfg i).st s) ((ρ.cfg j).st s)
 
 /-- A run is deadlocked when some actor is stuck on a blocking send, a call
-reply, an internal effect, or a timed peer wait. An untimed peer wait is an
-external stall: `finish` is not enabled, and the actor may stay there. -/
+reply, an internal effect, or a timed peer wait. An untimed peer wait is not
+a deadlock. `finish` is still enabled on it when a timed peer in the cohort
+can end the chain (`peerFinishable`). A pure untimed wait leaves `finish`
+disabled, and the actor may stay there. -/
 def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   ∃ s i, Stuck ρ s i ∧
     match waitKind ((ρ.cfg i).st s) with
