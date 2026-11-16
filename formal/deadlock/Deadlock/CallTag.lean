@@ -4983,4 +4983,194 @@ theorem reply_tag (w : World) (sender : InstId) (k : Cont) (es : List Eff) (hT :
     simp [hwait, hflip]
     exact reply_resume_tag w sender c k ck es hT hph hrest hcount hto hwait hcne
 
+/-- Replacing one actor's priority lane with plain messages keeps call tags. -/
+theorem prio_keep_tag (w : World) (id : InstId) (prio : List Msg) (hT : CallTagInv w)
+    (hplain : ∀ m, m ∈ prio → m.callFrom = none) :
+    CallTagInv (setActor w id { (w.st id) with prio := prio }) := by
+  let w' := setActor w id { (w.st id) with prio := prio }
+  have hst (i : InstId) (hi : i ≠ id) : w'.st i = w.st i := by simp [w', setActor, hi]
+  have hph (i : InstId) : (w'.st i).phase = (w.st i).phase := by
+    by_cases hi : i = id <;> simp [w', setActor, hi]
+  have hbox (i : InstId) : (w'.st i).box = (w.st i).box := by
+    by_cases hi : i = id <;> simp [w', setActor, hi]
+  have hparked (i : InstId) : (w'.st i).parked = (w.st i).parked := by
+    by_cases hi : i = id <;> simp [w', setActor, hi]
+  apply call_tag_stable w w' hT
+  · intro d c
+    exact mail_iff_lists w w' hbox hparked d c
+  · intro i c
+    exact owes_iff_carried _ _ (by simp [hph i]) c
+  · intro i c
+    exact pending_iff_carried _ _ (by simp [hph i]) c
+  · intro c d k hph'
+    rw [hph c] at hph'
+    exact hph'
+  · intro c d k hph'
+    rw [← hph c] at hph'
+    exact hph'
+  · intro c d k hph'
+    rw [hph c] at hph'
+    exact hph'
+  · intro c d k hph'
+    rw [← hph c] at hph'
+    exact hph'
+  · intro i m hm
+    by_cases hi : i = id
+    · exact hplain m (by simp [w', hi, setActor] at hm; exact hm)
+    · exact hT.prioPlain i m (by rw [hst i hi] at hm; exact hm)
+  · intro d c
+    unfold soleCall
+    rw [hbox d, hparked d]
+    exact hT.sole d c
+  · intro d p hp s
+    exact parkFrom_transport w w' hT hparked
+      (by
+        intro s0 d0 k0
+        constructor
+        · intro hk
+          rw [hph s0] at hk
+          exact hk
+        · intro hk
+          rw [← hph s0] at hk
+          exact hk)
+      d p hp s
+  · intro c d k hk
+    exact parkedOnly_transport w w' hT hparked (by intro i m hm; rw [hbox i] at hm; exact hm)
+      (by
+        intro c0 d0 k0 hk0
+        rw [hph c0] at hk0
+        exact hk0)
+      c d k hk
+
+/-- A wake is a plain priority message, or no change. -/
+theorem try_wake_tag (D : Description) (w : World) (dst : InstId) (label : String) (writer : InstId)
+    (hT : CallTagInv w) : CallTagInv (tryWake D w dst label writer) := by
+  by_cases hif : ((w.st dst).life == .alive &&
+      decide ((w.st dst).prio.length < capPrio D w.N dst) &&
+      !((w.st dst).prio.any fun p => p.label == label)) = true
+  · simp [tryWake, hif]
+    apply prio_keep_tag w dst (upsertPrio (w.st dst).prio { label := label, sender := writer, callFrom := none }) hT
+    intro m hm
+    unfold upsertPrio at hm
+    by_cases hany : (w.st dst).prio.any (fun p => p.label == label) = true
+    · simp [hany] at hm
+      exact hT.prioPlain dst m hm
+    · simp [hany, List.mem_append, List.mem_singleton] at hm
+      rcases hm with hold | heq
+      · exact hT.prioPlain dst m hold
+      · simp [heq]
+  · simp [tryWake, hif]
+    exact hT
+
+theorem wake_readers_tag (D : Description) (w : World) (dst label : String) (writer : InstId)
+    (ids : List InstId) (hT : CallTagInv w) :
+    CallTagInv (ids.foldl (fun w id => tryWake D w id label writer) w) := by
+  induction ids generalizing w with
+  | nil => simpa
+  | cons i ids ih =>
+    simp
+    exact ih _ (try_wake_tag D w i label writer hT)
+
+/-- Moving a running handler into `awaitEffect` or `awaitPeer` keeps its reply. -/
+theorem carry_step_tag (w : World) (id : InstId) (kRun : Cont) (e : Eff) (es : List Eff) (ph : Phase)
+    (hT : CallTagInv w) (hph : (w.st id).phase = .run kRun) (hrest : kRun.rest = e :: es)
+    (hne : e ≠ .reply) (hterm : e ≠ .terminate) (hcar : carriedCont ph = some (afterHead kRun))
+    (hnotA : ∀ d k, ph ≠ .awaitReply d k) (hnotP : ∀ d k, ph ≠ .parked d true k) :
+    CallTagInv (setActor w id { (w.st id) with phase := ph }) := by
+  let w' := setActor w id { (w.st id) with phase := ph }
+  have hst (i : InstId) (hi : i ≠ id) : w'.st i = w.st i := by simp [w', setActor, hi]
+  have hbox (i : InstId) : (w'.st i).box = (w.st i).box := by
+    by_cases hi : i = id <;> simp [w', setActor, hi]
+  have hparked (i : InstId) : (w'.st i).parked = (w.st i).parked := by
+    by_cases hi : i = id <;> simp [w', setActor, hi]
+  have hprioL (i : InstId) : (w'.st i).prio = (w.st i).prio := by
+    by_cases hi : i = id <;> simp [w', setActor, hi]
+  have hduty (c : InstId) :
+      handlerOwes c (w'.st id).phase ∨ replyPending c (w'.st id).phase ↔
+        handlerOwes c (w.st id).phase ∨ replyPending c (w.st id).phase := by
+    have hshape := replyShape_tail c kRun e es hrest hne hterm
+    have hold := (shape_split c kRun).trans hshape
+    have hnew := carried_duty c ph (afterHead kRun) (by simp [w', setActor, hcar])
+    constructor
+    · intro h
+      have hphW : (w'.st id).phase = ph := by simp [w', setActor]
+      rw [hphW] at h
+      have h' := hold.mpr (hnew.mp h)
+      rwa [hph]
+    · intro h
+      have h0 : handlerOwes c (.run kRun) ∨ replyPending c (.run kRun) := by
+        rw [hph] at h
+        exact h
+      simpa [w', setActor] using hnew.mpr (hold.mp h0)
+  apply call_tag_duty w w' hT
+  · intro d c
+    exact mail_iff_lists w w' hbox hparked d c
+  · intro i c
+    by_cases hi : i = id
+    · rw [hi]
+      exact hduty c
+    · exact (by
+        have hpe : (w'.st i).phase = (w.st i).phase := by simp [hst i hi]
+        constructor
+        · intro h
+          rcases h with ho | hp
+          · exact Or.inl (by simpa [← hpe] using ho)
+          · exact Or.inr (by simpa [← hpe] using hp)
+        · intro h
+          rcases h with ho | hp
+          · exact Or.inl (by simpa [hpe] using ho)
+          · exact Or.inr (by simpa [hpe] using hp))
+  · intro c d k hph'
+    by_cases hc : c = id
+    · exact absurd hph' (by
+        have hbad := hph'
+        rw [hc, show (w'.st id).phase = ph from by simp [w', setActor]] at hbad
+        exact False.elim (hnotA d k hbad))
+    · simpa [hst c hc] using hph'
+  · intro c d k hph'
+    by_cases hc : c = id
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro c d k hph'
+    by_cases hc : c = id
+    · exact absurd hph' (by
+        have hbad := hph'
+        rw [hc, show (w'.st id).phase = ph from by simp [w', setActor]] at hbad
+        exact False.elim (hnotP d k hbad))
+    · simpa [hst c hc] using hph'
+  · intro c d k hph'
+    by_cases hc : c = id
+    · simp [hc, hph] at hph'
+    · simpa [← hst c hc] using hph'
+  · intro i m hm
+    exact hT.prioPlain i m (by rw [hprioL i] at hm; exact hm)
+  · intro d c
+    unfold soleCall
+    rw [hbox d, hparked d]
+    exact hT.sole d c
+  · intro d p hp s
+    exact parkFrom_transport w w' hT hparked
+      (by
+        intro s0 d0 k0
+        constructor
+        · intro hk
+          by_cases hs0 : s0 = id
+          · rw [hs0, show (w'.st id).phase = ph from by simp [w', setActor]] at hk
+            exact absurd hk (hnotP d0 k0)
+          · simpa [hst s0 hs0] using hk
+        · intro hk
+          by_cases hs0 : s0 = id
+          · simp [hs0, hph] at hk
+          · simpa [← hst s0 hs0] using hk)
+      d p hp s
+  · intro c d k hk
+    exact parkedOnly_transport w w' hT hparked (by intro i m hm; rw [hbox i] at hm; exact hm)
+      (by
+        intro c0 d0 k0 hk0
+        by_cases hc0 : c0 = id
+        · rw [hc0, show (w'.st id).phase = ph from by simp [w', setActor]] at hk0
+          exact absurd hk0 (hnotP d0 k0)
+        · simpa [hst c0 hc0] using hk0)
+      c d k hk
+
 end Deadlock
