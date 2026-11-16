@@ -169,6 +169,8 @@ import Deadlock.Deliver
 #print axioms Deadlock.park_reachable
 #print axioms Deadlock.park_unblocks
 #print axioms Deadlock.fair_delivered
+#print axioms Deadlock.loss_fair
+#print axioms Deadlock.loss_not_delivered
 #print axioms Deadlock.demo_fair
 #print axioms Deadlock.demo_parked
 #print axioms Deadlock.demo_awaiting

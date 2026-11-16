@@ -14,6 +14,7 @@
 
 import Deadlock.Progress
 import Deadlock.Witness
+import Deadlock.Deliver
 
 set_option autoImplicit false
 
@@ -262,5 +263,144 @@ theorem demo_fair : Fair demoRun := by
     obtain ⟨hb, hoff⟩ := hquiet j hlen
     exact False.elim (quiet_no_forced demoImpl (demoRun.cfg j)
       (fun id hid => And.intro (hoff id hid).2 (hoff id hid).1) hb (.recvPrio s) rfl hen)
+
+/-- A terminable actor accepts a reliable message and then kills itself.
+The message is in the box at step 5 and is gone after the killing `exec`.
+This description is not `LocalOk`: a checked graph does not put reliable mail
+on a template that can die. -/
+def lossTpl : Template := { tpl "loss" 4 ["idle"] "idle" true with terminable := true }
+
+def lossDesc : Description where
+  name := "loss-run"
+  freshNames := true
+  templates := [tpl "prod" 4 ["idle", "busy"] "idle" true, lossTpl]
+  edges :=
+    [{ (sendEdge "prod" "idle" "prod" "Go" 1) with
+        effect := .trySend, kind := .nonBlocking, reliability := .reliable,
+        ingress := true, ingressLegal := some (Affine.ofNat 1) }]
+  compatibility := .all
+  steps := [{ template := "prod", fromState := "idle", toState := "busy", label := "Go" }]
+
+def lossImpl : Impl where
+  desc := lossDesc
+  transitions :=
+    [demoTr "prod" "idle" "Go" "busy" [.send "loss" "Start" 0] false,
+     demoTr "loss" "idle" "Start" "idle" [.send "loss" "M" 0, .terminate] false]
+
+def lossProd : InstId := .core "prod"
+def lossId : InstId := .core "loss"
+
+def lossActs : List Action :=
+  [.ingress lossProd "Go", .recvBulk lossProd, .exec lossProd,
+   .recvBulk lossId, .exec lossId, .exec lossId]
+
+def lossHeld : Bool :=
+  match ((replayCfg lossImpl lossActs 5).st lossId).box with
+  | m :: _ => m.reliable
+  | [] => false
+
+def lossStepsOk : Bool :=
+  (List.range (lossActs.length + 1)).all fun i =>
+    (apply lossImpl (nthAct lossActs i) (replayCfg lossImpl lossActs i)).isSome
+
+theorem loss_steps_ok : lossStepsOk = true := by decide
+
+theorem loss_step_before (i : Nat) (hi : i < lossActs.length + 1) :
+    (apply lossImpl (nthAct lossActs i) (replayCfg lossImpl lossActs i)).isSome = true := by
+  have hmem : i ∈ List.range (lossActs.length + 1) := List.mem_range.mpr hi
+  have hall : ∀ j ∈ List.range (lossActs.length + 1),
+      (apply lossImpl (nthAct lossActs j) (replayCfg lossImpl lossActs j)).isSome = true := by
+    simpa [lossStepsOk, List.all_eq_true] using loss_steps_ok
+  exact hall i hmem
+
+theorem loss_quiet : runtimeBusy lossImpl (replayCfg lossImpl lossActs lossActs.length) = false := by
+  decide
+
+theorem loss_held : lossHeld = true := by decide
+
+theorem loss_tail (i : Nat) (hi : lossActs.length ≤ i) :
+    replayCfg lossImpl lossActs i = replayCfg lossImpl lossActs lossActs.length ∧
+      runtimeBusy lossImpl (replayCfg lossImpl lossActs i) = false := by
+  induction i with
+  | zero =>
+    simp [lossActs] at hi
+  | succ i ih =>
+    by_cases hle : lossActs.length ≤ i
+    · obtain ⟨heq, hb⟩ := ih hle
+      have hact : nthAct lossActs i = .stutter := by simp [nthAct, Nat.not_lt_of_le hle]
+      have hb' : runtimeBusy lossImpl (replayCfg lossImpl lossActs lossActs.length) = false := by
+        rw [← heq]
+        exact hb
+      rw [replayCfg, hact, apply, heq, hb']
+      simp [Option.getD, Bool.false_eq_true, hb']
+    · have heq : i + 1 = lossActs.length := by omega
+      simpa [heq] using loss_quiet
+
+theorem loss_is_some (i : Nat) :
+    (apply lossImpl (nthAct lossActs i) (replayCfg lossImpl lossActs i)).isSome = true := by
+  by_cases hi : i < lossActs.length + 1
+  · exact loss_step_before i hi
+  · have hle : lossActs.length ≤ i := by omega
+    obtain ⟨heq, hb⟩ := loss_tail i hle
+    simp [nthAct, Nat.not_lt_of_le hle, apply, hb]
+
+def lossRun : Run lossImpl 0 where
+  cfg := replayCfg lossImpl lossActs
+  act := nthAct lossActs
+  startN := rfl
+  start := rfl
+  valid := replay_valid lossImpl lossActs loss_is_some
+
+theorem loss_act_not_recv (j : Nat) (hj : 5 ≤ j) : nthAct lossActs j ≠ .recvBulk lossId := by
+  by_cases hlt : j < lossActs.length
+  · have hj5 : j = 5 := by
+      simp [lossActs] at hlt
+      omega
+    simp [hj5, nthAct, lossActs]
+  · simp [nthAct, hlt]
+
+/-- The killing run is fair: after the mailbox is cleared, nothing forced stays enabled. -/
+theorem loss_fair : Fair lossRun := by
+  have hquiet (j : Nat) (hj : lossActs.length ≤ j) :
+      runtimeBusy lossImpl (lossRun.cfg j) = false ∧
+        (∀ id, id ∉ (lossRun.cfg j).roster →
+          ((lossRun.cfg j).st id).phase = .idle ∧ ((lossRun.cfg j).st id).life ≠ .alive) := by
+    obtain ⟨heq, hb⟩ := loss_tail j hj
+    refine ⟨hb, ?_⟩
+    intro id hid
+    have hR := cfg_reachable lossRun j
+    exact off_idle_reachable lossImpl 0 (lossRun.cfg j) hR id hid
+  refine ⟨?_, ?_, ?_⟩
+  · intro a i hf hen
+    let j := Nat.max i lossActs.length
+    have hj : lossActs.length ≤ j := Nat.le_max_right _ _
+    have hle : i ≤ j := Nat.le_max_left _ _
+    obtain ⟨hb, hoff⟩ := hquiet j hj
+    exact False.elim (quiet_no_forced lossImpl (lossRun.cfg j)
+      (fun id hid => And.intro (hoff id hid).2 (hoff id hid).1) hb a hf (hen j hle))
+  · intro s hio i
+    obtain ⟨j, hj, hen⟩ := hio (Nat.max i lossActs.length)
+    have hlen : lossActs.length ≤ j := Nat.le_trans (Nat.le_max_right _ _) hj
+    obtain ⟨hb, hoff⟩ := hquiet j hlen
+    exact False.elim (quiet_no_forced lossImpl (lossRun.cfg j)
+      (fun id hid => And.intro (hoff id hid).2 (hoff id hid).1) hb (.recvBulk s) rfl hen)
+  · intro s hio i
+    obtain ⟨j, hj, hen⟩ := hio (Nat.max i lossActs.length)
+    have hlen : lossActs.length ≤ j := Nat.le_trans (Nat.le_max_right _ _) hj
+    obtain ⟨hb, hoff⟩ := hquiet j hlen
+    exact False.elim (quiet_no_forced lossImpl (lossRun.cfg j)
+      (fun id hid => And.intro (hoff id hid).2 (hoff id hid).1) hb (.recvPrio s) rfl hen)
+
+theorem loss_not_delivered : ¬ Delivered lossRun := by
+  intro hD
+  have hheld := loss_held
+  cases hbox : ((replayCfg lossImpl lossActs 5).st lossId).box with
+  | nil => simp [lossHeld, hbox] at hheld
+  | cons m ms =>
+    have hr : m.reliable = true := by
+      simp [lossHeld, hbox] at hheld
+      exact hheld
+    obtain ⟨j, hj, hact, _⟩ := hD.1 5 lossId m (by simp [lossRun, hbox]) hr
+    exact loss_act_not_recv j hj (by simpa [lossRun] using hact)
 
 end Deadlock

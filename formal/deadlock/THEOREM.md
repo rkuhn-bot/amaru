@@ -11,10 +11,16 @@ Three statements lead.
 chain. It ends with that actor not `Blocked`.
 
 `fair_delivered` is liveness for a `Fair` run of a `GraphOk` and `LocalOk`
-implementation. `Delivered` says each bulk-box index and each parked index is
-consumed by that many later `recvBulk` steps, or that list is empty, and every
-`awaitReply` eventually changes. A later message with the same fields is a new
-acceptance. `Assumptions` is only `rust_refines`.
+implementation. `Delivered` says every reliable message in the bulk box, the
+parked list, or the priority lane is later the head consumed by `recvBulk` or
+`recvPrio`, matched by the id the storing actor assigned when it accepted the
+message. A try-drop send and a superseding cell wake are not obligations. An
+admitted call leaves `awaitReply`. `Assumptions` is only `rust_refines`.
+
+`loss_fair` and `loss_not_delivered` are the run without that check. A
+terminable actor accepts a reliable message and then executes `terminate`,
+which clears the mailbox. The schedule ends in stutter and is `Fair`, and the
+message is never received.
 
 `demo_fair` is one quiet run of a checked description. It parks a producer on
 a full sink, admits a call and waits for the reply, wakes a reader from a cell,
@@ -32,6 +38,9 @@ theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
 
 theorem fair_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
     (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ) : Delivered ρ
+
+theorem loss_fair : Fair lossRun
+theorem loss_not_delivered : ¬ Delivered lossRun
 
 theorem demo_fair : Fair demoRun
 theorem demo_parked : demoCode 4 prodId = 1
@@ -331,10 +340,12 @@ this development.
   subtree key. Waiting on Roland's `SUBTREE.md` decision. Not implemented.
 - **F7.** Peer waits are not given their own timeout. A timed peer ends by the
   `finish` step; there is no clock beside that step.
-- **F10.** `fair_delivered` shows a bulk or parked entry is taken by later
-  `recvBulk` steps, or that list is empty. Empty includes a killing
-  `terminate`, which discards the mailbox. The theorem does not show `deliver`
-  ran on that entry when the owner dies with mail still queued.
+- **F10.** Under `LocalOk` and `GraphOk`, `fair_delivered` shows each reliable
+  message, identified by the id of the actor that stored it, is consumed by
+  `recvBulk` or `recvPrio`. `reliable_free_reachable` keeps a terminable mailbox
+  free of reliable mail, so a killing `terminate` cannot discard one.
+  `loss_not_delivered` is that discard on a description the checker does not
+  accept: the run is `Fair` and the message is never received.
 - **F11.** `CellFlags` is not checked against the set of writers. A cell edge
   is accepted when the flag word passes `cellFails`, not when the program
   effects are shown to be the only writers.
@@ -349,6 +360,8 @@ From `lake build Deadlock` (`#print axioms`):
 'Deadlock.deadlock_freedom' depends on axioms: [propext, Classical.choice, Quot.sound]
 'Deadlock.cell_fresh' depends on axioms: [propext, Classical.choice, Quot.sound]
 'Deadlock.fair_delivered' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Deadlock.loss_fair' depends on axioms: [propext, Quot.sound]
+'Deadlock.loss_not_delivered' depends on axioms: [propext, Quot.sound]
 'Deadlock.demo_fair' depends on axioms: [propext, Quot.sound]
 'Deadlock.park_reachable' depends on axioms: [propext]
 'Deadlock.park_unblocks' depends on axioms: [propext]
