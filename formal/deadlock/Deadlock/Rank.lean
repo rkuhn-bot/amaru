@@ -9480,4 +9480,740 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
             exact hrel _ _ (by simp [setActor, hne, hpre])
           · simp [htpl, hkill, hidle]
 
+/-- A message in a box after `enqueueOrPark` was already there, or it is the message
+just enqueued into the live target. -/
+theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (mb : InstId) (m : Msg)
+    (hm : m ∈ ((enqueueOrPark w D sender dst msg isCall k).st mb).box) :
+    m ∈ (w.st mb).box ∨
+      (mb = dst ∧ m = msg ∧ (w.st dst).life = .alive) := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
+        have hparkS : (w.st sender).parked = [] := by rw [hsame]; exact hroom.1
+        have hcapS : (w.st sender).box.length < capBulk D w.N sender := by rw [hsame]; exact hroom.2
+        cases isCall
+        · rw [← hsame] at hm
+          rw [enqueue_room_self_send w D sender msg k hliveS hparkS hcapS] at hm
+          by_cases hmb : mb = sender
+          · simp [setActor, hmb, proceed_box, charge_box, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
+          · simp [setActor, hmb] at hm
+            exact Or.inl hm
+        · rw [← hsame] at hm
+          rw [enqueue_room_self_call w D sender msg k hliveS hparkS hcapS] at hm
+          by_cases hmb : mb = sender
+          · simp [setActor, hmb, charge_box, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
+          · simp [setActor, hmb] at hm
+            exact Or.inl hm
+      · have hflip : ¬ dst = sender := fun h => hsame h.symm
+        cases isCall
+        · rw [enqueue_room_other_send w D sender dst msg k hlive hsame hroom.1 hroom.2] at hm
+          by_cases hmb : mb = dst
+          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+            simp [setActor, hmb, hne, hflip, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb, hm, hlive⟩
+          · by_cases hsender : mb = sender
+            · simp [setActor, hmb, hsender, hflip, proceed_box, charge_box] at hm
+              exact Or.inl (by rw [← hsender] at hm; exact hm)
+            · simp [setActor, hmb, hsender, hflip] at hm
+              exact Or.inl hm
+        · rw [enqueue_room_other_call w D sender dst msg k hlive hsame hroom.1 hroom.2] at hm
+          by_cases hmb : mb = dst
+          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+            simp [setActor, hmb, hne, hflip, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb, hm, hlive⟩
+          · by_cases hsender : mb = sender
+            · simp [setActor, hmb, hsender, hflip, charge_box] at hm
+              exact Or.inl (by rw [← hsender] at hm; exact hm)
+            · simp [setActor, hmb, hsender, hflip] at hm
+              exact Or.inl hm
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
+        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := by
+          rw [hsame]; exact hroom
+        rw [← hsame] at hm
+        rw [enqueue_park_self w D sender msg isCall k hliveS hroomS] at hm
+        by_cases hmb : mb = sender
+        · simp [setActor, hmb, charge_box] at hm
+          exact Or.inl (by rw [← hmb] at hm; exact hm)
+        · simp [setActor, hmb] at hm
+          exact Or.inl hm
+      · rw [enqueue_park_other w D sender dst msg isCall k hlive hsame hroom] at hm
+        by_cases hmb : mb = dst
+        · have hflip : ¬ dst = sender := fun h => hsame h.symm
+          simp [setActor, hmb, hflip] at hm
+          exact Or.inl (by rw [← hmb] at hm; exact hm)
+        · by_cases hsender : mb = sender
+          · simp [setActor, hmb, hsender, charge_box] at hm
+            exact Or.inl (by rw [← hsender] at hm; exact hm)
+          · simp [setActor, hmb, hsender] at hm
+            exact Or.inl hm
+  · rw [enqueue_dead w D sender dst msg isCall k hlive] at hm
+    by_cases hmb : mb = sender
+    · simp [setActor, hmb, proceed_box] at hm
+      exact Or.inl (by rw [← hmb] at hm; exact hm)
+    · simp [setActor, hmb] at hm
+      exact Or.inl hm
+
+/-- Some bulk mailbox holds a message naming `c`. -/
+def anyCall (w : World) (c : InstId) : Prop :=
+  (∃ i m, m ∈ (w.st i).box ∧ m.callFrom = some c) ∨
+    (∃ i p, p ∈ (w.st i).parked ∧ p.msg.callFrom = some c)
+
+theorem anyCall_mail (w : World) (d c : InstId) (h : mailCall w d c) : anyCall w c := by
+  rcases h with ⟨m, hm, hc⟩ | ⟨p, hp, hc⟩
+  · exact Or.inl ⟨d, m, hm, hc⟩
+  · exact Or.inr ⟨d, p, hp, hc⟩
+
+/-- While `c` is in `awaitReply d`, only `d` can hold a message naming `c`. -/
+theorem only_call_here (w : World) (hT : CallTagInv w) (c d : InstId) (k : Cont)
+    (hph : (w.st c).phase = .awaitReply d k) (i : InstId) :
+    (∀ m, m ∈ (w.st i).box → m.callFrom = some c → i = d) ∧
+      (∀ p, p ∈ (w.st i).parked → p.msg.callFrom = some c → i = d) := by
+  refine ⟨?_, ?_⟩
+  · intro m hm hc
+    rcases hT.msgOwner i c (Or.inl ⟨m, hm, hc⟩) with ⟨k', hk⟩ | ⟨k', hk⟩
+    · have heq : Phase.awaitReply i k' = Phase.awaitReply d k := by rw [← hk, hph]
+      injection heq
+    · rw [hph] at hk
+      cases hk
+  · intro p hp hc
+    rcases hT.msgOwner i c (Or.inr ⟨p, hp, hc⟩) with ⟨k', hk⟩ | ⟨k', hk⟩
+    · have heq : Phase.awaitReply i k' = Phase.awaitReply d k := by rw [← hk, hph]
+      injection heq
+    · rw [hph] at hk
+      cases hk
+
+theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c : InstId)
+    (hne : id ≠ c) (hno : ¬ anyCall w c) :
+    ¬ anyCall (execRun I w id (w.st id) k) c := by
+  intro hyes
+  have hne' : ¬ c = id := fun h => hne h.symm
+  cases k with
+  | mk rest toState replyTo =>
+    cases rest with
+    | nil =>
+      rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+      · simp [execRun, setActor] at hm
+        by_cases hmb : mb = id
+        · rw [hmb] at hm
+          simp [setActor] at hm
+          exact hno (Or.inl ⟨id, m, hm, hc⟩)
+        · simp [setActor, hmb] at hm
+          exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+      · simp [execRun, setActor] at hp
+        by_cases hmb : mb = id
+        · rw [hmb] at hp
+          simp [setActor] at hp
+          exact hno (Or.inr ⟨id, p, hp, hc⟩)
+        · simp [setActor, hmb] at hp
+          exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+    | cons e tail =>
+      cases e with
+      | call dst label hint =>
+        simp only [execRun] at hyes
+        cases hr : route w I.desc dst hint with
+        | none =>
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · by_cases hmb : mb = id
+            · simp [hr, setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [hr, setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · by_cases hmb : mb = id
+            · simp [hr, setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [hr, setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+        | some dstId =>
+          let msg : Msg := { label := label, sender := id, callFrom := some id }
+          simp only [hr] at hyes
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · rcases enqueue_box_mem w I.desc id dstId msg true
+                (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb m hm with
+              hold | ⟨_, heq, _⟩
+            · exact hno (Or.inl ⟨mb, m, hold, hc⟩)
+            · rw [heq] at hc
+              injection hc with hid
+              exact hne hid
+          · rcases enqueue_parked_mem w I.desc id dstId msg true
+                (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb p hp with
+              hold | ⟨_, _, heq, _, _⟩
+            · exact hno (Or.inr ⟨mb, p, hold, hc⟩)
+            · rw [heq] at hc
+              injection hc with hid
+              exact hne hid
+      | send dst label hint =>
+        simp only [execRun] at hyes
+        cases hr : route w I.desc dst hint with
+        | none =>
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · by_cases hmb : mb = id
+            · simp [hr, setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [hr, setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · by_cases hmb : mb = id
+            · simp [hr, setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [hr, setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+        | some dstId =>
+          let msg : Msg := { label := label, sender := id, callFrom := none }
+          simp only [hr] at hyes
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · rcases enqueue_box_mem w I.desc id dstId msg false
+                (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb m hm with
+              hold | ⟨_, heq, _⟩
+            · exact hno (Or.inl ⟨mb, m, hold, hc⟩)
+            · rw [heq] at hc
+              simp at hc
+          · rcases enqueue_parked_mem w I.desc id dstId msg false
+                (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb p hp with
+              hold | ⟨_, _, heq, _, _⟩
+            · exact hno (Or.inr ⟨mb, p, hold, hc⟩)
+            · rw [heq] at hc
+              simp at hc
+      | trySend dst label hint =>
+        simp only [execRun] at hyes
+        cases hr : route w I.desc dst hint with
+        | none =>
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · by_cases hmb : mb = id
+            · simp [hr, setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [hr, setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · by_cases hmb : mb = id
+            · simp [hr, setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [hr, setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+        | some dstId =>
+          simp only [hr] at hyes
+          by_cases hgo : ((w.st dstId).life == .alive && decide ((w.st dstId).parked = []) &&
+              decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = true
+          · simp [hgo] at hyes
+            rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+            · by_cases hmb : mb = dstId
+              · by_cases hself : dstId = id
+                · simp [setActor, hmb, hself, charge_box, proceed_box, List.mem_append,
+                    List.mem_singleton] at hm
+                  rcases hm with hm | hm
+                  · exact hno (Or.inl ⟨id, m, hm, hc⟩)
+                  · rw [hm] at hc
+                    simp at hc
+                · have hnd : ¬ id = dstId := fun h => hself h.symm
+                  simp [setActor, hmb, hself, hnd, charge_box, proceed_box, List.mem_append,
+                    List.mem_singleton] at hm
+                  rcases hm with hm | hm
+                  · exact hno (Or.inl ⟨dstId, m, hm, hc⟩)
+                  · rw [hm] at hc
+                    simp at hc
+              · by_cases hmi : mb = id
+                · have hnd : ¬ id = dstId := fun h => hmb (hmi.trans h)
+                  simp [setActor, hmb, hmi, hnd, proceed_box, charge_box] at hm
+                  exact hno (Or.inl ⟨id, m, hm, hc⟩)
+                · simp [setActor, hmb, hmi] at hm
+                  exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+            · by_cases hmb : mb = id
+              · by_cases hself : id = dstId
+                · simp [setActor, hmb, hself, proceed_parked, charge_parked] at hp
+                  rw [← hself] at hp
+                  exact hno (Or.inr ⟨id, p, hp, hc⟩)
+                · have hflip : ¬ dstId = id := fun h => hself h.symm
+                  simp [setActor, hmb, hself, hflip, proceed_parked, charge_parked] at hp
+                  exact hno (Or.inr ⟨id, p, hp, hc⟩)
+              · by_cases hmd : mb = dstId
+                · have hnd : ¬ dstId = id := fun h => hmb (hmd.trans h)
+                  have hni : ¬ id = dstId := fun h => hnd h.symm
+                  simp [setActor, hmb, hmd, hnd, hni, charge_parked] at hp
+                  exact hno (Or.inr ⟨dstId, p, hp, hc⟩)
+                · simp [setActor, hmb, hmd] at hp
+                  exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+          · simp [hgo] at hyes
+            rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb, proceed_box] at hm
+                exact hno (Or.inl ⟨id, m, hm, hc⟩)
+              · simp [setActor, hmb] at hm
+                exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb, proceed_parked] at hp
+                exact hno (Or.inr ⟨id, p, hp, hc⟩)
+              · simp [setActor, hmb] at hp
+                exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+      | reply =>
+        simp only [execRun] at hyes
+        unfold performReply at hyes
+        cases hto : replyTo with
+        | none =>
+          simp [hto] at hyes
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+        | some caller =>
+          simp [hto] at hyes
+          cases hcall : (w.st caller).phase with
+          | awaitReply dst ck =>
+            simp [hcall] at hyes
+            by_cases hd : dst = id
+            · simp [hd] at hyes
+              rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+              · by_cases hmb : mb = id
+                · by_cases hcid : caller = id
+                  · simp [setActor, hmb, hcid, hd, proceed_box] at hm
+                    exact hno (Or.inl ⟨id, m, hm, hc⟩)
+                  · have hni : ¬ id = caller := fun h => hcid h.symm
+                    simp [setActor, hmb, hcid, hni, proceed_box] at hm
+                    exact hno (Or.inl ⟨id, m, hm, hc⟩)
+                · by_cases hmc : mb = caller
+                  · have hnc : ¬ caller = id := fun h => hmb (hmc.trans h)
+                    have hni : ¬ id = caller := fun h => hnc h.symm
+                    simp [setActor, hmb, hmc, hnc, hni, proceed_box] at hm
+                    exact hno (Or.inl ⟨caller, m, hm, hc⟩)
+                  · simp [setActor, hmb, hmc] at hm
+                    exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+              · by_cases hmb : mb = id
+                · by_cases hcid : caller = id
+                  · simp [setActor, hmb, hcid, hd, proceed_parked] at hp
+                    exact hno (Or.inr ⟨id, p, hp, hc⟩)
+                  · have hni : ¬ id = caller := fun h => hcid h.symm
+                    simp [setActor, hmb, hcid, hni, proceed_parked] at hp
+                    exact hno (Or.inr ⟨id, p, hp, hc⟩)
+                · by_cases hmc : mb = caller
+                  · have hnc : ¬ caller = id := fun h => hmb (hmc.trans h)
+                    have hni : ¬ id = caller := fun h => hnc h.symm
+                    simp [setActor, hmb, hmc, hnc, hni, proceed_parked] at hp
+                    exact hno (Or.inr ⟨caller, p, hp, hc⟩)
+                  · simp [setActor, hmb, hmc] at hp
+                    exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+            · simp [hd] at hyes
+              rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+              · by_cases hmb : mb = id
+                · simp [setActor, hmb, proceed_box] at hm
+                  exact hno (Or.inl ⟨id, m, hm, hc⟩)
+                · simp [setActor, hmb] at hm
+                  exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+              · by_cases hmb : mb = id
+                · simp [setActor, hmb, proceed_parked] at hp
+                  exact hno (Or.inr ⟨id, p, hp, hc⟩)
+                · simp [setActor, hmb] at hp
+                  exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+          | _ =>
+            simp [hcall] at hyes
+            rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb, proceed_box] at hm
+                exact hno (Or.inl ⟨id, m, hm, hc⟩)
+              · simp [setActor, hmb] at hm
+                exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb, proceed_parked] at hp
+                exact hno (Or.inr ⟨id, p, hp, hc⟩)
+              · simp [setActor, hmb] at hp
+                exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+      | selfSchedule label =>
+        simp only [execRun] at hyes
+        by_cases hdup : ((w.st id).prio.any (fun p => p.label == label)) = true
+        · simp [hdup] at hyes
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+        · simp [hdup] at hyes
+          by_cases hroom : (w.st id).prio.length < capPrio I.desc w.N id
+          · simp [hroom] at hyes
+            rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb, proceed_box] at hm
+                exact hno (Or.inl ⟨id, m, hm, hc⟩)
+              · simp [setActor, hmb] at hm
+                exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb, proceed_parked] at hp
+                exact hno (Or.inr ⟨id, p, hp, hc⟩)
+              · simp [setActor, hmb] at hp
+                exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+          · simp [hroom] at hyes
+            rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb] at hm
+                exact hno (Or.inl ⟨id, m, hm, hc⟩)
+              · simp [setActor, hmb] at hm
+                exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+            · by_cases hmb : mb = id
+              · simp [setActor, hmb] at hp
+                exact hno (Or.inr ⟨id, p, hp, hc⟩)
+              · simp [setActor, hmb] at hp
+                exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+      | cell dst label value =>
+        simp only [execRun] at hyes
+        by_cases hdirty : (w.cell dst label).dirty = true
+        · simp [hdirty, setCell] at hyes
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+        · simp [hdirty, setCell, wakeReaders] at hyes
+          rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+          · rw [wakes_box] at hm
+            by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_box] at hm
+              exact hno (Or.inl ⟨id, m, hm, hc⟩)
+            · simp [setActor, hmb] at hm
+              exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+          · rw [wakes_parked] at hp
+            by_cases hmb : mb = id
+            · simp [setActor, hmb, proceed_parked] at hp
+              exact hno (Or.inr ⟨id, p, hp, hc⟩)
+            · simp [setActor, hmb] at hp
+              exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+      | internal =>
+        simp [execRun, setActor] at hyes
+        rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+        · by_cases hmb : mb = id
+          · simp [setActor, hmb] at hm
+            exact hno (Or.inl ⟨id, m, hm, hc⟩)
+          · simp [setActor, hmb] at hm
+            exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+        · by_cases hmb : mb = id
+          · simp [setActor, hmb] at hp
+            exact hno (Or.inr ⟨id, p, hp, hc⟩)
+          · simp [setActor, hmb] at hp
+            exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+      | peer =>
+        simp [execRun, setActor] at hyes
+        rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+        · by_cases hmb : mb = id
+          · simp [setActor, hmb] at hm
+            exact hno (Or.inl ⟨id, m, hm, hc⟩)
+          · simp [setActor, hmb] at hm
+            exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+        · by_cases hmb : mb = id
+          · simp [setActor, hmb] at hp
+            exact hno (Or.inr ⟨id, p, hp, hc⟩)
+          · simp [setActor, hmb] at hp
+            exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+      | terminate =>
+        simp only [execRun] at hyes
+        cases htpl : templateOf I.desc (tname id) with
+        | none =>
+          simp [htpl] at hyes
+          exact hno hyes
+        | some t =>
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · simp [htpl, hkill] at hyes
+            rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
+            · rw [release_box] at hm
+              by_cases hmb : mb = id
+              · simp [setActor, hmb] at hm
+              · simp [setActor, hmb, refundP_box, refund_box, readCells_st] at hm
+                exact hno (Or.inl ⟨mb, m, hm, hc⟩)
+            · rw [release_preserves_parked] at hp
+              by_cases hmb : mb = id
+              · simp [setActor, hmb] at hp
+              · simp [setActor, hmb, refundP_park, refund_park, readCells_st] at hp
+                exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+          · simp [htpl, hkill] at hyes
+            exact hno hyes
+
+/-- A bulk receive only rearranges messages that were already queued. -/
+theorem recv_keeps_call (I : Impl) (w w' : World) (id c : InstId)
+    (h : receiveBulk I w id = some w') (hno : ¬ anyCall w c) (hyes : anyCall w' c) : False := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · have hidle : (w.st id).phase = .idle := by
+      by_cases hp : (w.st id).phase = .idle
+      · exact hp
+      · exact False.elim (hready (Or.inr hp))
+    simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := fun i => deliver_st I w id _ p.msg w1 a1 i hdel
+          have hbx := deliver_box I w id _ p.msg w1 a1 hdel
+          have hpk := deliver_parked I w id _ p.msg w1 a1 hdel
+          rcases hyes with ⟨i, m, hm, hc⟩ | ⟨i, q, hq, hc⟩
+          · by_cases hi : i = id
+            · by_cases hs : id = p.sender
+              · simp [credit_box, setActor, hi, hs, resume_box, hbx] at hm
+              · simp [credit_box, setActor, hi, hs, hbx] at hm
+            · by_cases hs : i = p.sender
+              · have hnj : ¬ p.sender = id := fun h => hi (hs.trans h)
+                simp [credit_box, setActor, hi, hs, hnj, resume_box] at hm
+                rw [← hs, hst i] at hm
+                exact hno (Or.inl ⟨i, m, hm, hc⟩)
+              · simp [credit_box, setActor, hi, hs] at hm
+                rw [hst i] at hm
+                exact hno (Or.inl ⟨i, m, hm, hc⟩)
+          · by_cases hi : i = id
+            · by_cases hs : id = p.sender
+              · simp [credit_parked, setActor, hi, hs, resume_parked, hpk] at hq
+                exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+              · simp [credit_parked, setActor, hi, hs, hpk] at hq
+                exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+            · by_cases hs : i = p.sender
+              · have hnj : ¬ p.sender = id := fun h => hi (hs.trans h)
+                simp [credit_parked, setActor, hi, hs, hnj, resume_parked] at hq
+                rw [← hs, hst i] at hq
+                exact hno (Or.inr ⟨i, q, hq, hc⟩)
+              · simp [credit_parked, setActor, hi, hs] at hq
+                rw [hst i] at hq
+                exact hno (Or.inr ⟨i, q, hq, hc⟩)
+    | cons m0 ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := fun i => deliver_st I w id _ m0 w1 a1 i hdel
+          have hbx := deliver_box I w id _ m0 w1 a1 hdel
+          have hpk := deliver_parked I w id _ m0 w1 a1 hdel
+          rcases hyes with ⟨i, m, hm, hc⟩ | ⟨i, q, hq, hc⟩
+          · by_cases hi : i = id
+            · by_cases hsend : id = m0.sender
+              · simp [credit_box, setActor, hi, hsend, hbx] at hm
+                exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+              · simp [credit_box, setActor, hi, hsend, hbx] at hm
+                exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+            · by_cases hsend : i = m0.sender
+              · have hni : ¬ m0.sender = id := fun h => hi (hsend.trans h)
+                simp [credit_box, setActor, hi, hsend, hni] at hm
+                rw [← hsend, hst i] at hm
+                exact hno (Or.inl ⟨i, m, hm, hc⟩)
+              · simp [credit_box, setActor, hi, hsend] at hm
+                rw [hst i] at hm
+                exact hno (Or.inl ⟨i, m, hm, hc⟩)
+          · by_cases hi : i = id
+            · by_cases hsend : id = m0.sender
+              · simp [credit_parked, setActor, hi, hsend, hpk, hpark] at hq
+              · simp [credit_parked, setActor, hi, hsend, hpk, hpark] at hq
+            · by_cases hsend : i = m0.sender
+              · have hni : ¬ m0.sender = id := fun h => hi (hsend.trans h)
+                simp [credit_parked, setActor, hi, hsend, hni] at hq
+                rw [← hsend, hst i] at hq
+                exact hno (Or.inr ⟨i, q, hq, hc⟩)
+              · simp [credit_parked, setActor, hi, hsend] at hq
+                rw [hst i] at hq
+                exact hno (Or.inr ⟨i, q, hq, hc⟩)
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := fun i => deliver_st I w id _ m0 w1 a1 i hdel
+          have hbx := deliver_box I w id _ m0 w1 a1 hdel
+          rcases hyes with ⟨i, m, hm, hc⟩ | ⟨i, q, hq, hc⟩
+          · by_cases hi : i = id
+            · by_cases hs : id = p.sender
+              · by_cases hsend : id = m0.sender
+                · have hsp : m0.sender = p.sender := hsend.symm.trans hs
+                  simp [credit_box, setActor, hi, hs, hsend, hsp, resume_box, hbx, List.mem_append,
+                    List.mem_singleton] at hm
+                  rcases hm with hm | hm
+                  · exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+                  · rw [hm] at hc
+                    exact hno (Or.inr ⟨id, p, by rw [hpark]; exact List.Mem.head _, hc⟩)
+                · have hsp : ¬ m0.sender = p.sender := fun h => hsend (hs.trans h.symm)
+                  simp [credit_box, setActor, hi, hs, hsend, hsp, resume_box, hbx, List.mem_append,
+                    List.mem_singleton] at hm
+                  rcases hm with hm | hm
+                  · exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+                  · rw [hm] at hc
+                    exact hno (Or.inr ⟨id, p, by rw [hpark]; exact List.Mem.head _, hc⟩)
+              · by_cases hsend : id = m0.sender
+                · have hsp : ¬ m0.sender = p.sender := fun h => hs (hsend.trans h)
+                  simp [credit_box, setActor, hi, hs, hsend, hsp, hbx, List.mem_append,
+                    List.mem_singleton] at hm
+                  rcases hm with hm | hm
+                  · exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+                  · rw [hm] at hc
+                    exact hno (Or.inr ⟨id, p, by rw [hpark]; exact List.Mem.head _, hc⟩)
+                · by_cases hsp : m0.sender = p.sender
+                  · simp [credit_box, setActor, hi, hs, hsend, hsp, hbx, List.mem_append,
+                      List.mem_singleton] at hm
+                    rcases hm with hm | hm
+                    · exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+                    · rw [hm] at hc
+                      exact hno (Or.inr ⟨id, p, by rw [hpark]; exact List.Mem.head _, hc⟩)
+                  · simp [credit_box, setActor, hi, hs, hsend, hsp, hbx, List.mem_append,
+                      List.mem_singleton] at hm
+                    rcases hm with hm | hm
+                    · exact hno (Or.inl ⟨id, m, by rw [hbox]; exact List.Mem.tail _ hm, hc⟩)
+                    · rw [hm] at hc
+                      exact hno (Or.inr ⟨id, p, by rw [hpark]; exact List.Mem.head _, hc⟩)
+            · by_cases hs : i = p.sender
+              · by_cases hsend : p.sender = m0.sender
+                · have hnj : ¬ p.sender = id := fun h => hi (hs.trans h)
+                  have hni : ¬ m0.sender = id := fun h => hnj (hsend.trans h)
+                  simp [credit_box, setActor, hi, hs, hsend, hnj, hni, resume_box] at hm
+                  rw [← hsend, ← hs, hst i] at hm
+                  exact hno (Or.inl ⟨i, m, hm, hc⟩)
+                · have hnj : ¬ p.sender = id := fun h => hi (hs.trans h)
+                  have hflip : ¬ m0.sender = p.sender := fun h => hsend h.symm
+                  simp [credit_box, setActor, hi, hs, hsend, hnj, hflip, resume_box] at hm
+                  rw [← hs, hst i] at hm
+                  exact hno (Or.inl ⟨i, m, hm, hc⟩)
+              · by_cases hsend : i = m0.sender
+                · have hni : ¬ m0.sender = id := fun h => hi (hsend.trans h)
+                  have hsp : ¬ m0.sender = p.sender := fun h => hs (hsend.trans h)
+                  simp [credit_box, setActor, hi, hs, hsend, hni, hsp] at hm
+                  rw [← hsend, hst i] at hm
+                  exact hno (Or.inl ⟨i, m, hm, hc⟩)
+                · simp [credit_box, setActor, hi, hs, hsend] at hm
+                  rw [hst i] at hm
+                  exact hno (Or.inl ⟨i, m, hm, hc⟩)
+          · by_cases hi : i = id
+            · by_cases hs : id = p.sender
+              · by_cases hsend : id = m0.sender
+                · have hsp : m0.sender = p.sender := hsend.symm.trans hs
+                  simp [credit_parked, setActor, hi, hs, hsend, hsp, resume_parked] at hq
+                  exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+                · have hsp : ¬ m0.sender = p.sender := fun h => hsend (hs.trans h.symm)
+                  simp [credit_parked, setActor, hi, hs, hsend, hsp, resume_parked] at hq
+                  exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+              · by_cases hsend : id = m0.sender
+                · have hsp : ¬ m0.sender = p.sender := fun h => hs (hsend.trans h)
+                  simp [credit_parked, setActor, hi, hs, hsend, hsp] at hq
+                  exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+                · by_cases hsp : m0.sender = p.sender
+                  · simp [credit_parked, setActor, hi, hs, hsend, hsp] at hq
+                    exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+                  · simp [credit_parked, setActor, hi, hs, hsend, hsp] at hq
+                    exact hno (Or.inr ⟨id, q, by rw [hpark]; exact List.Mem.tail _ hq, hc⟩)
+            · by_cases hs : i = p.sender
+              · by_cases hsend : p.sender = m0.sender
+                · have hnj : ¬ p.sender = id := fun h => hi (hs.trans h)
+                  have hni : ¬ m0.sender = id := fun h => hnj (hsend.trans h)
+                  simp [credit_parked, setActor, hi, hs, hsend, hnj, hni, resume_parked] at hq
+                  rw [← hsend, ← hs, hst i] at hq
+                  exact hno (Or.inr ⟨i, q, hq, hc⟩)
+                · have hnj : ¬ p.sender = id := fun h => hi (hs.trans h)
+                  have hflip : ¬ m0.sender = p.sender := fun h => hsend h.symm
+                  simp [credit_parked, setActor, hi, hs, hsend, hnj, hflip, resume_parked] at hq
+                  rw [← hs, hst i] at hq
+                  exact hno (Or.inr ⟨i, q, hq, hc⟩)
+              · by_cases hsend : i = m0.sender
+                · have hni : ¬ m0.sender = id := fun h => hi (hsend.trans h)
+                  have hsp : ¬ m0.sender = p.sender := fun h => hs (hsend.trans h)
+                  simp [credit_parked, setActor, hi, hs, hsend, hni, hsp] at hq
+                  rw [← hsend, hst i] at hq
+                  exact hno (Or.inr ⟨i, q, hq, hc⟩)
+                · simp [credit_parked, setActor, hi, hs, hsend] at hq
+                  rw [hst i] at hq
+                  exact hno (Or.inr ⟨i, q, hq, hc⟩)
+
+/-- A caller parked in `awaitReply` does not run, so it cannot create a fresh
+`callFrom` for itself. Messages already naming it stay the only ones. -/
+theorem no_new_mailCall (I : Impl) (a : Action) (w w' : World) (c d : InstId) (k : Cont)
+    (h : apply I a w = some w')
+    (hph : (w.st c).phase = .awaitReply d k)
+    (hph' : (w'.st c).phase = .awaitReply d k)
+    (hno : ¬ anyCall w c) : ¬ anyCall w' c := by
+  cases a with
+  | exec id =>
+    have hne : id ≠ c := by
+      intro heq
+      rw [← heq] at hph
+      simp [apply, execHead, hph] at h
+    simp only [apply] at h
+    unfold execHead at h
+    by_cases hlive : (w.st id).life = .alive
+    · simp [hlive] at h
+      cases hphase : (w.st id).phase with
+      | run kRun =>
+        simp [hphase] at h
+        cases h
+        exact exec_no_foreign_call I w id kRun c hne hno
+      | idle => simp [hphase] at h
+      | parked _ _ _ => simp [hphase] at h
+      | awaitReply _ _ => simp [hphase] at h
+      | awaitEffect _ => simp [hphase] at h
+      | awaitPeer _ => simp [hphase] at h
+      | crashed => simp [hphase] at h
+    · simp [hlive] at h
+  | finish id =>
+    intro hyes
+    rcases hyes with ⟨i, m, hm, hc⟩ | ⟨i, p, hp, hc⟩
+    · have heq := finish_box w w' id i (by simpa [apply] using h)
+      exact hno (Or.inl ⟨i, m, by rw [heq] at hm; exact hm, hc⟩)
+    · have heq := finish_parked w w' id i (by simpa [apply] using h)
+      exact hno (Or.inr ⟨i, p, by rw [heq] at hp; exact hp, hc⟩)
+  | recvPrio id =>
+    intro hyes
+    rcases hyes with ⟨i, m, hm, hc⟩ | ⟨i, p, hp, hc⟩
+    · have heq := prio_box I w w' id i (by simpa [apply] using h)
+      exact hno (Or.inl ⟨i, m, by rw [heq] at hm; exact hm, hc⟩)
+    · have heq := prio_parked I w w' id i (by simpa [apply] using h)
+      exact hno (Or.inr ⟨i, p, by rw [heq] at hp; exact hp, hc⟩)
+  | spawn template =>
+    intro hyes
+    simp only [apply] at h
+    unfold spawn at h
+    split at h
+    · cases h
+    · next t ht =>
+      split at h
+      · cases h
+        let nid := InstId.peer template (w.nextIx template)
+        rcases hyes with ⟨i, m, hm, hc⟩ | ⟨i, p, hp, hc⟩
+        · by_cases hi : i = nid
+          · simp [nid, readCells_st, setActor, hi, withTokens] at hm
+          · simp [nid, readCells_st, setActor, hi] at hm
+            exact hno (Or.inl ⟨i, m, hm, hc⟩)
+        · by_cases hi : i = nid
+          · simp [nid, readCells_st, setActor, hi, withTokens] at hp
+          · simp [nid, readCells_st, setActor, hi] at hp
+            exact hno (Or.inr ⟨i, p, hp, hc⟩)
+      · cases h
+  | recvBulk id =>
+    intro hyes
+    have hrecv : receiveBulk I w id = some w' := by simpa [apply] using h
+    exact recv_keeps_call I w w' id c hrecv hno hyes
+
 end Deadlock
