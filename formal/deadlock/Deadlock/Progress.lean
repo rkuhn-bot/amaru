@@ -121,11 +121,12 @@ theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I 
   | step w w' a _ ha ih =>
     by_cases hdie : (w'.st (InstId.core dst)).life = .alive
     · exact hdie
-    · obtain ⟨_, _, _, t', _, _, ht', hflag⟩ :=
-        only_terminate_kills I a w w' (InstId.core dst) ha ih hdie
-      have hto : templateOf I.desc dst = some t' := by simpa [tname] using ht'
-      have hsame : t' = t := by injection (hto.symm.trans ht)
-      simp [hsame, hterm] at hflag
+    · rcases only_terminate_kills I a w w' (InstId.core dst) ha ih hdie with
+      | inl ⟨_, _, _, t', _, _, ht', hflag⟩ =>
+        have hto : templateOf I.desc dst = some t' := by simpa [tname] using ht'
+        have hsame : t' = t := by injection (hto.symm.trans ht)
+        simp [hsame, hterm] at hflag
+      | inr ⟨_, _, _, hmem⟩ => simp [isMember] at hmem
 
 theorem enqueue_roster (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) : (enqueueOrPark w D sender dst msg isCall k).roster = w.roster := by

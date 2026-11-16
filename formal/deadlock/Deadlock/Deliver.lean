@@ -580,8 +580,9 @@ def Delivered {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   (∀ i c d k, ((ρ.cfg i).st c).phase = .awaitReply d k →
     ∃ j, i ≤ j ∧ ((ρ.cfg j).st c).phase ≠ .awaitReply d k)
 
-theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : Nat)
-    (h0 : ((ρ.cfg i).st id).life = .alive) (hterm : terminableB I.desc (tname id) = false) :
+theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (hG : GraphOk I.desc) (id : InstId)
+    (i : Nat) (h0 : ((ρ.cfg i).st id).life = .alive)
+    (hterm : terminableB I.desc (tname id) = false) :
     ∀ t, i ≤ t → ((ρ.cfg t).st id).life = .alive := by
   intro t ht
   have hall : ∀ n, ((ρ.cfg (i + n)).st id).life = .alive := by
@@ -591,11 +592,13 @@ theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : Nat
     | succ n ih =>
       by_cases hlive : ((ρ.cfg (i + n + 1)).st id).life = .alive
       · exact hlive
-      · obtain ⟨_, _, _, tpl, _, _, htpl, hflag⟩ :=
-          only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
-            (ρ.valid (i + n)) ih hlive
-        simp [Bool.and_eq_true] at hflag
-        simp [terminableB, htpl, hflag.1] at hterm
+      · rcases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
+          (ρ.valid (i + n)) ih hlive with
+        | inl ⟨_, _, _, tpl, _, _, htpl, hflag⟩ =>
+          simp [Bool.and_eq_true] at hflag
+          simp [terminableB, htpl, hflag.1] at hterm
+        | inr ⟨sub, key, _, hmem⟩ =>
+          simp [member_terminable I.desc hG.subtrees id sub key hmem] at hterm
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
 
 theorem pos_drop (mid : Nat) (m : Msg) (ms new : List Msg) (hne : m.mid ≠ mid)
@@ -632,7 +635,7 @@ theorem box_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
   | ind n ih =>
     intro i hpeq hlt hlive0
     have halive : ∀ t, i ≤ t → ((ρ.cfg t).st id).life = .alive :=
-      nonterm_stays ρ id i hlive0 hterm
+      nonterm_stays ρ hG id i hlive0 hterm
     have hstill : ∀ t, i ≤ t → (∀ u, i ≤ u → u < t → ρ.act u ≠ .recvBulk id) →
         posOf mid ((ρ.cfg t).st id).box = n ∧
           posOf mid ((ρ.cfg t).st id).box < ((ρ.cfg t).st id).box.length := by
@@ -714,13 +717,18 @@ theorem dead_box_empty (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
   | init => exact (init_box I N id).1
   | step w w' a _ ha ih =>
     by_cases hprev : (w.st id).life = .alive
-    · obtain ⟨tail, toState, replyTo, t, hact, hrun, ht, hflag⟩ :=
-        only_terminate_kills I a w w' id ha hprev hdead
-      have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
-        simp [apply, hact, execHead, hprev, hrun] at ha
-        exact ha.symm
-      rw [hstep]
-      exact kill_box_empty I w id t tail toState replyTo ht hflag
+    · rcases only_terminate_kills I a w w' id ha hprev hdead with
+      | inl ⟨tail, toState, replyTo, t, hact, hrun, ht, hflag⟩ =>
+        have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
+          simp [apply, hact, execHead, hprev, hrun] at ha
+          exact ha.symm
+        rw [hstep]
+        exact kill_box_empty I w id t tail toState replyTo ht hflag
+      | inr ⟨sub, key, hact, _⟩ =>
+        rw [hact] at ha
+        have hk := kill_apply_world I w w' sub key ha
+        rw [hk] at hdead ⊢
+        exact (killSubtree_died w I.desc sub key id hprev hdead).2.2.2.1
     · exact dead_no_box I a w w' id ha hprev (ih id hprev)
 
 theorem drops_succ {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (start k : Nat)
@@ -823,17 +831,23 @@ theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : N
       by_cases hlive : ((ρ.cfg (i + n + 1)).st id).life = .alive
       · exact hlive
       · have hempty : ((ρ.cfg (i + n + 1)).st id).box = [] := by
-          obtain ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩ :=
-            only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
-              (ρ.valid (i + n)) ih hlive
-          have hstep : ρ.cfg (i + n + 1) =
-              execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
-                ⟨.terminate :: tail, toState, replyTo⟩ := by
+          rcases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
+              (ρ.valid (i + n)) ih hlive with
+          | inl ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩ =>
+            have hstep : ρ.cfg (i + n + 1) =
+                execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
+                  ⟨.terminate :: tail, toState, replyTo⟩ := by
+              have hv := ρ.valid (i + n)
+              simp [apply, hact, execHead, ih, hrun] at hv
+              exact hv.symm
+            rw [hstep]
+            exact kill_box_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hflag
+          | inr ⟨sub, key, hact, _⟩ =>
             have hv := ρ.valid (i + n)
-            simp [apply, hact, execHead, ih, hrun] at hv
-            exact hv.symm
-          rw [hstep]
-          exact kill_box_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hflag
+            rw [hact] at hv
+            have hk := kill_apply_world I (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) sub key hv
+            rw [hk] at hlive ⊢
+            exact (killSubtree_died (ρ.cfg (i + n)) I.desc sub key id ih hlive).2.2.2.1
         exact False.elim (hne (i + n + 1) (by omega) hempty)
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
 
@@ -850,17 +864,23 @@ theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i 
       by_cases hlive : ((ρ.cfg (i + n + 1)).st id).life = .alive
       · exact hlive
       · have hempty : ((ρ.cfg (i + n + 1)).st id).parked = [] := by
-          obtain ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩ :=
-            only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
-              (ρ.valid (i + n)) ih hlive
-          have hstep : ρ.cfg (i + n + 1) =
-              execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
-                ⟨.terminate :: tail, toState, replyTo⟩ := by
+          rcases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
+              (ρ.valid (i + n)) ih hlive with
+          | inl ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩ =>
+            have hstep : ρ.cfg (i + n + 1) =
+                execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
+                  ⟨.terminate :: tail, toState, replyTo⟩ := by
+              have hv := ρ.valid (i + n)
+              simp [apply, hact, execHead, ih, hrun] at hv
+              exact hv.symm
+            rw [hstep]
+            exact kill_park_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hflag
+          | inr ⟨sub, key, hact, _⟩ =>
             have hv := ρ.valid (i + n)
-            simp [apply, hact, execHead, ih, hrun] at hv
-            exact hv.symm
-          rw [hstep]
-          exact kill_park_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hflag
+            rw [hact] at hv
+            have hk := kill_apply_world I (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) sub key hv
+            rw [hk] at hlive ⊢
+            exact (killSubtree_died (ρ.cfg (i + n)) I.desc sub key id ih hlive).2.2.2.2.2
         exact False.elim (hne (i + n + 1) (by omega) hempty)
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
 
@@ -1773,7 +1793,7 @@ theorem park_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
   | ind n ih =>
     intro i hpeq hlt hlive0
     have halive : ∀ t, i ≤ t → ((ρ.cfg t).st id).life = .alive :=
-      nonterm_stays ρ id i hlive0 hterm
+      nonterm_stays ρ hG id i hlive0 hterm
     have hstill : ∀ t, i ≤ t → (∀ u, i ≤ u → u < t → ρ.act u ≠ .recvBulk id) →
         posOf mid (((ρ.cfg t).st id).parked.map (·.msg)) = n ∧
           posOf mid (((ρ.cfg t).st id).parked.map (·.msg)) < ((ρ.cfg t).st id).parked.length := by
@@ -2080,9 +2100,15 @@ theorem prio_permanent_alive (I : Impl) (N : Nat) (w : World) (hR : Reachable I 
     by_cases hpre : (w.st id).life = .alive
     · by_cases hlive : (w'.st id).life = .alive
       · exact hlive
-      · obtain ⟨_, _, _, _, _, _, ht, hflag⟩ := only_terminate_kills I a w w' id ha hpre hlive
-        simp [Bool.and_eq_true] at hflag
-        simp [terminableB, ht, hflag.1] at hterm
+      · rcases only_terminate_kills I a w w' id ha hpre hlive with
+        | inl ⟨_, _, _, _, _, _, ht, hflag⟩ =>
+          simp [Bool.and_eq_true] at hflag
+          simp [terminableB, ht, hflag.1] at hterm
+        | inr ⟨sub, key, hact, _⟩ =>
+          rw [hact] at ha
+          have hk := kill_apply_world I w w' sub key ha
+          rw [hk] at hlive ⊢
+          exact absurd (killSubtree_died w I.desc sub key id hpre hlive).2.2.2.2.1 hne
     · have hempty : (w.st id).prio = [] := by
         by_cases hp : (w.st id).prio = []
         · exact hp
@@ -2348,7 +2374,7 @@ theorem prio_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
   | ind n ih =>
     intro i hpeq hlt hlive0
     have halive : ∀ t, i ≤ t → ((ρ.cfg t).st id).life = .alive :=
-      nonterm_stays ρ id i hlive0 hterm
+      nonterm_stays ρ hG id i hlive0 hterm
     have hstill : ∀ t, i ≤ t → (∀ u, i ≤ u → u < t → ρ.act u ≠ .recvPrio id) →
         posOf mid ((ρ.cfg t).st id).prio = n ∧
           posOf mid ((ρ.cfg t).st id).prio < ((ρ.cfg t).st id).prio.length := by

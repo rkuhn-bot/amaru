@@ -2479,34 +2479,35 @@ theorem killSubtree_quiet (w : World) (D : Description) (sub : String) (key : Na
   simpa [killSubtree, killMembers, plant_cell] using killFold_quiet w D sub key w.roster d l
 
 /-- `failWaiter` writes `.idle` or a continuation. It never installs a parked phase. -/
-theorem failWaiter_keeps_off (w : World) (dead i j dst : InstId) (c : Bool) (k : Cont)
-    (h : (w.st j).phase ≠ .parked dst c k) :
-    ((failWaiter w dead i).st j).phase ≠ .parked dst c k := by
+theorem failWaiter_keeps_off (w : World) (dead i j dst : InstId) (c : Bool)
+    (h : ∀ k, (w.st j).phase ≠ .parked dst c k) :
+    ∀ k, ((failWaiter w dead i).st j).phase ≠ .parked dst c k := by
+  intro k
   by_cases hj : j = i
   · rw [hj] at h ⊢
     unfold failWaiter
     split
-    · exact h
+    · exact h k
     · cases hph : (w.st i).phase with
       | parked d b k' =>
         simp only [hph]
         split
         · intro hbad
           cases hk : k'.rest <;> simp [setActor, proceed, hk] at hbad
-        · exact h
+        · exact h k
       | awaitReply d k' =>
         simp only [hph]
         split
         · intro hbad
           simp [setActor] at hbad
-        · exact h
-      | idle => simp [hph]
-      | run _ => simp [hph]
-      | awaitEffect _ => simp [hph]
-      | awaitPeer _ => simp [hph]
-      | crashed => simp [hph]
+        · exact h k
+      | idle => exact h k
+      | run _ => exact h k
+      | awaitEffect _ => exact h k
+      | awaitPeer _ => exact h k
+      | crashed => exact h k
   · rw [failWaiter_other w dead i j hj]
-    exact h
+    exact h k
 
 /-- A sender parked on someone other than `dead` keeps that phase through the failure fold. -/
 theorem failFold_spares (w : World) (dead s dst : InstId) (ids : List InstId) (c : Bool) (k : Cont)
@@ -2530,18 +2531,20 @@ theorem failFold_spares (w : World) (dead s dst : InstId) (ids : List InstId) (c
     exact (ih (failWaiter w dead i) (by rw [hstep]; exact hph)).trans hstep
 
 theorem failFold_keeps_off (w : World) (dead j dst : InstId) (ids : List InstId) (c : Bool)
-    (k : Cont) (h : (w.st j).phase ≠ .parked dst c k) :
-    ((ids.foldl (fun w i => failWaiter w dead i) w).st j).phase ≠ .parked dst c k := by
+    (h : ∀ k, (w.st j).phase ≠ .parked dst c k) :
+    ∀ k, ((ids.foldl (fun w i => failWaiter w dead i) w).st j).phase ≠ .parked dst c k := by
+  intro k
   induction ids generalizing w with
-  | nil => simpa using h
+  | nil => simpa using h k
   | cons i ids ih =>
     simp only [List.foldl_cons]
-    exact ih (failWaiter w dead i) (failWaiter_keeps_off w dead i j dst c k h)
+    exact ih (failWaiter w dead i) (failWaiter_keeps_off w dead i j dst c h)
 
 /-- A live waiter parked on `dead` is resumed, so that parked phase does not survive. -/
 theorem failWaiter_clears (w : World) (dead s : InstId) (c : Bool) (k : Cont)
     (hph : (w.st s).phase = .parked dead c k) (hl : (w.st s).life = .alive) :
-    ((failWaiter w dead s).st s).phase ≠ .parked dead c k := by
+    ∀ k', ((failWaiter w dead s).st s).phase ≠ .parked dead c k' := by
+  intro k'
   unfold failWaiter
   have hlive : ((w.st s).life != .alive) = false := by simp [hl, bne]
   simp only [hlive, hph, Bool.false_eq_true, ite_false, beq_self_eq_true, ite_true]
@@ -2551,20 +2554,21 @@ theorem failWaiter_clears (w : World) (dead s : InstId) (c : Bool) (k : Cont)
 theorem failFold_clears (w : World) (dead s : InstId) (ids : List InstId) (c : Bool) (k : Cont)
     (hph : (w.st s).phase = .parked dead c k) (hl : (w.st s).life = .alive)
     (hs : s ∈ ids) :
-    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase ≠ .parked dead c k := by
+    ∀ k', ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase ≠ .parked dead c k' := by
+  intro k'
   induction ids generalizing w with
   | nil => cases hs
   | cons i ids ih =>
     simp only [List.foldl_cons]
     cases hs with
     | head =>
-      exact failFold_keeps_off (failWaiter w dead s) dead s dead ids c k
-        (failWaiter_clears w dead s c k hph hl)
+      exact failFold_keeps_off (failWaiter w dead s) dead s dead ids c
+        (failWaiter_clears w dead s c k hph hl) k'
     | tail _ hmem =>
       by_cases heq : i = s
       · subst heq
-        exact failFold_keeps_off (failWaiter w dead i) dead i dead ids c k
-          (failWaiter_clears w dead i c k hph hl)
+        exact failFold_keeps_off (failWaiter w dead i) dead i dead ids c
+          (failWaiter_clears w dead i c k hph hl) k'
       · have hst := failWaiter_other w dead i s (fun h => heq h.symm)
         exact ih (failWaiter w dead i) (by rw [hst]; exact hph) (by rw [hst]; exact hl) hmem
 
@@ -2596,7 +2600,7 @@ theorem killOne_spares (w : World) (D : Description) (j s dst : InstId) (c : Boo
 theorem killOne_drops_park (w : World) (D : Description) (dst s : InstId) (c : Bool) (k : Cont)
     (hne : s ≠ dst) (hs : s ∈ w.roster) (hl : (w.st s).life = .alive)
     (hph : (w.st s).phase = .parked dst c k) :
-    ((killOne w D dst).st s).phase ≠ .parked dst c k := by
+    ∀ k', ((killOne w D dst).st s).phase ≠ .parked dst c k' := by
   let w1 := readCells D w dst
   have hst1 : w1.st s = w.st s := cellsSt D w dst s
   have hr1 : w1.roster = w.roster := cellsRoster D w dst
@@ -2619,14 +2623,15 @@ theorem killOne_drops_park (w : World) (D : Description) (dst s : InstId) (c : B
       setActor w5 dst { w5.st dst with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
     simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
   rw [hbody, setActor_other _ _ _ _ hne]
-  intro hbad
-  have : (w4.st s).phase = .parked dst c k := by rw [← h5.2.2.1]; exact hbad
-  exact h4 this
+  intro k' hbad
+  have : (w4.st s).phase = .parked dst c k' := by rw [← h5.2.2.1]; exact hbad
+  exact h4 k' this
 
 /-- A kill step does not install `.parked dst`. An actor already off that phase stays off it. -/
-theorem killOne_keeps_off (w : World) (D : Description) (j s dst : InstId) (c : Bool) (k : Cont)
-    (h : (w.st s).phase ≠ .parked dst c k) :
-    ((killOne w D j).st s).phase ≠ .parked dst c k := by
+theorem killOne_keeps_off (w : World) (D : Description) (j s dst : InstId) (c : Bool)
+    (h : ∀ k, (w.st s).phase ≠ .parked dst c k) :
+    ∀ k, ((killOne w D j).st s).phase ≠ .parked dst c k := by
+  intro k
   by_cases hne : s = j
   · subst hne
     intro hbad
@@ -2637,11 +2642,12 @@ theorem killOne_keeps_off (w : World) (D : Description) (j s dst : InstId) (c : 
     have h2 := refundMsgs_rest w1 (tname j) (w.st j).box s
     let w3 := refundParked w2 (tname j) (w.st j).parked
     have h3 := refundParked_rest w2 (tname j) (w.st j).parked s
-    have h3off : (w3.st s).phase ≠ .parked dst c k := by
+    have h3off : ∀ k, (w3.st s).phase ≠ .parked dst c k := by
+      intro k'
       rw [h3.1, h2.1, congrArg (·.phase) hst1]
-      exact h
+      exact h k'
     let w4 := failWaiters w3 j
-    have h4 := failFold_keeps_off w3 j s dst w3.roster c k h3off
+    have h4 := failFold_keeps_off w3 j s dst w3.roster c h3off
     let w5 := forgetSender w4 j
     have h5 := forgetFold_mail w4 j s w4.roster
     have hbody : killOne w D j =
@@ -2653,22 +2659,22 @@ theorem killOne_keeps_off (w : World) (D : Description) (j s dst : InstId) (c : 
       have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
       rw [h5p] at hbad
       simpa [w4] using hbad
-    exact h4 hback
+    exact h4 k hback
 
 /-- While `dst` is a live member ahead in the fold, a sender parked on `dst` leaves that phase. -/
 theorem killFold_unpark (w : World) (D : Description) (sub : String) (key : Nat)
     (ids : List InstId) (s dst : InstId) (c : Bool) (k : Cont) (hs : s ∈ w.roster)
     (h : ((w.st s).phase = .parked dst c k ∧ dst ∈ ids ∧ (w.st dst).life = .alive ∧
           isMember D dst sub key = true ∧ (w.st s).life = .alive) ∨
-        (w.st s).phase ≠ .parked dst c k) :
-    ((ids.foldl (fun w id =>
+        (∀ k', (w.st s).phase ≠ .parked dst c k')) :
+    ∀ k', ((ids.foldl (fun w id =>
         if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase ≠
-      .parked dst c k := by
+      .parked dst c k' := by
   induction ids generalizing w with
   | nil =>
     rcases h with ⟨_, hmem, _, _, _⟩ | hoff
     · cases hmem
-    · simpa using hoff
+    · exact hoff
   | cons j ids ih =>
     simp only [List.foldl_cons]
     rcases h with ⟨hph, hmem, hl, hm, hls⟩ | hoff
@@ -2678,9 +2684,9 @@ theorem killFold_unpark (w : World) (D : Description) (sub : String) (key : Nat)
           simp [hm, hl]
         simp only [hcond, ite_true]
         by_cases hsd : s = dst
-        · have hoff : ((killOne w D dst).st s).phase ≠ .parked dst c k := by
+        · have hoff : ∀ k', ((killOne w D dst).st s).phase ≠ .parked dst c k' := by
             rw [hsd]
-            intro hbad
+            intro k' hbad
             simp [(killOne_self w D dst).2.1] at hbad
           exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hoff)
         · have hdrop := killOne_drops_park w D dst s c k hsd hs hls hph
@@ -2692,9 +2698,9 @@ theorem killFold_unpark (w : World) (D : Description) (sub : String) (key : Nat)
             simp [hm, hl]
           simp only [hcond, ite_true]
           by_cases hsd : s = dst
-          · have hoff : ((killOne w D dst).st s).phase ≠ .parked dst c k := by
+          · have hoff : ∀ k', ((killOne w D dst).st s).phase ≠ .parked dst c k' := by
               rw [hsd]
-              intro hbad
+              intro k' hbad
               simp [(killOne_self w D dst).2.1] at hbad
             exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hoff)
           · have hdrop := killOne_drops_park w D dst s c k hsd hs hls hph
@@ -2702,9 +2708,9 @@ theorem killFold_unpark (w : World) (D : Description) (sub : String) (key : Nat)
         · by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
           · simp only [hcond, ite_true]
             by_cases hsj : s = j
-            · have hoff : ((killOne w D j).st s).phase ≠ .parked dst c k := by
+            · have hoff : ∀ k', ((killOne w D j).st s).phase ≠ .parked dst c k' := by
                 rw [hsj]
-                intro hbad
+                intro k' hbad
                 simp [(killOne_self w D j).2.1] at hbad
               exact ih (killOne w D j) (by rw [killOne_roster]; exact hs) (Or.inr hoff)
             · have hneDst : dst ≠ j := fun h => hjd h.symm
@@ -2724,7 +2730,7 @@ theorem killFold_unpark (w : World) (D : Description) (sub : String) (key : Nat)
     · by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
       · simp only [hcond, ite_true]
         exact ih (killOne w D j) (by rw [killOne_roster]; exact hs)
-          (Or.inr (killOne_keeps_off w D j s dst c k hoff))
+          (Or.inr (killOne_keeps_off w D j s dst c hoff))
       · have hf : (isMember D j sub key && (w.st j).life == .alive) = false := by
           cases hb : isMember D j sub key && (w.st j).life == .alive with
           | false => rfl
@@ -2737,9 +2743,396 @@ theorem killSubtree_unpark (w : World) (D : Description) (sub : String) (key : N
     (hph : (w.st s).phase = .parked dst c k) (hls : (w.st s).life = .alive)
     (hl : (w.st dst).life = .alive) (hm : isMember D dst sub key = true)
     (hdst : dst ∈ w.roster) :
-    ((killSubtree w D sub key).st s).phase ≠ .parked dst c k := by
+    ∀ k', ((killSubtree w D sub key).st s).phase ≠ .parked dst c k' := by
   simpa [killSubtree, killMembers, plant_st] using
     killFold_unpark w D sub key w.roster s dst c k hs
       (Or.inl ⟨hph, hdst, hl, hm, hls⟩)
+
+/-- Resuming a waiter writes `.idle` or `.run`, and a later kill keeps one of those. -/
+theorem failWaiter_shape (w : World) (dead s : InstId) (c : Bool) (k : Cont)
+    (hph : (w.st s).phase = .parked dead c k) (hl : (w.st s).life = .alive) :
+    ((failWaiter w dead s).st s).phase = .idle ∨ ∃ k', ((failWaiter w dead s).st s).phase = .run k' := by
+  unfold failWaiter
+  have hlive : ((w.st s).life != .alive) = false := by simp [hl, bne]
+  simp only [hlive, hph, Bool.false_eq_true, ite_false, beq_self_eq_true, ite_true]
+  cases hk : k.rest with
+  | nil => exact Or.inl (by simp [setActor, proceed, hk])
+  | cons _ _ => exact Or.inr ⟨k, by simp [setActor, proceed, hk]⟩
+
+theorem failFold_shape (w : World) (dead s : InstId) (ids : List InstId)
+    (h : ((w.st s).phase = .idle) ∨ ∃ k, (w.st s).phase = .run k) :
+    (((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .idle) ∨
+      ∃ k, ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .run k := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have hstep : ((failWaiter w dead i).st s).phase = .idle ∨
+        ∃ k, ((failWaiter w dead i).st s).phase = .run k := by
+      rcases h with hidle | ⟨k, hrun⟩
+      · exact Or.inl ((failWaiter_holds w dead i s (by simp [holdsPhase, hidle])).1.trans hidle)
+      · exact Or.inr ⟨k, (failWaiter_holds w dead i s (by simp [holdsPhase, hrun])).1.trans hrun⟩
+    exact ih (failWaiter w dead i) hstep
+
+theorem killOne_shape (w : World) (D : Description) (j s : InstId)
+    (h : ((w.st s).phase = .idle) ∨ ∃ k, (w.st s).phase = .run k) :
+    (((killOne w D j).st s).phase = .idle) ∨ ∃ k, ((killOne w D j).st s).phase = .run k := by
+  by_cases hne : s = j
+  · exact Or.inl (by rw [hne]; exact (killOne_self w D j).2.1)
+  · rcases h with hidle | ⟨k, hrun⟩
+    · exact Or.inl ((killOne_holds w D j s hne (by simp [holdsPhase, hidle])).1.trans hidle)
+    · exact Or.inr ⟨k, (killOne_holds w D j s hne (by simp [holdsPhase, hrun])).1.trans hrun⟩
+
+theorem failFold_resumes (w : World) (dead s : InstId) (ids : List InstId) (c : Bool) (k : Cont)
+    (hph : (w.st s).phase = .parked dead c k) (hl : (w.st s).life = .alive) (hs : s ∈ ids) :
+    (((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .idle) ∨
+      ∃ k', ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .run k' := by
+  induction ids generalizing w with
+  | nil => cases hs
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    cases hs with
+    | head =>
+      exact failFold_shape (failWaiter w dead s) dead s ids (failWaiter_shape w dead s c k hph hl)
+    | tail _ hmem =>
+      by_cases heq : i = s
+      · subst heq
+        exact failFold_shape (failWaiter w dead i) dead i ids (failWaiter_shape w dead i c k hph hl)
+      · have hst := failWaiter_other w dead i s (fun h => heq h.symm)
+        exact ih (failWaiter w dead i) (by rw [hst]; exact hph) (by rw [hst]; exact hl) hmem
+
+theorem killOne_drops_shape (w : World) (D : Description) (dst s : InstId) (c : Bool) (k : Cont)
+    (hne : s ≠ dst) (hs : s ∈ w.roster) (hl : (w.st s).life = .alive)
+    (hph : (w.st s).phase = .parked dst c k) :
+    (((killOne w D dst).st s).phase = .idle) ∨ ∃ k', ((killOne w D dst).st s).phase = .run k' := by
+  let w1 := readCells D w dst
+  have hst1 : w1.st s = w.st s := cellsSt D w dst s
+  have hr1 : w1.roster = w.roster := cellsRoster D w dst
+  let w2 := refundMsgs w1 (tname dst) (w.st dst).box
+  have h2 := refundMsgs_rest w1 (tname dst) (w.st dst).box s
+  have hr2 : w2.roster = w1.roster := refundMsgs_roster w1 (tname dst) (w.st dst).box
+  let w3 := refundParked w2 (tname dst) (w.st dst).parked
+  have h3 := refundParked_rest w2 (tname dst) (w.st dst).parked s
+  have hr3 : w3.roster = w2.roster := refundParked_roster w2 (tname dst) (w.st dst).parked
+  have hph3 : (w3.st s).phase = .parked dst c k := by
+    rw [h3.1, h2.1, congrArg (·.phase) hst1, hph]
+  have hl3 : (w3.st s).life = .alive := by
+    rw [h3.2.1, h2.2.1, congrArg (·.life) hst1, hl]
+  have hs3 : s ∈ w3.roster := by rw [hr3, hr2, hr1]; exact hs
+  have hfold : (((failWaiters w3 dst).st s).phase = .idle) ∨
+      ∃ k', ((failWaiters w3 dst).st s).phase = .run k' := by
+    simpa [failWaiters] using failFold_resumes w3 dst s w3.roster c k hph3 hl3 hs3
+  let w4 := failWaiters w3 dst
+  let w5 := forgetSender w4 dst
+  have h5 := forgetFold_mail w4 dst s w4.roster
+  have hbody : killOne w D dst =
+      setActor w5 dst { w5.st dst with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody, setActor_other _ _ _ _ hne]
+  rcases hfold with hidle | ⟨k', hrun⟩
+  · have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+    exact Or.inl (by rw [h5p]; simpa [w4] using hidle)
+  · have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+    exact Or.inr ⟨k', by rw [h5p]; simpa [w4] using hrun⟩
+
+/-- A sender parked on a member that this fold kills is afterwards idle or running. -/
+theorem killFold_resumed (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s dst : InstId) (c : Bool) (k : Cont) (hs : s ∈ w.roster)
+    (h : ((w.st s).phase = .parked dst c k ∧ dst ∈ ids ∧ (w.st dst).life = .alive ∧
+          isMember D dst sub key = true ∧ (w.st s).life = .alive) ∨
+        (((w.st s).phase = .idle) ∨ ∃ k', (w.st s).phase = .run k')) :
+    (((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+      .idle) ∨
+      ∃ k', ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+        .run k' := by
+  induction ids generalizing w with
+  | nil =>
+    rcases h with ⟨_, hmem, _, _, _⟩ | hshape
+    · cases hmem
+    · simpa using hshape
+  | cons j ids ih =>
+    simp only [List.foldl_cons]
+    rcases h with ⟨hph, hmem, hl, hm, hls⟩ | hshape
+    · cases hmem with
+      | head =>
+        have hcond : (isMember D dst sub key && (w.st dst).life == .alive) = true := by simp [hm, hl]
+        simp only [hcond, ite_true]
+        by_cases hsd : s = dst
+        · have hshape : (((killOne w D dst).st s).phase = .idle) ∨
+              ∃ k', ((killOne w D dst).st s).phase = .run k' := by
+            rw [hsd]
+            exact Or.inl (killOne_self w D dst).2.1
+          exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hshape)
+        · exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs)
+            (Or.inr (killOne_drops_shape w D dst s c k hsd hs hls hph))
+      | tail _ hmem' =>
+        by_cases hjd : j = dst
+        · rw [hjd]
+          have hcond : (isMember D dst sub key && (w.st dst).life == .alive) = true := by simp [hm, hl]
+          simp only [hcond, ite_true]
+          by_cases hsd : s = dst
+          · have hshape : (((killOne w D dst).st s).phase = .idle) ∨
+                ∃ k', ((killOne w D dst).st s).phase = .run k' := by
+              rw [hsd]
+              exact Or.inl (killOne_self w D dst).2.1
+            exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hshape)
+          · exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs)
+              (Or.inr (killOne_drops_shape w D dst s c k hsd hs hls hph))
+        · by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+          · simp only [hcond, ite_true]
+            by_cases hsj : s = j
+            · have hshape : (((killOne w D j).st s).phase = .idle) ∨
+                  ∃ k', ((killOne w D j).st s).phase = .run k' := by
+                rw [hsj]
+                exact Or.inl (killOne_self w D j).2.1
+              exact ih (killOne w D j) (by rw [killOne_roster]; exact hs) (Or.inr hshape)
+            · have hneDst : dst ≠ j := fun h => hjd h.symm
+              have hsp := killOne_spares w D j s dst c k hsj hneDst hph
+              have hl' : ((killOne w D j).st dst).life = .alive :=
+                ((killOne_other_rest w D j dst hneDst).2.2).trans hl
+              have hls' : ((killOne w D j).st s).life = .alive :=
+                ((killOne_other_rest w D j s hsj).2.2).trans hls
+              exact ih (killOne w D j) (by rw [killOne_roster]; exact hs)
+                (Or.inl ⟨by rw [hsp]; exact hph, hmem', hl', hm, hls'⟩)
+          · have hf : (isMember D j sub key && (w.st j).life == .alive) = false := by
+              cases hb : isMember D j sub key && (w.st j).life == .alive with
+              | false => rfl
+              | true => exact absurd hb hcond
+            simp only [hf, ite_false]
+            exact ih w hs (Or.inl ⟨hph, hmem', hl, hm, hls⟩)
+    · by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+      · simp only [hcond, ite_true]
+        exact ih (killOne w D j) (by rw [killOne_roster]; exact hs)
+          (Or.inr (killOne_shape w D j s hshape))
+      · have hf : (isMember D j sub key && (w.st j).life == .alive) = false := by
+          cases hb : isMember D j sub key && (w.st j).life == .alive with
+          | false => rfl
+          | true => exact absurd hb hcond
+        simp only [hf, ite_false]
+        exact ih w hs (Or.inr hshape)
+
+theorem failWaiter_await_idle (w : World) (dead s : InstId) (k : Cont)
+    (hph : (w.st s).phase = .awaitReply dead k) (hl : (w.st s).life = .alive) :
+    ((failWaiter w dead s).st s).phase = .idle := by
+  unfold failWaiter
+  have hlive : ((w.st s).life != .alive) = false := by simp [hl, bne]
+  simp [hlive, hph, setActor]
+
+theorem failFold_await_idle (w : World) (dead s : InstId) (ids : List InstId)
+    (h : (w.st s).phase = .idle) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .idle := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    exact ih (failWaiter w dead i)
+      ((failWaiter_holds w dead i s (by simp [holdsPhase, h])).1.trans h)
+
+theorem failFold_drops_await (w : World) (dead s : InstId) (ids : List InstId) (k : Cont)
+    (hph : (w.st s).phase = .awaitReply dead k) (hl : (w.st s).life = .alive) (hs : s ∈ ids) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .idle := by
+  induction ids generalizing w with
+  | nil => cases hs
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    cases hs with
+    | head =>
+      exact failFold_await_idle (failWaiter w dead s) dead s ids
+        (failWaiter_await_idle w dead s k hph hl)
+    | tail _ hmem =>
+      by_cases heq : i = s
+      · subst heq
+        exact failFold_await_idle (failWaiter w dead i) dead i ids
+          (failWaiter_await_idle w dead i k hph hl)
+      · have hst := failWaiter_other w dead i s (fun h => heq h.symm)
+        exact ih (failWaiter w dead i) (by rw [hst]; exact hph) (by rw [hst]; exact hl) hmem
+
+theorem failFold_keeps_await (w : World) (dead s dst : InstId) (ids : List InstId) (k : Cont)
+    (hdst : dst ≠ dead) (hph : (w.st s).phase = .awaitReply dst k) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = (w.st s).phase := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have hstep : ((failWaiter w dead i).st s).phase = (w.st s).phase := by
+      by_cases hsi : s = i
+      · rw [hsi] at hph ⊢
+        unfold failWaiter
+        split
+        · rfl
+        · simp only [hph]
+          have hne' : (dst == dead) = false := by simpa [beq_iff_eq] using hdst
+          simp [hne']
+          exact hph
+      · exact congrArg (·.phase) (failWaiter_other w dead i s hsi)
+    exact (ih (failWaiter w dead i) (by rw [hstep]; exact hph)).trans hstep
+
+theorem killFold_await_idle (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s dst : InstId) (k : Cont) (hs : s ∈ w.roster)
+    (h : ((w.st s).phase = .awaitReply dst k ∧ dst ∈ ids ∧ (w.st dst).life = .alive ∧
+          isMember D dst sub key = true ∧ (w.st s).life = .alive) ∨
+        (w.st s).phase = .idle) :
+    ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+      .idle := by
+  induction ids generalizing w with
+  | nil =>
+    rcases h with ⟨_, hmem, _, _, _⟩ | hidle
+    · cases hmem
+    · simpa using hidle
+  | cons j ids ih =>
+    simp only [List.foldl_cons]
+    rcases h with ⟨hph, hmem, hl, hm, hls⟩ | hidle
+    · cases hmem with
+      | head =>
+        have hcond : (isMember D dst sub key && (w.st dst).life == .alive) = true := by simp [hm, hl]
+        simp only [hcond, ite_true]
+        by_cases hsd : s = dst
+        · have hidle : ((killOne w D dst).st s).phase = .idle := by
+            rw [hsd]; exact (killOne_self w D dst).2.1
+          exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hidle)
+        · -- Killing `dst` fails the awaiter to idle. The chain is the await analogue of
+          -- `killOne_drops_shape`.
+          have hidle : ((killOne w D dst).st s).phase = .idle := by
+            let w1 := readCells D w dst
+            have hst1 : w1.st s = w.st s := cellsSt D w dst s
+            have hr1 : w1.roster = w.roster := cellsRoster D w dst
+            let w2 := refundMsgs w1 (tname dst) (w.st dst).box
+            have h2 := refundMsgs_rest w1 (tname dst) (w.st dst).box s
+            have hr2 : w2.roster = w1.roster := refundMsgs_roster w1 (tname dst) (w.st dst).box
+            let w3 := refundParked w2 (tname dst) (w.st dst).parked
+            have h3 := refundParked_rest w2 (tname dst) (w.st dst).parked s
+            have hr3 : w3.roster = w2.roster := refundParked_roster w2 (tname dst) (w.st dst).parked
+            have hph3 : (w3.st s).phase = .awaitReply dst k := by
+              rw [h3.1, h2.1, congrArg (·.phase) hst1, hph]
+            have hl3 : (w3.st s).life = .alive := by
+              rw [h3.2.1, h2.2.1, congrArg (·.life) hst1, hls]
+            have hs3 : s ∈ w3.roster := by rw [hr3, hr2, hr1]; exact hs
+            have hfold := failFold_drops_await w3 dst s w3.roster k hph3 hl3 hs3
+            let w4 := failWaiters w3 dst
+            let w5 := forgetSender w4 dst
+            have h5 := forgetFold_mail w4 dst s w4.roster
+            have hbody : killOne w D dst =
+                setActor w5 dst
+                  { w5.st dst with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+              simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+            rw [hbody, setActor_other _ _ _ _ hsd]
+            have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+            rw [h5p]
+            simpa [w4, failWaiters] using hfold
+          exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hidle)
+      | tail _ hmem' =>
+        by_cases hjd : j = dst
+        · rw [hjd]
+          have hcond : (isMember D dst sub key && (w.st dst).life == .alive) = true := by simp [hm, hl]
+          simp only [hcond, ite_true]
+          by_cases hsd : s = dst
+          · have hidle : ((killOne w D dst).st s).phase = .idle := by
+              rw [hsd]; exact (killOne_self w D dst).2.1
+            exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hidle)
+          · have hidle : ((killOne w D dst).st s).phase = .idle := by
+              let w1 := readCells D w dst
+              have hst1 : w1.st s = w.st s := cellsSt D w dst s
+              have hr1 : w1.roster = w.roster := cellsRoster D w dst
+              let w2 := refundMsgs w1 (tname dst) (w.st dst).box
+              have h2 := refundMsgs_rest w1 (tname dst) (w.st dst).box s
+              have hr2 : w2.roster = w1.roster := refundMsgs_roster w1 (tname dst) (w.st dst).box
+              let w3 := refundParked w2 (tname dst) (w.st dst).parked
+              have h3 := refundParked_rest w2 (tname dst) (w.st dst).parked s
+              have hr3 : w3.roster = w2.roster := refundParked_roster w2 (tname dst) (w.st dst).parked
+              have hph3 : (w3.st s).phase = .awaitReply dst k := by
+                rw [h3.1, h2.1, congrArg (·.phase) hst1, hph]
+              have hl3 : (w3.st s).life = .alive := by
+                rw [h3.2.1, h2.2.1, congrArg (·.life) hst1, hls]
+              have hs3 : s ∈ w3.roster := by rw [hr3, hr2, hr1]; exact hs
+              have hfold := failFold_drops_await w3 dst s w3.roster k hph3 hl3 hs3
+              let w4 := failWaiters w3 dst
+              let w5 := forgetSender w4 dst
+              have h5 := forgetFold_mail w4 dst s w4.roster
+              have hbody : killOne w D dst =
+                  setActor w5 dst
+                    { w5.st dst with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+                simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+              rw [hbody, setActor_other _ _ _ _ hsd]
+              have h5p : (w5.st s).phase = (w4.st s).phase := by simpa [w5, forgetSender] using h5.2.2.1
+              rw [h5p]
+              simpa [w4, failWaiters] using hfold
+            exact ih (killOne w D dst) (by rw [killOne_roster]; exact hs) (Or.inr hidle)
+        · by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+          · simp only [hcond, ite_true]
+            by_cases hsj : s = j
+            · have hidle : ((killOne w D j).st s).phase = .idle := by
+                rw [hsj]; exact (killOne_self w D j).2.1
+              exact ih (killOne w D j) (by rw [killOne_roster]; exact hs) (Or.inr hidle)
+            · have hneDst : dst ≠ j := fun h => hjd h.symm
+              have hst : ((killOne w D j).st s).phase = (w.st s).phase := by
+                -- `s` awaits `dst`, not `j`, so this kill does not rewrite `s`.
+                let w1 := readCells D w j
+                have hst1 : w1.st s = w.st s := cellsSt D w j s
+                let w2 := refundMsgs w1 (tname j) (w.st j).box
+                have h2 := refundMsgs_rest w1 (tname j) (w.st j).box s
+                let w3 := refundParked w2 (tname j) (w.st j).parked
+                have h3 := refundParked_rest w2 (tname j) (w.st j).parked s
+                have hph3 : (w3.st s).phase = .awaitReply dst k := by
+                  rw [h3.1, h2.1, congrArg (·.phase) hst1, hph]
+                have h4 : ((failWaiters w3 j).st s).phase = (w3.st s).phase := by
+                  simpa [failWaiters] using failFold_keeps_await w3 j s dst w3.roster k hneDst hph3
+                let w4 := failWaiters w3 j
+                let w5 := forgetSender w4 j
+                have h5 := forgetFold_mail w4 j s w4.roster
+                have hbody : killOne w D j =
+                    setActor w5 j
+                      { w5.st j with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+                  simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+                rw [hbody, setActor_other _ _ _ _ hsj]
+                have h5p : (w5.st s).phase = (w4.st s).phase := by
+                  simpa [w5, forgetSender] using h5.2.2.1
+                have h4s : (w4.st s).phase = (w3.st s).phase := by simpa [w4] using h4
+                exact h5p.trans (h4s.trans (hph3.trans hph.symm))
+              have hl' : ((killOne w D j).st dst).life = .alive :=
+                ((killOne_other_rest w D j dst hneDst).2.2).trans hl
+              have hls' : ((killOne w D j).st s).life = .alive :=
+                ((killOne_other_rest w D j s hsj).2.2).trans hls
+              exact ih (killOne w D j) (by rw [killOne_roster]; exact hs)
+                (Or.inl ⟨by rw [hst]; exact hph, hmem', hl', hm, hls'⟩)
+          · have hf : (isMember D j sub key && (w.st j).life == .alive) = false := by
+              cases hb : isMember D j sub key && (w.st j).life == .alive with
+              | false => rfl
+              | true => exact absurd hb hcond
+            simp only [hf, ite_false]
+            exact ih w hs (Or.inl ⟨hph, hmem', hl, hm, hls⟩)
+    · by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+      · simp only [hcond, ite_true]
+        by_cases hsj : s = j
+        · have hidle' : ((killOne w D j).st s).phase = .idle := by
+            rw [hsj]; exact (killOne_self w D j).2.1
+          exact ih (killOne w D j) (by rw [killOne_roster]; exact hs) (Or.inr hidle')
+        · exact ih (killOne w D j) (by rw [killOne_roster]; exact hs)
+            (Or.inr ((killOne_holds w D j s hsj (by simp [holdsPhase, hidle])).1.trans hidle))
+      · have hf : (isMember D j sub key && (w.st j).life == .alive) = false := by
+          cases hb : isMember D j sub key && (w.st j).life == .alive with
+          | false => rfl
+          | true => exact absurd hb hcond
+        simp only [hf, ite_false]
+        exact ih w hs (Or.inr hidle)
+
+theorem killSubtree_await_idle (w : World) (D : Description) (sub : String) (key : Nat)
+    (s dst : InstId) (k : Cont) (hs : s ∈ w.roster)
+    (hph : (w.st s).phase = .awaitReply dst k) (hls : (w.st s).life = .alive)
+    (hl : (w.st dst).life = .alive) (hm : isMember D dst sub key = true) (hdst : dst ∈ w.roster) :
+    ((killSubtree w D sub key).st s).phase = .idle := by
+  simpa [killSubtree, killMembers, plant_st] using
+    killFold_await_idle w D sub key w.roster s dst k hs (Or.inl ⟨hph, hdst, hl, hm, hls⟩)
+
+theorem killSubtree_resumed (w : World) (D : Description) (sub : String) (key : Nat)
+    (s dst : InstId) (c : Bool) (k : Cont) (hs : s ∈ w.roster)
+    (hph : (w.st s).phase = .parked dst c k) (hls : (w.st s).life = .alive)
+    (hl : (w.st dst).life = .alive) (hm : isMember D dst sub key = true) (hdst : dst ∈ w.roster) :
+    (((killSubtree w D sub key).st s).phase = .idle) ∨
+      ∃ k', ((killSubtree w D sub key).st s).phase = .run k' := by
+  simpa [killSubtree, killMembers, plant_st] using
+    killFold_resumed w D sub key w.roster s dst c k hs (Or.inl ⟨hph, hdst, hl, hm, hls⟩)
 
 end Deadlock
