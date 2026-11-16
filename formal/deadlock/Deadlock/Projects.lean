@@ -336,34 +336,7 @@ theorem exec_ty (I : Impl) (w : World) (id : InstId) (k : Cont) (hT : TyOk I.des
       | some dst =>
         simp [execRun, hk, hr]
         split
-        · next hcond =>
-          apply tyOk_id
-          · apply tyOk_id
-            · apply tyOk_id
-              · exact hT
-              · simp [chargeSender, bumpToken]
-              · simp [chargeSender, bumpToken]
-            · rfl
-            · rfl
-          · by_cases hsame : id = dst
-            · cases es with
-              | nil =>
-                simp [hsame, proceed, hk, afterHead, setActor, chargeSender, bumpToken]
-                rw [hsame] at hty
-                exact hty.symm
-              | cons _ _ => simp [hsame, proceed, hk, afterHead, setActor, chargeSender, bumpToken, hty]
-            · have hflip : dst ≠ id := Ne.symm hsame
-              cases es with
-              | nil => simp [hsame, hflip, proceed, hk, afterHead, setActor, chargeSender, bumpToken, hty]
-              | cons _ _ => simp [hsame, hflip, proceed, hk, afterHead, setActor, chargeSender, bumpToken, hty]
-          · by_cases hsame : id = dst
-            · cases es with
-              | nil => simp [hsame, proceed, hk, afterHead, setActor, chargeSender, bumpToken]
-              | cons _ _ => simp [hsame, proceed, hk, afterHead, setActor, chargeSender, bumpToken]
-            · have hflip : dst ≠ id := Ne.symm hsame
-              cases es with
-              | nil => simp [hsame, hflip, proceed, hk, afterHead, setActor, chargeSender, bumpToken]
-              | cons _ _ => simp [hsame, hflip, proceed, hk, afterHead, setActor, chargeSender, bumpToken]
+        · exact enqueue_ty I.desc w id dst _ false (afterHead k) hT (by simp [afterHead, hty])
         · exact tyOk_proceed I.desc w id (afterHead k) hT (by simp [afterHead, hty])
     | reply =>
       simp [execRun, hk]
@@ -487,7 +460,7 @@ theorem receive_prio_ty (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := (w.st id).box, prio := ms,
-          parked := (w.st id).parked, tokens := (w.st id).tokens }
+          parked := (w.st id).parked, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hmem := deliver_ty_mem I hL w id a0 m w1 a1 hT hready.1.symm rfl rfl hd
         exact tyOk_new I.desc w1 id a1 (tyOk_st I.desc w w1 hT (fun i => deliver_st I w id a0 m w1 a1 i hd))
           (fun _ => hmem.1)
@@ -518,7 +491,7 @@ theorem receive_bulk_ty (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := [], prio := (w.st id).prio,
-          parked := ps, tokens := (w.st id).tokens }
+          parked := ps, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hT1 := install_ty I hL w id a0 p.msg w1 a1 hT hready.1.symm rfl rfl hd
         have hT2 := tyOk_credit I.desc _ (tname id) p.msg.sender hT1
         have hfree : notParked (w.st id).phase := by simp [hready.2, notParked]
@@ -543,7 +516,7 @@ theorem receive_bulk_ty (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := ms, prio := (w.st id).prio,
-          parked := [], tokens := (w.st id).tokens }
+          parked := [], tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         exact tyOk_credit I.desc _ (tname id) m.sender
           (install_ty I hL w id a0 m w1 a1 hT hready.1.symm rfl rfl hd)
     | cons p ps =>
@@ -554,7 +527,7 @@ theorem receive_bulk_ty (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (w
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := ms, prio := (w.st id).prio,
-          parked := p :: ps, tokens := (w.st id).tokens }
+          parked := p :: ps, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
         have hmem := deliver_ty_mem I hL w id a0 m w1 a1 hT hready.1.symm rfl rfl hd
         have hT2 := tyOk_new I.desc w1 id admitted
@@ -839,7 +812,9 @@ theorem exec_ix (I : Impl) (w : World) (id : InstId) (k : Cont) (name : String) 
       | none => simp [execRun, hk, hr, setActor]
       | some dst =>
         simp [execRun, hk, hr]
-        split <;> simp [setActor]
+        split
+        · simp [enqueue_ix]
+        · simp [setActor]
     | reply => simp [execRun, hk, perform_ix]
     | selfSchedule _ =>
       simp [execRun, hk]

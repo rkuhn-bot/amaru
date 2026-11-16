@@ -282,16 +282,7 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
       · simp [setActor_other, hs, hp]
       · rename_i dstId _
         split
-        · by_cases hc : s = dstId
-          · by_cases hi : dstId = id
-            · exact (hs (hc.trans hi)).elim
-            · subst hc
-              rw [setActor_other _ id s _ hi]
-              simp [setActor_self, setActor_other, hi, hp]
-          · rw [setActor_other _ id s _ hs]
-            rw [setActor_other _ dstId s _ hc]
-            rw [setActor_other _ id s _ hs]
-            exact hp
+        · exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
         · simp [setActor_other, hs, hp]
     | call dst label hint =>
       simp

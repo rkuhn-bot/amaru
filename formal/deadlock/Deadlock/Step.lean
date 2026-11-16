@@ -190,42 +190,12 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
   | some dstId =>
     simp [hr]
     split
-    · -- Room: charge, append to the box, then continue. The sender is running, so it is not parked.
-      rename_i hroom
-      have hch := charge_ok (w.st id) (tname dstId)
-      have hcontC : contTy (chargeSender (w.st id) (tname dstId)) := by
-        simpa [chargeSender, bumpToken, contTy] using hS.cont id
-      have hprogC : programOk I.desc id (chargeSender (w.st id) (tname dstId)) := by
-        simpa [chargeSender, bumpToken, programOk] using hS.prog id
-      have hwaitC : waitEdge I.desc id (chargeSender (w.st id) (tname dstId)) := by
-        simpa [chargeSender, bumpToken, waitEdge] using hS.waited id
-      have hS1 := sem_set I w id (chargeSender (w.st id) (tname dstId)) hS hch.1 hch.2.1 hcontC hprogC hwaitC
-      have hM1 := mail_set_same w id (chargeSender (w.st id) (tname dstId)) hM (charge_phase _ _) (charge_parked _ _)
-      let w1 := setActor w id (chargeSender (w.st id) (tname dstId))
-      let stored : Actor := { (w1.st dstId) with box := (w1.st dstId).box ++ [{ label := l, sender := id, callFrom := none }] }
-      have hS2 := sem_set I w1 dstId stored hS1 rfl rfl
-        (by simpa [stored, contTy] using hS1.cont dstId)
-        (by simpa [stored, programOk] using hS1.prog dstId)
-        (by simpa [stored, waitEdge] using hS1.waited dstId)
-      have hM2 := mail_set_same w1 dstId stored hM1 rfl rfl
-      let w2 := setActor w1 dstId stored
-      have hty2 : (w2.st id).typestate = k.toState := by
-        by_cases hs : id = dstId
-        · subst hs
-          simp [w2, w1, stored, setActor, hch.1, hty]
-        · simp [w2, w1, stored, setActor, hs, hch.1, hty]
-      have htail2 : effectsOk I.desc (tname id) (w2.st id).typestate es = true := by
-        rw [hty2]
-        simpa [hty] using htail
-      have hp := proceed_ok I.desc id (w2.st id) (afterHead { k with rest := .trySend d l n :: es })
-        (by simp [afterHead, hty2]) (by simpa [afterHead] using htail2)
-      have hfree2 : notParked (w2.st id).phase := by
-        by_cases hs : id = dstId
-        · subst hs
-          simp [w2, w1, stored, setActor, charge_phase, notParked, hphase]
-        · simp [w2, w1, stored, setActor, hs, charge_phase, notParked, hphase]
-      refine ⟨sem_set I w2 id _ hS2 hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2,
-        mail_set_free w2 id _ hM2 hfree2 (proceed_not_parked _ _) (proceed_parked _ _)⟩
+    · rename_i hroom
+      let msg : Msg := { label := l, sender := id, callFrom := none, reliable := false }
+      let k' := afterHead { k with rest := .trySend d l n :: es }
+      refine ⟨try_room_sem I w id dstId msg k' hS (by simp [k', afterHead, hty])
+          (by simpa [k', afterHead] using htail) hroom.1.1 hroom.1.2 hroom.2,
+        enqueue_mail w I.desc id dstId msg false k' hM hfree⟩
     · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2, ?_⟩
@@ -248,11 +218,16 @@ theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : 
       mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)⟩
   · split
     · let bumped : Actor :=
-        { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } }
+        { (w.st id) with
+          prio := upsertPrio (w.st id).prio
+            { label := label, sender := id, callFrom := none, reliable := true,
+              mid := (w.st id).nextMid },
+          nextMid := (w.st id).nextMid + 1 }
       have hp := proceed_ok I.desc id bumped (afterHead { k with rest := .selfSchedule label :: es })
         (by simp [bumped, afterHead, hty]) (by simpa [bumped, afterHead] using htail)
-      refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2,
-        mail_set_free w id _ hM hfree (proceed_not_parked _ _) (by simp [proceed_parked, bumped])⟩
+      refine ⟨sem_set I w id (proceed bumped _) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2,
+        mail_set_free w id (proceed bumped _) hM hfree (proceed_not_parked _ _)
+          (by simp [proceed_parked, bumped])⟩
     · refine ⟨sem_set I w id { (w.st id) with phase := .crashed } hS rfl rfl
         (by simp [contTy]) (by simp [programOk]) (by simp [waitEdge]),
         mail_set_free w id { (w.st id) with phase := .crashed } hM hfree (by simp [notParked]) rfl⟩
@@ -968,7 +943,7 @@ theorem receive_prio_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := (w.st id).box, prio := ms,
-          parked := (w.st id).parked, tokens := (w.st id).tokens }
+          parked := (w.st id).parked, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hdI := deliver_inv I hL w id a0 m w1 a1 hS halive.symm rfl rfl rfl hd
         have hMail := deliver_mail I hL w id a0 m w1 a1 hS hM halive.symm rfl rfl rfl hphase rfl hd
         exact ⟨hdI.sem, hMail⟩
@@ -1089,7 +1064,7 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := [], prio := (w.st id).prio,
-          parked := ps, tokens := (w.st id).tokens }
+          parked := ps, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hdI := deliver_inv I hL w id a0 p.msg w1 a1 hS halive.symm rfl rfl rfl hd
         simpa using resume_one I w w1 id a1 p ps p.msg.sender hdI.sem hM hdI.st hphase hpk hdI.parked hdI.free
   | cons m ms =>
@@ -1102,7 +1077,7 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := ms, prio := (w.st id).prio,
-          parked := [], tokens := (w.st id).tokens }
+          parked := [], tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hdI := deliver_inv I hL w id a0 m w1 a1 hS halive.symm rfl rfl rfl hd
         have hMail := deliver_mail I hL w id a0 m w1 a1 hS hM halive.symm rfl rfl rfl hphase (by simp [a0, hpk]) hd
         exact ⟨credit_sem I (setActor w1 id a1) (tname id) m.sender hdI.sem,
@@ -1115,7 +1090,7 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := ms, prio := (w.st id).prio,
-          parked := p :: ps, tokens := (w.st id).tokens }
+          parked := p :: ps, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hdI := deliver_inv I hL w id a0 m w1 a1 hS halive.symm rfl rfl rfl hd
         let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
         have hAd := sem_set I (setActor w1 id a1) id admitted hdI.sem
@@ -1718,20 +1693,7 @@ theorem exec_run_open (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : Open
       | some dst =>
         simp [execRun, hk, hr]
         split
-        · next hcond =>
-          by_cases hsame : dst = id
-          · rw [hsame]
-            have h1 := open_busy w id (chargeSender (w.st id) (tname id)) hO (busy_run id w k hph)
-            have hph1 : ((setActor w id (chargeSender (w.st id) (tname id))).st id).phase ≠ .idle := by
-              simp [setActor_self, chargeSender, bumpToken, hph]
-            exact open_busy _ id _ (open_busy _ id _ h1 hph1)
-              (by simp [setActor_self, chargeSender, bumpToken, hph])
-          · exact open_busy _ id _
-              (open_alive _ dst _
-                (open_busy w id _ hO (busy_run id w k hph))
-                (by rw [setActor_other _ id dst _ hsame]; exact hcond.1.1))
-              (by rw [setActor_other _ dst id _ (Ne.symm hsame), setActor_self, chargeSender, bumpToken, hph]
-                  intro hbad; cases hbad)
+        · exact enqueue_open w I.desc id dst _ false _ hO (busy_run id w k hph)
         · exact open_busy w id _ hO (busy_run id w k hph)
     | reply =>
       simp [execRun, hk, performReply]

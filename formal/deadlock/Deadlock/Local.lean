@@ -50,11 +50,15 @@ def hasTerminate : List Eff → Bool
   | .terminate :: _ => true
   | _ :: es => hasTerminate es
 
+/-- A terminable program must not leave a reliable message behind. `send`,
+`trySend`, and `call` are bulk; `selfSchedule` is a reliable priority message
+that `terminate` would clear. -/
 def noBulkSend : List Eff → Bool
   | [] => true
   | .send _ _ _ :: _ => false
   | .trySend _ _ _ :: _ => false
   | .call _ _ _ :: _ => false
+  | .selfSchedule _ :: _ => false
   | _ :: es => noBulkSend es
 
 def transitionOk (I : Impl) (tr : Transition) : Bool :=

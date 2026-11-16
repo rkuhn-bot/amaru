@@ -4,8 +4,9 @@ set_option autoImplicit false
 
 namespace Deadlock
 
-/-- A terminable actor's continuation does not bulk-send. This is narrower than
-Amaru: a per-peer stage can terminate and still have sent to a shared stage. -/
+/-- A terminable actor's continuation does not send, call, or self-schedule.
+This is narrower than Amaru: a per-peer stage can terminate and still have sent
+to a shared stage. -/
 def BulkFree (I : Impl) (w : World) : Prop :=
   ∀ id, terminableName I.desc (tname id) → noBulkSend (contRest (w.st id).phase) = true
 
@@ -301,7 +302,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
           | none => simp [hr, setActor, hi]
           | some dstId =>
             simp [hr]
-            exact Or.inr (enqueue_phase_other w I.desc id dstId ⟨label, id, none⟩ false
+            exact Or.inr (enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := none } false
               ⟨es, toState, replyTo⟩ i hi)
       | call dst label hint =>
         by_cases hi : i = id
@@ -313,7 +314,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
           | none => simp [hr, setActor, hi]
           | some dstId =>
             simp [hr]
-            exact Or.inr (enqueue_phase_other w I.desc id dstId ⟨label, id, some id⟩ true
+            exact Or.inr (enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
               ⟨es, toState, replyTo⟩ i hi)
       | trySend dst label hint =>
         by_cases hi : i = id
@@ -326,9 +327,9 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
           | some dstId =>
             simp [hr]
             split
-            · next hcond =>
-              simp [setActor, hi, chargeSender, bumpToken]
-              by_cases hsame : dstId = id <;> by_cases hid : i = dstId <;> simp [hsame, hid, hi]
+            · exact Or.inr (enqueue_phase_other w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false
+                ⟨es, toState, replyTo⟩ i hi)
             · simp [setActor, hi]
       | reply =>
         simp [execRun, hrest]

@@ -744,10 +744,10 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           simp [hr] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false
               (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) es hc
             exact Or.inl ⟨.send dst label hint :: tail, hold, Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
-          · have hsame := enqueue_phase_other w I.desc id dstId ⟨label, id, none⟩ false
+          · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := none } false
               (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | call dst label hint =>
@@ -765,10 +765,10 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           simp [hr] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true
               (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) es hc
             exact Or.inl ⟨.call dst label hint :: tail, hold, Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
-          · have hsame := enqueue_phase_other w I.desc id dstId ⟨label, id, some id⟩ true
+          · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
               (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | trySend dst label hint =>
@@ -787,22 +787,15 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           split at hc
           · by_cases hi : i = id
             · rw [hi] at hc ⊢
-              by_cases hdst : dstId = id
-              · simp [hdst, setActor] at hc
-                have heq := carried_proceed _ _ es hc
-                exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                  Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
-              · simp [hdst, setActor] at hc
-                have heq := carried_proceed _ _ es hc
-                exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                  Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
-            · by_cases hd : i = dstId
-              · have hne : dstId ≠ id := fun h => hi (hd.trans h)
-                have hswap : id ≠ dstId := fun h => hne h.symm
-                simp [setActor, hi, hd, hne, hswap] at hc
-                exact Or.inl ⟨es, by simpa [hd] using hc, Or.inl rfl⟩
-              · simp [setActor, hi, hd] at hc
-                exact Or.inl ⟨es, hc, Or.inl rfl⟩
+              have heq := enqueue_carried w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false
+                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) es hc
+              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
+                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+            · have hsame := enqueue_phase_other w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false
+                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i hi
+              exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
           · by_cases hi : i = id
             · rw [hi] at hc ⊢
               have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
@@ -1003,10 +996,10 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           exact after_shorter ⟨.send dst label hint :: tail, toState, replyTo⟩ k' _ (by simp [hrest]) h
         | some dstId =>
           simp [hr] at h
-          have hc : carried ((enqueueOrPark w I.desc id dstId ⟨label, id, none⟩ false
+          have hc : carried ((enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := none } false
               (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)).st id).phase = some k'.rest := by
             simp [carried, h]
-          have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false _ k'.rest hc
+          have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false _ k'.rest hc
           exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
       | call dst label hint =>
         simp [execRun, hrest] at h
@@ -1016,10 +1009,10 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           exact after_shorter ⟨.call dst label hint :: tail, toState, replyTo⟩ k' _ (by simp [hrest]) h
         | some dstId =>
           simp [hr] at h
-          have hc : carried ((enqueueOrPark w I.desc id dstId ⟨label, id, some id⟩ true
+          have hc : carried ((enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := some id } true
               (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)).st id).phase = some k'.rest := by
             simp [carried, h]
-          have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true _ k'.rest hc
+          have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true _ k'.rest hc
           exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
       | trySend dst label hint =>
         simp [execRun, hrest] at h
@@ -1030,9 +1023,14 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
         | some dstId =>
           simp [hr] at h
           split at h
-          · by_cases hdst : dstId = id <;> simp [hdst, setActor] at h
-            · exact after_shorter _ k' _ (by simp [hrest]) h
-            · exact after_shorter _ k' _ (by simp [hrest]) h
+          · have hc : carried ((enqueueOrPark w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false
+                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)).st id).phase =
+                some k'.rest := by
+              simp [carried, h]
+            have heq := enqueue_carried w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false _ k'.rest hc
+            exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
           · simp [setActor] at h
             exact after_shorter _ k' _ (by simp [hrest]) h
       | reply =>
@@ -1354,18 +1352,10 @@ theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : C
       | some dstId =>
         simp [hr]
         split
-        · by_cases hc : s = dstId
-          · by_cases hi : dstId = id
-            · exact absurd (hc.trans hi) hs
-            · rw [hc]
-              refine ⟨?_, ?_⟩
-              · rw [setActor_other _ id dstId _ hi]
-                simp [setActor, hi]
-              · rw [setActor_other _ id dstId _ hi]
-                simp [setActor, hi, chargeSender, bumpToken, proceed_life]
-          · refine ⟨?_, ?_⟩
-            · rw [setActor_other _ id s _ hs, setActor_other _ dstId s _ hc, setActor_other _ id s _ hs]
-            · rw [setActor_other _ id s _ hs, setActor_other _ dstId s _ hc, setActor_other _ id s _ hs]
+        · refine ⟨enqueue_phase_other w I.desc id dstId
+            { label := label, sender := id, callFrom := none, reliable := false } false _ s hs,
+            enqueue_life w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false _ s⟩
         · refine ⟨?_, ?_⟩ <;> simp [setActor_other, hs, proceed_life]
     | call dst label hint =>
       simp [execRun, hk]
@@ -1858,6 +1848,27 @@ theorem proceed_after_fuel (a : Actor) (k : Cont) (e : Eff) (tail : List Eff)
     phaseFuel (proceed a (afterHead k)).phase < 2 * (e :: tail).length := by
   cases htail : tail <;> simp [proceed, afterHead, phaseFuel, hrest, htail]
 
+/-- Every branch of an enqueue shortens the sender's program, including a park or a call wait. -/
+theorem enqueue_sender_fuel (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (e : Eff) (tail : List Eff) (hrest : k.rest = e :: tail) :
+    phaseFuel ((enqueueOrPark w D sender dst msg isCall (afterHead k)).st sender).phase <
+      2 * (e :: tail).length := by
+  unfold enqueueOrPark
+  by_cases hlive : (w.st dst).life = .alive
+  · simp [hlive]
+    by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · cases isCall <;> cases htail : tail <;>
+          simp [hsame, setActor, proceed, afterHead, phaseFuel, hrest, htail] <;> omega
+      · cases isCall <;> cases htail : tail <;>
+          simp [hsame, setActor, proceed, afterHead, phaseFuel, hrest, htail] <;> omega
+    · simp [hroom]
+      by_cases hsame : sender = dst <;> cases htail : tail <;>
+        simp [hsame, setActor, afterHead, phaseFuel, hrest, htail] <;> omega
+  · cases htail : tail <;>
+      simp [hlive, setActor, proceed, afterHead, phaseFuel, hrest, htail] <;> omega
+
 /-- One step of a nonempty program strictly lowers `phaseFuel`, including a crash or a killing terminate. -/
 theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id : InstId) (k : Cont)
@@ -1919,13 +1930,9 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
       | some dstId =>
         simp [hr]
         split
-        · by_cases hdst : dstId = id
-          · cases htail : tail with
-            | nil => simp [hdst, setActor, proceed, afterHead, phaseFuel, hrest, htail]
-            | cons _ _ => simp [hdst, setActor, proceed, afterHead, phaseFuel, hrest, htail]
-          · cases htail : tail with
-            | nil => simp [hdst, setActor, proceed, afterHead, phaseFuel, hrest, htail]
-            | cons _ _ => simp [hdst, setActor, proceed, afterHead, phaseFuel, hrest, htail]
+        · exact enqueue_sender_fuel w I.desc id dstId
+            { label := label, sender := id, callFrom := none, reliable := false } false k
+            (.trySend dst label hint) tail hrest
         · cases htail : tail with
           | nil => simp [setActor, proceed, afterHead, phaseFuel, hrest, htail]
           | cons _ _ => simp [setActor, proceed, afterHead, phaseFuel, hrest, htail]
@@ -1967,29 +1974,29 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
         exact proceed_after_fuel (w.st id) k (.send dst label hint) tail hrest
       | some dstId =>
         simp [hr]
-        let w' := enqueueOrPark w I.desc id dstId ⟨label, id, none⟩ false (afterHead k)
+        let w' := enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := none } false (afterHead k)
         have hbound : phaseFuel (w'.st id).phase ≤ 2 * tail.length + 1 := by
           cases hnow : (w'.st id).phase with
           | idle => simp [phaseFuel, hnow]
           | crashed => simp [phaseFuel, hnow]
           | run k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | parked _ _ k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | awaitReply _ k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | awaitEffect k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | awaitPeer k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
         simp [w'] at hbound
@@ -2002,29 +2009,29 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
         exact proceed_after_fuel (w.st id) k (.call dst label hint) tail hrest
       | some dstId =>
         simp [hr]
-        let w' := enqueueOrPark w I.desc id dstId ⟨label, id, some id⟩ true (afterHead k)
+        let w' := enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k)
         have hbound : phaseFuel (w'.st id).phase ≤ 2 * tail.length + 1 := by
           cases hnow : (w'.st id).phase with
           | idle => simp [phaseFuel, hnow]
           | crashed => simp [phaseFuel, hnow]
           | run k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | parked _ _ k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | awaitReply _ k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | awaitEffect k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
           | awaitPeer k' =>
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true (afterHead k) k'.rest
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k) k'.rest
               (by simp [w', carried, hnow])
             simp [phaseFuel, hnow, heq, afterHead, hrest]
         simp [w'] at hbound
@@ -2531,33 +2538,30 @@ theorem lane_tail (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (m :
   intro x hx
   exact hmem x (by simp [hp, hx])
 
-theorem lane_upsert (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (label : String)
-    (hsender : InstId) (hmem : label ∈ prioLabels I (tname id)) :
-    (laneLabels (upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none })).Nodup ∧
-      ∀ m ∈ upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none },
-        m.label ∈ prioLabels I (tname id) := by
-  by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
-  · have hsame : upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none } =
-        (w.st id).prio := by simp [upsertPrio, hany]
+theorem lane_upsert (I : Impl) (w : World) (hLane : LaneOk I w) (id : InstId) (m : Msg)
+    (hmem : m.label ∈ prioLabels I (tname id)) :
+    (laneLabels (upsertPrio (w.st id).prio m)).Nodup ∧
+      ∀ x ∈ upsertPrio (w.st id).prio m, x.label ∈ prioLabels I (tname id) := by
+  by_cases hany : ((w.st id).prio.any fun p => p.label == m.label) = true
+  · have hsame : upsertPrio (w.st id).prio m = (w.st id).prio := by simp [upsertPrio, hany]
     rw [hsame]
     exact hLane id
-  · have hfalse : ((w.st id).prio.any fun p => p.label == label) = false := by
-      cases hbit : (w.st id).prio.any fun p => p.label == label <;> simp_all
+  · have hfalse : ((w.st id).prio.any fun p => p.label == m.label) = false := by
+      cases hbit : ((w.st id).prio.any fun p => p.label == m.label) <;> simp_all
     have hnot := any_label_false _ _ hfalse
-    have hlabels : laneLabels (upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none }) =
-        laneLabels ((w.st id).prio) ++ [label] := by
+    have hlabels : laneLabels (upsertPrio (w.st id).prio m) =
+        laneLabels ((w.st id).prio) ++ [m.label] := by
       simp [upsertPrio, hfalse, laneLabels]
     refine ⟨?_, ?_⟩
     · rw [hlabels]
       exact nodup_snoc (hLane id).1 hnot
-    · intro m hm
-      have hgrown : upsertPrio (w.st id).prio { label := label, sender := hsender, callFrom := none } =
-          (w.st id).prio ++ [{ label := label, sender := hsender, callFrom := none }] := by
+    · intro x hx
+      have hgrown : upsertPrio (w.st id).prio m = (w.st id).prio ++ [m] := by
         simp [upsertPrio, hfalse]
-      rw [hgrown] at hm
-      simp [List.mem_append] at hm
-      cases hm with
-      | inl hold => exact (hLane id).2 m hold
+      rw [hgrown] at hx
+      simp [List.mem_append] at hx
+      cases hx with
+      | inl hold => exact (hLane id).2 x hold
       | inr hnew =>
         cases hnew
         exact hmem
@@ -2642,11 +2646,11 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           simp [hr] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, none⟩ false
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false
               (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) es hc
             exact Or.inl ⟨.send dst label hint :: tail, hold,
               Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
-          · have hsame := enqueue_phase_other w I.desc id dstId ⟨label, id, none⟩ false
+          · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := none } false
               (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | call dst label hint =>
@@ -2664,11 +2668,11 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           simp [hr] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
-            have heq := enqueue_carried w I.desc id dstId ⟨label, id, some id⟩ true
+            have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true
               (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) es hc
             exact Or.inl ⟨.call dst label hint :: tail, hold,
               Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
-          · have hsame := enqueue_phase_other w I.desc id dstId ⟨label, id, some id⟩ true
+          · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
               (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | trySend dst label hint =>
@@ -2687,22 +2691,15 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           split at hc
           · by_cases hi : i = id
             · rw [hi] at hc ⊢
-              by_cases hdst : dstId = id
-              · simp [hdst, setActor] at hc
-                have heq := carried_proceed _ _ es hc
-                exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                  Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
-              · simp [hdst, setActor] at hc
-                have heq := carried_proceed _ _ es hc
-                exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                  Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
-            · by_cases hd : i = dstId
-              · have hne : dstId ≠ id := fun h => hi (hd.trans h)
-                have hswap : id ≠ dstId := fun h => hne h.symm
-                simp [setActor, hi, hd, hne, hswap] at hc
-                exact Or.inl ⟨es, by simpa [hd] using hc, Or.inl rfl⟩
-              · simp [setActor, hi, hd] at hc
-                exact Or.inl ⟨es, hc, Or.inl rfl⟩
+              have heq := enqueue_carried w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false
+                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) es hc
+              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
+                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+            · have hsame := enqueue_phase_other w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false
+                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i hi
+              exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
           · by_cases hi : i = id
             · rw [hi] at hc ⊢
               have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
@@ -3044,11 +3041,14 @@ theorem try_wake_lane (I : Impl) (w : World) (hLane : LaneOk I w) (dstId : InstI
   by_cases hif : (((w.st dstId).life == .alive) &&
       decide ((w.st dstId).prio.length < capPrio I.desc w.N dstId) &&
       !((w.st dstId).prio.any fun p => p.label == label)) = true
-  · let grown := upsertPrio (w.st dstId).prio { label := label, sender := writer, callFrom := none }
-    let a : Actor := { (w.st dstId) with prio := grown }
-    have hup := lane_upsert I w hLane dstId label writer hmem
+  · let wake : Msg :=
+      { label := label, sender := writer, callFrom := none, reliable := false,
+        mid := (w.st dstId).nextMid }
+    let grown := upsertPrio (w.st dstId).prio wake
+    let a : Actor := { (w.st dstId) with prio := grown, nextMid := (w.st dstId).nextMid + 1 }
+    have hup := lane_upsert I w hLane dstId wake (by simpa [wake] using hmem)
     have hstep : tryWake I.desc w dstId label writer = setActor w dstId a := by
-      simp [tryWake, hif, a, grown]
+      simp [tryWake, hif, a, grown, wake]
     rw [hstep]
     exact lane_set I w hLane dstId a hup
   · simp [tryWake, hif]
@@ -3149,14 +3149,17 @@ theorem lane_schedule (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : Wor
   obtain ⟨t, ht⟩ := src_template I hL w hS id _ hc
   cases hany : ((w.st id).prio.any fun p => p.label == label)
   · have hlt := lane_has_room I hL hG w.N w hLane id t ht label hdecl hany
-    let grown := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none }
-    let a := proceed { (w.st id) with prio := grown }
+    let msg : Msg :=
+      { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }
+    let grown := upsertPrio (w.st id).prio msg
+    let a := proceed
+      { (w.st id) with prio := grown, nextMid := (w.st id).nextMid + 1 }
       (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)
-    have hup := lane_upsert I w hLane id label id hdecl
+    have hup := lane_upsert I w hLane id msg (by simpa [msg] using hdecl)
     have hok : (laneLabels a.prio).Nodup ∧ ∀ m ∈ a.prio, m.label ∈ prioLabels I (tname id) := by
       simpa [a, proceed_prio] using hup
     have hstep : execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩ =
-        setActor w id a := by simp [execRun, hany, hlt, a, grown]
+        setActor w id a := by simp [execRun, hany, hlt, a, grown, msg]
     rw [hstep]
     exact lane_set I w hLane id a hok
   · simp [execRun, hany]
@@ -3434,17 +3437,10 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
           | none =>
             by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi]
           | some dstId =>
-            simp [hr, chargeSender, bumpToken, proceed_prio]
+            simp [hr]
             split
-            · by_cases hi : i = id
-              · by_cases hdi : dstId = id
-                · simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hdi]
-                · have hflip : ¬ id = dstId := fun h => hdi h.symm
-                  simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hflip]
-              · by_cases hd : i = dstId
-                · have hne : dstId ≠ id := fun h => hi (by simpa [h, hd] using rfl)
-                  simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hd, hne]
-                · simp [setActor, proceed_prio, chargeSender, bumpToken, hi, hd]
+            · exact enqueue_prio w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } false _ i
             · by_cases hi : i = id <;> simp [setActor, proceed_prio, hi])
       | reply =>
         exact lane_same I w _ hLane (fun i => by
@@ -3721,22 +3717,9 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
         | some dstId =>
           simp only [hr]
           split
-          · let k' := afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩
-            let charged := chargeSender (w.st id) (tname dstId)
-            have hch : charged.phase = (w.st id).phase := by simp [charged, chargeSender, bumpToken]
-            let w1 := setActor w id charged
-            have h1 : NoCrash w1 := by
-              intro j
-              by_cases hj : j = id
-              · rw [hj]
-                simpa [w1, setActor, hch] using hpre id
-              · simpa [w1, setActor, hj] using hpre j
-            let stored : Actor := { (w1.st dstId) with box := (w1.st dstId).box ++ [{ label := label, sender := id, callFrom := none }] }
-            have hstored : stored.phase = (w1.st dstId).phase := by simp [stored]
-            let w2 := setActor w1 dstId stored
-            have h2 : NoCrash w2 := set_not_crashed w1 h1 dstId stored (by simpa [hstored] using h1 dstId)
-            show ((setActor w2 id (proceed (w2.st id) k')).st i).phase ≠ .crashed
-            exact set_not_crashed w2 h2 id (proceed (w2.st id) k') (proceed_not_crashed _ _) i
+          · simpa using enqueue_not_crashed w hpre I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false
+              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i
           · simpa using set_not_crashed w hpre id (proceed (w.st id) (afterHead
               ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
       | reply =>
@@ -4408,15 +4391,15 @@ theorem enqueue_queue (w : World) (D : Description) (sender dst : InstId) (msg :
         by_cases hi : i = dst
         · rw [hi]
           simp [setActor, charge_parked]
-          exact Or.inr ⟨{ sender := dst, msg := msg, isCall := isCall }, rfl⟩
+          exact Or.inr ⟨{ sender := dst, msg := { msg with mid := (chargeSender (w.st dst) (tname dst)).nextMid }, isCall := isCall }, rfl⟩
         · simp [setActor, hi]
           exact Or.inl rfl
       · by_cases hi : i = dst
         · rw [if_neg hsame, hi]
           have hflip : ¬ dst = sender := fun h => hsame h.symm
-          simp [setActor, charge_parked]
+          simp [setActor, charge_parked, hsame]
           rw [if_neg hflip]
-          exact Or.inr ⟨{ sender := sender, msg := msg, isCall := isCall }, rfl⟩
+          exact Or.inr ⟨{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }, rfl⟩
         · by_cases his : i = sender
           · rw [his, if_neg hsame]
             simp [setActor, hi, charge_parked]
@@ -4590,7 +4573,7 @@ theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
         · simpa [hany] using queue_actor w id (proceed (w.st id)
             (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
         · by_cases hlt : (w.st id).prio.length < capPrio I.desc w.N id
-          · simpa [hany, hlt] using queue_actor w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_parked])
+          · simpa [hany, hlt] using queue_actor w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }, nextMid := (w.st id).nextMid + 1 } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_parked])
           · simpa [hany, hlt] using queue_actor w id { (w.st id) with phase := .crashed } mb rfl
       | trySend dst label hint =>
         simp only [execRun]
@@ -4601,23 +4584,9 @@ theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
         | some dstId =>
           simp only [hr]
           split
-          · by_cases hmb : mb = id
-            · rw [hmb]
-              by_cases hd : dstId = id
-              · rw [hd]
-                simp [setActor, chargeSender, bumpToken, proceed_parked]
-                exact Or.inl rfl
-              · have hflip : ¬ id = dstId := fun h => hd h.symm
-                simp [setActor, chargeSender, bumpToken, proceed_parked]
-                rw [if_neg hflip]
-                exact Or.inl rfl
-            · by_cases hd : mb = dstId
-              · rw [hd]
-                have hne : dstId ≠ id := fun h => hmb (hd.trans h)
-                simp [setActor, hne, chargeSender, bumpToken]
-                exact Or.inl rfl
-              · simp [setActor, hmb, hd]
-                exact Or.inl rfl
+          · simpa using enqueue_queue w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false
+              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb
           · exact queue_actor w id (proceed (w.st id)
               (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
       | reply =>
@@ -5018,6 +4987,12 @@ a call is not. -/
 def msgOk (I : Impl) (mb : InstId) (m : Msg) : Prop :=
   m.callFrom = none ∨ callSite I (tname mb) m.label
 
+theorem msgOk_mid (I : Impl) (mb : InstId) (msg : Msg) (n : Nat) (h : msgOk I mb msg) :
+    msgOk I mb { msg with mid := n } := by
+  rcases h with h | h
+  · exact Or.inl (by simpa using h)
+  · exact Or.inr (by simpa using h)
+
 /-- Every bulk message sitting in a mailbox is one `deliver` can take. -/
 def MailAccepted (I : Impl) (w : World) : Prop :=
   (∀ id m, m ∈ (w.st id).box → msgOk I id m) ∧
@@ -5163,7 +5138,7 @@ theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg
     (isCall : Bool) (k : Cont) (mb : InstId) (m : Msg)
     (hm : m ∈ ((enqueueOrPark w D sender dst msg isCall k).st mb).box) :
     m ∈ (w.st mb).box ∨
-      (mb = dst ∧ m = msg ∧ (w.st dst).life = .alive) := by
+      (mb = dst ∧ m = { msg with mid := (w.st dst).nextMid } ∧ (w.st dst).life = .alive) := by
   by_cases hlive : (w.st dst).life = .alive
   · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
     · by_cases hsame : sender = dst
@@ -5177,7 +5152,8 @@ theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg
           · simp [setActor, hmb, proceed_box, charge_box, List.mem_append, List.mem_singleton] at hm
             rcases hm with hm | hm
             · exact Or.inl (by rw [← hmb] at hm; exact hm)
-            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
+            · simp [chargeSender, bumpToken, hsame] at hm
+              exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
           · simp [setActor, hmb] at hm
             exact Or.inl hm
         · rw [← hsame] at hm
@@ -5186,7 +5162,8 @@ theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg
           · simp [setActor, hmb, charge_box, List.mem_append, List.mem_singleton] at hm
             rcases hm with hm | hm
             · exact Or.inl (by rw [← hmb] at hm; exact hm)
-            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
+            · simp [chargeSender, bumpToken, hsame] at hm
+              exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
           · simp [setActor, hmb] at hm
             exact Or.inl hm
       · have hflip : ¬ dst = sender := fun h => hsame h.symm
@@ -5359,7 +5336,7 @@ theorem copy_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (hA : Mai
 
 theorem append_ok (I : Impl) (w : World) (dst : InstId) (msg : Msg) (hA : MailAccepted I w)
     (hmsg : msgOk I dst msg) :
-    MailAccepted I (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) := by
+    MailAccepted I (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg], nextMid := (w.st dst).nextMid + 1 }) := by
   refine ⟨?_, ?_⟩
   · intro i m hm
     by_cases hi : i = dst
@@ -5383,12 +5360,12 @@ theorem enqueue_accepted (I : Impl) (w : World) (sender dst : InstId) (msg : Msg
     rcases enqueue_box_mem w I.desc sender dst msg isCall k i m hm with hold | ⟨hid, heq, _⟩
     · exact hA.1 i m hold
     · rw [hid, heq]
-      exact hmsg
+      exact msgOk_mid I dst msg _ hmsg
   · intro i p hp
     rcases enqueue_parked_mem w I.desc sender dst msg isCall k i p hp with hold | ⟨hid, _, heq, _, _⟩
     · exact hA.2 i p hold
     · rw [hid, heq]
-      exact hmsg
+      exact msgOk_mid I dst msg _ hmsg
 
 theorem deliver_box_of (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
     (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.box = a.box ∧ a1.parked = a.parked := by
@@ -5681,21 +5658,25 @@ theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
       (afterHead k) hA (Or.inr hsite)
 
 def tryFitWorld (w : World) (id dstId : InstId) (label : String) (k : Cont) : World :=
-  let msg : Msg := { label := label, sender := id, callFrom := none }
   let charged := chargeSender (w.st id) (tname dstId)
   let w1 := setActor w id charged
-  let w2 := setActor w1 dstId { w1.st dstId with box := (w1.st dstId).box ++ [msg] }
+  let dstA := w1.st dstId
+  let msg : Msg :=
+    { label := label, sender := id, callFrom := none, reliable := false, mid := dstA.nextMid }
+  let w2 := setActor w1 dstId { dstA with box := dstA.box ++ [msg], nextMid := dstA.nextMid + 1 }
   setActor w2 id (proceed (w2.st id) k)
 
 theorem try_fit_mail (I : Impl) (w : World) (id dstId : InstId) (label : String) (k : Cont)
     (hA : MailAccepted I w) : MailAccepted I (tryFitWorld w id dstId label k) := by
-  let msg : Msg := { label := label, sender := id, callFrom := none }
   let charged := chargeSender (w.st id) (tname dstId)
   have h1 := copy_accepted I w id charged hA (charge_box _ _) (charge_parked _ _)
   let w1 := setActor w id charged
+  let dstA := w1.st dstId
+  let msg : Msg :=
+    { label := label, sender := id, callFrom := none, reliable := false, mid := dstA.nextMid }
   have h2 := append_ok I w1 dstId msg h1 (Or.inl rfl)
-  let w2 := setActor w1 dstId { w1.st dstId with box := (w1.st dstId).box ++ [msg] }
-  simpa [tryFitWorld, msg, charged, w1, w2] using
+  let w2 := setActor w1 dstId { dstA with box := dstA.box ++ [msg], nextMid := dstA.nextMid + 1 }
+  simpa [tryFitWorld, msg, charged, w1, dstA, w2] using
     copy_accepted I w2 id (proceed (w2.st id) k) h2 (by simp [proceed_box]) (by simp [proceed_parked])
 
 theorem exec_try_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
@@ -5708,7 +5689,9 @@ theorem exec_try_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : 
   | some dstId =>
     simp only [hr]
     split
-    · simpa [tryFitWorld] using try_fit_mail I w id dstId label (afterHead k) hA
+    · exact enqueue_accepted I w id dstId
+        { label := label, sender := id, callFrom := none, reliable := false } false
+        (afterHead k) hA (Or.inl rfl)
     · exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
 
 theorem exec_cell_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
@@ -5801,7 +5784,7 @@ theorem exec_run_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) 
       split
       · exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
       · split
-        · exact copy_accepted I w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } } (afterHead k)) hA (by simp [proceed_box]) (by simp [proceed_parked])
+        · exact copy_accepted I w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }, nextMid := (w.st id).nextMid + 1 } (afterHead k)) hA (by simp [proceed_box]) (by simp [proceed_parked])
         · exact copy_accepted I w id { (w.st id) with phase := .crashed } hA rfl rfl
     | reply =>
       simp [hk, ha, performReply]
@@ -6474,11 +6457,8 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
       | some dstId =>
         simp [hr]
         split
-        · by_cases hid : dstId = id
-          · simp [setActor, hid, hne, chargeSender, bumpToken, proceed_life]
-          · by_cases hi : i = dstId
-            · simp [setActor, hi, hid, chargeSender, bumpToken, proceed_life]
-            · simp [setActor, hi, hne, chargeSender, bumpToken, proceed_life]
+        · exact enqueue_life w I.desc id dstId
+            { label := label, sender := id, callFrom := none, reliable := false } false _ i
         · simp [setActor, hne, proceed_life]
     | call dst label hint =>
       simp [execRun, hk]
@@ -6718,12 +6698,10 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
               | some dstId =>
                 simp [hr] at hdead
                 split at hdead
-                · by_cases hid : id = dstId
-                  · simp [setActor, chargeSender, bumpToken, proceed_life, hid] at hdead
-                    rw [hid] at hlid
-                    exact hdead hlid
-                  · have hflip : ¬dstId = id := fun h => hid h.symm
-                    simp [setActor, chargeSender, bumpToken, proceed_life, hid, hflip, hlid] at hdead
+                · have heq := enqueue_life w I.desc id dstId
+                    ({ label := label, sender := id, callFrom := none, reliable := false } : Msg)
+                    false (afterHead k) id
+                  simp [heq, hlid] at hdead
                 · simp [setActor, proceed_life, hlid] at hdead
             | call dst label hint =>
               exfalso
@@ -7117,13 +7095,9 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
             | some dstId =>
               simp [hr]
               split
-              · by_cases hd : s = dstId
-                · have hid : ¬dstId = id := fun h => hsne (hd.trans h)
-                  simp [setActor, hd, hid, chargeSender, bumpToken, hph]
-                  have hph' := hph
-                  rw [hd] at hph'
-                  exact Or.inl hph'
-                · exact Or.inl (by simp [setActor, hd, hsne, chargeSender, bumpToken, hph])
+              · exact Or.inl ((enqueue_phase_other w I.desc id dstId
+                  ({ label := label, sender := id, callFrom := none, reliable := false } : Msg) false
+                  (afterHead kE) s hsne).trans hph)
               · exact Or.inl (by simp [setActor, hsne, hph])
           | reply =>
             simp [execRun, hk]
@@ -7447,13 +7421,9 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
             | some dstId =>
               simp [hr]
               split
-              · by_cases hd : s = dstId
-                · have hid : ¬dstId = id := fun hne => hsne (hd.trans hne)
-                  simp [setActor, hd, hid, chargeSender, bumpToken]
-                  have hph' := hph
-                  rw [hd] at hph'
-                  exact Or.inl hph'
-                · exact Or.inl (by simp [setActor, hd, hsne, hph])
+              · exact Or.inl ((enqueue_phase_other w I.desc id dstId
+                  ({ label := label, sender := id, callFrom := none, reliable := false } : Msg) false
+                  (afterHead kE) s hsne).trans hph)
               · exact Or.inl (by simp [setActor, hsne, hph])
           | selfSchedule label =>
             simp [execRun, hk]
@@ -7751,10 +7721,9 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
               | some dstId =>
                 simp [hr]
                 split
-                · next hguard =>
-                  have hlived : (w.st dstId).life = .alive := hguard.1.1
-                  have hid : id ≠ dstId := fun h => hdead (by simpa [h] using hlived)
-                  simp [setActor, hji, hid, chargeSender, bumpToken, proceed_parked, hempty]
+                · simpa [hempty] using enqueue_miss_dead w I.desc j dstId id
+                    ({ label := label, sender := j, callFrom := none, reliable := false } : Msg)
+                    false (afterHead k) hji hdead
                 · simp [setActor, hji, proceed_parked, hempty]
             | reply =>
               simp [execRun, hk]
@@ -8291,14 +8260,15 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
               cases hr : route w I.desc name hint with
               | none => simp [hr, setActor, hs] at hpost ⊢
               | some dstId =>
-                simp [hr]
+                simp [hr] at hpost ⊢
                 split
-                · by_cases hid : dstId = j
-                  · simp [setActor, hid, hs, chargeSender, bumpToken, proceed]
-                  · by_cases hi : s = dstId
-                    · simp [setActor, hi, hid, hs, chargeSender, bumpToken, proceed]
-                    · simp [setActor, hi, hs, chargeSender, bumpToken, proceed]
-                · simp [setActor, hs, proceed]
+                · next hgo =>
+                  simp [hgo] at hpost ⊢
+                  exact enqueue_ty_wait w I.desc j dstId s
+                    ({ label := label, sender := j, callFrom := none, reliable := false } : Msg)
+                    false (afterHead kE) hpost
+                · next hmiss =>
+                  simp [hmiss, setActor, hs, proceed] at hpost ⊢
             | reply =>
               simp [execRun, hk] at hpost ⊢
               exact reply_ty_wait w j kE s hpost
@@ -8644,13 +8614,9 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
               | some dstId =>
                 simp [hr]
                 split
-                · by_cases hd : s = dstId
-                  · have hdj : ¬dstId = j := fun h => hsj (hd.trans h)
-                    simp [setActor, hd, hdj, chargeSender, bumpToken]
-                    have hph' := hph
-                    rw [hd] at hph'
-                    exact Or.inl hph'
-                  · exact Or.inl (by simp [setActor, hd, hsj, chargeSender, bumpToken, hph])
+                · exact Or.inl ((enqueue_phase_other w I.desc j dstId
+                    ({ label := label, sender := j, callFrom := none, reliable := false } : Msg) false
+                    (afterHead kE) s hsj).trans hph)
                 · exact Or.inl (by simp [setActor, hsj, hph])
             | reply =>
               simp [execRun, hk]
@@ -9459,40 +9425,9 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
           | some dstId =>
             simp
             split
-            · next hgo =>
-              have htag := enqueue_send_tag w I.desc id dstId
-                { label := label, sender := id, callFrom := none } k (.trySend dst label hint) es hT
-                hph hrest (by intro h; cases h) (by intro h; cases h) rfl
-              have hliveD : (w.st dstId).life = .alive := hgo.1.1
-              have hempty : (w.st dstId).parked = [] := hgo.1.2
-              have hcap : (w.st dstId).box.length < capBulk I.desc w.N dstId := hgo.2
-              by_cases hsame : id = dstId
-              · have hliveS : (w.st id).life = .alive := by
-                  have h := hliveD
-                  rwa [← hsame] at h
-                have hemptyS : (w.st id).parked = [] := by
-                  have h := hempty
-                  rwa [← hsame] at h
-                have hcapS : (w.st id).box.length < capBulk I.desc w.N id := by
-                  have h := hcap
-                  rwa [← hsame] at h
-                rw [← hsame] at htag
-                rw [enqueue_room_self_send w I.desc id { label := label, sender := id, callFrom := none }
-                  (afterHead k) hliveS hemptyS hcapS] at htag
-                rw [← hsame]
-                rw [setActor_same]
-                simp [setActor_self]
-                rw [setActor_same]
-                exact htag
-              · have hflip : ¬ dstId = id := fun h => hsame h.symm
-                rw [enqueue_room_other_send w I.desc id dstId
-                  { label := label, sender := id, callFrom := none } (afterHead k) hliveD hsame hempty hcap] at htag
-                simp only [setActor, chargeSender, bumpToken, proceed, hflip, hsame] at htag ⊢
-                have hdead {α : Type} (p q : Prop) [Decidable p] [Decidable q] (a b c d : α) :
-                    (if p then a else if q then b else if p then c else d) =
-                      if p then a else if q then b else d := by
-                  by_cases hp : p <;> by_cases hq : q <;> simp [hp, hq]
-                simpa [hdead] using htag
+            · exact enqueue_send_tag w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false } k
+                (.trySend dst label hint) es hT hph hrest (by intro h; cases h) (by intro h; cases h) rfl
             · exact run_tail_tag w id k (.trySend dst label hint) es hT hph hrest
                 (by intro h; cases h) (by intro h; cases h)
         | call dst label hint =>
@@ -9904,15 +9839,15 @@ theorem enqueue_box (w : World) (D : Description) (sender dst : InstId) (msg : M
           by_cases hi : i = dst
           · rw [hi]
             simp [setActor, charge_box, proceed_box]
-            exact Or.inr ⟨msg, rfl⟩
+            exact Or.inr ⟨{ msg with mid := (w.st dst).nextMid }, rfl⟩
           · simp [setActor, hi]
             exact Or.inl rfl
         · by_cases hi : i = dst
           · rw [hi, if_neg hsame]
             have hflip : ¬ dst = sender := fun h => hsame h.symm
-            simp [setActor, charge_box, proceed_box]
+            simp [setActor, charge_box, proceed_box, hsame]
             rw [if_neg hflip]
-            exact Or.inr ⟨msg, rfl⟩
+            exact Or.inr ⟨{ msg with mid := (w.st dst).nextMid }, rfl⟩
           · by_cases his : i = sender
             · rw [his, if_neg hsame]
               simp [setActor, hi, charge_box, proceed_box]
@@ -9925,15 +9860,15 @@ theorem enqueue_box (w : World) (D : Description) (sender dst : InstId) (msg : M
           by_cases hi : i = dst
           · rw [hi]
             simp [setActor, charge_box]
-            exact Or.inr ⟨msg, rfl⟩
+            exact Or.inr ⟨{ msg with mid := (w.st dst).nextMid }, rfl⟩
           · simp [setActor, hi]
             exact Or.inl rfl
         · by_cases hi : i = dst
           · rw [hi, if_neg hsame]
             have hflip : ¬ dst = sender := fun h => hsame h.symm
-            simp [setActor, charge_box]
+            simp [setActor, charge_box, hsame]
             rw [if_neg hflip]
-            exact Or.inr ⟨msg, rfl⟩
+            exact Or.inr ⟨{ msg with mid := (w.st dst).nextMid }, rfl⟩
           · by_cases his : i = sender
             · rw [his, if_neg hsame]
               simp [setActor, hi, charge_box]
@@ -10159,7 +10094,10 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
             (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
         · by_cases hlt : (w.st id).prio.length < capPrio I.desc w.N id
           · simpa [hany, hlt] using box_actor w id (proceed { (w.st id) with
-              prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } }
+              prio := upsertPrio (w.st id).prio
+                { label := label, sender := id, callFrom := none, reliable := true,
+                  mid := (w.st id).nextMid },
+              nextMid := (w.st id).nextMid + 1 }
               (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_box])
           · simpa [hany, hlt] using box_actor w id { (w.st id) with phase := .crashed } mb rfl
       | trySend dst label hint =>
@@ -10171,23 +10109,9 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
         | some dstId =>
           simp only [hr]
           split
-          · by_cases hmb : mb = id
-            · rw [hmb]
-              by_cases hd : dstId = id
-              · rw [hd]
-                simp [setActor, charge_box, proceed_box]
-                exact Or.inr ⟨{ label := label, sender := id, callFrom := none }, rfl⟩
-              · have hflip : ¬ id = dstId := fun h => hd h.symm
-                simp [setActor, charge_box, proceed_box]
-                rw [if_neg hflip]
-                exact Or.inl rfl
-            · by_cases hd : mb = dstId
-              · rw [hd]
-                have hne : dstId ≠ id := fun h => hmb (hd.trans h)
-                simp [setActor, hne, charge_box]
-                exact Or.inr ⟨{ label := label, sender := id, callFrom := none }, rfl⟩
-              · simp [setActor, hmb, hd]
-                exact Or.inl rfl
+          · simpa using enqueue_box w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false
+              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb
           · exact box_actor w id (proceed (w.st id)
               (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
       | reply =>
@@ -10297,7 +10221,7 @@ theorem box_pos_mono (I : Impl) (a : Action) (w w' : World) (h : apply I a w = s
       exact Or.inl rfl
     | ingress who label =>
       rcases ingress_box I w w' who label d (by simpa [apply] using h) with ⟨_, hbox⟩ | ⟨_, hbox⟩
-      · exact Or.inr ⟨{ label := label, sender := who, callFrom := none }, hbox⟩
+      · exact Or.inr ⟨{ label := label, sender := who, callFrom := none, reliable := true, mid := (w.st who).nextMid }, hbox⟩
       · exact Or.inl hbox
     | recvBulk id =>
       have hid : id ≠ d := by
@@ -10552,12 +10476,9 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
         | some dstId =>
           simp only [hr]
           split
-          · next hgo =>
-            by_cases hid : i = dstId
-            · have hnd : ¬ dstId = id := fun h => hne (hid.trans h)
-              rw [← hid]
-              simp [hgo, setActor, hne, hnd, proceed, hidle]
-            · simp [hgo, setActor, hid, hne, proceed, hidle]
+          · simpa [hidle] using enqueue_phase_other w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false
+              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i hne
           · simp [setActor, hne, proceed, hidle]
       | reply =>
         simp only [execRun, performReply]
@@ -10780,43 +10701,20 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
           by_cases hgo : ((w.st dstId).life == .alive && decide ((w.st dstId).parked = []) &&
               decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = true
           · simp [hgo] at hyes
+            let msg : Msg := { label := label, sender := id, callFrom := none, reliable := false }
             rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
-            · by_cases hmb : mb = dstId
-              · by_cases hself : dstId = id
-                · simp [setActor, hmb, hself, charge_box, proceed_box, List.mem_append,
-                    List.mem_singleton] at hm
-                  rcases hm with hm | hm
-                  · exact hno (Or.inl ⟨id, m, hm, hc⟩)
-                  · rw [hm] at hc
-                    simp at hc
-                · have hnd : ¬ id = dstId := fun h => hself h.symm
-                  simp [setActor, hmb, hself, hnd, charge_box, proceed_box, List.mem_append,
-                    List.mem_singleton] at hm
-                  rcases hm with hm | hm
-                  · exact hno (Or.inl ⟨dstId, m, hm, hc⟩)
-                  · rw [hm] at hc
-                    simp at hc
-              · by_cases hmi : mb = id
-                · have hnd : ¬ id = dstId := fun h => hmb (hmi.trans h)
-                  simp [setActor, hmb, hmi, hnd, proceed_box, charge_box] at hm
-                  exact hno (Or.inl ⟨id, m, hm, hc⟩)
-                · simp [setActor, hmb, hmi] at hm
-                  exact hno (Or.inl ⟨mb, m, hm, hc⟩)
-            · by_cases hmb : mb = id
-              · by_cases hself : id = dstId
-                · simp [setActor, hmb, hself, proceed_parked, charge_parked] at hp
-                  rw [← hself] at hp
-                  exact hno (Or.inr ⟨id, p, hp, hc⟩)
-                · have hflip : ¬ dstId = id := fun h => hself h.symm
-                  simp [setActor, hmb, hself, hflip, proceed_parked, charge_parked] at hp
-                  exact hno (Or.inr ⟨id, p, hp, hc⟩)
-              · by_cases hmd : mb = dstId
-                · have hnd : ¬ dstId = id := fun h => hmb (hmd.trans h)
-                  have hni : ¬ id = dstId := fun h => hnd h.symm
-                  simp [setActor, hmb, hmd, hnd, hni, charge_parked] at hp
-                  exact hno (Or.inr ⟨dstId, p, hp, hc⟩)
-                · simp [setActor, hmb, hmd] at hp
-                  exact hno (Or.inr ⟨mb, p, hp, hc⟩)
+            · rcases enqueue_box_mem w I.desc id dstId msg false
+                  (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb m hm with
+                hold | ⟨_, heq, _⟩
+              · exact hno (Or.inl ⟨mb, m, hold, hc⟩)
+              · rw [heq] at hc
+                simp at hc
+            · rcases enqueue_parked_mem w I.desc id dstId msg false
+                  (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb p hp with
+                hold | ⟨_, _, heq, _, _⟩
+              · exact hno (Or.inr ⟨mb, p, hold, hc⟩)
+              · rw [heq] at hc
+                simp at hc
           · simp [hgo] at hyes
             rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
             · by_cases hmb : mb = id
@@ -11535,10 +11433,9 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
               | some dstId =>
                 simp [hr]
                 split
-                · next hguard =>
-                  have hlived : (w.st dstId).life = .alive := hguard.1.1
-                  have hid : id ≠ dstId := fun h => hdead (by simpa [h] using hlived)
-                  simp [setActor, hji, hid, chargeSender, bumpToken, proceed_box, hempty]
+                · simpa [hempty] using enqueue_dead_box w I.desc j dstId id
+                    ({ label := label, sender := j, callFrom := none, reliable := false } : Msg)
+                    false (afterHead k) hdead hempty
                 · simp [setActor, hji, proceed_box, hempty]
             | reply =>
               simp [execRun, hk]
@@ -11905,13 +11802,15 @@ theorem parked_idle_enabled (I : Impl) (w : World) (dst : InstId)
   · simp [hnil]
     obtain ⟨r, hr⟩ := noncall_deliver I w dst
       { life := .alive, typestate := (w.st dst).typestate, phase := .idle, box := [],
-        prio := (w.st dst).prio, parked := qs, tokens := (w.st dst).tokens } q.msg rfl hc
+        prio := (w.st dst).prio, parked := qs, tokens := (w.st dst).tokens,
+        nextMid := (w.st dst).nextMid } q.msg rfl hc
     rw [hr]
     simp
   · simp [hm]
     obtain ⟨r, hr⟩ := noncall_deliver I w dst
       { life := .alive, typestate := (w.st dst).typestate, phase := .idle, box := ms,
-        prio := (w.st dst).prio, parked := q :: qs, tokens := (w.st dst).tokens } m rfl hmc
+        prio := (w.st dst).prio, parked := q :: qs, tokens := (w.st dst).tokens,
+        nextMid := (w.st dst).nextMid } m rfl hmc
     rw [hr]
     simp
 
@@ -12003,8 +11902,7 @@ theorem tryWake_install (D : Description) (w : World) (dstId : InstId) (label : 
     hasLabel (((tryWake D w dstId label writer).st dstId).prio) label := by
   unfold tryWake
   simp [hlive, hroom, hfresh, upsertPrio, setActor]
-  exact ⟨{ label := label, sender := writer, callFrom := none },
-    List.mem_append.mpr (Or.inr (List.Mem.head _)), rfl⟩
+  exact ⟨{ label := label, sender := writer, callFrom := none, reliable := false, mid := (w.st dstId).nextMid }, List.mem_append.mpr (Or.inr (List.Mem.head _)), rfl⟩
 
 theorem fold_tryWake_hasLabel (D : Description) (ids : List InstId) (w : World)
     (label : String) (writer r : InstId) (wake : String)
@@ -12129,7 +12027,7 @@ theorem recv_prio_enabled (I : Impl) (w : World) (r : InstId) (label : String) (
     have hdel' : deliver I w r
         { life := (w.st r).life, typestate := (w.st r).typestate, phase := (w.st r).phase,
           box := (w.st r).box, prio := ms, parked := (w.st r).parked,
-          tokens := (w.st r).tokens } m0 = some (w1, a1) := by
+          tokens := (w.st r).tokens, nextMid := (w.st r).nextMid } m0 = some (w1, a1) := by
       simpa [hlive, hidle] using hdel
     unfold Enabled apply receivePrio
     simp [hp, hlive, hidle]
@@ -12439,24 +12337,9 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
             | some dstId =>
               simp [hrte]
               split
-              · by_cases hc : r = dstId
-                · by_cases hi : dstId = id
-                  · rw [hc, hi] at hm
-                    simp [hc, hi, setActor, chargeSender, bumpToken, proceed_prio]
-                    exact hm
-                  · rw [hc] at hm
-                    rw [setActor_other _ id dstId _ hi]
-                    simp [hc, hi, setActor, chargeSender, bumpToken, proceed_prio]
-                    exact hm
-                · by_cases hri : r = id
-                  · rw [hri] at hc hm
-                    have hne : id ≠ dstId := fun h => hc h
-                    rw [setActor_other _ dstId id _ hne]
-                    simp [hri, setActor, chargeSender, bumpToken, proceed_prio]
-                    exact hm
-                  · rw [setActor_other _ id r _ hri, setActor_other _ dstId r _ hc,
-                      setActor_other _ id r _ hri]
-                    exact hm
+              · simpa [enqueue_prio w I.desc id dstId
+                  { label := label, sender := id, callFrom := none, reliable := false } false
+                  (afterHead k) r] using hm
               · by_cases hri : r = id
                 · rw [hri] at hm
                   simp [hri, setActor, proceed_prio]
@@ -12780,8 +12663,12 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
             cases hr : route w I.desc d0 hint with
             | none => simp [hr, setActor]
             | some dstId =>
-              simp [hr, setActor]
-              split <;> simp [setActor, chargeSender, bumpToken]
+              simp [hr]
+              split
+              · simpa [enqueue_cell] using enqueue_cell w I.desc id dstId
+                  { label := l0, sender := id, callFrom := none, reliable := false } false
+                  (afterHead k) dst label
+              · simp [setActor]
           | reply => simpa [execRun, hk, reply_cell]
           | selfSchedule _ =>
             simp [execRun, hk]

@@ -339,8 +339,9 @@ theorem ingress_sem (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
           · cases h
             let a0 := w.st dst
             let charged := chargeSender a0 (tname dst)
-            let msg : Msg := { label := label, sender := dst, callFrom := none }
-            let a' : Actor := { charged with box := a0.box ++ [msg] }
+            let msg : Msg :=
+              { label := label, sender := dst, callFrom := none, reliable := true, mid := a0.nextMid }
+            let a' : Actor := { charged with box := a0.box ++ [msg], nextMid := a0.nextMid + 1 }
             have hty : a'.typestate = a0.typestate := by simp [a', charged, chargeSender, bumpToken]
             have hlife : a'.life = a0.life := by simp [a', charged, chargeSender, bumpToken]
             have hcont : contTy a' := by
@@ -460,7 +461,9 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           simp [hcf]
           have hp := proceed_ok I.desc sender
             { chargeSender (w.st sender) (tname sender) with
-                box := (chargeSender (w.st sender) (tname sender)).box ++ [msg] }
+                box := (chargeSender (w.st sender) (tname sender)).box ++
+                  [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
+                nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1 }
             k (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
           apply sem_set I w sender _ hS
           · rw [hp.1, hcharge.1]
@@ -471,7 +474,9 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
       · simp [hsame]
         rw [← halive, ← hroom.1]
         -- Destination first, then the sender.
-        have hdst : SemInv I (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) := by
+        have hdst : SemInv I (setActor w dst { (w.st dst) with
+            box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+            nextMid := (w.st dst).nextMid + 1 }) := by
           apply sem_set I w dst _ hS
           · rfl
           · rfl
@@ -526,7 +531,10 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           exact hedge
       · simp [hsame]
         rw [← halive]
-        have hdst : SemInv I (setActor w dst { (w.st dst) with parked := (w.st dst).parked ++ [{ sender := sender, msg := msg, isCall := isCall }] }) := by
+        have hdst : SemInv I (setActor w dst { (w.st dst) with
+            parked := (w.st dst).parked ++
+              [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }],
+            nextMid := (w.st dst).nextMid + 1 }) := by
           apply sem_set I w dst _ hS
           · rfl
           · rfl
@@ -550,5 +558,52 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
   · simp [halive]
     have hp := proceed_ok I.desc sender (w.st sender) k hty htail
     exact sem_set I w sender (proceed (w.st sender) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+
+/-- A fitting `trySend` is an enqueue of an unreliable message, so it needs no blocking edge. -/
+theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)
+    (hS : SemInv I w) (hty : (w.st sender).typestate = k.toState)
+    (htail : effectsOk I.desc (tname sender) (w.st sender).typestate k.rest = true)
+    (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
+    (hcap : (w.st dst).box.length < capBulk I.desc w.N dst) :
+    SemInv I (enqueueOrPark w I.desc sender dst msg false k) := by
+  unfold enqueueOrPark
+  have hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst := ⟨hpark, hcap⟩
+  simp [hlive, hroom]
+  have hcharge := charge_ok (w.st sender) (tname dst)
+  by_cases hsame : sender = dst
+  · subst hsame
+    simp
+    have hp := proceed_ok I.desc sender { chargeSender (w.st sender) (tname sender) with
+        box := (chargeSender (w.st sender) (tname sender)).box ++
+          [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
+        nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1 } k
+      (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
+    apply sem_set I w sender _ hS
+    · rw [hp.1, hcharge.1]
+    · rw [hp.2.1, hcharge.2.1]
+    · exact hp.2.2.1
+    · exact hp.2.2.2.1
+    · exact hp.2.2.2.2
+  · simp [hsame]
+    rw [← hlive, ← hpark]
+    have hdst : SemInv I (setActor w dst { (w.st dst) with
+        box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+        nextMid := (w.st dst).nextMid + 1 }) := by
+      apply sem_set I w dst _ hS
+      · rfl
+      · rfl
+      · simpa [contTy] using hS.cont dst
+      · simpa [programOk] using hS.prog dst
+      · simpa [waitEdge] using hS.waited dst
+    have hp := proceed_ok I.desc sender (chargeSender (w.st sender) (tname dst)) k
+      (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
+    apply sem_set I _ sender _ hdst
+    · rw [setActor_other _ dst sender _ hsame]
+      rw [hp.1, hcharge.1]
+    · rw [setActor_other _ dst sender _ hsame]
+      rw [hp.2.1, hcharge.2.1]
+    · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.1
+    · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.1
+    · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.2
 
 end Deadlock

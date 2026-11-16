@@ -449,10 +449,14 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
           · simp [proceed_parked, chargeSender, bumpToken]
       · simp [hsame]
         rw [← halive, ← hroom.1]
-        have hM1 := mail_set_same w dst { (w.st dst) with box := (w.st dst).box ++ [msg] } hM rfl rfl
+        have hM1 := mail_set_same w dst { (w.st dst) with
+            box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+            nextMid := (w.st dst).nextMid + 1 } hM rfl rfl
         if hcall : isCall = true then
           simp [hcall]
-          apply mail_set_free (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender _ hM1
+          apply mail_set_free (setActor w dst { (w.st dst) with
+              box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+              nextMid := (w.st dst).nextMid + 1 }) sender _ hM1
           · rw [setActor_other _ dst sender _ hsame]
             exact hfree
           · simp [notParked, chargeSender, bumpToken]
@@ -461,7 +465,9 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
         else
           have hcf : isCall = false := by cases hbb : isCall <;> simp_all
           simp [hcf]
-          apply mail_set_free (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender _ hM1
+          apply mail_set_free (setActor w dst { (w.st dst) with
+              box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+              nextMid := (w.st dst).nextMid + 1 }) sender _ hM1
           · rw [setActor_other _ dst sender _ hsame]
             exact hfree
           · exact proceed_not_parked _ _
@@ -471,7 +477,10 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
       by_cases hsame : sender = dst
       · subst hsame
         simp
-        apply mail_park_self w sender _ { sender := sender, msg := msg, isCall := isCall } isCall k hM hfree
+        apply mail_park_self w sender _
+          { sender := sender,
+            msg := { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid },
+            isCall := isCall } isCall k hM hfree
         · simp [chargeSender, bumpToken]
         · simp [chargeSender, bumpToken]
         · simp
@@ -479,8 +488,12 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
         rw [← halive]
         apply mail_park_other w dst sender
           { chargeSender (w.st sender) (tname dst) with phase := .parked dst isCall k }
-          { (w.st dst) with parked := (w.st dst).parked ++ [{ sender := sender, msg := msg, isCall := isCall }] }
-          { sender := sender, msg := msg, isCall := isCall } isCall k hM hsame hfree
+          { (w.st dst) with
+            parked := (w.st dst).parked ++
+              [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }],
+            nextMid := (w.st dst).nextMid + 1 }
+          { sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }
+          isCall k hM hsame hfree
         · rfl
         · rfl
         · simp

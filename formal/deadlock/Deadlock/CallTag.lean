@@ -25,7 +25,8 @@ theorem enqueue_parked_mem (w : World) (D : Description) (sender dst : InstId) (
     (isCall : Bool) (k : Cont) (mb : InstId) (p : Parked)
     (hp : p ∈ ((enqueueOrPark w D sender dst msg isCall k).st mb).parked) :
     p ∈ (w.st mb).parked ∨
-      (mb = dst ∧ p.sender = sender ∧ p.msg = msg ∧ p.isCall = isCall ∧ (w.st dst).life = .alive) := by
+      (mb = dst ∧ p.sender = sender ∧ p.msg = { msg with mid := (w.st dst).nextMid } ∧
+        p.isCall = isCall ∧ (w.st dst).life = .alive) := by
   by_cases hlive : (w.st dst).life = .alive
   · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
     · by_cases hsame : sender = dst
@@ -85,7 +86,8 @@ theorem enqueue_parked_mem (w : World) (D : Description) (sender dst : InstId) (
           | inl h => exact Or.inl (by rw [← hmb] at h; exact h)
           | inr h =>
             cases h
-            exact Or.inr ⟨hmb.trans hsame, rfl, rfl, rfl, hlive⟩
+            refine Or.inr ⟨hmb.trans hsame, rfl, ?_, rfl, hlive⟩
+            simp [chargeSender, bumpToken, hsame]
         · simp [setActor, hmb] at hp
           exact Or.inl hp
       · have hflip : ¬ dst = sender := fun h => hsame h.symm
@@ -671,7 +673,8 @@ theorem countCall_snoc_none (ms : List Msg) (m : Msg) (c : InstId) (hc : m.callF
 /-- Environment ingress appends a non-call, so every call tag stays where it was. -/
 theorem ingress_tag (I : Impl) (w : World) (dst : InstId) (label : String) (w' : World)
     (hT : CallTagInv w) (h : receiveIngress I w dst label = some w') : CallTagInv w' := by
-  let msg : Msg := { label := label, sender := dst, callFrom := none }
+  let msg : Msg :=
+    { label := label, sender := dst, callFrom := none, reliable := true, mid := (w.st dst).nextMid }
   have hphase (i : InstId) : (w'.st i).phase = (w.st i).phase :=
     (ingress_phase I w w' dst label i h).1
   have hprio (i : InstId) : (w'.st i).prio = (w.st i).prio :=
@@ -4530,7 +4533,7 @@ theorem enqueue_call_tag (w : World) (D : Description) (sender dst : InstId) (ms
           rwa [← hsame] at h
         rw [← hsame]
         rw [enqueue_room_self_call w D sender msg (afterHead kRun) hliveS hparkS hcapS]
-        apply fresh_call_tag w _ sender sender msg (afterHead kRun) kRun hT hM hph e es hrest hne
+        apply fresh_call_tag w _ sender sender { msg with mid := (w.st sender).nextMid } (afterHead kRun) kRun hT hM hph e es hrest hne
           hterm rfl hfrom
         · intro i hi
           simp [setActor, hi]
@@ -4544,7 +4547,7 @@ theorem enqueue_call_tag (w : World) (D : Description) (sender dst : InstId) (ms
         · intro i
           by_cases hi : i = sender <;> simp [setActor, hi, chargeSender, bumpToken]
       · rw [enqueue_room_other_call w D sender dst msg (afterHead kRun) hlive hsame hroom.1 hroom.2]
-        apply fresh_call_tag w _ sender dst msg (afterHead kRun) kRun hT hM hph e es hrest hne
+        apply fresh_call_tag w _ sender dst { msg with mid := (w.st dst).nextMid } (afterHead kRun) kRun hT hM hph e es hrest hne
           hterm rfl hfrom
         · intro i hi
           by_cases hid : i = dst
@@ -4579,7 +4582,7 @@ theorem enqueue_call_tag (w : World) (D : Description) (sender dst : InstId) (ms
           rwa [← hsame] at h
         rw [← hsame]
         rw [enqueue_park_self w D sender msg true (afterHead kRun) hliveS hroomS]
-        apply fresh_call_tag w _ sender sender msg (afterHead kRun) kRun hT hM hph e es hrest hne
+        apply fresh_call_tag w _ sender sender { msg with mid := (w.st sender).nextMid } (afterHead kRun) kRun hT hM hph e es hrest hne
           hterm rfl hfrom
         · intro i hi
           simp [setActor, hi]
@@ -4593,7 +4596,7 @@ theorem enqueue_call_tag (w : World) (D : Description) (sender dst : InstId) (ms
         · intro i
           by_cases hi : i = sender <;> simp [setActor, hi, chargeSender, bumpToken]
       · rw [enqueue_park_other w D sender dst msg true (afterHead kRun) hlive hsame hroom]
-        apply fresh_call_tag w _ sender dst msg (afterHead kRun) kRun hT hM hph e es hrest hne
+        apply fresh_call_tag w _ sender dst { msg with mid := (w.st dst).nextMid } (afterHead kRun) kRun hT hM hph e es hrest hne
           hterm rfl hfrom
         · intro i hi
           by_cases hid : i = dst
@@ -5065,10 +5068,10 @@ theorem reply_tag (w : World) (sender : InstId) (k : Cont) (es : List Eff) (hT :
     exact reply_resume_tag w sender c k ck es hT hph hrest hcount hto hwait hcne
 
 /-- Replacing one actor's priority lane with plain messages keeps call tags. -/
-theorem prio_keep_tag (w : World) (id : InstId) (prio : List Msg) (hT : CallTagInv w)
+theorem prio_keep_tag (w : World) (id : InstId) (prio : List Msg) (n : Nat) (hT : CallTagInv w)
     (hplain : ∀ m, m ∈ prio → m.callFrom = none) :
-    CallTagInv (setActor w id { (w.st id) with prio := prio }) := by
-  let w' := setActor w id { (w.st id) with prio := prio }
+    CallTagInv (setActor w id { (w.st id) with prio := prio, nextMid := n }) := by
+  let w' := setActor w id { (w.st id) with prio := prio, nextMid := n }
   have hst (i : InstId) (hi : i ≠ id) : w'.st i = w.st i := by simp [w', setActor, hi]
   have hph (i : InstId) : (w'.st i).phase = (w.st i).phase := by
     by_cases hi : i = id <;> simp [w', setActor, hi]
@@ -5130,16 +5133,21 @@ theorem try_wake_tag (D : Description) (w : World) (dst : InstId) (label : Strin
       decide ((w.st dst).prio.length < capPrio D w.N dst) &&
       !((w.st dst).prio.any fun p => p.label == label)) = true
   · simp [tryWake, hif]
-    apply prio_keep_tag w dst (upsertPrio (w.st dst).prio { label := label, sender := writer, callFrom := none }) hT
+    let wake : Msg :=
+      { label := label, sender := writer, callFrom := none, reliable := false,
+        mid := (w.st dst).nextMid }
+    have hmiss : ((w.st dst).prio.any fun p => p.label == wake.label) = false := by
+      simp only [Bool.and_eq_true, Bool.not_eq_true] at hif
+      simpa [wake] using hif.2
+    have hup : upsertPrio (w.st dst).prio wake = (w.st dst).prio ++ [wake] := by
+      simp [upsertPrio, hmiss]
+    apply prio_keep_tag w dst (upsertPrio (w.st dst).prio wake) ((w.st dst).nextMid + 1) hT
     intro m hm
-    unfold upsertPrio at hm
-    by_cases hany : (w.st dst).prio.any (fun p => p.label == label) = true
-    · simp [hany] at hm
-      exact hT.prioPlain dst m hm
-    · simp [hany, List.mem_append, List.mem_singleton] at hm
-      rcases hm with hold | heq
-      · exact hT.prioPlain dst m hold
-      · simp [heq]
+    rw [hup] at hm
+    simp [List.mem_append, List.mem_singleton] at hm
+    rcases hm with hold | heq
+    · exact hT.prioPlain dst m hold
+    · simp [heq, wake]
   · simp [tryWake, hif]
     exact hT
 
@@ -5549,7 +5557,7 @@ theorem enqueue_send_tag (w : World) (D : Description) (sender dst : InstId) (ms
           rwa [← hsame] at h
         rw [← hsame]
         rw [enqueue_room_self_send w D sender msg (afterHead kRun) hliveS hparkS hcapS]
-        apply plain_move_tag w _ sender sender msg (afterHead kRun) kRun e es hT hph hrest hne
+        apply plain_move_tag w _ sender sender { msg with mid := (w.st sender).nextMid } (afterHead kRun) kRun e es hT hph hrest hne
           hterm rfl hfrom
         · intro i hi
           simp [setActor, hi]
@@ -5564,7 +5572,7 @@ theorem enqueue_send_tag (w : World) (D : Description) (sender dst : InstId) (ms
         · intro i
           by_cases hi : i = sender <;> simp [setActor, hi, proceed_fields, chargeSender, bumpToken]
       · rw [enqueue_room_other_send w D sender dst msg (afterHead kRun) hlive hsame hroom.1 hroom.2]
-        apply plain_move_tag w _ sender dst msg (afterHead kRun) kRun e es hT hph hrest hne
+        apply plain_move_tag w _ sender dst { msg with mid := (w.st dst).nextMid } (afterHead kRun) kRun e es hT hph hrest hne
           hterm rfl hfrom
         · intro i hi
           by_cases hid : i = dst
@@ -5599,7 +5607,7 @@ theorem enqueue_send_tag (w : World) (D : Description) (sender dst : InstId) (ms
           rwa [← hsame] at h
         rw [← hsame]
         rw [enqueue_park_self w D sender msg false (afterHead kRun) hliveS hroomS]
-        apply plain_move_tag w _ sender sender msg (afterHead kRun) kRun e es hT hph hrest hne
+        apply plain_move_tag w _ sender sender { msg with mid := (w.st sender).nextMid } (afterHead kRun) kRun e es hT hph hrest hne
           hterm rfl hfrom
         · intro i hi
           simp [setActor, hi]
@@ -5613,7 +5621,7 @@ theorem enqueue_send_tag (w : World) (D : Description) (sender dst : InstId) (ms
         · intro i
           by_cases hi : i = sender <;> simp [setActor, hi, chargeSender, bumpToken]
       · rw [enqueue_park_other w D sender dst msg false (afterHead kRun) hlive hsame hroom]
-        apply plain_move_tag w _ sender dst msg (afterHead kRun) kRun e es hT hph hrest hne
+        apply plain_move_tag w _ sender dst { msg with mid := (w.st dst).nextMid } (afterHead kRun) kRun e es hT hph hrest hne
           hterm rfl hfrom
         · intro i hi
           by_cases hid : i = dst
@@ -5660,22 +5668,24 @@ theorem schedule_tag (I : Impl) (w : World) (hT : CallTagInv w) (id : InstId) (k
       rw [(beq_iff_eq).mpr hl] at hf
       simp at hf
     simp [hno, hlt]
-    let grown := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none }
+    let msg : Msg :=
+      { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }
+    let grown := upsertPrio (w.st id).prio msg
+    let armed : Actor := { (w.st id) with prio := grown, nextMid := (w.st id).nextMid + 1 }
     have hplain : ∀ m, m ∈ grown → m.callFrom = none := by
       intro m hm
-      simp [upsertPrio, grown, hno, List.mem_append, List.mem_singleton] at hm
+      simp [upsertPrio, grown, msg, hno, List.mem_append, List.mem_singleton] at hm
       rcases hm with hold | heq
       · exact hT.prioPlain id m hold
       · rw [heq]
-    have hP := prio_keep_tag w id grown hT hplain
-    have hphP : ((setActor w id { (w.st id) with prio := grown }).st id).phase = .run k := by
-      simp [setActor, hph]
-    have hrun := run_tail_tag (setActor w id { (w.st id) with prio := grown }) id k
+    have hP := prio_keep_tag w id grown ((w.st id).nextMid + 1) hT hplain
+    have hphP : ((setActor w id armed).st id).phase = .run k := by
+      simp [setActor, armed, hph]
+    have hrun := run_tail_tag (setActor w id armed) id k
       (.selfSchedule label) es hP hphP hrest (by intro h; cases h) (by intro h; cases h)
-    have hself : (setActor w id { (w.st id) with prio := grown }).st id =
-        { (w.st id) with prio := grown } := by simp [setActor]
+    have hself : (setActor w id armed).st id = armed := by simp [setActor]
     rw [setActor_same, hself] at hrun
-    simpa [grown] using hrun
+    simpa [grown, msg, armed] using hrun
   · rw [List.any_eq_true] at hany
     obtain ⟨x, hx, hb⟩ := hany
     have hyes : ∃ x, x ∈ (w.st id).prio ∧ x.label = label := ⟨x, hx, (beq_iff_eq).mp hb⟩

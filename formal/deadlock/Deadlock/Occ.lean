@@ -31,10 +31,24 @@ theorem noBulk_sends (es : List Eff) (h : noBulkSend es = true) (dst : String) :
   induction es with
   | nil => rfl
   | cons e es ih =>
-    cases e <;> simp [noBulkSend, sendsTo] at h ⊢ <;> exact ih h
+    cases e with
+    | send _ _ _ => simp [noBulkSend] at h
+    | trySend _ _ _ => simp [noBulkSend] at h
+    | call _ _ _ => simp [noBulkSend] at h
+    | selfSchedule _ => simp [noBulkSend] at h
+    | _ =>
+      simp [noBulkSend, sendsTo] at h ⊢
+      exact ih h
 
 theorem noBulk_tail (e : Eff) (es : List Eff) (h : noBulkSend (e :: es) = true) : noBulkSend es = true := by
-  cases e <;> simp [noBulkSend] at h ⊢ <;> exact h
+  cases e with
+  | send _ _ _ => simp [noBulkSend] at h
+  | trySend _ _ _ => simp [noBulkSend] at h
+  | call _ _ _ => simp [noBulkSend] at h
+  | selfSchedule _ => simp [noBulkSend] at h
+  | _ =>
+    simp [noBulkSend] at h ⊢
+    exact h
 
 /-- Outstanding credit, queues, and the Lemma-1 promise that nothing is parked. -/
 structure OccInv (I : Impl) (w : World) : Prop where
@@ -1278,9 +1292,10 @@ theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
     (h : receiveIngress I w dst label = some w') : OccInv I w' := by
   obtain ⟨hlive, _hopen, htermB, hfloor, hw⟩ := ingress_open I w w' dst label h
   let name := tname dst
-  let msg : Msg := { label := label, sender := dst, callFrom := none }
   let a := w.st dst
-  let a' : Actor := { chargeSender a name with box := a.box ++ [msg] }
+  let msg : Msg :=
+    { label := label, sender := dst, callFrom := none, reliable := true, mid := a.nextMid }
+  let a' : Actor := { chargeSender a name with box := a.box ++ [msg], nextMid := a.nextMid + 1 }
   have hw' : w' = setActor w dst a' := by simpa [a', a, name, msg] using hw
   rw [hw']
   have hnot : ¬ terminableName I.desc name := by
@@ -1899,7 +1914,7 @@ theorem occ_prio (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (
         cases h
         let a0 : Actor := {
           life := .alive, typestate := (w.st id).typestate, phase := .idle, box := (w.st id).box, prio := ms,
-          parked := (w.st id).parked, tokens := (w.st id).tokens }
+          parked := (w.st id).parked, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid }
         have hacc := deliver_account I hL hG w id a0 m w1 a1 rfl rfl hd
         obtain ⟨hl, hbox, hpark, htok, hfloor⟩ := hacc
         have hO1 := occ_same I w w1 hO (fun i => deliver_st I w id a0 m w1 a1 i hd)
@@ -2675,11 +2690,11 @@ theorem occ_try_wake (I : Impl) (w : World) (dstId : InstId) (label : String) (w
   by_cases hif : ((w.st dstId).life == .alive && (w.st dstId).prio.length < capPrio I.desc w.N dstId &&
       !((w.st dstId).prio.any (fun p => p.label == label))) = true
   · rw [if_pos hif]
-    let wake : Msg := ⟨label, writer, none⟩
-    have ha : ({ (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake } : Actor) =
-        { (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake } := rfl
-    exact occ_keep I w dstId ({ (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake }) hO
-      rfl rfl rfl (fun _ => rfl) rfl (fun _ => Nat.le_refl _)
+    let wake : Msg :=
+      { label := label, sender := writer, callFrom := none, reliable := false,
+        mid := (w.st dstId).nextMid }
+    let armed : Actor := { (w.st dstId) with prio := upsertPrio (w.st dstId).prio wake, nextMid := (w.st dstId).nextMid + 1 }
+    exact occ_keep I w dstId armed hO rfl rfl rfl (fun _ => rfl) rfl (fun _ => Nat.le_refl _)
   · rw [if_neg hif]
     exact hO
 
@@ -2992,7 +3007,9 @@ theorem enqueue_room_self_call (w : World) (D : Description) (sender : InstId) (
     enqueueOrPark w D sender sender msg true k =
       setActor w sender
         { chargeSender (w.st sender) (tname sender) with
-          box := (chargeSender (w.st sender) (tname sender)).box ++ [msg],
+          box := (chargeSender (w.st sender) (tname sender)).box ++
+            [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
+          nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1,
           phase := .awaitReply sender k } := by
   simp [enqueueOrPark, hlive, hpark, hcap]
 
@@ -3003,7 +3020,9 @@ theorem enqueue_room_self_send (w : World) (D : Description) (sender : InstId) (
     enqueueOrPark w D sender sender msg false k =
       setActor w sender
         (proceed { chargeSender (w.st sender) (tname sender) with
-          box := (chargeSender (w.st sender) (tname sender)).box ++ [msg] } k) := by
+          box := (chargeSender (w.st sender) (tname sender)).box ++
+            [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
+          nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1 } k) := by
   simp [enqueueOrPark, hlive, hpark, hcap]
 
 theorem enqueue_room_other_call (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
@@ -3011,7 +3030,9 @@ theorem enqueue_room_other_call (w : World) (D : Description) (sender dst : Inst
     (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk D w.N dst) :
     enqueueOrPark w D sender dst msg true k =
-      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender
+      setActor (setActor w dst { (w.st dst) with
+        box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+        nextMid := (w.st dst).nextMid + 1 }) sender
         { chargeSender (w.st sender) (tname dst) with phase := .awaitReply dst k } := by
   simp [enqueueOrPark, hlive, hne, hpark, hcap]
 
@@ -3020,7 +3041,9 @@ theorem enqueue_room_other_send (w : World) (D : Description) (sender dst : Inst
     (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk D w.N dst) :
     enqueueOrPark w D sender dst msg false k =
-      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) sender
+      setActor (setActor w dst { (w.st dst) with
+        box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+        nextMid := (w.st dst).nextMid + 1 }) sender
         (proceed (chargeSender (w.st sender) (tname dst)) k) := by
   simp [enqueueOrPark, hlive, hne, hpark, hcap]
 
@@ -3032,7 +3055,10 @@ theorem enqueue_park_self (w : World) (D : Description) (sender : InstId) (msg :
       setActor w sender
         { chargeSender (w.st sender) (tname sender) with
           parked := (chargeSender (w.st sender) (tname sender)).parked ++
-            [{ sender := sender, msg := msg, isCall := isCall }],
+            [{ sender := sender,
+               msg := { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid },
+               isCall := isCall }],
+          nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1,
           phase := .parked sender isCall k } := by
   simp [enqueueOrPark, hlive, hroom]
 
@@ -3041,8 +3067,15 @@ theorem enqueue_park_other (w : World) (D : Description) (sender dst : InstId) (
     (hlive : (w.st dst).life = .alive) (hne : sender ≠ dst)
     (hroom : ¬ ((w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst)) :
     enqueueOrPark w D sender dst msg isCall k =
-      setActor (setActor w dst { (w.st dst) with parked := (w.st dst).parked ++
-          [{ sender := sender, msg := msg, isCall := isCall }] }) sender
+      setActor
+        (setActor w dst
+          { (w.st dst) with
+            parked := (w.st dst).parked ++
+              [{ sender := sender,
+                 msg := { msg with mid := (w.st dst).nextMid },
+                 isCall := isCall }],
+            nextMid := (w.st dst).nextMid + 1 })
+        sender
         { chargeSender (w.st sender) (tname dst) with phase := .parked dst isCall k } := by
   simp [enqueueOrPark, hlive, hne, hroom]
 
@@ -3232,7 +3265,9 @@ theorem occ_self_call (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
   rw [enqueue_room_self_call w I.desc sender msg (afterHead k) hsender hpark hcap]
   let aS : Actor :=
     { chargeSender (w.st sender) (tname sender) with
-      box := (chargeSender (w.st sender) (tname sender)).box ++ [msg],
+      box := (chargeSender (w.st sender) (tname sender)).box ++
+        [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
+      nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1,
       phase := .awaitReply sender (afterHead k) }
   suffices OccInv I (setActor w sender aS) by simpa [aS] using this
   apply occ_one I w sender aS (tname sender) hO
@@ -3253,16 +3288,20 @@ theorem occ_self_call (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
         · exact Or.inl h
         · exact Or.inr (Or.inl h)) hp
   · intro s
-    exact owed_self_box w.st (tname sender) sender aS msg w.roster hO.nodup hmem rfl hmsg
+    exact owed_self_box w.st (tname sender) sender aS
+      { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }
+      w.roster hO.nodup hmem rfl (by simpa using hmsg)
       (by simp [aS, hcb]) (by simp [aS, hcp]) s
   · intro d hd s
     exact owed_off w.st sender aS d s w.roster hO.nodup hmem (fun h => hd h.symm)
   · intro m hm
-    have hm' : m ∈ (w.st sender).box ++ [msg] := by simpa [aS, hcb] using hm
+    have hm' : m ∈ (w.st sender).box ++
+        [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }] := by
+      simpa [aS, hcb] using hm
     simp [List.mem_append, List.mem_singleton] at hm'
     cases hm' with
     | inl h => exact hO.sentFrom sender m h
-    | inr h => rw [h, hmsg]; exact hmem
+    | inr h => simpa [h, hmsg] using hmem
   · intro p hp
     have hp' : p ∈ (w.st sender).parked := by simpa [aS, hcp] using hp
     exact hO.parkFrom sender p hp'
@@ -3301,7 +3340,9 @@ theorem occ_self_send (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
   rw [enqueue_room_self_send w I.desc sender msg (afterHead k) hsender hpark hcap]
   let base : Actor :=
     { chargeSender (w.st sender) (tname sender) with
-      box := (chargeSender (w.st sender) (tname sender)).box ++ [msg] }
+      box := (chargeSender (w.st sender) (tname sender)).box ++
+        [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
+      nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1 }
   let aS : Actor := proceed base (afterHead k)
   suffices OccInv I (setActor w sender aS) by simpa [aS, base] using this
   apply occ_one I w sender aS (tname sender) hO
@@ -3325,16 +3366,20 @@ theorem occ_self_send (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : 
         · exact Or.inr (Or.inl h)
         · exact Or.inr (Or.inr h)) hp
   · intro s
-    exact owed_self_box w.st (tname sender) sender aS msg w.roster hO.nodup hmem rfl hmsg
+    exact owed_self_box w.st (tname sender) sender aS
+      { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }
+      w.roster hO.nodup hmem rfl (by simpa using hmsg)
       (by simp [aS, base, proceed_box, hcb]) (by simp [aS, base, proceed_parked, hcp]) s
   · intro d hd s
     exact owed_off w.st sender aS d s w.roster hO.nodup hmem (fun h => hd h.symm)
   · intro m hm
-    have hm' : m ∈ (w.st sender).box ++ [msg] := by simpa [aS, base, proceed_box, hcb] using hm
+    have hm' : m ∈ (w.st sender).box ++
+        [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }] := by
+      simpa [aS, base, proceed_box, hcb] using hm
     simp [List.mem_append] at hm'
     cases hm' with
     | inl h => exact hO.sentFrom sender m h
-    | inr h => rw [h, hmsg]; exact hmem
+    | inr h => simpa [h, hmsg] using hmem
   · intro p hp
     have hp' : p ∈ (w.st sender).parked := by simpa [aS, base, proceed_parked, hcp] using hp
     exact hO.parkFrom sender p hp'
@@ -3592,10 +3637,14 @@ theorem occ_self_park (I : Impl) (hL : LocalOk I) (w : World) (sender : InstId) 
     omega
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname sender)
   rw [enqueue_park_self w I.desc sender msg isCall (afterHead k) hsender hroom]
-  let entry : Parked := { sender := sender, msg := msg, isCall := isCall }
+  let entry : Parked :=
+    { sender := sender,
+      msg := { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid },
+      isCall := isCall }
   let aS : Actor :=
     { chargeSender (w.st sender) (tname sender) with
       parked := (chargeSender (w.st sender) (tname sender)).parked ++ [entry],
+      nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1,
       phase := .parked sender isCall (afterHead k) }
   suffices OccInv I (setActor w sender aS) by simpa [aS, entry] using this
   apply occ_one I w sender aS (tname sender) hO
@@ -3664,7 +3713,10 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     omega
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname dst)
   rw [enqueue_room_other_call w I.desc sender dst msg (afterHead k) hlive hne hpark hcap]
-  let aD : Actor := { (w.st dst) with box := (w.st dst).box ++ [msg] }
+  let aD : Actor :=
+    { (w.st dst) with
+      box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+      nextMid := (w.st dst).nextMid + 1 }
   let aS : Actor :=
     { chargeSender (w.st sender) (tname dst) with phase := .awaitReply dst (afterHead k) }
   suffices OccInv I (setActor (setActor w dst aD) sender aS) by simpa [aS, aD] using this
@@ -3690,7 +3742,8 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
         · exact Or.inl h
         · exact Or.inr (Or.inl h)) hp
   · intro s
-    exact owed_other_box w.st (tname dst) sender dst aS aD msg w.roster hO.nodup hdst hmem hne rfl hmsg
+    exact owed_other_box w.st (tname dst) sender dst aS aD
+      { msg with mid := (w.st dst).nextMid } w.roster hO.nodup hdst hmem hne rfl (by simpa using hmsg)
       (by simp [aS, hcb]) (by simp [aS, hcp]) (by simp [aD]) (by simp [aD]) s
   · intro d hd s
     exact owed_other_skip w.st sender dst aS aD d w.roster hO.nodup hdst hmem hne
@@ -3699,11 +3752,11 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     have hm' : m ∈ (w.st sender).box := by simpa [aS, hcb] using hm
     exact hO.sentFrom sender m hm'
   · intro m hm
-    have hm' : m ∈ (w.st dst).box ++ [msg] := by simpa [aD] using hm
+    have hm' : m ∈ (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }] := by simpa [aD] using hm
     simp [List.mem_append] at hm'
     cases hm' with
     | inl h => exact hO.sentFrom dst m h
-    | inr h => rw [h, hmsg]; exact hmem
+    | inr h => simpa [h, hmsg] using hmem
   · intro p hp
     have hp' : p ∈ (w.st sender).parked := by simpa [aS, hcp] using hp
     exact hO.parkFrom sender p hp'
@@ -3754,7 +3807,10 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname dst)
   rw [enqueue_room_other_send w I.desc sender dst msg (afterHead k) hlive hne hpark hcap]
   let charged : Actor := chargeSender (w.st sender) (tname dst)
-  let aD : Actor := { (w.st dst) with box := (w.st dst).box ++ [msg] }
+  let aD : Actor :=
+    { (w.st dst) with
+      box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+      nextMid := (w.st dst).nextMid + 1 }
   let aS : Actor := proceed charged (afterHead k)
   suffices OccInv I (setActor (setActor w dst aD) sender aS) by simpa [aS, aD, charged] using this
   apply occ_two I w sender dst aS aD (tname dst) hO hne
@@ -3782,7 +3838,8 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
         · exact Or.inr (Or.inl h)
         · exact Or.inr (Or.inr h)) hp
   · intro s
-    exact owed_other_box w.st (tname dst) sender dst aS aD msg w.roster hO.nodup hdst hmem hne rfl hmsg
+    exact owed_other_box w.st (tname dst) sender dst aS aD
+      { msg with mid := (w.st dst).nextMid } w.roster hO.nodup hdst hmem hne rfl (by simpa using hmsg)
       (by simp [aS, charged, proceed_box, hcb]) (by simp [aS, charged, proceed_parked, hcp])
       (by simp [aD]) (by simp [aD]) s
   · intro d hd s
@@ -3793,11 +3850,11 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     have hm' : m ∈ (w.st sender).box := by simpa [aS, charged, proceed_box, hcb] using hm
     exact hO.sentFrom sender m hm'
   · intro m hm
-    have hm' : m ∈ (w.st dst).box ++ [msg] := by simpa [aD] using hm
+    have hm' : m ∈ (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }] := by simpa [aD] using hm
     simp [List.mem_append] at hm'
     cases hm' with
     | inl h => exact hO.sentFrom dst m h
-    | inr h => rw [h, hmsg]; exact hmem
+    | inr h => simpa [h, hmsg] using hmem
   · intro p hp
     have hp' : p ∈ (w.st sender).parked := by simpa [aS, charged, proceed_parked, hcp] using hp
     exact hO.parkFrom sender p hp'
@@ -3846,8 +3903,9 @@ theorem occ_other_park (I : Impl) (hL : LocalOk I) (w : World) (sender dst : Ins
     omega
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname dst)
   rw [enqueue_park_other w I.desc sender dst msg isCall (afterHead k) hlive hne hroom]
-  let entry : Parked := { sender := sender, msg := msg, isCall := isCall }
-  let aD : Actor := { (w.st dst) with parked := (w.st dst).parked ++ [entry] }
+  let entry : Parked :=
+    { sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }
+  let aD : Actor := { (w.st dst) with parked := (w.st dst).parked ++ [entry], nextMid := (w.st dst).nextMid + 1 }
   let aS : Actor :=
     { chargeSender (w.st sender) (tname dst) with phase := .parked dst isCall (afterHead k) }
   suffices OccInv I (setActor (setActor w dst aD) sender aS) by simpa [aS, aD, entry] using this
@@ -3966,13 +4024,15 @@ theorem occ_schedule (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (hO : OccInv I w) (ha : a = w.st id) (hph : a.phase = .run k) (hty : a.typestate = k.toState) :
     OccInv I
       (let cap := capPrio I.desc w.N id
-      let msg : Msg := { label := label, sender := id, callFrom := none }
+      let msg : Msg :=
+        { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
       let k' := afterHead k
       if a.prio.any (fun p => p.label == label) then setActor w id (proceed a k')
       else if a.prio.length < cap then
-        setActor w id (proceed { a with prio := upsertPrio a.prio msg } k')
+        setActor w id (proceed { a with prio := upsertPrio a.prio msg, nextMid := a.nextMid + 1 } k')
       else setActor w id { a with phase := .crashed }) := by
-  let msg : Msg := { label := label, sender := id, callFrom := none }
+  let msg : Msg :=
+    { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
   cases hb : a.prio.any (fun p => p.label == label) with
   | true =>
     simp [hb, ha]
@@ -3980,7 +4040,7 @@ theorem occ_schedule (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
   | false =>
     by_cases hlen : a.prio.length < capPrio I.desc w.N id
     · simp [hb, hlen]
-      let base : Actor := { a with prio := upsertPrio a.prio msg }
+      let base : Actor := { a with prio := upsertPrio a.prio msg, nextMid := a.nextMid + 1 }
       let aS : Actor := proceed base (afterHead k)
       suffices OccInv I (setActor w id aS) by simpa [aS, base, msg] using this
       apply occ_keep I w id aS hO
@@ -4416,9 +4476,10 @@ theorem occ_spawn (I : Impl) (w w' : World) (template : String) (hO : OccInv I w
 theorem try_fit_self (w : World) (id : InstId) (msg : Msg) (k : Cont) :
     let a' := chargeSender (w.st id) (tname id)
     let w1 := setActor w id a'
-    let stored := { (w1.st id) with box := (w1.st id).box ++ [msg] }
+    let stored :=
+      { (w1.st id) with box := (w1.st id).box ++ [msg], nextMid := (w1.st id).nextMid + 1 }
     setActor (setActor w1 id stored) id (proceed ((setActor w1 id stored).st id) k) =
-      setActor w id (proceed { a' with box := a'.box ++ [msg] } k) := by
+      setActor w id (proceed { a' with box := a'.box ++ [msg], nextMid := a'.nextMid + 1 } k) := by
   simp only [setActor]
   congr 1
   funext i
@@ -4427,9 +4488,10 @@ theorem try_fit_self (w : World) (id : InstId) (msg : Msg) (k : Cont) :
 theorem try_fit_other (w : World) (id dst : InstId) (msg : Msg) (k : Cont) (hne : id ≠ dst) :
     let a' := chargeSender (w.st id) (tname dst)
     let w1 := setActor w id a'
-    let stored := { (w1.st dst) with box := (w1.st dst).box ++ [msg] }
+    let stored :=
+      { (w1.st dst) with box := (w1.st dst).box ++ [msg], nextMid := (w1.st dst).nextMid + 1 }
     setActor (setActor w1 dst stored) id (proceed ((setActor w1 dst stored).st id) k) =
-      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) id (proceed a' k) := by
+      setActor (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg], nextMid := (w.st dst).nextMid + 1 }) id (proceed a' k) := by
   simp only [setActor, hne]
   congr 1
   funext i
@@ -4462,18 +4524,14 @@ theorem occ_try (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
       have hlive : (w.st dst).life = .alive := hcond.1.1
       have hpark : (w.st dst).parked = [] := hcond.1.2
       have hcap : (w.st dst).box.length < capBulk I.desc w.N dst := hcond.2
-      let msg : Msg := { label := label, sender := id, callFrom := none }
+      let msg : Msg := { label := label, sender := id, callFrom := none, reliable := false }
       have he : Eff.trySend dstName label hint = Eff.trySend (tname dst) label hint := by rw [hname]
       by_cases hsame : id = dst
       · subst hsame
-        have hocc := occ_self_send I w id msg cont (.trySend dstName label hint) es label hint hO
+        exact occ_self_send I w id msg cont (.trySend dstName label hint) es label hint hO
           hph' rfl (Or.inr (Or.inr he)) rfl hty' hsender hnot hpark hcap
-        rw [enqueue_room_self_send w I.desc id msg (afterHead cont) hsender hpark hcap] at hocc
-        simpa [msg, try_fit_self, cont] using hocc
-      · have hocc := occ_other_send I w id dst msg cont (.trySend dstName label hint) es label hint hO
+      · exact occ_other_send I w id dst msg cont (.trySend dstName label hint) es label hint hO
           hph' rfl (Or.inr (Or.inr he)) rfl hty' hsender hnot hsame hlive hpark hcap
-        rw [enqueue_room_other_send w I.desc id dst msg (afterHead cont) hlive hsame hpark hcap] at hocc
-        simpa [msg, try_fit_other w id dst msg (afterHead cont) hsame, cont] using hocc
     · exact occ_advance I w id cont hO hty' hph'
 
 def drainBox (w : World) (id : InstId) (dst : String) : List Msg → World
@@ -4670,9 +4728,40 @@ theorem drain_life (w : World) (id : InstId) (dst : String) (ms : List Msg) (i :
     simp [hc, hL] at hi
     exact hi
 
+theorem credit_mid (w : World) (dst : String) (sender i : InstId) :
+    ((creditSender w dst sender).st i).nextMid = (w.st i).nextMid := by
+  by_cases hi : i = sender
+  · subst hi
+    simp [creditSender, setActor, bumpToken]
+  · simp [creditSender, setActor, hi]
+
+theorem drain_mid (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((drainBox w id dst ms).st i).nextMid = (w.st i).nextMid := by
+  induction ms generalizing w with
+  | nil =>
+    by_cases hi : i = id <;> simp [drainBox, setActor, hi]
+  | cons m ms ih =>
+    simp [drainBox]
+    have hset : ((setActor w id { (w.st id) with box := ms }).st i).nextMid = (w.st i).nextMid := by
+      by_cases hi : i = id <;> simp [setActor, hi]
+    exact (ih _).trans ((credit_mid _ _ _ _).trans hset)
+
+theorem refund_mid (w : World) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w dst ms).st i).nextMid = (w.st i).nextMid := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    exact (hfold ▸ ih _).trans (credit_mid w dst m.sender i)
+
+theorem clear_mid (w : World) (id : InstId) (dst : String) (ms : List Msg) (i : InstId) :
+    ((refundClearBox w id dst ms).st i).nextMid = (w.st i).nextMid := by
+  by_cases hi : i = id <;> simp [refundClearBox, setActor, hi, refund_mid]
+
 theorem actor_fields (a b : Actor) (hl : a.life = b.life) (ht : a.typestate = b.typestate)
     (hp : a.phase = b.phase) (hb : a.box = b.box) (hpr : a.prio = b.prio) (hpk : a.parked = b.parked)
-    (htk : ∀ d, a.tokens d = b.tokens d) : a = b := by
+    (htk : ∀ d, a.tokens d = b.tokens d) (hm : a.nextMid = b.nextMid) : a = b := by
   cases a
   cases b
   cases hl
@@ -4681,6 +4770,7 @@ theorem actor_fields (a b : Actor) (hl : a.life = b.life) (ht : a.typestate = b.
   cases hb
   cases hpr
   cases hpk
+  cases hm
   simp
   funext d
   exact htk d
@@ -4763,6 +4853,7 @@ theorem drain_eq_refund (w : World) (id : InstId) (dst : String) (ms : List Msg)
     · exact (drain_park w id dst ms i).trans (clear_park w id dst ms i).symm
     · intro d
       exact (drain_tok w id dst ms i d).trans (clear_tok w id dst ms i d).symm
+    · exact (drain_mid w id dst ms i).trans (clear_mid w id dst ms i).symm
   exact world_eq _ _ (hD.1.trans hC.1.symm) (hD.2.1.trans hC.2.1.symm)
     (hD.2.2.1.trans hC.2.2.1.symm) hst (hD.2.2.2.1.trans hC.2.2.2.1.symm)
     (hD.2.2.2.2.trans hC.2.2.2.2.symm)
@@ -5009,6 +5100,30 @@ theorem frame_clearP (w : World) (id : InstId) (dst : String) (ps : List Parked)
       (refundClearPark w id dst ps).observed = w.observed := by
   simp [refundClearPark, setActor, frame_refundP]
 
+theorem drainP_mid (w : World) (id : InstId) (dst : String) (ps : List Parked) (i : InstId) :
+    ((drainPark w id dst ps).st i).nextMid = (w.st i).nextMid := by
+  induction ps generalizing w with
+  | nil =>
+    by_cases hi : i = id <;> simp [drainPark, setActor, hi]
+  | cons p ps ih =>
+    simp [drainPark]
+    have hset : ((setActor w id { (w.st id) with parked := ps }).st i).nextMid = (w.st i).nextMid := by
+      by_cases hi : i = id <;> simp [setActor, hi]
+    exact (ih _).trans ((credit_mid _ _ _ _).trans hset)
+
+theorem refundP_mid (w : World) (dst : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w dst ps).st i).nextMid = (w.st i).nextMid := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    have hfold : refundParked w dst (p :: ps) = refundParked (creditSender w dst p.msg.sender) dst ps := by
+      simp [refundParked, List.foldl_cons]
+    exact (hfold ▸ ih _).trans (credit_mid w dst p.msg.sender i)
+
+theorem clearP_mid (w : World) (id : InstId) (dst : String) (ps : List Parked) (i : InstId) :
+    ((refundClearPark w id dst ps).st i).nextMid = (w.st i).nextMid := by
+  by_cases hi : i = id <;> simp [refundClearPark, setActor, hi, refundP_mid]
+
 /-- Refunding every parked sender and then clearing that lane is the same world
 as dropping each entry and crediting `msg.sender`, including when that sender is `id`. -/
 theorem drain_eq_refund_park (w : World) (id : InstId) (dst : String) (ps : List Parked) :
@@ -5026,6 +5141,7 @@ theorem drain_eq_refund_park (w : World) (id : InstId) (dst : String) (ps : List
     · exact (drainP_park w id dst ps i).trans (clearP_park w id dst ps i).symm
     · intro d
       exact (drainP_tok w id dst ps i d).trans (clearP_tok w id dst ps i d).symm
+    · exact (drainP_mid w id dst ps i).trans (clearP_mid w id dst ps i).symm
   exact world_eq _ _ (hD.1.trans hC.1.symm) (hD.2.1.trans hC.2.1.symm)
     (hD.2.2.1.trans hC.2.2.1.symm) hst (hD.2.2.2.1.trans hC.2.2.2.1.symm)
     (hD.2.2.2.2.trans hC.2.2.2.2.symm)
@@ -5264,8 +5380,13 @@ theorem term_actor (w : World) (id i : InstId) :
         ((drain_life w id name ms id).2.1.trans
           ((refund_life w name ms id).2.1.symm.trans
             (refundP_life (refundMsgs w name ms) name ps id).2.1.symm))
-    · funext d
-      simpa using term_tok w id id d
+    · constructor
+      · funext d
+        simpa using term_tok w id id d
+      · exact (drainP_mid (drainBox w id name ms) id name ps id).trans
+          ((drain_mid w id name ms id).trans
+            ((refund_mid w name ms id).symm.trans
+              (refundP_mid (refundMsgs w name ms) name ps id).symm))
   · simp [setActor, hi]
     apply actor_fields
     · have h1 := (drainP_life (drainBox w id name ms) id name ps i).1
@@ -5302,6 +5423,10 @@ theorem term_actor (w : World) (id i : InstId) :
       exact h1.trans (h2.trans (h3.symm.trans h4.symm))
     · intro d
       simpa using term_tok w id i d
+    · exact (drainP_mid (drainBox w id name ms) id name ps i).trans
+        ((drain_mid w id name ms i).trans
+          ((refund_mid w name ms i).symm.trans
+            (refundP_mid (refundMsgs w name ms) name ps i).symm))
 
 theorem occ_term_kill (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
     (hcont : ∀ i, contTy (w.st i)) (hmem : id ∈ w.roster)
@@ -5404,7 +5529,7 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont
         | some dstId =>
           simp [hr]
           have hname := route_tname w I.desc dst hint dstId hr
-          exact occ_enqueue I hL w id dstId ⟨label, id, none⟩ false
+          exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := none } false
             ⟨.send dst label hint :: es, toState, replyTo⟩ (.send dst label hint) es label hint hO hT
             hph rfl (Or.inl (by simp [hname])) rfl hty hsender hnot
       | trySend dst label hint =>
@@ -5427,7 +5552,7 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont
         | some dstId =>
           simp [hr]
           have hname := route_tname w I.desc dst hint dstId hr
-          exact occ_enqueue I hL w id dstId ⟨label, id, some id⟩ true
+          exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := some id } true
             ⟨.call dst label hint :: es, toState, replyTo⟩ (.call dst label hint) es label hint hO hT
             hph rfl (Or.inr (by simp [hname])) rfl hty hsender hnot
       | reply =>

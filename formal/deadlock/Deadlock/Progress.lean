@@ -195,12 +195,14 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
       | some dstId => exact enqueue_roster w I.desc id dstId _ false _
     | trySend dst label hint =>
       simp [hk]
-      cases route w I.desc dst hint with
-      | none => simp [setActor]
+      cases hr : route w I.desc dst hint with
+      | none => simp [hr, setActor]
       | some dstId =>
+        simp [hr]
         by_cases hroom : ((w.st dstId).life = .alive ∧ (w.st dstId).parked = []) ∧
             (w.st dstId).box.length < capBulk I.desc w.N dstId
-        · simp [hroom, setActor]
+        · simp [hroom]
+          exact enqueue_roster w I.desc id dstId _ false _
         · simp [hroom, setActor]
     | call dst label hint =>
       simp [hk]

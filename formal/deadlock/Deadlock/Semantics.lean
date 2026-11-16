@@ -61,6 +61,10 @@ structure Msg where
   label : String
   sender : InstId
   callFrom : Option InstId
+  /-- Identity issued by the actor that accepts the message. -/
+  mid : Nat := 0
+  /-- A try-drop send and a superseding cell wake are not delivery obligations. -/
+  reliable : Bool := true
   deriving DecidableEq, Repr, Inhabited
 
 structure Parked where
@@ -78,6 +82,8 @@ structure Actor where
   parked : List Parked
   /-- Remaining send slots per destination template. `tokens dst + msgsTo dst = budget`. -/
   tokens : String → Nat
+  /-- Next identity this actor stamps on a message it accepts. -/
+  nextMid : Nat := 0
   deriving Inhabited
 
 def absentActor : Actor where
@@ -319,22 +325,30 @@ def enqueueOrPark (w : World) (D : Description) (sender dst : InstId) (msg : Msg
     let senderA := chargeSender (w.st sender) (tname dst)
     let room := decide (target.parked = []) && decide (target.box.length < cap)
     let same := decide (sender = dst)
-    let entry : Parked := { sender := sender, msg := msg, isCall := isCall }
+    -- The id belongs to the actor that stores the message. A self-send stores it
+    -- on the sender after the charge, which does not move `nextMid`.
+    let host := if same then senderA else target
+    let issued : Msg := { msg with mid := host.nextMid }
+    let entry : Parked := { sender := sender, msg := issued, isCall := isCall }
     if room then
       if same then
-        let self : Actor := { senderA with box := senderA.box ++ [msg] }
+        let self : Actor :=
+          { senderA with box := senderA.box ++ [issued], nextMid := host.nextMid + 1 }
         if isCall then setActor w sender { self with phase := .awaitReply dst k }
         else setActor w sender (proceed self k)
       else
-        let stored : Actor := { target with box := target.box ++ [msg] }
+        let stored : Actor :=
+          { target with box := target.box ++ [issued], nextMid := host.nextMid + 1 }
         let w := setActor w dst stored
         if isCall then setActor w sender { senderA with phase := .awaitReply dst k }
         else setActor w sender (proceed senderA k)
     else if same then
-      let self : Actor := { senderA with parked := senderA.parked ++ [entry] }
+      let self : Actor :=
+        { senderA with parked := senderA.parked ++ [entry], nextMid := host.nextMid + 1 }
       setActor w sender { self with phase := .parked dst isCall k }
     else
-      let stored : Actor := { target with parked := target.parked ++ [entry] }
+      let stored : Actor :=
+        { target with parked := target.parked ++ [entry], nextMid := host.nextMid + 1 }
       let w := setActor w dst stored
       setActor w sender { senderA with phase := .parked dst isCall k }
 
@@ -362,9 +376,12 @@ def upsertPrio (prio : List Msg) (m : Msg) : List Msg :=
 def tryWake (D : Description) (w : World) (dstId : InstId) (label : String) (writer : InstId) : World :=
   let target := w.st dstId
   let cap := capPrio D w.N dstId
-  let wake : Msg := { label := label, sender := writer, callFrom := none }
+  -- A cell wake is a superseding write: it is not a reliable delivery.
+  let wake : Msg :=
+    { label := label, sender := writer, callFrom := none, reliable := false, mid := target.nextMid }
   if target.life == .alive && target.prio.length < cap && !(target.prio.any (fun p => p.label == label)) then
-    setActor w dstId { target with prio := upsertPrio target.prio wake }
+    setActor w dstId
+      { target with prio := upsertPrio target.prio wake, nextMid := target.nextMid + 1 }
   else
     w
 
@@ -407,11 +424,10 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
         let target := w.st dstId
         let cap := capBulk I.desc w.N dstId
         if target.life == .alive && target.parked = [] && target.box.length < cap then
-          let msg : Msg := { label := label, sender := id, callFrom := none }
-          let a' := chargeSender a (tname dstId)
-          let w := setActor w id a'
-          setActor w dstId { (w.st dstId) with box := (w.st dstId).box ++ [msg] }
-            |> fun w => setActor w id (proceed (w.st id) k')
+          -- Program `trySend` is the try-drop class: a full box discards it, and a
+          -- copy that does land is not a reliable delivery obligation.
+          let msg : Msg := { label := label, sender := id, callFrom := none, reliable := false }
+          enqueueOrPark w I.desc id dstId msg false k'
         else
           setActor w id (proceed a k')
     | .call dst label hint =>
@@ -425,13 +441,14 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
     | .reply => performReply w id k
     | .selfSchedule label =>
       let cap := capPrio I.desc w.N id
-      let msg : Msg := { label := label, sender := id, callFrom := none }
-      -- Re-arming a label already queued does not grow the lane. A new label
-      -- past the lane capacity is the overflow crash.
+      let msg : Msg :=
+        { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
+      -- Re-arming a label already queued does not grow the lane, and does not
+      -- accept a new message. A new label past the lane capacity is the overflow crash.
       if a.prio.any (fun p => p.label == label) then
         setActor w id (proceed a k')
       else if a.prio.length < cap then
-        setActor w id (proceed { a with prio := upsertPrio a.prio msg } k')
+        setActor w id (proceed { a with prio := upsertPrio a.prio msg, nextMid := a.nextMid + 1 } k')
       else
         setActor w id { a with phase := .crashed }
     | .cell dst label value =>
@@ -553,9 +570,10 @@ def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Opti
   else if a.tokens (tname dst) < need ||
       a.tokens (tname dst) < Nat.max (ingressAllowance I.desc w.N (tname dst) label) 1 then none
   else
-    let msg : Msg := { label := label, sender := dst, callFrom := none }
+    let msg : Msg :=
+      { label := label, sender := dst, callFrom := none, reliable := true, mid := a.nextMid }
     let charged := chargeSender a (tname dst)
-    some (setActor w dst { charged with box := a.box ++ [msg] })
+    some (setActor w dst { charged with box := a.box ++ [msg], nextMid := a.nextMid + 1 })
 
 theorem ingress_phase (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
     (h : receiveIngress I w dst label = some w') :
@@ -604,7 +622,8 @@ theorem finish_proceed (I : Impl) (w w' : World) (id : InstId)
 /-- Ingress appends one non-call to the target box and leaves every other box. -/
 theorem ingress_box (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
     (h : receiveIngress I w dst label = some w') :
-    (i = dst ∧ (w'.st i).box = (w.st i).box ++ [{ label := label, sender := dst, callFrom := none }]) ∨
+    (i = dst ∧ (w'.st i).box = (w.st i).box ++
+      [{ label := label, sender := dst, callFrom := none, reliable := true, mid := (w.st dst).nextMid }]) ∨
       (i ≠ dst ∧ (w'.st i).box = (w.st i).box) := by
   dsimp [receiveIngress] at h
   split at h
@@ -653,7 +672,9 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
         debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
         pending (w.st dst) (tname dst) + 1 ≤ (w.st dst).tokens (tname dst) ∧
       w' = setActor w dst { chargeSender (w.st dst) (tname dst) with
-        box := (w.st dst).box ++ [{ label := label, sender := dst, callFrom := none }] } := by
+        box := (w.st dst).box ++
+          [{ label := label, sender := dst, callFrom := none, reliable := true, mid := (w.st dst).nextMid }],
+        nextMid := (w.st dst).nextMid + 1 } := by
   dsimp [receiveIngress] at h
   split at h
   · simp at h
