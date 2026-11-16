@@ -4429,4 +4429,116 @@ theorem fresh_call_tag (w w' : World) (sender dst : InstId) (msg : Msg) (k kRun 
         · rw [hboxI d hd] at hm
           exact hpre.2 ⟨m, hm, hcf⟩
 
+/-- A call effect enqueues a fresh tag, or proceeds when the target is not alive. -/
+theorem enqueue_call_tag (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (kRun : Cont) (e : Eff) (es : List Eff) (hT : CallTagInv w) (hM : MailInv w)
+    (hph : (w.st sender).phase = .run kRun) (hrest : kRun.rest = e :: es) (hne : e ≠ .reply)
+    (hterm : e ≠ .terminate) (hfrom : msg.callFrom = some sender) :
+    CallTagInv (enqueueOrPark w D sender dst msg true (afterHead kRun)) := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by
+          have h := hlive
+          rwa [← hsame] at h
+        have hparkS : (w.st sender).parked = [] := by
+          have h := hroom.1
+          rwa [← hsame] at h
+        have hcapS : (w.st sender).box.length < capBulk D w.N sender := by
+          have h := hroom.2
+          rwa [← hsame] at h
+        rw [← hsame]
+        rw [enqueue_room_self_call w D sender msg (afterHead kRun) hliveS hparkS hcapS]
+        apply fresh_call_tag w _ sender sender msg (afterHead kRun) kRun hT hM hph e es hrest hne
+          hterm rfl hfrom
+        · intro i hi
+          simp [setActor, hi]
+        · intro i hi
+          simp [setActor, hi]
+        · intro i hi
+          simp [setActor, hi]
+        · refine Or.inl ⟨by simp [setActor], ?_, ?_⟩
+          · simp [setActor, chargeSender, bumpToken]
+          · simp [setActor, chargeSender, bumpToken]
+        · intro i
+          by_cases hi : i = sender <;> simp [setActor, hi, chargeSender, bumpToken]
+      · rw [enqueue_room_other_call w D sender dst msg (afterHead kRun) hlive hsame hroom.1 hroom.2]
+        apply fresh_call_tag w _ sender dst msg (afterHead kRun) kRun hT hM hph e es hrest hne
+          hterm rfl hfrom
+        · intro i hi
+          by_cases hid : i = dst
+          · have hflip : ¬ dst = sender := fun h => hsame h.symm
+            simp [setActor, hi, hid, hflip]
+          · simp [setActor, hi, hid]
+        · intro i hi
+          by_cases hs : i = sender
+          · simp [setActor, hs, chargeSender, bumpToken]
+          · simp [setActor, hs, hi]
+        · intro i hi
+          by_cases hs : i = sender
+          · simp [setActor, hs, chargeSender, bumpToken]
+          · simp [setActor, hs, hi]
+        · have hflip : ¬ dst = sender := fun h => hsame h.symm
+          refine Or.inl ⟨by simp [setActor], ?_, ?_⟩
+          · simp [setActor, hflip]
+          · simp [setActor, hflip]
+        · intro i
+          by_cases hi : i = sender
+          · simp [setActor, hi, chargeSender, bumpToken]
+          · by_cases hid : i = dst
+            · have hflip : ¬ dst = sender := fun h => hsame h.symm
+              simp [setActor, hi, hid, hflip]
+            · simp [setActor, hi, hid]
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by
+          have h := hlive
+          rwa [← hsame] at h
+        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := by
+          have h := hroom
+          rwa [← hsame] at h
+        rw [← hsame]
+        rw [enqueue_park_self w D sender msg true (afterHead kRun) hliveS hroomS]
+        apply fresh_call_tag w _ sender sender msg (afterHead kRun) kRun hT hM hph e es hrest hne
+          hterm rfl hfrom
+        · intro i hi
+          simp [setActor, hi]
+        · intro i hi
+          simp [setActor, hi]
+        · intro i hi
+          simp [setActor, hi]
+        · refine Or.inr ⟨by simp [setActor], ?_, ?_⟩
+          · simp [setActor, chargeSender, bumpToken]
+          · simp [setActor, chargeSender, bumpToken]
+        · intro i
+          by_cases hi : i = sender <;> simp [setActor, hi, chargeSender, bumpToken]
+      · rw [enqueue_park_other w D sender dst msg true (afterHead kRun) hlive hsame hroom]
+        apply fresh_call_tag w _ sender dst msg (afterHead kRun) kRun hT hM hph e es hrest hne
+          hterm rfl hfrom
+        · intro i hi
+          by_cases hid : i = dst
+          · have hflip : ¬ dst = sender := fun h => hsame h.symm
+            simp [setActor, hi, hid, hflip]
+          · simp [setActor, hi, hid]
+        · intro i hi
+          by_cases hs : i = sender
+          · simp [setActor, hs, chargeSender, bumpToken]
+          · simp [setActor, hs, hi]
+        · intro i hi
+          by_cases hs : i = sender
+          · simp [setActor, hs, chargeSender, bumpToken]
+          · simp [setActor, hs, hi]
+        · have hflip : ¬ dst = sender := fun h => hsame h.symm
+          refine Or.inr ⟨by simp [setActor, chargeSender, bumpToken], ?_, ?_⟩
+          · simp [setActor, hflip]
+          · simp [setActor, hflip]
+        · intro i
+          by_cases hi : i = sender
+          · simp [setActor, hi, chargeSender, bumpToken]
+          · by_cases hid : i = dst
+            · have hflip : ¬ dst = sender := fun h => hsame h.symm
+              simp [setActor, hi, hid, hflip]
+            · simp [setActor, hi, hid]
+  · rw [enqueue_dead w D sender dst msg true (afterHead kRun) hlive]
+    exact run_tail_tag w sender kRun e es hT hph hrest hne hterm
+
 end Deadlock
