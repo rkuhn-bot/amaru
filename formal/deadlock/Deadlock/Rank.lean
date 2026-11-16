@@ -8713,4 +8713,579 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
             exact Or.inl (callPos_mem (ms ++ [p.msg]) c (by rw [hposA, hlen]; omega))
           · simp [hbox', hposA, callPos, hc]
 
+theorem charge_box (a : Actor) (name : String) : (chargeSender a name).box = a.box := by
+  simp [chargeSender, bumpToken]
+
+/-- A bulk mailbox grows only by keeping its messages and appending behind them. -/
+def BoxGrow (old new : List Msg) : Prop :=
+  new = old ∨ ∃ m, new = old ++ [m]
+
+theorem call_grow (old new : List Msg) (c : InstId) (h : BoxGrow old new)
+    (hin : callPos old c < old.length) :
+    callPos new c = callPos old c ∧ callPos new c < new.length := by
+  rcases h with h | ⟨m, h⟩
+  · rw [h]
+    exact ⟨rfl, hin⟩
+  · rw [h, callPos_append old [m] c hin, List.length_append]
+    refine ⟨rfl, ?_⟩
+    simp
+    omega
+
+/-- Enqueue appends to the target box or leaves every box alone. -/
+theorem enqueue_box (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) :
+    BoxGrow ((w.st i).box) ((enqueueOrPark w D sender dst msg isCall k).st i).box := by
+  unfold enqueueOrPark
+  by_cases hlive : (w.st dst).life = .alive
+  · simp [hlive]
+    by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · simp [hroom]
+      cases isCall
+      · by_cases hsame : sender = dst
+        · rw [hsame]
+          by_cases hi : i = dst
+          · rw [hi]
+            simp [setActor, charge_box, proceed_box]
+            exact Or.inr ⟨msg, rfl⟩
+          · simp [setActor, hi]
+            exact Or.inl rfl
+        · by_cases hi : i = dst
+          · rw [hi, if_neg hsame]
+            have hflip : ¬ dst = sender := fun h => hsame h.symm
+            simp [setActor, charge_box, proceed_box]
+            rw [if_neg hflip]
+            exact Or.inr ⟨msg, rfl⟩
+          · by_cases his : i = sender
+            · rw [his, if_neg hsame]
+              simp [setActor, hi, charge_box, proceed_box]
+              exact Or.inl rfl
+            · rw [if_neg hsame]
+              simp [setActor, hi, his]
+              exact Or.inl rfl
+      · by_cases hsame : sender = dst
+        · rw [hsame]
+          by_cases hi : i = dst
+          · rw [hi]
+            simp [setActor, charge_box]
+            exact Or.inr ⟨msg, rfl⟩
+          · simp [setActor, hi]
+            exact Or.inl rfl
+        · by_cases hi : i = dst
+          · rw [hi, if_neg hsame]
+            have hflip : ¬ dst = sender := fun h => hsame h.symm
+            simp [setActor, charge_box]
+            rw [if_neg hflip]
+            exact Or.inr ⟨msg, rfl⟩
+          · by_cases his : i = sender
+            · rw [his, if_neg hsame]
+              simp [setActor, hi, charge_box]
+              exact Or.inl rfl
+            · rw [if_neg hsame]
+              simp [setActor, hi, his]
+              exact Or.inl rfl
+    · simp [hroom]
+      by_cases hsame : sender = dst
+      · rw [hsame]
+        by_cases hi : i = dst
+        · rw [hi]
+          simp [setActor, charge_box]
+          exact Or.inl rfl
+        · simp [setActor, hi]
+          exact Or.inl rfl
+      · by_cases hi : i = dst
+        · rw [if_neg hsame, hi]
+          have hflip : ¬ dst = sender := fun h => hsame h.symm
+          simp [setActor, charge_box]
+          rw [if_neg hflip]
+          exact Or.inl rfl
+        · by_cases his : i = sender
+          · rw [his, if_neg hsame]
+            simp [setActor, hi, charge_box]
+            exact Or.inl rfl
+          · rw [if_neg hsame]
+            simp [setActor, hi, his]
+            exact Or.inl rfl
+  · simp [hlive]
+    by_cases hi : i = sender
+    · rw [hi]
+      simp [setActor, proceed_box]
+      exact Or.inl rfl
+    · simp [setActor, hi]
+      exact Or.inl rfl
+
+theorem box_actor (w : World) (id : InstId) (a : Actor) (mb : InstId)
+    (h : a.box = (w.st id).box) :
+    BoxGrow ((w.st mb).box) ((setActor w id a).st mb).box := by
+  by_cases hmb : mb = id
+  · rw [hmb, setActor_self, h]
+    exact Or.inl rfl
+  · rw [setActor_other w id mb a hmb]
+    exact Or.inl rfl
+
+theorem finish_box (w w' : World) (id i : InstId) (h : finishWait w id = some w') :
+    (w'.st i).box = (w.st i).box := by
+  unfold finishWait at h
+  split at h
+  · cases h
+    by_cases hi : i = id <;> simp [setActor, hi, proceed_box]
+  · cases h
+    by_cases hi : i = id <;> simp [setActor, hi, proceed_box]
+  · cases h
+
+theorem deliver_box (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.box = a.box := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        rfl
+    · split at h
+      · cases h
+      · cases h
+        split <;> rfl
+
+theorem prio_box (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio I w id = some w') :
+    (w'.st i).box = (w.st i).box := by
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      have hbx := deliver_box I w id ({ (w.st id) with prio := ms }) m w1 a1 hdel
+      have hst := deliver_st I w id _ m w1 a1 i hdel
+      by_cases hi : i = id
+      · rw [hi]
+        simp [setActor, hbx]
+      · simp [setActor, hi, hst]
+
+/-- A bulk receive of someone else does not change this mailbox. -/
+theorem bulk_other_box (I : Impl) (w w' : World) (j i : InstId)
+    (h : receiveBulk I w j = some w') (hne : i ≠ j) :
+    (w'.st i).box = (w.st i).box := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st j).life ≠ .alive ∨ (w.st j).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st j).box with
+    | nil =>
+      cases hpark : (w.st j).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w j _ p.msg w1 a1 i hdel
+          by_cases hs : i = p.sender
+          · have hnj : p.sender ≠ j := fun h => hne (hs.trans h)
+            rw [hs] at hst ⊢
+            simp [setActor_self, resume_box, credit_box]
+            rw [setActor_other w1 j p.sender a1 hnj]
+            exact congrArg (·.box) hst
+          · simp [setActor_other (creditSender (setActor w1 j a1) (tname j) p.msg.sender) p.sender i _ hs,
+              credit_box, setActor_other w1 j i a1 hne, hst]
+    | cons m ms =>
+      cases hpark : (w.st j).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          have hst := deliver_st I w j _ m w1 a1 i hdel
+          rw [credit_box]
+          simp [setActor, hne, hst]
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          let admitted : Actor := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hst := deliver_st I w j _ m w1 a1 i hdel
+          by_cases hs : i = p.sender
+          · have hnj : p.sender ≠ j := fun h => hne (hs.trans h)
+            rw [hs] at hst ⊢
+            simp [setActor_self, resume_box, credit_box, admitted]
+            rw [setActor_other w1 j p.sender admitted hnj]
+            exact congrArg (·.box) hst
+          · simp [admitted, setActor_other (creditSender (setActor w1 j admitted) (tname j) m.sender)
+              p.sender i _ hs, credit_box, setActor_other w1 j i admitted hne, hst]
+
+theorem release_box (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
+    ((releaseParked w id ps).st i).box = (w.st i).box := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w
+    · rw [if_neg hskip]
+      have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+      have hset : ((setActor w p.sender (resumeSender (w.st p.sender) false id)).st i).box =
+          (w.st i).box := by
+        by_cases hi : i = p.sender
+        · rw [hi]
+          simp [setActor, resume_box]
+        · simp [setActor, hi]
+      rw [hset] at hmid
+      exact hmid
+
+theorem try_wake_box (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) : ((tryWake D w dstId label writer).st i).box = (w.st i).box := by
+  by_cases hif : ((w.st dstId).life == .alive &&
+      decide ((w.st dstId).prio.length < capPrio D w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · simp [tryWake, hif, setActor]
+    by_cases hi : i = dstId <;> simp [hi]
+  · simp [tryWake, hif]
+
+theorem wakes_box (D : Description) (ids : List InstId) (w : World) (label : String)
+    (writer i : InstId) :
+    ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).box = (w.st i).box := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    exact (ih _).trans (try_wake_box D w j label writer i)
+
+/-- One execution step appends to a mailbox or leaves it. Killing the mailbox
+owner is excluded: that actor is not alive afterwards. -/
+theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
+    (hlive : ((execRun I w id (w.st id) k).st mb).life = .alive) :
+    BoxGrow ((w.st mb).box) ((execRun I w id (w.st id) k).st mb).box := by
+  cases k with
+  | mk rest toState replyTo =>
+    cases rest with
+    | nil =>
+      simpa [execRun] using box_actor w id { (w.st id) with phase := .idle, typestate := toState } mb rfl
+    | cons e tail =>
+      cases e with
+      | send dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using box_actor w id (proceed (w.st id)
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+        | some dstId =>
+          simpa [hr] using enqueue_box w I.desc id dstId
+            { label := label, sender := id, callFrom := none } false
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb
+      | call dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using box_actor w id (proceed (w.st id)
+            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+        | some dstId =>
+          simpa [hr] using enqueue_box w I.desc id dstId
+            { label := label, sender := id, callFrom := some id } true
+            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb
+      | internal =>
+        simpa [execRun] using box_actor w id
+          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo⟩) }
+          mb rfl
+      | peer =>
+        simpa [execRun] using box_actor w id
+          { (w.st id) with phase := .awaitPeer (afterHead ⟨.peer :: tail, toState, replyTo⟩) }
+          mb rfl
+      | selfSchedule label =>
+        simp only [execRun]
+        by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
+        · simpa [hany] using box_actor w id (proceed (w.st id)
+            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+        · by_cases hlt : (w.st id).prio.length < capPrio I.desc w.N id
+          · simpa [hany, hlt] using box_actor w id (proceed { (w.st id) with
+              prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } }
+              (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_box])
+          · simpa [hany, hlt] using box_actor w id { (w.st id) with phase := .crashed } mb rfl
+      | trySend dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none =>
+          simpa [hr] using box_actor w id (proceed (w.st id)
+            (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+        | some dstId =>
+          simp only [hr]
+          split
+          · by_cases hmb : mb = id
+            · rw [hmb]
+              by_cases hd : dstId = id
+              · rw [hd]
+                simp [setActor, charge_box, proceed_box]
+                exact Or.inr ⟨{ label := label, sender := id, callFrom := none }, rfl⟩
+              · have hflip : ¬ id = dstId := fun h => hd h.symm
+                simp [setActor, charge_box, proceed_box]
+                rw [if_neg hflip]
+                exact Or.inl rfl
+            · by_cases hd : mb = dstId
+              · rw [hd]
+                have hne : dstId ≠ id := fun h => hmb (hd.trans h)
+                simp [setActor, hne, charge_box]
+                exact Or.inr ⟨{ label := label, sender := id, callFrom := none }, rfl⟩
+              · simp [setActor, hmb, hd]
+                exact Or.inl rfl
+          · exact box_actor w id (proceed (w.st id)
+              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+      | reply =>
+        simp only [execRun]
+        unfold performReply
+        cases hto : replyTo with
+        | none =>
+          simpa [hto] using box_actor w id (proceed (w.st id)
+            (afterHead ⟨.reply :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+        | some caller =>
+          cases hcall : (w.st caller).phase with
+          | awaitReply dst ck =>
+            by_cases hd : dst = id
+            · simp [hto, hcall, hd]
+              by_cases hmb : mb = id
+              · rw [hmb]
+                by_cases hc : caller = id
+                · rw [hc]
+                  simp [setActor, proceed_box]
+                  exact Or.inl rfl
+                · have hflip : ¬ id = caller := fun h => hc h.symm
+                  simp [setActor, proceed_box]
+                  rw [if_neg hflip]
+                  exact Or.inl rfl
+              · by_cases hc : mb = caller
+                · rw [hc]
+                  have hne : ¬ caller = id := fun h => hmb (hc.trans h)
+                  simp [setActor, hne, proceed_box]
+                  exact Or.inl rfl
+                · simp [setActor, hmb, hc]
+                  exact Or.inl rfl
+            · simpa [hto, hcall, hd] using box_actor w id (proceed (w.st id)
+                (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+          | idle =>
+            simpa [hto, hcall] using box_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+          | run _ =>
+            simpa [hto, hcall] using box_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+          | awaitEffect _ =>
+            simpa [hto, hcall] using box_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+          | awaitPeer _ =>
+            simpa [hto, hcall] using box_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+          | parked _ _ _ =>
+            simpa [hto, hcall] using box_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+          | crashed =>
+            simpa [hto, hcall] using box_actor w id (proceed (w.st id)
+              (afterHead ⟨.reply :: tail, toState, some caller⟩)) mb (proceed_box _ _)
+      | cell dst label value =>
+        simp only [execRun]
+        cases hdirty : (w.cell dst label).dirty
+        · simp [hdirty, wakeReaders]
+          rw [wakes_box]
+          exact box_actor (setCell w dst label
+            { value := max (w.cell dst label).value value, dirty := true }) id
+            (proceed ((setCell w dst label
+              { value := max (w.cell dst label).value value, dirty := true }).st id)
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+            (by simpa [setCell] using proceed_box _ _)
+        · simp [hdirty]
+          exact box_actor (setCell w dst label
+            { value := max (w.cell dst label).value value, dirty := true }) id
+            (proceed ((setCell w dst label
+              { value := max (w.cell dst label).value value, dirty := true }).st id)
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+            (by simpa [setCell] using proceed_box _ _)
+      | terminate =>
+        simp only [execRun]
+        cases htpl : templateOf I.desc (tname id) with
+        | none =>
+          simp [htpl]
+          exact Or.inl rfl
+        | some t =>
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · simp [htpl, hkill]
+            by_cases hmb : mb = id
+            · exfalso
+              rw [hmb] at hlive
+              simp [execRun, htpl, hkill] at hlive
+              rw [release_life_self] at hlive
+              simp [setActor] at hlive
+            · have hbase : ∀ i, ((refundParked (refundMsgs (readCells I.desc w id) (tname id)
+                  (w.st id).box) (tname id) (w.st id).parked).st i).box = (w.st i).box := by
+                intro i
+                rw [refundP_box, refund_box, readCells_st]
+              rw [release_box, setActor_other _ id mb _ hmb, hbase]
+              exact Or.inl rfl
+          · simp [htpl, hkill]
+            exact Or.inl rfl
+
+/-- A step other than this callee's bulk receive appends to its box or leaves the
+box alone, so a call already in the box keeps its position. The call leaves the
+box only when that receive delivers it. -/
+theorem box_pos_mono (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
+    (hOcc : OccInv I w) (d c : InstId)
+    (hnot : a ≠ .recvBulk d) (halive : (w'.st d).life = .alive)
+    (hpos : callPos (w.st d).box c < (w.st d).box.length) :
+    callPos (w'.st d).box c = callPos (w.st d).box c ∧
+      callPos (w'.st d).box c < (w'.st d).box.length := by
+  have hgrow : BoxGrow (w.st d).box (w'.st d).box := by
+    cases a with
+    | recvBulk id =>
+      have hid : id ≠ d := by
+        intro heq
+        exact hnot (by simp [heq])
+      exact Or.inl (bulk_other_box I w w' id d (by simpa [apply] using h) hid.symm)
+    | recvPrio id =>
+      exact Or.inl (prio_box I w w' id d (by simpa [apply] using h))
+    | finish id =>
+      exact Or.inl (finish_box w w' id d (by simpa [apply] using h))
+    | exec id =>
+      simp only [apply] at h
+      unfold execHead at h
+      by_cases hrun : (w.st id).life = .alive
+      · simp [hrun] at h
+        cases hphase : (w.st id).phase with
+        | run k =>
+          simp [hphase] at h
+          cases h
+          exact exec_box I w id k d halive
+        | idle => simp [hphase] at h
+        | parked _ _ _ => simp [hphase] at h
+        | awaitReply _ _ => simp [hphase] at h
+        | awaitEffect _ => simp [hphase] at h
+        | awaitPeer _ => simp [hphase] at h
+        | crashed => simp [hphase] at h
+      · simp [hrun] at h
+    | spawn template =>
+      simp only [apply] at h
+      unfold spawn at h
+      split at h
+      · cases h
+      · next t ht =>
+        split at h
+        · cases h
+          let nid := InstId.peer template (w.nextIx template)
+          let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n =>
+            if n = template then w.nextIx n + 1 else w.nextIx n } : World)
+          let born : Actor := withTokens I.desc template
+            { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [],
+              parked := [], tokens := fun _ => 0 }
+          by_cases hd : d = nid
+          · have hnin : nid ∉ w.roster := by
+              intro hmem
+              have hix := hOcc.indexed template (w.nextIx template) hmem
+              omega
+            have hempty := (hOcc.offEmpty nid hnin).1
+            rw [hd, hempty] at hpos
+            simp [callPos] at hpos
+          · have hs := readCells_st I.desc (setActor wR nid born) nid d
+            rw [hs]
+            simp [wR, setActor, hd]
+            exact Or.inl rfl
+        · cases h
+  exact call_grow _ _ _ hgrow hpos
+
+/-- While the callee is not receiving, a call sitting in its box stays at the same index. -/
+theorem call_pos_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (c d : InstId) (i n : Nat)
+    (halive : ∀ t, i ≤ t → t ≤ i + n → ((ρ.cfg t).st d).life = .alive)
+    (hnorecv : ∀ t, i ≤ t → t < i + n → ρ.act t ≠ .recvBulk d)
+    (hin : callPos ((ρ.cfg i).st d).box c < ((ρ.cfg i).st d).box.length) :
+    callPos ((ρ.cfg (i + n)).st d).box c = callPos ((ρ.cfg i).st d).box c ∧
+      callPos ((ρ.cfg (i + n)).st d).box c < ((ρ.cfg (i + n)).st d).box.length := by
+  induction n with
+  | zero =>
+    rw [Nat.add_zero]
+    exact ⟨rfl, hin⟩
+  | succ n ih =>
+    have hprev := ih (fun t h1 h2 => halive t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+      (fun t h1 h2 => hnorecv t h1 (by omega))
+    have hOcc := (inv2_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).2.1
+    have hstep := box_pos_mono I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1))
+      (ρ.valid (i + n)) hOcc d c
+      (hnorecv (i + n) (Nat.le_add_right i n) (by omega))
+      (halive (i + n + 1) (by omega) (by omega)) hprev.2
+    exact ⟨hstep.1.trans hprev.1, hstep.2⟩
+
+/-- With the callee alive and able to receive infinitely often, the tagged call is
+delivered and the handler is installed. `n` bounds the call's position. Each bulk
+receive either installs the handler or moves the message strictly closer to the head. -/
+theorem call_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
+    (ρ : Run I N) (hF : Fair ρ) (c d : InstId) (k : Cont) (n i : Nat)
+    (hstay : ∀ t, i ≤ t → ((ρ.cfg t).st c).phase = .awaitReply d k)
+    (halive : ∀ t, i ≤ t → ((ρ.cfg t).st d).life = .alive)
+    (hin : callPos ((ρ.cfg i).st d).box c ≤ n)
+    (hlt : callPos ((ρ.cfg i).st d).box c < ((ρ.cfg i).st d).box.length)
+    (hio : ∀ t, ∃ j, t ≤ j ∧ CanReceive (ρ.cfg j) d) :
+    ∃ j, i ≤ j ∧ ¬mailCall (ρ.cfg j) d c ∧
+      (handlerOwes c ((ρ.cfg j).st d).phase ∨ replyPending c ((ρ.cfg j).st d).phase) ∧
+      ((ρ.cfg j).st c).phase = .awaitReply d k := by
+  induction n generalizing i with
+  | zero =>
+    have hzero : callPos ((ρ.cfg i).st d).box c = 0 := by omega
+    obtain ⟨j, hj, hact, hfirst⟩ := next_bulk ρ hF d i hio
+    have hmono := call_pos_mono I hL hG ρ c d i (j - i)
+      (fun t h1 _ => halive t h1)
+      (fun t h1 h2 => hfirst t h1 (by
+        have hsum : i + (j - i) = j := Nat.add_sub_of_le hj
+        omega))
+      hlt
+    have hposj : callPos ((ρ.cfg j).st d).box c = 0 := by
+      have heq := hmono.1
+      simp [Nat.add_sub_of_le hj] at heq
+      rw [heq]
+      exact hzero
+    have hlenj : callPos ((ρ.cfg j).st d).box c < ((ρ.cfg j).st d).box.length := by
+      simpa [Nat.add_sub_of_le hj] using hmono.2
+    have hM := (inv_reachable I N (ρ.cfg j) hL (cfg_reachable ρ j)).2.1
+    have hT := call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j)
+    have hrecv : receiveBulk I (ρ.cfg j) d = some (ρ.cfg (j + 1)) := by
+      simpa [apply, hact] using ρ.valid j
+    rcases recv_box_progress I hL (ρ.cfg j) (ρ.cfg (j + 1)) d c k hrecv hM hT (hstay j hj) hlenj with
+      hinst | hdrop
+    · exact ⟨j + 1, Nat.le_trans hj (Nat.le_succ j), hinst.2.1, hinst.2.2, hinst.1⟩
+    · simp [hposj] at hdrop
+  | succ n ih =>
+    obtain ⟨j, hj, hact, hfirst⟩ := next_bulk ρ hF d i hio
+    have hmono := call_pos_mono I hL hG ρ c d i (j - i)
+      (fun t h1 _ => halive t h1)
+      (fun t h1 h2 => hfirst t h1 (by
+        have hsum : i + (j - i) = j := Nat.add_sub_of_le hj
+        omega))
+      hlt
+    have hposj : callPos ((ρ.cfg j).st d).box c ≤ n + 1 := by
+      have heq := hmono.1
+      simp [Nat.add_sub_of_le hj] at heq
+      rw [heq]
+      exact hin
+    have hlenj : callPos ((ρ.cfg j).st d).box c < ((ρ.cfg j).st d).box.length := by
+      simpa [Nat.add_sub_of_le hj] using hmono.2
+    have hM := (inv_reachable I N (ρ.cfg j) hL (cfg_reachable ρ j)).2.1
+    have hT := call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j)
+    have hrecv : receiveBulk I (ρ.cfg j) d = some (ρ.cfg (j + 1)) := by
+      simpa [apply, hact] using ρ.valid j
+    rcases recv_box_progress I hL (ρ.cfg j) (ρ.cfg (j + 1)) d c k hrecv hM hT (hstay j hj) hlenj with
+      hinst | hdrop
+    · exact ⟨j + 1, Nat.le_trans hj (Nat.le_succ j), hinst.2.1, hinst.2.2, hinst.1⟩
+    · have hnext : callPos ((ρ.cfg (j + 1)).st d).box c ≤ n := by
+        have hltp := hdrop.2.2
+        omega
+      have hmail : mailCall (ρ.cfg (j + 1)) d c := hdrop.2.1
+      have hph1 : ((ρ.cfg (j + 1)).st c).phase = .awaitReply d k := hdrop.1
+      have hT1 := call_tag_reachable I hL hG N (ρ.cfg (j + 1)) (cfg_reachable ρ (j + 1))
+      have hlen1 := (await_mail_in_box (ρ.cfg (j + 1)) hT1 c d k hph1 hmail).1
+      obtain ⟨j1, hj1, hmail1, howe1, hphj⟩ := ih (j + 1)
+        (fun t ht => hstay t (Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) ht))
+        (fun t ht => halive t (Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) ht))
+        hnext hlen1
+      exact ⟨j1, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj1, hmail1, howe1, hphj⟩
+
 end Deadlock

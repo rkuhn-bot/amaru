@@ -364,10 +364,12 @@ for a send the actor did not itself perform.
   continuation it drops has reply count zero, so clearing the mailbox and
   releasing the parked list moves no tag. `call_tag_reachable` is that
   invariant on every reachable world. While a caller stays in `awaitReply`, its
-  call sits in the callee's box. One bulk receive there either installs the
-  handler or moves that message strictly closer to the head. The rest of the
-  delivery walk, the handler reply, `never_stuck`, `deadlock_freedom`,
-  `CellFresh`, and the dead-instance lift are not done.
+  call sits in the callee's box. A step that is not that callee's bulk receive
+  only appends to the box or leaves it, so the call's position never increases
+  and the message stays until delivery. While the callee stays alive and can
+  receive infinitely often, some later bulk receive installs the handler.
+  The handler's reply, `never_stuck`, `deadlock_freedom`, `CellFresh`, and the
+  dead-instance lift are not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
