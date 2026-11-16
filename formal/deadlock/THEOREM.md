@@ -1,20 +1,53 @@
-# Deadlock freedom and cell observation
+# Deadlock freedom, delivery, and a quiet fair run
 
 This note is the statement a reviewer can check against the Lean development.
 Nothing in the development uses `sorry` or `admit`.
 
 ## What is proved
 
-The headline is a finite execution along the blocked actor's own wait chain.
+Three statements lead.
+
+`blocked_unblocks` is a finite execution along the blocked actor's own wait
+chain. It ends with that actor not `Blocked`.
+
+`fair_delivered` is liveness for a `Fair` run of a `GraphOk` and `LocalOk`
+implementation. `Delivered` says each bulk-box index and each parked index is
+consumed by that many later `recvBulk` steps, or that list is empty, and every
+`awaitReply` eventually changes. A later message with the same fields is a new
+acceptance. `Assumptions` is only `rust_refines`.
+
+`demo_fair` is one quiet run of a checked description. It parks a producer on
+a full sink, admits a call and waits for the reply, wakes a reader from a cell,
+and then stutters. The trace is kernel-checked with `decide`. Fairness does not
+ask the environment to keep injecting: `forced` is false for `ingress`,
+`spawn`, and `stutter`, and `stutter` is enabled only when no roster actor can
+`recv`, `exec`, or `finish`.
 
 ```lean
-def OnChain (w : World) (root : InstId) (act : Action) : Prop
-
 theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
     (hA : Assumptions I) (N : Nat) (w : World) (hR : Reachable I N w)
     (id : InstId) (hB : Blocked w id) :
     ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
       Reachable I N w' ∧ ¬ Blocked w' id
+
+theorem fair_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
+    (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ) : Delivered ρ
+
+theorem demo_fair : Fair demoRun
+theorem demo_parked : demoCode 4 prodId = 1
+theorem demo_awaiting : demoCode 9 callerId = 2
+theorem demo_answered : demoCode 11 callerId = 3
+theorem demo_woken :
+    ((replayCfg demoImpl demoActs 15).st readerId).prio = [] ∧
+      ((replayCfg demoImpl demoActs 14).st readerId).prio ≠ []
+```
+
+`park_graph_ok`, `park_local_ok`, `park_reachable`, and `park_unblocks` are the
+same park/resume world, checked with `decide`. `demo_graph_ok` and
+`demo_local_ok` are the quiet run's checks.
+
+```lean
+def OnChain (w : World) (root : InstId) (act : Action) : Prop
 
 theorem blocked_chain ... :
     ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
@@ -82,8 +115,11 @@ without reading `Env`. `Assumptions` is only `rust_refines`. A blocking send
 or a parked call waits on a strictly lower actor. An `awaitReply` cannot last:
 while the caller stays there it cannot mint a new `callFrom`, so `CallTagInv`
 keeps the callee in `handlerOwes` or `replyPending`, and that phase is not
-`idle`. `forced` is false for `spawn` and for `ingress`, so fairness does not
-require the environment to keep injecting. `cell_fresh`
+`idle`. `forced` is false for `spawn`, `ingress`, and `stutter`, so fairness does not
+require the environment to keep injecting. A run that takes a finite schedule
+and then stutters is fair once no roster actor can `recv`, `exec`, or
+`finish`, because an off-roster actor stays idle and not alive
+(`off_idle_reachable`). `cell_fresh`
 is the liveness form of the same cell fact: along a fair infinite run the
 queued wake is eventually observed. `fin_exec_no_wake` is the safety form.
 
@@ -159,7 +195,11 @@ structure Fair {I : Impl} {N : Nat} (ρ : Run I N) : Prop where
     (∀ i, ∃ j, i ≤ j ∧ ρ.act j = .recvPrio s)
 ```
 
-`forced (.spawn _) = false` and `forced _ = true` otherwise. `Enabled` is
+`forced` is false for `.spawn`, `.ingress`, and `.stutter`, and true for
+`recvBulk`, `recvPrio`, `exec`, and `finish`. `stutter` applies only when
+`runtimeBusy` is false: no roster actor has `recv`, `exec`, or `finish`.
+Ingress may still be enabled; taking it is the environment's choice, and a
+fair run does not have to. `Enabled` is
 `apply ≠ none`. `bulk` is stated on `Enabled`, not on `CanReceive`: a call at
 the head can make the mailbox look ready while `deliver` refuses it.
 `uniqueKeys` and `callTotal` are what turn readiness into `Enabled`. `prio`
@@ -179,14 +219,14 @@ def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
     match waitKind ((ρ.cfg i).st s) with
     | some (.blockingSend _) => True
     | some (.callReply _) => True
-    | some .cell => True
     | some .effect => True
+    | some .peer => peerUntimed I.desc s = false
     | _ => False
 ```
 
-`waitKind` of a real phase is never `some .cell` (`waitKind_ne_cell`). The
-`cell` arm of `Deadlock` is unreachable. `effect` and `peer` are discharged
-by `Assumptions`, not by the height induction.
+An effect or a timed peer wait is ended by `finish`, which the step relation
+enables without reading `Env`. An untimed peer wait is not a deadlock: the
+peer may stay silent.
 
 ### `CellFresh`
 
@@ -253,19 +293,12 @@ structure Assumptions (I : Impl) : Prop where
       tr'.template = tr.template ∧ tr'.fromState = tr.fromState ∧
       tr'.label = tr.label ∧ tr'.program = tr.program ∧
       tr'.toState = tr.toState ∧ tr'.acceptsCall = tr.acceptsCall
-  internal_complete :
-    ∀ (w : World) (id : InstId) (k : Cont),
-      (w.st id).phase = .awaitEffect k → Enabled I w (.finish id)
-  peer_complete :
-    ∀ (w : World) (id : InstId) (k : Cont),
-      (w.st id).phase = .awaitPeer k → Enabled I w (.finish id)
 ```
 
-These are not theorems about Rust. `rust_refines` is the exporter obligation.
+This is not a theorem about Rust. `rust_refines` is the exporter obligation.
 In this development the transition list is the model, so the field is the
-identity on that list. `internal_complete` and `peer_complete` are the
-assumptions that an internal effect returns and a peer wait completes or
-times out.
+identity on that list. An internal effect and a timed peer wait complete as
+`finish` steps. An untimed peer wait does not.
 
 ## Restrictions that are still in force
 
@@ -294,13 +327,14 @@ this development.
 
 ## Still open
 
-- **F4/F5.** Per-peer subtree kill, calls inside a subtree, and routing by a
-  subtree key. Design only, in `SUBTREE.md`. Not implemented.
-- **F7.** Peer waits are not given their own timeout. `Assumptions.peer_complete`
-  is an oracle flag, not a clock.
-- **F10.** No liveness theorem that a message accepted into a mailbox is
-  eventually delivered. `cell_fresh` is the cell special case, and it still
-  assumes a `Fair` infinite run.
+- **N4/N5.** Per-peer subtree kill, calls inside a subtree, and routing by a
+  subtree key. Waiting on Roland's `SUBTREE.md` decision. Not implemented.
+- **F7.** Peer waits are not given their own timeout. A timed peer ends by the
+  `finish` step; there is no clock beside that step.
+- **F10.** `fair_delivered` shows a bulk or parked entry is taken by later
+  `recvBulk` steps, or that list is empty. Empty includes a killing
+  `terminate`, which discards the mailbox. The theorem does not show `deliver`
+  ran on that entry when the owner dies with mail still queued.
 - **F11.** `CellFlags` is not checked against the set of writers. A cell edge
   is accepted when the flag word passes `cellFails`, not when the program
   effects are shown to be the only writers.
@@ -314,7 +348,16 @@ From `lake build Deadlock` (`#print axioms`):
 'Deadlock.never_stuck' depends on axioms: [propext, Classical.choice, Quot.sound]
 'Deadlock.deadlock_freedom' depends on axioms: [propext, Classical.choice, Quot.sound]
 'Deadlock.cell_fresh' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Deadlock.fair_delivered' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Deadlock.demo_fair' depends on axioms: [propext, Quot.sound]
+'Deadlock.park_reachable' depends on axioms: [propext]
+'Deadlock.park_unblocks' depends on axioms: [propext]
 ```
+
+`park_graph_ok`, `park_local_ok`, `park_reachable`, `park_unblocks`, and the
+`demo_*` Bool facts (`demo_graph`, `demo_parked`, `demo_awaiting`,
+`demo_answered`, `demo_woken`, `demo_quiet`) are `decide`. They do not use
+`native_decide` (`Lean.ofReduceBool`).
 
 `propext`, `Classical.choice`, and `Quot.sound` are the standard Lean kernel
 axioms used by `Classical.em` and by `simp` of definitions. There is no

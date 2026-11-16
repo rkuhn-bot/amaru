@@ -164,3 +164,14 @@ import Deadlock.Deliver
 #print axioms Deadlock.never_stuck
 #print axioms Deadlock.deadlock_freedom
 #print axioms Deadlock.cell_fresh
+#print axioms Deadlock.park_graph_ok
+#print axioms Deadlock.park_local_ok
+#print axioms Deadlock.park_reachable
+#print axioms Deadlock.park_unblocks
+#print axioms Deadlock.fair_delivered
+#print axioms Deadlock.demo_fair
+#print axioms Deadlock.demo_parked
+#print axioms Deadlock.demo_awaiting
+#print axioms Deadlock.demo_answered
+#print axioms Deadlock.demo_woken
+#print axioms Deadlock.forced_env_free
