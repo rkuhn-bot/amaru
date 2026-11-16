@@ -51,6 +51,13 @@ def OnChain (w : World) (root : InstId) (act : Action) : Prop :=
       | _ => True
   | none => False
 
+/-- A list of chain steps. Each action is `OnChain` in the world where it is taken. -/
+inductive ChainRun (I : Impl) (root : InstId) : World → List Action → Prop where
+  | nil (w : World) : ChainRun I root w []
+  | cons (w : World) (a : Action) (w' : World) (as : List Action)
+      (hC : OnChain w root a) (hA : apply I a w = some w')
+      (hR : ChainRun I root w' as) : ChainRun I root w (a :: as)
+
 theorem waits_on_park (w : World) (id dst : InstId) (isCall : Bool) (k : Cont)
     (h : (w.st id).phase = .parked dst isCall k) : WaitsOn w id dst := by
   simp [WaitsOn, h]
@@ -592,36 +599,289 @@ theorem blocked_progress (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA :
   obtain ⟨hs, hok⟩ := hG.ranked
   exact blocked_go I hL hG hA N w hR hs hok (heightOf hs (nodeAt w id) + 1) id (by omega) hB
 
-/-- A finite execution that has stopped is not holding a live blocked actor. -/
+theorem runtimeBusy_roster (I : Impl) (w : World) (hb : runtimeBusy I w = false) (id : InstId)
+    (hid : id ∈ w.roster) :
+    receiveBulk I w id = none ∧ receivePrio I w id = none ∧
+      execHead I w id = none ∧ finishWait I w id = none := by
+  have hall : ∀ x ∈ w.roster,
+      ((receiveBulk I w x).isSome || (receivePrio I w x).isSome ||
+        (execHead I w x).isSome || (finishWait I w x).isSome) = false := by
+    simpa [runtimeBusy] using (List.any_eq_false.mp hb)
+  have hfalse := hall id hid
+  rw [Bool.or_eq_false_iff] at hfalse
+  rw [Bool.or_eq_false_iff] at hfalse
+  rw [Bool.or_eq_false_iff] at hfalse
+  rcases hfalse with ⟨⟨⟨hr, hp⟩, he⟩, hf⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · cases h : receiveBulk I w id with
+    | none => rfl
+    | some _ => simp [h, Option.isSome] at hr
+  · cases h : receivePrio I w id with
+    | none => rfl
+    | some _ => simp [h, Option.isSome] at hp
+  · cases h : execHead I w id with
+    | none => rfl
+    | some _ => simp [h, Option.isSome] at he
+  · cases h : finishWait I w id with
+    | none => rfl
+    | some _ => simp [h, Option.isSome] at hf
+
+theorem quiet_no_forced (I : Impl) (w : World)
+    (hoff : ∀ id, id ∉ w.roster → (w.st id).life ≠ .alive ∧ (w.st id).phase = .idle)
+    (hb : runtimeBusy I w = false) (a : Action) (hf : forced a = true) : ¬ Enabled I w a := by
+  cases a with
+  | spawn _ => simp [forced] at hf
+  | ingress _ _ => simp [forced] at hf
+  | stutter => simp [forced] at hf
+  | recvBulk s =>
+    intro hen
+    by_cases hid : s ∈ w.roster
+    · have hnone := (runtimeBusy_roster I w hb s hid).1
+      simp [Enabled, apply, hnone] at hen
+    · have hdead := (hoff s hid).1
+      simp [Enabled, apply, receiveBulk, hdead] at hen
+  | recvPrio s =>
+    intro hen
+    by_cases hid : s ∈ w.roster
+    · have hnone := (runtimeBusy_roster I w hb s hid).2.1
+      simp [Enabled, apply, hnone] at hen
+    · have hdead := (hoff s hid).1
+      cases hp : (w.st s).prio with
+      | nil => simp [Enabled, apply, receivePrio, hp] at hen
+      | cons _ _ => simp [Enabled, apply, receivePrio, hp, hdead] at hen
+  | exec s =>
+    intro hen
+    by_cases hid : s ∈ w.roster
+    · have hnone := (runtimeBusy_roster I w hb s hid).2.2.1
+      simp [Enabled, apply, hnone] at hen
+    · have hdead := (hoff s hid).1
+      simp [Enabled, apply, execHead, hdead] at hen
+  | finish s =>
+    intro hen
+    by_cases hid : s ∈ w.roster
+    · have hnone := (runtimeBusy_roster I w hb s hid).2.2.2
+      simp [Enabled, apply, hnone] at hen
+    · have hidle := (hoff s hid).2
+      simp [Enabled, apply, finishWait, hidle] at hen
+
+
+/-- An id that the initial roster does not name is the absent actor. -/
+theorem off_idle_init (I : Impl) (N : Nat) (id : InstId) (h : id ∉ (initWorld I N).roster) :
+    ((initWorld I N).st id).phase = .idle ∧ ((initWorld I N).st id).life ≠ .alive := by
+  refine ⟨init_phase I N id, ?_⟩
+  rw [init_roster] at h
+  rw [init_base_st]
+  split
+  · next hc => exact False.elim (h (List.contains_iff_mem.mp hc))
+  · simp [absentActor]
+
+/-- A step does not wake an actor that is off the roster. Spawn puts the new id
+on the roster, and every other step leaves that actor idle and not alive. -/
+theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
+    (hoff : ∀ id, id ∉ w.roster → (w.st id).phase = .idle ∧ (w.st id).life ≠ .alive)
+    (h : apply I a w = some w') (s : InstId) (hs : s ∉ w'.roster) :
+    (w'.st s).phase = .idle ∧ (w'.st s).life ≠ .alive := by
+  cases a with
+  | stutter =>
+    have heq := stutter_unchanged I w w' h
+    subst heq
+    exact hoff s hs
+  | ingress dst label =>
+    have hkeep := ingress_phase I w w' dst label s (by simpa [apply] using h)
+    have hold : s ∉ w.roster := by
+      rw [hkeep.2.2.2.2.1] at hs
+      exact hs
+    obtain ⟨hidle, hdead⟩ := hoff s hold
+    refine ⟨hkeep.1.trans hidle, ?_⟩
+    rw [hkeep.2.1]
+    exact hdead
+  | finish id =>
+    have hr := finish_roster I w id w' (by simpa [apply] using h)
+    have hold : s ∉ w.roster := by
+      rw [hr] at hs
+      exact hs
+    obtain ⟨hidle, hdead⟩ := hoff s hold
+    obtain ⟨k, hph, hw⟩ := finish_proceed I w w' id (by simpa [apply] using h)
+    have hne : s ≠ id := by
+      intro heq
+      rcases hph with hph | hph
+      · rw [← heq, hidle] at hph
+        cases hph
+      · rw [← heq, hidle] at hph
+        cases hph
+    rw [hw]
+    refine ⟨?_, ?_⟩
+    · simp [setActor, hne, hidle]
+    · simp [setActor, hne]
+      exact hdead
+  | recvPrio id =>
+    have hr := prio_roster I w id w' (by simpa [apply] using h)
+    have hold : s ∉ w.roster := by
+      rw [hr] at hs
+      exact hs
+    obtain ⟨hidle, hdead⟩ := hoff s hold
+    have hrecv : receivePrio I w id = some w' := by simpa [apply] using h
+    unfold receivePrio at hrecv
+    cases hp : (w.st id).prio with
+    | nil => simp [hp] at hrecv
+    | cons m ms =>
+      by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+      · simp [hp, hready] at hrecv
+      · simp [hp, hready] at hrecv
+        split at hrecv
+        · cases hrecv
+        · next w1 a1 hdel =>
+          cases hrecv
+          have hlid : (w.st id).life = .alive := by
+            by_cases hl : (w.st id).life = .alive
+            · exact hl
+            · exact False.elim (hready (Or.inl hl))
+          have hne : s ≠ id := by
+            intro heq
+            exact hdead (by simpa [heq] using hlid)
+          have hst := deliver_st I w id ({ (w.st id) with prio := ms }) m w1 a1 s hdel
+          refine ⟨?_, ?_⟩
+          · simp [setActor, hne, hst, hidle]
+          · simp [setActor, hne, hst]
+            exact hdead
+  | recvBulk id =>
+    have hr := bulk_roster I w id w' (by simpa [apply] using h)
+    have hold : s ∉ w.roster := by
+      rw [hr] at hs
+      exact hs
+    obtain ⟨hidle, hdead⟩ := hoff s hold
+    have hrecv : receiveBulk I w id = some w' := by simpa [apply] using h
+    have hlid : (w.st id).life = .alive := by
+      unfold receiveBulk at hrecv
+      by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+      · simp [hready] at hrecv
+      · by_cases hl : (w.st id).life = .alive
+        · exact hl
+        · exact False.elim (hready (Or.inl hl))
+    have hne : s ≠ id := by
+      intro heq
+      exact hdead (by simpa [heq] using hlid)
+    have hnpark : ∀ d c k, (w.st s).phase ≠ .parked d c k := by
+      intro d c k hbad
+      rw [hidle] at hbad
+      cases hbad
+    have hkeep := bulk_keeps_quiet I w id w' s hne hnpark hrecv
+    refine ⟨hkeep.1.trans hidle, ?_⟩
+    rw [hkeep.2]
+    exact hdead
+  | exec id =>
+    have hr := head_roster I w id w' (by simpa [apply] using h)
+    have hold : s ∉ w.roster := by
+      rw [hr] at hs
+      exact hs
+    obtain ⟨hidle, hdead⟩ := hoff s hold
+    simp only [apply] at h
+    unfold execHead at h
+    by_cases hlid : (w.st id).life = .alive
+    · simp [hlid] at h
+      cases hph : (w.st id).phase with
+      | run k =>
+        simp [hph] at h
+        cases h
+        have hne : s ≠ id := by
+          intro heq
+          exact hdead (by simpa [heq] using hlid)
+        have hnpark : ∀ d c ck, (w.st s).phase ≠ .parked d c ck := by
+          intro d c ck hbad
+          rw [hidle] at hbad
+          cases hbad
+        have hnreply : ∀ d ck, (w.st s).phase ≠ .awaitReply d ck := by
+          intro d ck hbad
+          rw [hidle] at hbad
+          cases hbad
+        have hkeep := exec_keeps_quiet I w id (w.st id) k s hne hnpark hnreply
+        refine ⟨hkeep.1.trans hidle, ?_⟩
+        rw [hkeep.2]
+        exact hdead
+      | idle => simp [hph] at h
+      | parked _ _ _ => simp [hph] at h
+      | awaitReply _ _ => simp [hph] at h
+      | awaitEffect _ => simp [hph] at h
+      | awaitPeer _ => simp [hph] at h
+      | crashed => simp [hph] at h
+    · simp [hlid] at h
+  | spawn template =>
+    simp only [apply] at h
+    unfold spawn at h
+    cases ht : templateOf I.desc template with
+    | none => simp [ht] at h
+    | some t =>
+      by_cases hgo : (t.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
+      · simp [ht, hgo] at h
+        cases h
+        simp only [readCells_st]
+        by_cases hfresh : s = InstId.peer template (w.nextIx template)
+        · exfalso
+          apply hs
+          simp [readCells_roster, setActor, hfresh, List.mem_append]
+        · have hold : s ∉ w.roster := by
+            intro hin
+            apply hs
+            simp [readCells_roster, setActor, List.mem_append, hin]
+          obtain ⟨hidle, hdead⟩ := hoff s hold
+          refine ⟨?_, ?_⟩
+          · simpa [setActor, hfresh] using hidle
+          · simpa [setActor, hfresh] using hdead
+      · simp [ht, hgo] at h
+
+theorem off_idle_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
+    (id : InstId) (h : id ∉ w.roster) :
+    (w.st id).phase = .idle ∧ (w.st id).life ≠ .alive := by
+  induction hR generalizing id with
+  | init => exact off_idle_init I N id h
+  | step w w' a _ ha ih =>
+    exact off_idle_step I a w w' ih ha id h
+
+
+
+/-- A finite execution that has stopped is not holding a live blocked actor.
+Stopping means `runtimeBusy` is false: no forced `recv`, `exec`, or `finish`. -/
 theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     {N : Nat} (e : FinExec I N) (id : InstId) : ¬ Blocked (e.cfg e.len) id := by
   intro hB
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
-  obtain ⟨act, _, hen⟩ := blocked_progress I hG hL hA N (e.cfg e.len) hR id hB
-  exact hen (e.maximal act)
+  obtain ⟨act, hon, hen⟩ := blocked_progress I hG hL hA N (e.cfg e.len) hR id hB
+  have hf : forced act = true := by
+    cases act <;> simp_all [OnChain, actionSubject, forced]
+  have hoff : ∀ s, s ∉ (e.cfg e.len).roster →
+      ((e.cfg e.len).st s).life ≠ .alive ∧ ((e.cfg e.len).st s).phase = .idle := by
+    intro s hs
+    have h := off_idle_reachable I N (e.cfg e.len) hR s hs
+    exact ⟨h.2, h.1⟩
+  exact quiet_no_forced I (e.cfg e.len) hoff e.maximal act hf hen
 
 /-- A live reader with `label` still on its priority lane can take a step.
 Idle, that step is `recvPrio`, which runs `readCells` and clears the wake. -/
 theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     (N : Nat) (w : World) (hR : Reachable I N w) (r : InstId) (label : String)
     (hlive : (w.st r).life = .alive) (hhas : hasLabel ((w.st r).prio) label) :
-    ∃ act, Enabled I w act ∧ ((w.st r).phase = .idle → act = .recvPrio r) := by
+    ∃ act, Enabled I w act ∧ forced act = true ∧ ((w.st r).phase = .idle → act = .recvPrio r) := by
   cases hph : (w.st r).phase with
   | idle =>
-    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR) hlive hph hhas, fun _ => rfl⟩
+    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR) hlive hph hhas,
+      rfl, fun _ => rfl⟩
   | run k =>
-    exact ⟨.exec r, run_enabled I w r k hph hlive, fun hbad => by simp [hph] at hbad⟩
+    exact ⟨.exec r, run_enabled I w r k hph hlive, rfl, fun hbad => by simp [hph] at hbad⟩
   | awaitEffect k =>
-    exact ⟨.finish r, effect_finish_enabled I w r k hph, fun hbad => by simp [hph] at hbad⟩
+    exact ⟨.finish r, effect_finish_enabled I w r k hph, rfl, fun hbad => by simp [hph] at hbad⟩
   | awaitPeer k =>
     exact ⟨.finish r, peer_finish_enabled I w r k hph (graph_peer_timed I.desc hG.peers r),
-      fun hbad => by simp [hph] at hbad⟩
+      rfl, fun hbad => by simp [hph] at hbad⟩
   | parked _ _ _ =>
-    obtain ⟨act, _, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
-    exact ⟨act, hen, fun hbad => by simp [hph] at hbad⟩
+    obtain ⟨act, hon, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
+    have hf : forced act = true := by
+      cases act <;> simp_all [OnChain, actionSubject, forced]
+    exact ⟨act, hen, hf, fun hbad => by simp [hph] at hbad⟩
   | awaitReply _ _ =>
-    obtain ⟨act, _, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
-    exact ⟨act, hen, fun hbad => by simp [hph] at hbad⟩
+    obtain ⟨act, hon, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
+    have hf : forced act = true := by
+      cases act <;> simp_all [OnChain, actionSubject, forced]
+    exact ⟨act, hen, hf, fun hbad => by simp [hph] at hbad⟩
   | crashed =>
     exact False.elim ((reachable_not_crashed I hL hG N w hR) r (by simp [hph]))
 
@@ -631,7 +891,36 @@ theorem fin_exec_no_wake (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA :
     (hlive : ((e.cfg e.len).st r).life = .alive)
     (hhas : hasLabel (((e.cfg e.len).st r).prio) label) : False := by
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
-  obtain ⟨act, hen, _⟩ := cell_wake_enabled I hG hL hA N (e.cfg e.len) hR r label hlive hhas
-  exact hen (e.maximal act)
+  obtain ⟨act, hen, hf, _⟩ := cell_wake_enabled I hG hL hA N (e.cfg e.len) hR r label hlive hhas
+  have hoff : ∀ s, s ∉ (e.cfg e.len).roster →
+      ((e.cfg e.len).st s).life ≠ .alive ∧ ((e.cfg e.len).st s).phase = .idle := by
+    intro s hs
+    have h := off_idle_reachable I N (e.cfg e.len) hR s hs
+    exact ⟨h.2, h.1⟩
+  exact quiet_no_forced I (e.cfg e.len) hoff e.maximal act hf hen
+
+theorem fin_exec_not_blocked_on_idle (I : Impl) {N : Nat} (e : FinExec I N)
+    (hM : MailInv (e.cfg e.len)) (id dst : InstId) (k : Cont)
+    (hph : ((e.cfg e.len).st id).phase = .parked dst false k)
+    (hl : ((e.cfg e.len).st dst).life = .alive)
+    (hidle : ((e.cfg e.len).st dst).phase = .idle)
+    (hc : ∀ p, p ∈ ((e.cfg e.len).st dst).parked → p.msg.callFrom = none)
+    (hbox : ((e.cfg e.len).st dst).box = [] ∨
+      ∃ m ms, ((e.cfg e.len).st dst).box = m :: ms ∧ m.callFrom = none) : False := by
+  have hen : Enabled I (e.cfg e.len) (.recvBulk dst) := by
+    obtain ⟨p, hmem, _, _⟩ := hM.bwd id dst false k hph
+    cases hpark : ((e.cfg e.len).st dst).parked with
+    | nil => simp [hpark] at hmem
+    | cons q qs =>
+      exact parked_idle_enabled I (e.cfg e.len) dst hl hidle q qs hpark
+        (hc q (by simp [hpark])) hbox
+  have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
+  have hmem : dst ∈ (e.cfg e.len).roster := by
+    by_cases hin : dst ∈ (e.cfg e.len).roster
+    · exact hin
+    · exact False.elim ((off_idle_reachable I N (e.cfg e.len) hR dst hin).2 hl)
+  have hnone := (runtimeBusy_roster I (e.cfg e.len) e.maximal dst hmem).1
+  simp [Enabled, apply, hnone] at hen
+
 
 end Deadlock

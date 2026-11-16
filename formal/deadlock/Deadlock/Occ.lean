@@ -14,16 +14,6 @@ still in the continuation, so outstanding is at most the debt of that
 typestate. Lemma 1 sums those debts into `capBulk`, which makes the
 park branch of a blocking send unreachable. -/
 
-def contRest : Phase → List Eff
-  | .run k => k.rest
-  | .parked _ _ k => k.rest
-  | .awaitReply _ k => k.rest
-  | .awaitEffect k => k.rest
-  | .awaitPeer k => k.rest
-  | _ => []
-
-def pending (a : Actor) (dst : String) : Nat := sendsTo dst (contRest a.phase)
-
 def terminableName (D : Description) (name : String) : Prop :=
   ∃ t, templateOf D name = some t ∧ t.terminable = true
 
@@ -1286,7 +1276,7 @@ theorem owed_append_other (st : InstId → Actor) (dstName : String) (s dst : In
 
 theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (hO : OccInv I w)
     (h : receiveIngress I w dst label = some w') : OccInv I w' := by
-  obtain ⟨hlive, hphase, htermB, hfloor, hw⟩ := ingress_open I w w' dst label h
+  obtain ⟨hlive, _hopen, htermB, hfloor, hw⟩ := ingress_open I w w' dst label h
   let name := tname dst
   let msg : Msg := { label := label, sender := dst, callFrom := none }
   let a := w.st dst
@@ -1299,12 +1289,12 @@ theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
     simp [name, terminableB, ht, htv] at htermB
   have hone : 1 ≤ a.tokens name := by
     have h1 : 1 ≤ budget I.desc (tname dst) (tname dst) -
-        debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1 := Nat.le_add_left _ _
+        debt I.desc (tname dst) a.typestate (tname dst) + pending a (tname dst) + 1 := by
+      omega
     exact Nat.le_trans h1 (by simpa [a, name] using hfloor)
   have hcharge := charge_tokens a name hone
-  have hpend (d : String) : pending a d = 0 := by simp [pending, contRest, a, hphase, sendsTo]
-  have hpend' (d : String) : pending a' d = 0 := by
-    simp [a', a, pending, contRest, chargeSender, bumpToken, hphase, sendsTo]
+  have hpend' (d : String) : pending a' d = pending a d := by
+    simp [a', pending, chargeSender, bumpToken]
   have hmem : dst ∈ w.roster := hO.aliveIn dst hlive
   have htok (d : String) : a'.tokens d + (if d = name then 1 else 0) = a.tokens d := by
     by_cases hd : d = name
@@ -1445,16 +1435,15 @@ theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
         simp [name]
         have htk : a'.tokens (tname dst) + 1 = (w.st dst).tokens (tname dst) := by
           simpa [name, a] using htok (tname dst)
-        have hf : floorState I.desc (tname dst) (w.st dst).typestate (tname dst) + 1 ≤
-            (w.st dst).tokens (tname dst) := by simpa [floorState, a, name] using hfloor
+        have hf : floorState I.desc (tname dst) (w.st dst).typestate (tname dst) +
+            pending a (tname dst) + 1 ≤ (w.st dst).tokens (tname dst) := by
+          simpa [floorState, a, name] using hfloor
         omega
       · have htk : a'.tokens d = (w.st dst).tokens d := by
           have ht := htok d
           simp [name, a, hd, Nat.add_zero] at ht
           exact ht
         have hold := hO.slack dst d hs hlive
-        have hp0 : pending (w.st dst) d = 0 := by simpa [a] using hpend d
-        rw [hp0, Nat.add_zero] at hold
         rw [htk]
         exact hold
     · simp [hsnd] at hl ⊢

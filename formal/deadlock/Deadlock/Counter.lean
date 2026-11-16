@@ -16,6 +16,7 @@ import Deadlock.Progress
 import Deadlock.Witness
 
 set_option autoImplicit false
+set_option maxRecDepth 100000
 
 namespace Deadlock
 
@@ -66,7 +67,7 @@ def coreA : InstId := .core "A"
 def coreB : InstId := .core "B"
 def coreC : InstId := .core "C"
 
-theorem cycle_not_checked : checkBool cycDesc = false := by native_decide
+theorem cycle_not_checked : checkBool cycDesc = false := by decide
 
 def cycActs : List Action :=
   [.ingress coreA "Go", .ingress coreB "Go", .recvBulk coreA, .recvBulk coreB,
@@ -85,11 +86,11 @@ def parkTag (w : Option World) (x : InstId) : Nat :=
     | _ => 0
 
 theorem mutual_park : parkTag (afterCyc cycActs) coreA = 11 ∧ parkTag (afterCyc cycActs) coreB = 10 := by
-  native_decide
+  decide
 
 theorem clock_enabled :
     ((afterCyc cycActs).bind (apply cycImpl (.ingress coreC "Tick"))).isSome = true := by
-  native_decide
+  decide
 
 /-- A and B are parked on each other, the world is reachable, and `ingress C`
 is enabled. That ingress is not on A's chain, so it does not satisfy `OnChain`. -/
@@ -107,7 +108,7 @@ theorem cycle_off_chain : ∃ w, afterCyc cycActs = some w ∧ Reachable cycImpl
     · simp only [parkTag, hw] at hm
       refine ⟨?_, ?_⟩
       · have hl : ((afterCyc cycActs).map (fun w => decide ((w.st coreA).life = .alive))) = some true := by
-          native_decide
+          decide
         simp [hw] at hl
         exact hl
       · split at hm <;> simp_all
@@ -126,18 +127,18 @@ def parkClockImpl : Impl where
   desc := parkClockDesc
   transitions := parkImpl.transitions ++ [ctr "clock" "Tick" []]
 
-theorem clock_graph : checkBool parkClockDesc = true := by native_decide
+theorem clock_graph : checkBool parkClockDesc = true := by decide
 
-theorem clock_local : localOkB parkClockImpl = true := by native_decide
+theorem clock_local : localOkB parkClockImpl = true := by decide
 
 theorem clock_ingress_enabled :
     ((runFrom parkClockImpl (some (initWorld parkClockImpl 0)) parkActs).bind
-      (apply parkClockImpl (.ingress (.core "clock") "Tick"))).isSome = true := by native_decide
+      (apply parkClockImpl (.ingress (.core "clock") "Tick"))).isSome = true := by decide
 
 theorem clock_producer_parked :
     (match runFrom parkClockImpl (some (initWorld parkClockImpl 0)) parkActs with
      | some w => phaseTag ((w.st producerId).phase)
-     | none => 0) = 1 := by native_decide
+     | none => 0) = 1 := by decide
 
 /-- A checked world in which the producer is parked and an unrelated ingress is
 enabled. The ingress is not on the producer's chain. -/
@@ -162,7 +163,7 @@ theorem checked_off_chain : ∃ w, Reachable parkClockImpl 0 w ∧ Blocked w pro
             have hlife :
                 (match runFrom parkClockImpl (some (initWorld parkClockImpl 0)) parkActs with
                  | some w => decide ((w.st producerId).life = .alive)
-                 | none => false) = true := by native_decide
+                 | none => false) = true := by decide
             simpa [hw] using hlife
           simpa using hdec
         exact ⟨hlfe, by simp [hph]⟩

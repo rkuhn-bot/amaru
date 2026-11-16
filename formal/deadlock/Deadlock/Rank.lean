@@ -11861,15 +11861,17 @@ theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA :
   obtain ⟨s, i, _, hS, _⟩ := deadlock_kind ρ hF hD
   exact never_stuck I hL hG hA ρ hF s i hS
 
-/-- A finite execution starts at the initial world and stops only when no
-action applies. A `Run` cannot end this way: every index has a successor. -/
+/-- A finite execution starts at the initial world and stops when the runtime
+has nothing forced left to run. `stutter` may still apply, and so may ingress.
+A `Run` cannot end this way: every index has a successor. -/
 structure FinExec (I : Impl) (N : Nat) where
   cfg : Nat → World
   act : Nat → Action
   len : Nat
   start : cfg 0 = initWorld I N
   valid : ∀ i, i < len → apply I (act i) (cfg i) = some (cfg (i + 1))
-  maximal : ∀ a, apply I a (cfg len) = none
+  /-- No forced step is enabled. `runtimeBusy` is `recv`, `exec`, and `finish`. -/
+  maximal : runtimeBusy I (cfg len) = false
 
 theorem fin_exec_reachable (I : Impl) {N : Nat} (e : FinExec I N) (n : Nat) (hn : n ≤ e.len) :
     Reachable I N (e.cfg n) := by
@@ -11928,17 +11930,6 @@ theorem blocking_park_not_terminal (I : Impl) (w : World) (hM : MailInv w) (id d
     simp [hpark] at hmem
   | cons q qs =>
     exact ⟨.recvBulk dst, parked_idle_enabled I w dst hl hidle q qs hpark (hc q (by simp [hpark])) hbox⟩
-
-theorem fin_exec_not_blocked_on_idle (I : Impl) {N : Nat} (e : FinExec I N)
-    (hM : MailInv (e.cfg e.len)) (id dst : InstId) (k : Cont)
-    (hph : ((e.cfg e.len).st id).phase = .parked dst false k)
-    (hl : ((e.cfg e.len).st dst).life = .alive)
-    (hidle : ((e.cfg e.len).st dst).phase = .idle)
-    (hc : ∀ p, p ∈ ((e.cfg e.len).st dst).parked → p.msg.callFrom = none)
-    (hbox : ((e.cfg e.len).st dst).box = [] ∨
-      ∃ m ms, ((e.cfg e.len).st dst).box = m :: ms ∧ m.callFrom = none) : False := by
-  obtain ⟨a, ha⟩ := blocking_park_not_terminal I (e.cfg e.len) hM id dst k hph hl hidle hc hbox
-  exact ha (e.maximal a)
 
 /-- A priority message whose label is `l`. -/
 def hasLabel (ms : List Msg) (l : String) : Prop :=

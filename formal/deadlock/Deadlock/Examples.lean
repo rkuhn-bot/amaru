@@ -1,6 +1,7 @@
 import Deadlock.Graph
 
 set_option autoImplicit false
+set_option maxRecDepth 100000
 
 namespace Deadlock
 
@@ -95,25 +96,25 @@ def overflowDesc : Description where
   compatibility := .all
   steps := []
 
-theorem safe_pass : render safeDesc = "pass" := by native_decide
+theorem safe_pass : render safeDesc = "pass" := by decide
 
 theorem manager_cycle : render managerPeerDesc =
     "fail: residual cycle\n  (peer_selection, idle) -> (manager, idle) -> (peer_selection, idle)" := by
-  native_decide
+  decide
 
-theorem credit_pass : render creditDesc = "pass" := by native_decide
+theorem credit_pass : render creditDesc = "pass" := by decide
 
 theorem token_explicit_rejected : render tokenDesc =
     "fail: compatibility mode explicit is not an invariance check; use groups" := by
-  native_decide
+  decide
 
 theorem token_ungated_cycle : render tokenUngatedDesc =
     "fail: residual cycle\n  (select_chain, holding) -> (fetch_blocks, busy) -> (select_chain, holding)" := by
-  native_decide
+  decide
 
 theorem overflow_mailbox : render overflowDesc =
     "fail: overflowing mailbox\n  mailbox consumer: occupancy 0*N+11 > capacity 0*N+10" := by
-  native_decide
+  decide
 
 def lostReplyDesc : Description where
   name := "lost-reply"
@@ -137,11 +138,11 @@ def lostWakeDesc : Description where
 
 theorem lost_reply_fails : render lostReplyDesc =
     "fail: call source -[Ping]-> sink is not answered in the dequeue transition" := by
-  native_decide
+  decide
 
 theorem lost_wake_fails : render lostWakeDesc =
     "fail: superseding edge Wake misses cell conditions readPoints, dirtyBit" := by
-  native_decide
+  decide
 
 def undeclaredCellDesc : Description where
   name := "undeclared-cell"
@@ -154,7 +155,7 @@ def undeclaredCellDesc : Description where
 
 theorem undeclared_cell_fails : render undeclaredCellDesc =
     "fail: cell effect writer/idle -[Ghost]-> reader is not a declared cell edge" := by
-  native_decide
+  decide
 
 def rs (role state : String) : RoleState := { role, state }
 
@@ -190,15 +191,15 @@ def tokenRelationDesc : Description := fetchRelDesc "token-relation" false false
 def tokenGapDesc : Description := fetchRelDesc "token-relation-gap" false true
 def tokenCoarseDesc : Description := fetchRelDesc "token-relation-coarse" true true
 
-theorem token_relation_pass : render tokenRelationDesc = "pass" := by native_decide
+theorem token_relation_pass : render tokenRelationDesc = "pass" := by decide
 
 theorem token_relation_gap : render tokenGapDesc =
     "fail: compatibility broken by transition fetch_blocks idle -> busy [OnTip]\n  pre: (select_chain: holding, fetch_blocks: idle, header_store: idle)\n  post: (select_chain: holding, fetch_blocks: busy, header_store: idle)" := by
-  native_decide
+  decide
 
 theorem token_relation_coarse : render tokenCoarseDesc =
     "fail: residual cycle\n  (select_chain, holding) -> (fetch_blocks, busy) -> (select_chain, holding)" := by
-  native_decide
+  decide
 
 /-- Two blocking sends into mailboxes of capacity 1, with occupancy 2 and
 `mustFit` false. Lemma 1 does not discharge either edge, and overflow is not
@@ -225,10 +226,10 @@ def reliableTryDesc : Description where
 
 theorem mutual_full_rejected : render mutualFullDesc =
     "fail: residual cycle\n  (right, idle) -> (left, idle) -> (right, idle)" := by
-  native_decide
+  decide
 
 theorem reliable_try_fails : render reliableTryDesc =
     "fail: reliable trySend Ping may be dropped; mark a self-edge ingress or use superseding" := by
-  native_decide
+  decide
 
 end Deadlock

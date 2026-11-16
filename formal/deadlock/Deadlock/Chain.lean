@@ -171,12 +171,6 @@ def waitDebt (I : Impl) (w : World) (id : InstId) : Nat :=
   | .awaitReply dst _ => replyDebt I w id dst
   | _ => 0
 
-inductive ChainRun (I : Impl) (root : InstId) : World → List Action → Prop where
-  | nil (w : World) : ChainRun I root w []
-  | cons (w : World) (a : Action) (w' : World) (as : List Action)
-      (hC : OnChain w root a) (hA : apply I a w = some w')
-      (hR : ChainRun I root w' as) : ChainRun I root w (a :: as)
-
 theorem chain_run (I : Impl) (root : InstId) (w : World) (acts : List Action)
     (h : ChainRun I root w acts) : ∃ w', runFrom I (some w) acts = some w' := by
   induction h with

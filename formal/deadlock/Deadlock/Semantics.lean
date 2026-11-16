@@ -491,11 +491,40 @@ def hasIngress (D : Description) (dst label : String) : Bool :=
   D.edges.any fun e =>
     e.ingress && e.dst == dst && e.label == label && e.effect == .trySend
 
-/-- How many self-tokens an ingress may consume, taken from `ingressLegal`. -/
-def ingressAllowance (D : Description) (dst label : String) : Nat :=
+/-- Effects still to run from the current phase. -/
+def contRest : Phase → List Eff
+  | .run k => k.rest
+  | .parked _ _ k => k.rest
+  | .awaitReply _ k => k.rest
+  | .awaitEffect k => k.rest
+  | .awaitPeer k => k.rest
+  | _ => []
+
+def sendsTo (dst : String) : List Eff → Nat
+  | [] => 0
+  | .send d _ _ :: es => (if d == dst then 1 else 0) + sendsTo dst es
+  | .trySend d _ _ :: es => (if d == dst then 1 else 0) + sendsTo dst es
+  | .call d _ _ :: es => (if d == dst then 1 else 0) + sendsTo dst es
+  | _ :: es => sendsTo dst es
+
+/-- Bulk sends still in the continuation, counted toward the token floor. -/
+def pending (a : Actor) (dst : String) : Nat := sendsTo dst (contRest a.phase)
+
+/-- Idle, parked, or waiting. A running or crashed actor does not take ingress. -/
+def ingressOpen : Phase → Bool
+  | .idle => true
+  | .parked _ _ _ => true
+  | .awaitReply _ _ => true
+  | .awaitEffect _ => true
+  | .awaitPeer _ => true
+  | .run _ => false
+  | .crashed => false
+
+/-- How many self-tokens an ingress may consume, from `ingressLegal` at this `N`. -/
+def ingressAllowance (D : Description) (N : Nat) (dst label : String) : Nat :=
   match D.edges.find? fun e => e.ingress && e.dst == dst && e.label == label with
   | some e => match e.ingressLegal with
-    | some a => a.eval 0
+    | some a => a.eval N
     | none => 0
   | none => 0
 
@@ -505,21 +534,24 @@ def terminableB (D : Description) (name : String) : Bool :=
   | some t => t.terminable
   | none => false
 
-/-- Environment delivery into a live idle ingress stage. It charges one self-slot
-and appends a bulk message when the mailbox has room and the target still has a
-token above the floor of its typestate. A full mailbox, a dead target, a
-terminable target, or a spent budget makes the action disabled, so the message
-is never dropped and a terminable actor does not take on outstanding work. -/
+/-- Environment delivery into a live ingress stage. The actor may be idle, parked,
+or waiting; a running or crashed actor is refused. It charges one self-slot and
+appends a bulk message when the mailbox is under capacity and the target still
+has a token above the typestate floor plus the sends still in its continuation.
+A full mailbox, a dead target, a terminable target, or a spent budget makes the
+action disabled, so the message is never dropped. The allowance is `ingressLegal`
+evaluated at `w.N`. -/
 def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Option World :=
   let a := w.st dst
   let cap := capBulk I.desc w.N dst
   let floor := budget I.desc (tname dst) (tname dst) - debt I.desc (tname dst) a.typestate (tname dst)
-  if a.life ≠ .alive || a.phase ≠ .idle then none
+  let need := floor + pending a (tname dst) + 1
+  if a.life ≠ .alive || ingressOpen a.phase = false then none
   else if hasIngress I.desc (tname dst) label = false then none
-  else if a.parked ≠ [] || cap ≤ a.box.length then none
+  else if cap ≤ a.box.length then none
   else if terminableB I.desc (tname dst) then none
-  else if a.tokens (tname dst) < floor + 1 ||
-      a.tokens (tname dst) < Nat.max (ingressAllowance I.desc (tname dst) label) 1 then none
+  else if a.tokens (tname dst) < need ||
+      a.tokens (tname dst) < Nat.max (ingressAllowance I.desc w.N (tname dst) label) 1 then none
   else
     let msg : Msg := { label := label, sender := dst, callFrom := none }
     let charged := chargeSender a (tname dst)
@@ -611,13 +643,15 @@ theorem ingress_ty_eq (I : Impl) (w w' : World) (dst : InstId) (label : String) 
             · simp [setActor, hi]
 
 /-- A successful ingress is the charged, appended world, and the guards that
-make the charge safe have already held. -/
+make the charge safe have already held. The actor may be parked or waiting;
+the token floor includes the sends still in that continuation. -/
 theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
-    (w.st dst).life = .alive ∧ (w.st dst).phase = .idle ∧
+    (w.st dst).life = .alive ∧ ingressOpen (w.st dst).phase = true ∧
       terminableB I.desc (tname dst) = false ∧
-      budget I.desc (tname dst) (tname dst) - debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1 ≤
-        (w.st dst).tokens (tname dst) ∧
+      budget I.desc (tname dst) (tname dst) -
+        debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
+        pending (w.st dst) (tname dst) + 1 ≤ (w.st dst).tokens (tname dst) ∧
       w' = setActor w dst { chargeSender (w.st dst) (tname dst) with
         box := (w.st dst).box ++ [{ label := label, sender := dst, callFrom := none }] } := by
   dsimp [receiveIngress] at h
@@ -635,53 +669,39 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
           · simp at h
           · next htok =>
             cases h
-            have hnot : ¬((w.st dst).life ≠ .alive ∨ (w.st dst).phase ≠ .idle) := by simpa using hguard
+            have hnot : ¬((w.st dst).life ≠ .alive ∨ ingressOpen (w.st dst).phase = false) := by
+              simpa using hguard
             refine ⟨?_, ?_, ?_, ?_, rfl⟩
             · by_cases hl : (w.st dst).life = .alive
               · exact hl
               · exact False.elim (hnot (Or.inl hl))
-            · by_cases hp : (w.st dst).phase = .idle
+            · by_cases hp : ingressOpen (w.st dst).phase = true
               · exact hp
-              · exact False.elim (hnot (Or.inr hp))
+              · have hf : ingressOpen (w.st dst).phase = false := by
+                  cases hop : ingressOpen (w.st dst).phase <;> simp_all
+                exact False.elim (hnot (Or.inr hf))
             · cases hb : terminableB I.desc (tname dst) with
               | true => simp [hb] at hterm
               | false => rfl
-            · have hnot : ¬((w.st dst).tokens (tname dst) <
+            · have hlt : ¬((w.st dst).tokens (tname dst) <
                   budget I.desc (tname dst) (tname dst) -
-                    debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1) := by
-                intro hlt
+                    debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
+                    pending (w.st dst) (tname dst) + 1) := by
+                intro hbad
                 have hdec : decide ((w.st dst).tokens (tname dst) <
                     budget I.desc (tname dst) (tname dst) -
-                      debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1) = true :=
-                  decide_eq_true_iff.mpr hlt
+                      debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
+                      pending (w.st dst) (tname dst) + 1) = true :=
+                  decide_eq_true_iff.mpr hbad
                 simp [hdec] at htok
-              simpa [Nat.not_lt] using hnot
+              simpa [Nat.not_lt] using hlt
 
-/-- A delivered ingress names a live idle actor. -/
+/-- A delivered ingress names a live actor that is idle, parked, or waiting. -/
 theorem ingress_ready (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
-    (w.st dst).life = .alive ∧ (w.st dst).phase = .idle := by
-  dsimp [receiveIngress] at h
-  split at h
-  · simp at h
-  · next hguard =>
-    split at h
-    · simp at h
-    · split at h
-      · simp at h
-      · split at h
-        · simp at h
-        · split at h
-          · simp at h
-          · have hnot : ¬((w.st dst).life ≠ .alive ∨ (w.st dst).phase ≠ .idle) := by
-              simpa using hguard
-            refine ⟨?_, ?_⟩
-            · by_cases hl : (w.st dst).life = .alive
-              · exact hl
-              · exact False.elim (hnot (Or.inl hl))
-            · by_cases hp : (w.st dst).phase = .idle
-              · exact hp
-              · exact False.elim (hnot (Or.inr hp))
+    (w.st dst).life = .alive ∧ ingressOpen (w.st dst).phase = true := by
+  obtain ⟨hl, hop, _, _, _⟩ := ingress_open I w w' dst label h
+  exact ⟨hl, hop⟩
 
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
@@ -833,13 +853,6 @@ def phaseFuel : Phase → Nat
   | .awaitReply _ k => 2 * k.rest.length + 1
   | .awaitEffect k => 2 * k.rest.length + 1
   | .awaitPeer k => 2 * k.rest.length + 1
-
-def sendsTo (dst : String) : List Eff → Nat
-  | [] => 0
-  | .send d _ _ :: es => (if d == dst then 1 else 0) + sendsTo dst es
-  | .trySend d _ _ :: es => (if d == dst then 1 else 0) + sendsTo dst es
-  | .call d _ _ :: es => (if d == dst then 1 else 0) + sendsTo dst es
-  | _ :: es => sendsTo dst es
 
 def replyCount : List Eff → Nat
   | [] => 0
