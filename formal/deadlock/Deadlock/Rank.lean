@@ -1706,7 +1706,7 @@ theorem effect_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         have hst := hstay (j - i)
         have hph : ((ρ.cfg j).st s).phase = .awaitEffect k := by
           simpa [Nat.add_sub_of_le hj] using hst.1
-        exact hA.internal_complete (ρ.cfg j) s k hph
+        exact effect_finish_enabled I (ρ.cfg j) s k hph
       obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
       exact absurd ⟨j, hj, hact⟩ hmiss
   obtain ⟨j0, hj0, hact0⟩ := hhit
@@ -1744,7 +1744,8 @@ theorem effect_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
 theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N)
     (hF : Fair ρ) (s : InstId) (i : Nat) (k : Cont)
-    (hp : ((ρ.cfg i).st s).phase = .awaitPeer k) (hl : ((ρ.cfg i).st s).life = .alive) :
+    (hp : ((ρ.cfg i).st s).phase = .awaitPeer k) (hl : ((ρ.cfg i).st s).life = .alive)
+    (hu : peerUntimed I.desc s = false) :
     ∃ j, i ≤ j ∧ ((ρ.cfg (j + 1)).st s).phase = (proceed ((ρ.cfg j).st s) k).phase ∧
       ((ρ.cfg (j + 1)).st s).life = .alive := by
   have hhit : ∃ j, i ≤ j ∧ ρ.act j = .finish s := by
@@ -1763,7 +1764,7 @@ theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Ass
         have hst := hstay (j - i)
         have hph : ((ρ.cfg j).st s).phase = .awaitPeer k := by
           simpa [Nat.add_sub_of_le hj] using hst.1
-        exact hA.peer_complete (ρ.cfg j) s k hph
+        exact peer_finish_enabled I (ρ.cfg j) s k hph hu
       obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
       exact absurd ⟨j, hj, hact⟩ hmiss
   obtain ⟨j0, hj0, hact0⟩ := hhit
@@ -1797,11 +1798,27 @@ theorem peer_resumes (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Ass
   · rw [hw]
     simpa [setActor, proceed_life] using hl'
 
-/-- Idle, crashed, or blocked on a partner. An effect or peer wait is not one of these. -/
-def Quiescent (w : World) (s : InstId) : Prop :=
+theorem graph_peer_timed (D : Description) (h : peerFails D = []) (id : InstId) :
+    peerUntimed D id = false := by
+  cases ht : templateOf D (tname id) with
+  | none => simp [peerUntimed, ht]
+  | some t =>
+    simp [peerUntimed, ht]
+    by_cases hu : t.untimedPeer = true
+    · have hmem : (s!"fail: template {t.name} has an untimed peer wait; a checked description times peer waits out") ∈
+          peerFails D := by
+        refine List.mem_filterMap.mpr ⟨t, template_mem D (tname id) t ht, ?_⟩
+        simp [hu]
+      simp [h] at hmem
+    · cases hb : t.untimedPeer <;> simp_all
+
+/-- Idle, crashed, blocked on a partner, or stopped in an untimed peer wait.
+A timed peer wait and an internal effect are not quiescent: `finish` ends them. -/
+def Quiescent (D : Description) (w : World) (s : InstId) : Prop :=
   (w.st s).life ≠ .alive ∨ (w.st s).phase = .idle ∨ (w.st s).phase = .crashed ∨
     (∃ dst c k, (w.st s).phase = .parked dst c k) ∨
-    (∃ dst k, (w.st s).phase = .awaitReply dst k)
+    (∃ dst k, (w.st s).phase = .awaitReply dst k) ∨
+    (∃ k, (w.st s).phase = .awaitPeer k ∧ peerUntimed D s = true)
 
 theorem carried_fuel (ph : Phase) (es : List Eff)
     (h : ph = .idle ∨ ph = .crashed ∨ carried ph = some es) : phaseFuel ph ≤ 2 * es.length + 1 := by
@@ -2112,9 +2129,9 @@ Effect and peer waits are taken by `finish`, and a running program gets shorter 
 theorem reaches_block (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N)
     (hF : Fair ρ) (s : InstId) :
-    ∀ i, ((ρ.cfg i).st s).life = .alive → ∃ j, i ≤ j ∧ Quiescent (ρ.cfg j) s := by
+    ∀ i, ((ρ.cfg i).st s).life = .alive → ∃ j, i ≤ j ∧ Quiescent I.desc (ρ.cfg j) s := by
   suffices ∀ n i, phaseFuel (((ρ.cfg i).st s).phase) ≤ n → ((ρ.cfg i).st s).life = .alive →
-      ∃ j, i ≤ j ∧ Quiescent (ρ.cfg j) s by
+      ∃ j, i ≤ j ∧ Quiescent I.desc (ρ.cfg j) s by
     intro i hl
     exact this _ i (Nat.le_refl _) hl
   intro n
@@ -2127,7 +2144,7 @@ theorem reaches_block (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
     | parked dst c k =>
       exact ⟨i, Nat.le_refl _, Or.inr (Or.inr (Or.inr (Or.inl ⟨dst, c, k, hph⟩)))⟩
     | awaitReply dst k =>
-      exact ⟨i, Nat.le_refl _, Or.inr (Or.inr (Or.inr (Or.inr ⟨dst, k, hph⟩)))⟩
+      exact ⟨i, Nat.le_refl _, Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ⟨dst, k, hph⟩))))⟩
     | awaitEffect k =>
       obtain ⟨j, hj, hproc, hlj⟩ := effect_resumes I hL hG hA ρ hF s i k hph hl
       have hlt : phaseFuel (((ρ.cfg (j + 1)).st s).phase) < n := by
@@ -2139,15 +2156,18 @@ theorem reaches_block (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
       obtain ⟨j2, hj2, hq⟩ := ih _ hlt (j + 1) (Nat.le_refl _) hlj
       exact ⟨j2, Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) hj2), hq⟩
     | awaitPeer k =>
-      obtain ⟨j, hj, hproc, hlj⟩ := peer_resumes I hL hG hA ρ hF s i k hph hl
-      have hlt : phaseFuel (((ρ.cfg (j + 1)).st s).phase) < n := by
-        have hnew := proceed_fuel ((ρ.cfg j).st s) k
-        rw [← hproc] at hnew
-        have hold : phaseFuel (((ρ.cfg i).st s).phase) = 2 * k.rest.length + 1 := by
-          simp [phaseFuel, hph]
-        omega
-      obtain ⟨j2, hj2, hq⟩ := ih _ hlt (j + 1) (Nat.le_refl _) hlj
-      exact ⟨j2, Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) hj2), hq⟩
+      by_cases hu : peerUntimed I.desc s = false
+      · obtain ⟨j, hj, hproc, hlj⟩ := peer_resumes I hL hG hA ρ hF s i k hph hl hu
+        have hlt : phaseFuel (((ρ.cfg (j + 1)).st s).phase) < n := by
+          have hnew := proceed_fuel ((ρ.cfg j).st s) k
+          rw [← hproc] at hnew
+          have hold : phaseFuel (((ρ.cfg i).st s).phase) = 2 * k.rest.length + 1 := by
+            simp [phaseFuel, hph]
+          omega
+        obtain ⟨j2, hj2, hq⟩ := ih _ hlt (j + 1) (Nat.le_refl _) hlj
+        exact ⟨j2, Nat.le_trans hj (Nat.le_trans (Nat.le_succ j) hj2), hq⟩
+      · exact ⟨i, Nat.le_refl _, Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ⟨k, hph, by
+          cases hb : peerUntimed I.desc s <;> simp_all⟩))))⟩
     | run k =>
       have hhit : ∃ j, i ≤ j ∧ ρ.act j = .exec s := by
         cases Classical.em (∃ j, i ≤ j ∧ ρ.act j = .exec s) with
@@ -8773,6 +8793,28 @@ theorem call_height_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N :
   · simpa [rankAt] using reply_below I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) s dst k
       hs hok hawait hlive
 
+theorem untimed_peer_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (x : InstId) (i n : Nat) (k : Cont)
+    (hp : ((ρ.cfg i).st x).phase = .awaitPeer k) (hl : ((ρ.cfg i).st x).life = .alive)
+    (hu : peerUntimed I.desc x = true) (halive : ∀ t, i ≤ t → ((ρ.cfg t).st x).life = .alive) :
+    ((ρ.cfg (i + n)).st x).phase = .awaitPeer k := by
+  induction n with
+  | zero => simpa using hp
+  | succ n ih =>
+    have hprev := ih
+    have hO := (inv3_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).1.2.1
+    by_cases hfin : ρ.act (i + n) = .finish x
+    · have hv := ρ.valid (i + n)
+      rw [hfin] at hv
+      simp [apply, finishWait, hprev, hu] at hv
+    · have hstep := step_keeps_quiet I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) hO x
+        (fun d c kk hbad => by simp [hprev] at hbad)
+        (fun d ck hbad => by simp [hprev] at hbad)
+        (by simp [hprev])
+        (fun kk hbad => by simp [hprev] at hbad)
+        (halive (i + n) (Nat.le_add_right _ _)) (ρ.valid (i + n)) hfin
+      simpa [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using hstep.1.trans hprev
+
 /-- An actor that stays alive and is never stuck reaches idle. Blocks end, and each
 ending step drops `phaseFuel`, including a call whose continuation was frozen. -/
 theorem idle_when_free (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
@@ -8805,16 +8847,26 @@ theorem idle_when_free (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         (Nat.le_trans ht (Nat.le_trans hj (Nat.le_succ j))) (Nat.le_refl _)
       exact ⟨j2, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj2, hq⟩
     | awaitPeer k =>
-      obtain ⟨j, hj, hproc, _⟩ := peer_resumes I hL hG hA ρ hF x t k hph (halive t ht)
-      have hlt : phaseFuel (((ρ.cfg (j + 1)).st x).phase) < n := by
-        have hnew := proceed_fuel ((ρ.cfg j).st x) k
-        rw [← hproc] at hnew
-        have hold : phaseFuel (((ρ.cfg t).st x).phase) = 2 * k.rest.length + 1 := by
-          simp [phaseFuel, hph]
-        omega
-      obtain ⟨j2, hj2, hq⟩ := ih _ hlt (j + 1)
-        (Nat.le_trans ht (Nat.le_trans hj (Nat.le_succ j))) (Nat.le_refl _)
-      exact ⟨j2, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj2, hq⟩
+      by_cases hu : peerUntimed I.desc x = false
+      · obtain ⟨j, hj, hproc, _⟩ := peer_resumes I hL hG hA ρ hF x t k hph (halive t ht) hu
+        have hlt : phaseFuel (((ρ.cfg (j + 1)).st x).phase) < n := by
+          have hnew := proceed_fuel ((ρ.cfg j).st x) k
+          rw [← hproc] at hnew
+          have hold : phaseFuel (((ρ.cfg t).st x).phase) = 2 * k.rest.length + 1 := by
+            simp [phaseFuel, hph]
+          omega
+        obtain ⟨j2, hj2, hq⟩ := ih _ hlt (j + 1)
+          (Nat.le_trans ht (Nat.le_trans hj (Nat.le_succ j))) (Nat.le_refl _)
+        exact ⟨j2, Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) hj2, hq⟩
+      · exact False.elim ((hfree t ht) ⟨⟨by simp [SameWait, waitKind, hph], by simp [waitKind, hph]⟩,
+          fun j hj => by
+            have hut : peerUntimed I.desc x = true := by
+              cases hb : peerUntimed I.desc x <;> simp_all
+            have hphj := untimed_peer_stays I hL hG ρ x t (j - t) k hph (halive t ht) hut
+              (fun u hu => halive u (Nat.le_trans ht hu))
+            have hidx : t + (j - t) = j := Nat.add_sub_of_le hj
+            rw [hidx] at hphj
+            simp [SameWait, waitKind, hph, hphj]⟩)
     | run k =>
       have hhit : ∃ j, t ≤ j ∧ ρ.act j = .exec x := by
         cases Classical.em (∃ j, t ≤ j ∧ ρ.act j = .exec x) with
@@ -11684,9 +11736,9 @@ theorem below_idle (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
       | none => exact (hStuck.1).2 hwk
       | some kind =>
         cases kind with
-        | effect => exact not_stuck_effect_assumed ρ hA hF x v hStuck hwk
-        | peer => exact not_stuck_peer_assumed ρ hA hF x v hStuck hwk
-        | cell => exact absurd hwk (waitKind_ne_cell _)
+        | effect => exact not_stuck_effect_assumed ρ hF x v hStuck hwk
+        | peer =>
+          exact not_stuck_peer_assumed ρ hF x v hStuck hwk (graph_peer_timed I.desc hG.peers x)
         | blockingSend dst =>
           exact send_stuck_false I hL hG ρ hF hs hok x dst v hStuck hwk hlower
         | callReply dst =>
@@ -11702,9 +11754,9 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
   | none => exact hS.1.2 hwk
   | some kind =>
     cases kind with
-    | effect => exact not_stuck_effect_assumed ρ hA hF x t hS hwk
-    | peer => exact not_stuck_peer_assumed ρ hA hF x t hS hwk
-    | cell => exact absurd hwk (waitKind_ne_cell _)
+    | effect => exact not_stuck_effect_assumed ρ hF x t hS hwk
+    | peer =>
+      exact not_stuck_peer_assumed ρ hF x t hS hwk (graph_peer_timed I.desc hG.peers x)
     | blockingSend dst =>
       have hr (u : Nat) (hu : t ≤ u) :
           rankAt hs (ρ.cfg u) x = rankAt hs (ρ.cfg t) x := by
@@ -11743,7 +11795,7 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
 theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) : ¬ Deadlock ρ := by
   intro hD
-  obtain ⟨s, i, _, hS, _⟩ := deadlock_kind ρ hA hF hD
+  obtain ⟨s, i, _, hS, _⟩ := deadlock_kind ρ hF hD
   exact never_stuck I hL hG hA ρ hF s i hS
 
 /-- A finite execution starts at the initial world and stops only when no

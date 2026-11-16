@@ -17,6 +17,89 @@ def Blocked (w : World) (id : InstId) : Prop :=
 def nodeAt (w : World) (id : InstId) : Node :=
   { template := tname id, state := (w.st id).typestate }
 
+/-- Who an action steps, when it has a subject. Ingress is included so a proof
+can show it is not on the wait chain. -/
+def actionSubject : Action → Option InstId
+  | .recvBulk s => some s
+  | .recvPrio s => some s
+  | .exec s => some s
+  | .finish s => some s
+  | .ingress s _ => some s
+  | .spawn _ => none
+
+/-- `id` is blocked on `dst`. -/
+def WaitsOn (w : World) (id dst : InstId) : Prop :=
+  match (w.st id).phase with
+  | .parked d _ _ => d = dst
+  | .awaitReply d _ => d = dst
+  | _ => False
+
+/-- Actors reachable by following wait targets, including `id` itself. -/
+inductive InChain (w : World) : InstId → InstId → Prop where
+  | refl (id : InstId) : InChain w id id
+  | step (id dst nxt : InstId) : InChain w id dst → WaitsOn w dst nxt → InChain w id nxt
+
+/-- A step whose subject lies on `root`'s wait chain. Ingress and spawn never do. -/
+def OnChain (w : World) (root : InstId) (act : Action) : Prop :=
+  match actionSubject act with
+  | some s => InChain w root s ∧
+      match act with
+      | .ingress _ _ => False
+      | .spawn _ => False
+      | _ => True
+  | none => False
+
+theorem waits_on_park (w : World) (id dst : InstId) (isCall : Bool) (k : Cont)
+    (h : (w.st id).phase = .parked dst isCall k) : WaitsOn w id dst := by
+  simp [WaitsOn, h]
+
+theorem waits_on_reply (w : World) (id dst : InstId) (k : Cont)
+    (h : (w.st id).phase = .awaitReply dst k) : WaitsOn w id dst := by
+  simp [WaitsOn, h]
+
+theorem chain_of_wait (w : World) (id dst : InstId) (h : WaitsOn w id dst) : InChain w id dst :=
+  InChain.step id id dst (InChain.refl id) h
+
+theorem chain_prefix (w : World) (id dst s : InstId) (hwait : WaitsOn w id dst)
+    (h : InChain w dst s) : InChain w id s :=
+  match h with
+  | .refl _ => chain_of_wait w id dst hwait
+  | .step _ mid nxt hmid hnext =>
+    InChain.step id mid nxt (chain_prefix w id dst mid hwait hmid) hnext
+
+theorem ingress_off_chain (w : World) (id dst : InstId) (label : String) :
+    ¬ OnChain w id (.ingress dst label) := by
+  intro h
+  simp [OnChain, actionSubject] at h
+
+theorem on_finish_self (w : World) (id : InstId) : OnChain w id (.finish id) := by
+  simp [OnChain, actionSubject, InChain.refl]
+
+theorem on_self_bulk (w : World) (id : InstId) : OnChain w id (.recvBulk id) := by
+  simp [OnChain, actionSubject, InChain.refl]
+
+theorem on_self_exec (w : World) (id : InstId) : OnChain w id (.exec id) := by
+  simp [OnChain, actionSubject, InChain.refl]
+
+theorem on_partner (w : World) (id dst : InstId) (act : Action) (hwait : WaitsOn w id dst)
+    (h : OnChain w dst act) : OnChain w id act := by
+  simp [OnChain] at h ⊢
+  cases act with
+  | recvBulk s =>
+    rcases h with ⟨hc, _⟩
+    exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
+  | recvPrio s =>
+    rcases h with ⟨hc, _⟩
+    exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
+  | exec s =>
+    rcases h with ⟨hc, _⟩
+    exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
+  | finish s =>
+    rcases h with ⟨hc, _⟩
+    exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
+  | ingress _ _ => exact h.2.elim
+  | spawn _ => exact False.elim (by simp [actionSubject] at h)
+
 theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
     (dst : String) (t : Template) (ht : templateOf I.desc dst = some t)
     (hone : t.multiplicity = .one) (hterm : t.terminable = false) :
@@ -391,7 +474,8 @@ theorem reply_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
 theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I) (N : Nat)
     (w : World) (hR : Reachable I N w) (hs : List (Node × Nat))
     (hok : heightsOkB (residualEdges I.desc) hs = true) (n : Nat) (id : InstId)
-    (hn : heightOf hs (nodeAt w id) < n) (hB : Blocked w id) : ∃ act, Enabled I w act := by
+    (hn : heightOf hs (nodeAt w id) < n) (hB : Blocked w id) :
+    ∃ act, OnChain w id act ∧ Enabled I w act := by
   induction n generalizing id with
   | zero => omega
   | succ n ih =>
@@ -407,9 +491,10 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
       unfold Blocked at hB
       simp [hph] at hB
     | awaitEffect k =>
-      exact ⟨.finish id, hA.internal_complete w id k hph⟩
+      exact ⟨.finish id, on_finish_self w id, effect_finish_enabled I w id k hph⟩
     | awaitPeer k =>
-      exact ⟨.finish id, hA.peer_complete w id k hph⟩
+      exact ⟨.finish id, on_finish_self w id,
+        peer_finish_enabled I w id k hph (graph_peer_timed I.desc hG.peers id)⟩
     | parked dst isCall k =>
       have hliveD := park_target_alive I hL hG N w hR id dst isCall k hph
       have hdrop : heightOf hs (nodeAt w dst) < heightOf hs (nodeAt w id) := by
@@ -423,21 +508,33 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
         have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
           obtain ⟨p, hp, _, _⟩ := (inv_reachable I N w hL hR).2.1.bwd id dst isCall k hph
           exact Or.inr (fun hempty => by simp [hempty] at hp)
-        exact ⟨.recvBulk dst, can_receive_enabled I hL w dst
+        exact ⟨.recvBulk dst,
+          on_partner w id dst (.recvBulk dst) (waits_on_park w id dst isCall k hph) (on_self_bulk w dst),
+          can_receive_enabled I hL w dst
           ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
           ⟨⟨hliveD, hphD⟩, hmail⟩⟩
       | run kD =>
-        exact ⟨.exec dst, run_enabled I w dst kD hphD hliveD⟩
+        exact ⟨.exec dst,
+          on_partner w id dst (.exec dst) (waits_on_park w id dst isCall k hph) (on_self_exec w dst),
+          run_enabled I w dst kD hphD hliveD⟩
       | awaitEffect kD =>
-        exact ⟨.finish dst, hA.internal_complete w dst kD hphD⟩
+        exact ⟨.finish dst,
+          on_partner w id dst (.finish dst) (waits_on_park w id dst isCall k hph) (on_finish_self w dst),
+          effect_finish_enabled I w dst kD hphD⟩
       | awaitPeer kD =>
-        exact ⟨.finish dst, hA.peer_complete w dst kD hphD⟩
+        exact ⟨.finish dst,
+          on_partner w id dst (.finish dst) (waits_on_park w id dst isCall k hph) (on_finish_self w dst),
+          peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)⟩
       | crashed =>
         exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
       | parked _ _ _ =>
-        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩
+        exact ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
       | awaitReply _ _ =>
-        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩
+        exact ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
     | awaitReply dst k =>
       have hliveD := reply_target_alive I hL hG N w hR id dst k hph
       have hdrop := reply_below I hL hG N w hR id dst k hs hok hph hliveD
@@ -453,28 +550,39 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
             simp [carriedCont, hphD] at hcar
           · rcases hpend.2.2 with ⟨_, hcar, _⟩
             simp [carriedCont, hphD] at hcar
-        exact ⟨.recvBulk dst, can_receive_enabled I hL w dst
+        exact ⟨.recvBulk dst,
+          on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph) (on_self_bulk w dst),
+          can_receive_enabled I hL w dst
           ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
           ⟨⟨hliveD, hphD⟩, hmail⟩⟩
       | run kD =>
-        exact ⟨.exec dst, run_enabled I w dst kD hphD hliveD⟩
+        exact ⟨.exec dst,
+          on_partner w id dst (.exec dst) (waits_on_reply w id dst k hph) (on_self_exec w dst),
+          run_enabled I w dst kD hphD hliveD⟩
       | awaitEffect kD =>
-        exact ⟨.finish dst, hA.internal_complete w dst kD hphD⟩
+        exact ⟨.finish dst,
+          on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
+          effect_finish_enabled I w dst kD hphD⟩
       | awaitPeer kD =>
-        exact ⟨.finish dst, hA.peer_complete w dst kD hphD⟩
+        exact ⟨.finish dst,
+          on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
+          peer_finish_enabled I w dst kD hphD (graph_peer_timed I.desc hG.peers dst)⟩
       | crashed =>
         exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
       | parked _ _ _ =>
-        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩
+        exact ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
       | awaitReply _ _ =>
-        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+        obtain ⟨act, hchain, hen⟩ := ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+          ⟨hliveD, by simp [hphD]⟩
+        exact ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
 
-/-- In a reachable world every live wait has some enabled step. The rank of a
-blocking partner is strictly smaller, so the search reaches an idle mailbox, a
-running actor, or an effect or peer `finish`. -/
+/-- In a reachable world every live wait has an enabled step whose subject is
+on that actor's wait chain. An ingress into an unrelated core does not count. -/
 theorem blocked_progress (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id) :
-    ∃ act, Enabled I w act := by
+    ∃ act, OnChain w id act ∧ Enabled I w act := by
   obtain ⟨hs, hok⟩ := hG.ranked
   exact blocked_go I hL hG hA N w hR hs hok (heightOf hs (nodeAt w id) + 1) id (by omega) hB
 
@@ -483,7 +591,7 @@ theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (h
     {N : Nat} (e : FinExec I N) (id : InstId) : ¬ Blocked (e.cfg e.len) id := by
   intro hB
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
-  obtain ⟨act, hen⟩ := blocked_progress I hG hL hA N (e.cfg e.len) hR id hB
+  obtain ⟨act, _, hen⟩ := blocked_progress I hG hL hA N (e.cfg e.len) hR id hB
   exact hen (e.maximal act)
 
 /-- A live reader with `label` still on its priority lane can take a step.
@@ -498,14 +606,15 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
   | run k =>
     exact ⟨.exec r, run_enabled I w r k hph hlive, fun hbad => by simp [hph] at hbad⟩
   | awaitEffect k =>
-    exact ⟨.finish r, hA.internal_complete w r k hph, fun hbad => by simp [hph] at hbad⟩
+    exact ⟨.finish r, effect_finish_enabled I w r k hph, fun hbad => by simp [hph] at hbad⟩
   | awaitPeer k =>
-    exact ⟨.finish r, hA.peer_complete w r k hph, fun hbad => by simp [hph] at hbad⟩
+    exact ⟨.finish r, peer_finish_enabled I w r k hph (graph_peer_timed I.desc hG.peers r),
+      fun hbad => by simp [hph] at hbad⟩
   | parked _ _ _ =>
-    obtain ⟨act, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
+    obtain ⟨act, _, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
     exact ⟨act, hen, fun hbad => by simp [hph] at hbad⟩
   | awaitReply _ _ =>
-    obtain ⟨act, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
+    obtain ⟨act, _, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
     exact ⟨act, hen, fun hbad => by simp [hph] at hbad⟩
   | crashed =>
     exact False.elim ((reachable_not_crashed I hL hG N w hR) r (by simp [hph]))

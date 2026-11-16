@@ -228,7 +228,7 @@ theorem mutual_full_rejected : render mutualFullDesc =
   native_decide
 
 theorem reliable_try_fails : render reliableTryDesc =
-    "fail: reliable trySend Ping may be dropped; mark it ingress or superseding" := by
+    "fail: reliable trySend Ping may be dropped; mark a self-edge ingress or use superseding" := by
   native_decide
 
 end Deadlock

@@ -43,8 +43,7 @@ theorem finish_clears_effect (I : Impl) (w : World) (s : InstId) (w' : World)
     waitKind (w'.st s) ≠ some .effect := by
   obtain ⟨k, hk⟩ := wait_effect_phase (w.st s) hp
   simp [finishWait, hk] at h
-  rcases h with ⟨_, hw⟩
-  rw [← hw]
+  cases h
   simpa [setActor_self] using proceed_not_effect (w.st s) k
 
 theorem finish_clears_peer (I : Impl) (w : World) (s : InstId) (w' : World)
@@ -53,29 +52,36 @@ theorem finish_clears_peer (I : Impl) (w : World) (s : InstId) (w' : World)
   obtain ⟨k, hk⟩ := wait_peer_phase (w.st s) hp
   simp [finishWait, hk] at h
   rcases h with ⟨_, hw⟩
-  rw [← hw]
+  cases hw
   simpa [setActor_self] using proceed_not_peer (w.st s) k
 
+theorem effect_finish_enabled (I : Impl) (w : World) (id : InstId) (k : Cont)
+    (h : (w.st id).phase = .awaitEffect k) : Enabled I w (.finish id) := by
+  simp [Enabled, apply, finishWait, h]
+
+theorem peer_finish_enabled (I : Impl) (w : World) (id : InstId) (k : Cont)
+    (h : (w.st id).phase = .awaitPeer k) (hu : peerUntimed I.desc id = false) :
+    Enabled I w (.finish id) := by
+  simp [Enabled, apply, finishWait, h, hu]
+
 theorem enabled_finish_effect (I : Impl) (w : World) (s : InstId)
-    (hp : waitKind (w.st s) = some .effect) (hok : I.env.effectDone w s = true) :
-    Enabled I w (.finish s) := by
+    (hp : waitKind (w.st s) = some .effect) : Enabled I w (.finish s) := by
   obtain ⟨k, hk⟩ := wait_effect_phase (w.st s) hp
-  simp [Enabled, apply, finishWait, hk, hok]
+  exact effect_finish_enabled I w s k hk
 
 theorem enabled_finish_peer (I : Impl) (w : World) (s : InstId)
-    (hp : waitKind (w.st s) = some .peer) (hok : I.env.peerDone w s = true) :
+    (hp : waitKind (w.st s) = some .peer) (hu : peerUntimed I.desc s = false) :
     Enabled I w (.finish s) := by
   obtain ⟨k, hk⟩ := wait_peer_phase (w.st s) hp
-  simp [Enabled, apply, finishWait, hk, hok]
+  exact peer_finish_enabled I w s k hk hu
 
 theorem not_stuck_effect {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s : InstId) (i : Nat)
-    (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .effect)
-    (hok : ∀ j, i ≤ j → I.env.effectDone (ρ.cfg j) s = true) : False := by
+    (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .effect) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .effect := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) :=
-    fun j hj => enabled_finish_effect I (ρ.cfg j) s (hall j hj) (hok j hj)
+    fun j hj => enabled_finish_effect I (ρ.cfg j) s (hall j hj)
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
@@ -84,12 +90,12 @@ theorem not_stuck_effect {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s :
 
 theorem not_stuck_peer {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ) (s : InstId) (i : Nat)
     (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer)
-    (hok : ∀ j, i ≤ j → I.env.peerDone (ρ.cfg j) s = true) : False := by
+    (hu : peerUntimed I.desc s = false) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .peer := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) :=
-    fun j hj => enabled_finish_peer I (ρ.cfg j) s (hall j hj) (hok j hj)
+    fun j hj => enabled_finish_peer I (ρ.cfg j) s (hall j hj) hu
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ

@@ -179,8 +179,7 @@ theorem bulk_finish (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w)
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     apply bulk_or I w _ hB
     intro i ht
     by_cases hi : i = id

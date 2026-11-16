@@ -680,8 +680,7 @@ theorem finish_ty (I : Impl) (w : World) (id : InstId) (w' : World) (hT : TyOk I
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     exact tyOk_proceed I.desc w id k hT (by simpa [contTy, hph] using hS.cont id)
   | awaitPeer k =>
     simp [finishWait, hph] at h
@@ -875,8 +874,7 @@ theorem finish_ix (I : Impl) (w : World) (id : InstId) (w' : World) (name : Stri
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     simp [setActor]
   | awaitPeer k =>
     simp [finishWait, hph] at h

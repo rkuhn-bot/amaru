@@ -37,7 +37,10 @@ def sendsOk (D : Description) (template srcState dstState : String) (prog : List
 def effectsOk (D : Description) (template toState : String) : List Eff → Bool
   | [] => true
   | .send d l _ :: es => hasEdge D template toState d .send .blocking l && effectsOk D template toState es
-  | .trySend d l _ :: es => hasEdge D template toState d .trySend .nonBlocking l && effectsOk D template toState es
+  | .trySend d l _ :: es =>
+    hasEdge D template toState d .trySend .nonBlocking l &&
+      !(D.edges.any fun e => e.ingress && e.src == template && e.dst == d && e.label == l) &&
+      effectsOk D template toState es
   | .call d l _ :: es => hasEdge D template toState d .call .blocking l && effectsOk D template toState es
   | .cell d l _ :: es => hasEdge D template toState d .cell .nonBlocking l && effectsOk D template toState es
   | _ :: es => effectsOk D template toState es
@@ -175,21 +178,15 @@ def LocalOk (I : Impl) : Prop := localOkB I = true
 
 /-- Trust boundary. Nothing in here is a theorem about Rust.
 `rust_refines` says the node's programs are `I.transitions`.
-`internal_complete` / `peer_complete` say an internal effect returns and a peer
-wait completes or times out, which is why `finish` is the step the fairness
-argument applies to. Scheduler fairness is the separate `Fair` hypothesis. -/
+An internal effect completes as a `finish` step. A timed peer wait completes
+the same way. An untimed peer wait does not, so the peer may stay silent.
+Scheduler fairness is the separate `Fair` hypothesis and does not force ingress. -/
 structure Assumptions (I : Impl) : Prop where
   rust_refines :
     ∀ tr ∈ I.transitions, ∃ tr' ∈ I.transitions,
       tr'.template = tr.template ∧ tr'.fromState = tr.fromState ∧
       tr'.label = tr.label ∧ tr'.program = tr.program ∧ tr'.toState = tr.toState ∧
       tr'.acceptsCall = tr.acceptsCall
-  internal_complete :
-    ∀ (w : World) (id : InstId) (k : Cont),
-      (w.st id).phase = .awaitEffect k → Enabled I w (.finish id)
-  peer_complete :
-    ∀ (w : World) (id : InstId) (k : Cont),
-      (w.st id).phase = .awaitPeer k → Enabled I w (.finish id)
 
 /-- After a declared cell label strictly rises, every instance of that template
 which is already alive and stays alive eventually records at least the written

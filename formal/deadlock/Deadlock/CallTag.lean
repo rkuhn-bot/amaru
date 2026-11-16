@@ -645,8 +645,7 @@ theorem finish_tag (I : Impl) (w : World) (id : InstId) (w' : World) (hT : CallT
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     exact resume_tag w id k hT (by simp [carriedCont, hph])
       (fun d kA hbad => by simp [hph] at hbad)
       (fun d b kA hbad => by simp [hph] at hbad)

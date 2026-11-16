@@ -11,32 +11,31 @@ theorem transition_is_listed (I : Impl) (hA : Assumptions I) (tr : Transition) (
         tr'.program = tr.program ∧ tr'.toState = tr.toState ∧ tr'.acceptsCall = tr.acceptsCall :=
   hA.rust_refines tr hm
 
-/-- Internal effects do not stick: `Assumptions.internal_complete` is the step
-fairness applies, not a theorem about the binary. -/
-theorem not_stuck_effect_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumptions I) (hF : Fair ρ)
+/-- Internal effects do not stick: `finish` is enabled while the wait lasts, and
+fairness takes it. -/
+theorem not_stuck_effect_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
     (s : InstId) (i : Nat) (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .effect) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .effect := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) := by
     intro j hj
-    obtain ⟨k, hk⟩ := wait_effect_phase ((ρ.cfg j).st s) (hall j hj)
-    exact hA.internal_complete (ρ.cfg j) s k hk
+    exact enabled_finish_effect I (ρ.cfg j) s (hall j hj)
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
   exact finish_clears_effect I (ρ.cfg j) s (ρ.cfg (j + 1)) happ (hall j hj)
     (hall (j + 1) (Nat.le_trans hj (Nat.le_succ j)))
 
-theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumptions I) (hF : Fair ρ)
-    (s : InstId) (i : Nat) (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer) : False := by
+theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
+    (s : InstId) (i : Nat) (h : Stuck ρ s i) (hp : waitKind ((ρ.cfg i).st s) = some .peer)
+    (hu : peerUntimed I.desc s = false) : False := by
   have hall : ∀ j, i ≤ j → waitKind ((ρ.cfg j).st s) = some .peer := by
     intro j hj
     exact ((h.2 j hj).1).symm.trans hp
   have hen : ∀ j, i ≤ j → Enabled I (ρ.cfg j) (.finish s) := by
     intro j hj
-    obtain ⟨k, hk⟩ := wait_peer_phase ((ρ.cfg j).st s) (hall j hj)
-    exact hA.peer_complete (ρ.cfg j) s k hk
+    exact enabled_finish_peer I (ρ.cfg j) s (hall j hj) hu
   obtain ⟨j, hj, hact⟩ := hF.weak (.finish s) i rfl hen
   have happ := ρ.valid j
   simp [hact] at happ
@@ -45,7 +44,7 @@ theorem not_stuck_peer_assumed {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumpt
 
 /-- A deadlock is a send or a call that stays parked. An effect wait is taken
 by fairness, and no phase is recorded as a cell wait. -/
-theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumptions I) (hF : Fair ρ)
+theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
     (hD : Deadlock ρ) : ∃ s i dst, Stuck ρ s i ∧
       (waitKind ((ρ.cfg i).st s) = some (.blockingSend dst) ∨
         waitKind ((ρ.cfg i).st s) = some (.callReply dst)) := by
@@ -58,10 +57,9 @@ theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hA : Assumptions I) (
       exact ⟨s, i, dst, hS, Or.inl hkind⟩
     | callReply dst =>
       exact ⟨s, i, dst, hS, Or.inr hkind⟩
-    | cell =>
-      exact absurd hkind (waitKind_ne_cell _)
     | effect =>
-      exact False.elim (not_stuck_effect_assumed ρ hA hF s i hS hkind)
-    | peer => simp [hkind] at hk
+      exact False.elim (not_stuck_effect_assumed ρ hF s i hS hkind)
+    | peer =>
+      exact False.elim (not_stuck_peer_assumed ρ hF s i hS hkind (by simp [hkind] at hk; exact hk))
 
 end Deadlock

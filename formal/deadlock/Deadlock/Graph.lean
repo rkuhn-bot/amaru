@@ -404,8 +404,10 @@ def kindOk (e : Edge) : Bool :=
 Only a superseding edge, or an ingress edge delivered by `Action.ingress`, may do that. -/
 def reliableTryFails (D : Description) : List String :=
   D.edges.filterMap fun e =>
-    if e.effect == .trySend && e.reliability == .reliable && !e.ingress then
-      some s!"fail: reliable trySend {e.label} may be dropped; mark it ingress or superseding"
+    if e.ingress && !(e.src == e.dst) then
+      some s!"fail: ingress edge {e.label} must be a self-edge; a program send is not ingress"
+    else if e.effect == .trySend && e.reliability == .reliable && !e.ingress then
+      some s!"fail: reliable trySend {e.label} may be dropped; mark a self-edge ingress or use superseding"
     else none
 
 def kindFails (D : Description) : List String :=
@@ -588,10 +590,13 @@ def callTermFails (D : Description) : List String :=
         if t.terminable then some s!"fail: call {e.label} targets terminable template {e.dst}"
         else none
 
+/-- Untimed peer waits are outside `GraphOk`: a checked description times out
+every peer. The step relation still leaves `finish` disabled when the flag is
+set, so an unchecked description may keep a silent peer. -/
 def peerFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
     if t.untimedPeer then
-      some s!"fail: template {t.name} has an untimed peer wait; this model requires a timeout on every peer wait"
+      some s!"fail: template {t.name} has an untimed peer wait; a checked description times peer waits out"
     else none
 
 def overflowFails (D : Description) : List String :=

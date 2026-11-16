@@ -1187,8 +1187,7 @@ theorem finish_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w) (hM
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
       simpa [programOk, hph] using hS.prog id
@@ -1437,8 +1436,7 @@ theorem open_finish (I : Impl) (w : World) (id : InstId) (w' : World) (hO : Open
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     exact open_busy w id _ hO (by rw [hph]; intro hbad; cases hbad)
   | awaitPeer k =>
     simp [finishWait, hph] at h

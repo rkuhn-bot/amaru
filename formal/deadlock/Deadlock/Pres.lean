@@ -356,8 +356,7 @@ theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
       simpa [programOk, hph] using hS.prog id
@@ -366,7 +365,7 @@ theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
   | awaitPeer k =>
     simp [finishWait, hph] at h
     rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases hw
     have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
       simpa [programOk, hph] using hS.prog id

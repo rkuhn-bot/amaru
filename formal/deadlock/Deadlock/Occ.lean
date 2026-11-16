@@ -1508,8 +1508,7 @@ theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases h
     have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     let a := proceed (w.st id) k
     exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
@@ -1526,7 +1525,7 @@ theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS
   | awaitPeer k =>
     simp [finishWait, hph] at h
     rcases h with ⟨_, hw⟩
-    rw [← hw]
+    cases hw
     have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     let a := proceed (w.st id) k
     exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
@@ -1808,7 +1807,7 @@ theorem sends_outside (D : Description) (template state dst : String) (es : List
     | trySend d label n =>
       simp [effectsOk, sendsTo, Bool.and_eq_true] at hok ⊢
       have ⟨edge, he, _, _, hdst, _, _, _⟩ :=
-        hasEdge_mem D template state d .trySend .nonBlocking label hok.1
+        hasEdge_mem D template state d .trySend .nonBlocking label hok.1.1
       have hne : d ≠ dst := fun heq => hno edge he (by rw [← heq]; exact hdst)
       have hb : (d == dst) = false := by
         cases hbb : d == dst with

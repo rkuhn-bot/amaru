@@ -5,31 +5,53 @@ Nothing in the development uses `sorry` or `admit`.
 
 ## What is proved
 
-The headline is safety on reachable worlds, not an infinite run.
+The headline is a finite execution along the blocked actor's own wait chain.
 
 ```lean
-theorem blocked_progress (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
-    (hA : Assumptions I) (N : Nat) (w : World) (hR : Reachable I N w)
-    (id : InstId) (hB : Blocked w id) : ∃ act, Enabled I w act
+def OnChain (w : World) (root : InstId) (act : Action) : Prop
 
-theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
-    (hA : Assumptions I) {N : Nat} (e : FinExec I N) (id : InstId) :
-    ¬ Blocked (e.cfg e.len) id
+theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
+    (hA : Assumptions I) (N : Nat) (w : World) (hR : Reachable I N w)
+    (id : InstId) (hB : Blocked w id) :
+    ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
+      Reachable I N w' ∧ ¬ Blocked w' id
+
+theorem blocked_chain ... :
+    ∃ acts w', ChainRun I id w acts ∧ runFrom I (some w) acts = some w' ∧
+      Reachable I N w' ∧
+      (¬ Blocked w' id ∨ ∃ s k, InChain w' id s ∧
+        (w'.st s).phase = .awaitPeer k ∧ peerUntimed I.desc s = true)
 ```
 
+`OnChain` holds only for `recvBulk`, `recvPrio`, `exec`, and `finish` whose
+subject is `id` or is reached by following `.parked` / `.awaitReply` targets.
+Ingress and spawn are never on the chain. `ChainRun` is a list of such steps,
+each on the chain in the world where it is taken. `InChain` is that wait relation.
+
 `Blocked` is a live actor in `.parked` (a blocking send or a parked call),
-`.awaitReply`, `.awaitEffect`, or `.awaitPeer`. `blocked_progress` is strong
-induction on residual height. An effect or peer wait has `finish` enabled by
-`Assumptions`. A send or call waits on a live partner of strictly smaller
-height (`park_below`, `call_below`, `reply_below`): an idle partner can
-`recvBulk`, a running partner can `exec`, and a partner that is itself blocked
-is the induction hypothesis. `fin_exec_no_blocked` is the corollary: a finite
-execution that has stopped (`FinExec.maximal`) has no live blocked actor.
-`fin_exec_reachable` puts that last world in `Reachable`.
+`.awaitReply`, `.awaitEffect`, or `.awaitPeer`. The proof is strong induction
+on residual height, and inside one height on a debt of parked index or call
+position plus the partner's remaining program (`work`). An `awaitEffect` or a
+timed `awaitPeer` is one `finish` on the chain: internal completion is that
+step, not an assumption that a flag is true. A send or call waits on a live
+partner of strictly smaller height (`park_below`, `call_below`, `reply_below`).
+The partner is drained by `recvBulk`, `exec`, and `finish` on the chain, or the
+induction hypothesis unblocks the partner first. `blocked_chain` records the
+untimed-peer stop; `GraphOk` rejects `untimedPeer` (`peerFails`,
+`graph_peer_timed`), so every checked chain takes the `¬ Blocked` side.
+`finishWait` still returns `none` for an untimed peer, so an unchecked
+description can keep that peer silent.
+
+`blocked_progress` is the one-step form: some enabled action is `OnChain`.
+`fin_exec_no_blocked` is the total-stall corollary. A stopped finite execution
+has no live blocked actor, because a blocked actor would have an enabled chain
+step. It does not by itself rule out a partial deadlock in a world where some
+unrelated actor can still step; `blocked_unblocks` does.
 
 `park_reachable` and `park_unblocks` are one `GraphOk` and `LocalOk` world in
-which the producer is parked and the next `recvBulk` leaves it idle, so the
-hypothesis of `blocked_progress` is inhabited.
+which the producer is parked and the next `recvBulk` leaves it idle.
+`Counter.lean` shows an ingress into an independent clock is enabled in that
+world and is not `OnChain`, and that a mutual A↔B park is rejected by `checkBool`.
 
 A live reader with a label still on its priority lane likewise has an enabled
 step. If the reader is idle, that step is `recvPrio`, and delivery runs
@@ -54,12 +76,14 @@ theorem cell_fresh (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
 ```
 
 A fair reachable run has no actor blocked forever. The proof is strong
-induction on residual height (`below_idle`), then `never_stuck`. Effect and
-peer waits are discharged by `Assumptions.internal_complete` and
-`Assumptions.peer_complete`. A blocking send or a parked call waits on a
-strictly lower actor. An `awaitReply` cannot last: while the caller stays
-there it cannot mint a new `callFrom`, so `CallTagInv` keeps the callee in
-`handlerOwes` or `replyPending`, and that phase is not `idle`. `cell_fresh`
+induction on residual height (`below_idle`), then `never_stuck`. An effect or
+a timed peer wait is ended by `finish`, which the step relation enables
+without reading `Env`. `Assumptions` is only `rust_refines`. A blocking send
+or a parked call waits on a strictly lower actor. An `awaitReply` cannot last:
+while the caller stays there it cannot mint a new `callFrom`, so `CallTagInv`
+keeps the callee in `handlerOwes` or `replyPending`, and that phase is not
+`idle`. `forced` is false for `spawn` and for `ingress`, so fairness does not
+require the environment to keep injecting. `cell_fresh`
 is the liveness form of the same cell fact: along a fair infinite run the
 queued wake is eventually observed. `fin_exec_no_wake` is the safety form.
 

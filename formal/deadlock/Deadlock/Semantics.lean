@@ -147,14 +147,14 @@ structure Transition where
   release : Nat
   deriving DecidableEq, Repr, Inhabited
 
-/-- Environment permission for `finish`. `Assumptions` is the only constraint
-on these flags; the step relation does not grant them. -/
+/-- Unused by the step relation. An internal effect always finishes, a timed
+peer wait finishes as its timeout, and an untimed peer wait never does.
+The fields remain so an environment value can still be attached to `Impl`. -/
 structure Env where
   effectDone : World → InstId → Bool
   peerDone : World → InstId → Bool
 
-/-- An environment that always lets a finished effect or peer wait proceed.
-Real deployments substitute a flag constrained by `Assumptions`. -/
+/-- Default environment. `finishWait` does not read it. -/
 def Env.always : Env where
   effectDone := fun _ _ => true
   peerDone := fun _ _ => true
@@ -469,21 +469,35 @@ def execHead (I : Impl) (w : World) (id : InstId) : Option World :=
     | .run k => some (execRun I w id a k)
     | _ => none
 
-/-- `finish` fires only when the environment oracle says the wait is over.
-`Assumptions.internal_complete` / `peer_complete` are the only reasons those
-flags are true. -/
+/-- `true` when this actor's template declares its peer waits untimed. An untimed
+peer may stay silent; `finish` is not enabled. A timed peer wait ends by timeout,
+which is the `finish` step itself. -/
+def peerUntimed (D : Description) (id : InstId) : Bool :=
+  match templateOf D (tname id) with
+  | some t => t.untimedPeer
+  | none => false
+
+/-- Internal effects complete as an ordinary step. A timed peer wait completes
+the same way (its timeout). An untimed peer wait does not. -/
 def finishWait (I : Impl) (w : World) (id : InstId) : Option World :=
   match (w.st id).phase with
-  | .awaitEffect k =>
-    if I.env.effectDone w id then some (setActor w id (proceed (w.st id) k)) else none
+  | .awaitEffect k => some (setActor w id (proceed (w.st id) k))
   | .awaitPeer k =>
-    if I.env.peerDone w id then some (setActor w id (proceed (w.st id) k)) else none
+    if peerUntimed I.desc id then none else some (setActor w id (proceed (w.st id) k))
   | _ => none
 
 /-- A declared ingress edge: a non-blocking `trySend` the environment may deliver. -/
 def hasIngress (D : Description) (dst label : String) : Bool :=
   D.edges.any fun e =>
     e.ingress && e.dst == dst && e.label == label && e.effect == .trySend
+
+/-- How many self-tokens an ingress may consume, taken from `ingressLegal`. -/
+def ingressAllowance (D : Description) (dst label : String) : Nat :=
+  match D.edges.find? fun e => e.ingress && e.dst == dst && e.label == label with
+  | some e => match e.ingressLegal with
+    | some a => a.eval 0
+    | none => 0
+  | none => 0
 
 /-- `true` when the named template is declared terminable. -/
 def terminableB (D : Description) (name : String) : Bool :=
@@ -504,7 +518,8 @@ def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Opti
   else if hasIngress I.desc (tname dst) label = false then none
   else if a.parked ≠ [] || cap ≤ a.box.length then none
   else if terminableB I.desc (tname dst) then none
-  else if a.tokens (tname dst) < floor + 1 then none
+  else if a.tokens (tname dst) < floor + 1 ||
+      a.tokens (tname dst) < Nat.max (ingressAllowance I.desc (tname dst) label) 1 then none
   else
     let msg : Msg := { label := label, sender := dst, callFrom := none }
     let charged := chargeSender a (tname dst)
@@ -541,12 +556,13 @@ theorem finish_proceed (I : Impl) (w w' : World) (id : InstId)
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    exact ⟨k, Or.inl rfl, hw.symm⟩
+    cases h
+    exact ⟨k, Or.inl rfl, rfl⟩
   | awaitPeer k =>
     simp [finishWait, hph] at h
     rcases h with ⟨_, hw⟩
-    exact ⟨k, Or.inr rfl, hw.symm⟩
+    cases hw
+    exact ⟨k, Or.inr rfl, rfl⟩
   | idle => simp [finishWait, hph] at h
   | run _ => simp [finishWait, hph] at h
   | parked _ _ _ => simp [finishWait, hph] at h
@@ -630,7 +646,16 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
             · cases hb : terminableB I.desc (tname dst) with
               | true => simp [hb] at hterm
               | false => rfl
-            · simpa [Nat.not_lt] using htok
+            · have hnot : ¬((w.st dst).tokens (tname dst) <
+                  budget I.desc (tname dst) (tname dst) -
+                    debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1) := by
+                intro hlt
+                have hdec : decide ((w.st dst).tokens (tname dst) <
+                    budget I.desc (tname dst) (tname dst) -
+                      debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1) = true :=
+                  decide_eq_true_iff.mpr hlt
+                simp [hdec] at htok
+              simpa [Nat.not_lt] using hnot
 
 /-- A delivered ingress names a live idle actor. -/
 theorem ingress_ready (I : Impl) (w w' : World) (dst : InstId) (label : String)
@@ -692,8 +717,11 @@ def apply (I : Impl) (a : Action) (w : World) : Option World :=
 
 def Enabled (I : Impl) (w : World) (a : Action) : Prop := apply I a w ≠ none
 
+/-- Spawn and ingress are not scheduled by the runtime. A fair run does not
+have to keep injecting when an ingress stays enabled. -/
 def forced : Action → Bool
   | .spawn _ => false
+  | .ingress _ _ => false
   | _ => true
 
 def coreRoster (D : Description) : List InstId :=
@@ -752,7 +780,6 @@ structure Fair {I : Impl} {N : Nat} (ρ : Run I N) : Prop where
 inductive WaitKind where
   | blockingSend (dst : InstId)
   | callReply (dst : InstId)
-  | cell
   | effect
   | peer
   deriving DecidableEq, Repr
@@ -772,29 +799,16 @@ def Stuck {I : Impl} {N : Nat} (ρ : Run I N) (s : InstId) (i : Nat) : Prop :=
     ∀ j, i ≤ j → SameWait ((ρ.cfg i).st s) ((ρ.cfg j).st s)
 
 /-- A run is deadlocked when some actor is stuck on a blocking send, a call
-reply, or an internal effect. A `.peer` wait is excluded: it ends only when
-`Assumptions.peer_complete` lets `finish` fire, which is the environment
-oracle, not a height argument. No phase has wait kind `.cell`
-(`waitKind_ne_cell`). -/
+reply, an internal effect, or a timed peer wait. An untimed peer wait is an
+external stall: `finish` is not enabled, and the actor may stay there. -/
 def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   ∃ s i, Stuck ρ s i ∧
     match waitKind ((ρ.cfg i).st s) with
     | some (.blockingSend _) => True
     | some (.callReply _) => True
-    | some .cell => True
     | some .effect => True
+    | some .peer => peerUntimed I.desc s = false
     | _ => False
-
-theorem waitKind_ne_cell (a : Actor) : waitKind a ≠ some .cell := by
-  intro hEq
-  cases h : a.phase with
-  | idle => simp [waitKind, h] at hEq
-  | run _ => simp [waitKind, h] at hEq
-  | parked _ isCall _ => cases isCall <;> simp [waitKind, h] at hEq
-  | awaitReply _ _ => simp [waitKind, h] at hEq
-  | awaitEffect _ => simp [waitKind, h] at hEq
-  | awaitPeer _ => simp [waitKind, h] at hEq
-  | crashed => simp [waitKind, h] at hEq
 
 /-- Program length, used as the measure that makes a busy actor reach idle. -/
 def phaseFuel : Phase → Nat
