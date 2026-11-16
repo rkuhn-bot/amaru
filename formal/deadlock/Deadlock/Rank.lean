@@ -8608,7 +8608,7 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
         have hdel' : deliver I w d ({ (w.st d) with box := ms }) m = some (w1, a1) := by
           simpa [hpark] using hdel
         have hst (i) : w1.st i = w.st i := deliver_st I w d _ m w1 a1 i hdel'
-        have hpmem : p ∈ (w.st d).parked := by simpa [hpark] using (List.Mem.head _)
+        have hpmem : p ∈ (w.st d).parked := by simp [hpark]
         have hsnd : p.sender ≠ d := by
           intro heq
           obtain ⟨_, hkS⟩ := hM.fwd d p hpmem
@@ -8643,7 +8643,7 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
           -- The final world resumes the parked sender, who is neither the callee nor the caller.
           have hphC : (w'.st c).phase = .awaitReply d k := by
             rw [← hw]
-            simp [setActor, hflipC, hflipD, credit_same, hcne, hst c, hph]
+            simp [setActor, hflipC, credit_same, hcne, hst c, hph]
           have hphD : (w'.st d).phase = .run kH := by
             rw [← hw]
             simp [setActor, hflipD, credit_same]
@@ -8680,9 +8680,9 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
               simp [replyCount, hrest] at hc1
             | cons e es =>
               by_cases he : e = .reply
-              · exact Or.inr ⟨kH, by simp [carriedCont, hrun], hshape,
+              · exact Or.inr ⟨kH, by simp [carriedCont], hshape,
                   by simp [nextIsReply, hrest, he]⟩
-              · exact Or.inl ⟨kH, by simp [carriedCont, hrun], hshape, by
+              · exact Or.inl ⟨kH, by simp [carriedCont], hshape, by
                   cases e <;> simp [nextIsReply, hrest] at he ⊢⟩
         · have hboxA : a1.box = ms := by
             cases hcf : m.callFrom with
@@ -8699,7 +8699,7 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
             simp [setActor, hboxA]
           have hphC : (w'.st c).phase = .awaitReply d k := by
             rw [← hw]
-            simp [setActor, hflipC, hflipD, credit_same, hcne, hst c, hph]
+            simp [setActor, hflipC, credit_same, hcne, hst c, hph]
           have hbox' : (w'.st d).box = ms ++ [p.msg] := by
             rw [← hw]
             simp [setActor, hflipD, credit_same]
@@ -8711,6 +8711,6 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
             rw [hbox']
             have hlen : (ms ++ [p.msg]).length = ms.length + 1 := by simp
             exact Or.inl (callPos_mem (ms ++ [p.msg]) c (by rw [hposA, hlen]; omega))
-          · simp [hbox', hbox, hposA, callPos, hc]
+          · simp [hbox', hposA, callPos, hc]
 
 end Deadlock
