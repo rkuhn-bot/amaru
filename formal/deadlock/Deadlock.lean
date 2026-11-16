@@ -16,6 +16,7 @@ import Deadlock.Projects
 import Deadlock.Occ
 import Deadlock.Inv2
 import Deadlock.Rank
+import Deadlock.Progress
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed

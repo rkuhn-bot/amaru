@@ -5,28 +5,45 @@ Nothing in the development uses `sorry` or `admit`.
 
 ## What is proved
 
-The statements that do not depend on an infinite `Fair` `Run` are these.
+The headline is safety on reachable worlds, not an infinite run.
 
-`park_graph_ok` and `park_local_ok` are one checked instance (`GraphOk` and
-`LocalOk`). `park_reachable` is a world reached from `initWorld` in which the
-producer is parked on the sink. `park_unblocks` is the next step: `recvBulk`
-on the sink applies, and the producer is idle again. That world is in the set
-a safety theorem about reachable worlds quantifies over, and it is not quiet.
+```lean
+theorem blocked_progress (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
+    (hA : Assumptions I) (N : Nat) (w : World) (hR : Reachable I N w)
+    (id : InstId) (hB : Blocked w id) : ∃ act, Enabled I w act
 
-`FinExec` is a finite execution from `initWorld` that has stopped: no action
-applies to the last world. `fin_exec_reachable` says every prefix, including
-the last world, is `Reachable`. `blocking_park_not_terminal` and
-`fin_exec_not_blocked_on_idle` say that world cannot be one where a live actor
-is parked on a blocking send or call whose target is idle: `recvBulk` on that
-target is enabled. This is only the idle-target case. A parked call, an
-`awaitReply`, an effect wait, and a peer wait are not yet covered by a single
-"no live blocked actor at the end" theorem. The height ranking that would
-discharge those (`park_below`, `call_below`, `reply_below`) is proved;
-assembling it into `blocked_progress` for every wait, including a target that
-is itself blocked, is not in this revision.
+theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I)
+    (hA : Assumptions I) {N : Nat} (e : FinExec I N) (id : InstId) :
+    ¬ Blocked (e.cfg e.len) id
+```
 
-The infinite-run theorems are still here, as corollaries of fairness rather
-than as the statement that shows the model is non-vacuous:
+`Blocked` is a live actor in `.parked` (a blocking send or a parked call),
+`.awaitReply`, `.awaitEffect`, or `.awaitPeer`. `blocked_progress` is strong
+induction on residual height. An effect or peer wait has `finish` enabled by
+`Assumptions`. A send or call waits on a live partner of strictly smaller
+height (`park_below`, `call_below`, `reply_below`): an idle partner can
+`recvBulk`, a running partner can `exec`, and a partner that is itself blocked
+is the induction hypothesis. `fin_exec_no_blocked` is the corollary: a finite
+execution that has stopped (`FinExec.maximal`) has no live blocked actor.
+`fin_exec_reachable` puts that last world in `Reachable`.
+
+`park_reachable` and `park_unblocks` are one `GraphOk` and `LocalOk` world in
+which the producer is parked and the next `recvBulk` leaves it idle, so the
+hypothesis of `blocked_progress` is inhabited.
+
+A live reader with a label still on its priority lane likewise has an enabled
+step. If the reader is idle, that step is `recvPrio`, and delivery runs
+`readCells`. `fin_exec_no_wake` says a stopped execution is not still holding
+that wake.
+
+```lean
+theorem cell_wake_enabled ... (hlive) (hhas : hasLabel prio label) :
+    ∃ act, Enabled I w act ∧ ((w.st r).phase = .idle → act = .recvPrio r)
+
+theorem fin_exec_no_wake ... (hlive) (hhas) : False
+```
+
+The infinite-run theorems stay as corollaries of fairness:
 
 ```lean
 theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
@@ -43,9 +60,8 @@ peer waits are discharged by `Assumptions.internal_complete` and
 strictly lower actor. An `awaitReply` cannot last: while the caller stays
 there it cannot mint a new `callFrom`, so `CallTagInv` keeps the callee in
 `handlerOwes` or `replyPending`, and that phase is not `idle`. `cell_fresh`
-still uses `Fair.prio` on an infinite run. The matching safety fact, that a
-stopped execution cannot leave a live reader with that label still queued, is
-not a separate theorem yet.
+is the liveness form of the same cell fact: along a fair infinite run the
+queued wake is eventually observed. `fin_exec_no_wake` is the safety form.
 
 `cell_fresh` is the cell half of the target conjunction, for the `CellFresh`
 below. After a declared cell label strictly rises, every reader instance of

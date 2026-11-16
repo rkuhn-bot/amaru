@@ -1,0 +1,522 @@
+import Deadlock.Rank
+
+set_option autoImplicit false
+
+namespace Deadlock
+
+/-- A live actor waiting on a send, a call, an effect, or a peer. -/
+def Blocked (w : World) (id : InstId) : Prop :=
+  (w.st id).life = .alive ∧
+    match (w.st id).phase with
+    | .parked _ _ _ => True
+    | .awaitReply _ _ => True
+    | .awaitEffect _ => True
+    | .awaitPeer _ => True
+    | _ => False
+
+def nodeAt (w : World) (id : InstId) : Node :=
+  { template := tname id, state := (w.st id).typestate }
+
+theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
+    (dst : String) (t : Template) (ht : templateOf I.desc dst = some t)
+    (hone : t.multiplicity = .one) (hterm : t.terminable = false) :
+    (w.st (InstId.core dst)).life = .alive := by
+  induction hR with
+  | init => exact init_core_alive I N dst t ht hone
+  | step w w' a _ ha ih =>
+    by_cases hdie : (w'.st (InstId.core dst)).life = .alive
+    · exact hdie
+    · obtain ⟨_, _, _, t', _, _, ht', hflag⟩ :=
+        only_terminate_kills I a w w' (InstId.core dst) ha ih hdie
+      have hto : templateOf I.desc dst = some t' := by simpa [tname] using ht'
+      have hsame : t' = t := by injection (hto.symm.trans ht)
+      simp [hsame, hterm] at hflag
+
+theorem enqueue_roster (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) : (enqueueOrPark w D sender dst msg isCall k).roster = w.roster := by
+  unfold enqueueOrPark
+  by_cases hl : (w.st dst).life = .alive
+  · by_cases hr : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hs : sender = dst <;> cases isCall <;> simp [hl, hr, hs, setActor]
+    · by_cases hs : sender = dst <;> simp [hl, hr, hs, setActor]
+  · simp [hl, setActor]
+
+theorem perform_roster (w : World) (id : InstId) (k : Cont) :
+    (performReply w id k).roster = w.roster := by
+  unfold performReply
+  cases hr : k.replyTo with
+  | none => simp [hr, setActor]
+  | some caller =>
+    cases hph : (w.st caller).phase with
+    | awaitReply dst _ =>
+      by_cases hdst : dst = id <;> simp [hr, hph, hdst, setActor]
+    | idle => simp [hr, hph, setActor]
+    | run _ => simp [hr, hph, setActor]
+    | parked _ _ _ => simp [hr, hph, setActor]
+    | awaitEffect _ => simp [hr, hph, setActor]
+    | awaitPeer _ => simp [hr, hph, setActor]
+    | crashed => simp [hr, hph, setActor]
+
+theorem release_roster (w : World) (id : InstId) (ps : List Parked) :
+    (releaseParked w id ps).roster = w.roster := by
+  induction ps generalizing w with
+  | nil =>
+    unfold releaseParked
+    rfl
+  | cons p ps ih =>
+    unfold releaseParked
+    simp only [List.foldl_cons]
+    by_cases h : (p.isCall || decide (p.sender = id)) = true
+    · simp only [h]
+      exact ih w
+    · simp only [h]
+      exact ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+
+theorem try_wake_roster (D : Description) (w : World) (id : InstId) (label : String) (writer : InstId) :
+    (tryWake D w id label writer).roster = w.roster := by
+  unfold tryWake
+  by_cases hgo : ((w.st id).life == .alive && (w.st id).prio.length < capPrio D w.N id &&
+      !((w.st id).prio.any (fun p => p.label == label))) = true
+  · simp [hgo, setActor]
+  · simp [hgo]
+
+theorem wakes_roster (ids : List InstId) (D : Description) (w : World) (dst label : String) (writer : InstId) :
+    (ids.foldl (fun w id => tryWake D w id label writer) w).roster = w.roster := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons _ _ ih =>
+    simp only [List.foldl_cons]
+    rw [ih, try_wake_roster]
+
+theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) :
+    (execRun I w id a k).roster = w.roster := by
+  unfold execRun
+  cases hk : k.rest with
+  | nil => simp [setActor]
+  | cons e _ =>
+    cases e with
+    | send dst label hint =>
+      simp [hk]
+      cases route w I.desc dst hint with
+      | none => simp [setActor]
+      | some dstId => exact enqueue_roster w I.desc id dstId _ false _
+    | trySend dst label hint =>
+      simp [hk]
+      cases route w I.desc dst hint with
+      | none => simp [setActor]
+      | some dstId =>
+        by_cases hroom : ((w.st dstId).life = .alive ∧ (w.st dstId).parked = []) ∧
+            (w.st dstId).box.length < capBulk I.desc w.N dstId
+        · simp [hroom, setActor]
+        · simp [hroom, setActor]
+    | call dst label hint =>
+      simp [hk]
+      cases route w I.desc dst hint with
+      | none => simp [setActor]
+      | some dstId => exact enqueue_roster w I.desc id dstId _ true _
+    | reply => simp [hk, perform_roster]
+    | selfSchedule label =>
+      by_cases hany : a.prio.any (fun p => p.label == label) = true
+      · simp [hk, hany, setActor]
+      · by_cases hlen : a.prio.length < capPrio I.desc w.N id
+        · simp [hk, hany, hlen, setActor]
+        · simp [hk, hany, hlen, setActor]
+    | cell dst label value =>
+      simp only [hk]
+      by_cases hdirty : (w.cell dst label).dirty = true
+      · simp only [hdirty]
+        dsimp
+        rfl
+      · have hfalse : (w.cell dst label).dirty = false := by
+          cases hb : (w.cell dst label).dirty with
+          | true => exact False.elim (hdirty hb)
+          | false => rfl
+        rw [hfalse]
+        have hnot : ¬ (false = true) := by decide
+        rw [ite_eq_right hnot]
+        have hwk : wakeReaders I.desc
+            (setActor (setCell w dst label { value := max (w.cell dst label).value value, dirty := true }) id
+              (proceed ((setCell w dst label { value := max (w.cell dst label).value value, dirty := true }).st id)
+                (afterHead k))) dst label id =
+            ((readersOf (setActor (setCell w dst label { value := max (w.cell dst label).value value, dirty := true }) id
+              (proceed ((setCell w dst label { value := max (w.cell dst label).value value, dirty := true }).st id)
+                (afterHead k))) dst).foldl
+              (fun acc j => tryWake I.desc acc j label id)
+              (setActor (setCell w dst label { value := max (w.cell dst label).value value, dirty := true }) id
+                (proceed ((setCell w dst label { value := max (w.cell dst label).value value, dirty := true }).st id)
+                  (afterHead k)))) := by
+          unfold wakeReaders
+          rfl
+        rw [hwk]
+        rw [wakes_roster _ I.desc _ dst label id]
+        rfl
+    | internal => simp [hk, setActor]
+    | peer => simp [hk, setActor]
+    | terminate =>
+      cases ht : templateOf I.desc (tname id) with
+      | none => simp only [hk, ht]
+      | some t =>
+        by_cases hgo : t.terminable = true ∧ hasParkedCall a.parked = false
+        · simp only [hk, ht, hgo]
+          dsimp
+          rw [release_roster, (frame_set _ _ _).2.1, (frame_refundP _ _ _).2.1,
+            (frame_refund _ _ _).2.1, readCells_roster]
+        · have hf : (t.terminable && !hasParkedCall a.parked) = false := by
+            by_cases htB : t.terminable = true <;> by_cases hp : hasParkedCall a.parked = false <;>
+              simp [htB, hp] at hgo ⊢
+          simp only [hk, ht, hf]
+          rfl
+
+theorem bulk_roster (I : Impl) (w : World) (id : InstId) (w' : World)
+    (h : receiveBulk I w id = some w') : w'.roster = w.roster := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · simp at h
+        · next w1 a1 hdel =>
+          cases h
+          rw [(frame_set _ p.sender _).2.1, (frame_credit _ _ _).2.1, (frame_set w1 id a1).2.1,
+            deliver_roster I w id _ p.msg w1 a1 hdel]
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · simp at h
+        · next w1 a1 hdel =>
+          cases h
+          rw [(frame_credit _ _ _).2.1, (frame_set w1 id a1).2.1,
+            deliver_roster I w id _ m w1 a1 hdel]
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · simp at h
+        · next w1 a1 hdel =>
+          cases h
+          rw [(frame_set _ _ _).2.1, (frame_credit _ _ _).2.1, (frame_set w1 id _).2.1,
+            deliver_roster I w id _ m w1 a1 hdel]
+
+theorem prio_roster (I : Impl) (w : World) (id : InstId) (w' : World)
+    (h : receivePrio I w id = some w') : w'.roster = w.roster := by
+  unfold receivePrio at h
+  cases hp : (w.st id).prio with
+  | nil => simp [hp] at h
+  | cons m ms =>
+    simp [hp] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      cases h.2
+      rw [(frame_set w1 id a1).2.1, deliver_roster I w id _ m w1 a1 hdel]
+
+theorem head_roster (I : Impl) (w : World) (id : InstId) (w' : World)
+    (h : execHead I w id = some w') : w'.roster = w.roster := by
+  unfold execHead at h
+  by_cases hl : (w.st id).life = .alive
+  · simp [hl] at h
+    cases hp : (w.st id).phase <;> simp [hp] at h
+    · cases h
+      exact exec_roster I w id (w.st id) _
+  · simp [hl] at h
+
+theorem finish_roster (I : Impl) (w : World) (id : InstId) (w' : World)
+    (h : finishWait I w id = some w') : w'.roster = w.roster := by
+  obtain ⟨_, _, hw⟩ := finish_proceed I w w' id h
+  simp [hw, setActor]
+
+/-- A per-peer id of a multiplicity-one template is never on the roster. -/
+theorem one_peer_absent (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
+    (name : String) (t : Template) (ht : templateOf I.desc name = some t)
+    (hone : t.multiplicity = .one) (i : Nat) : InstId.peer name i ∉ w.roster := by
+  induction hR with
+  | init =>
+    intro hin
+    rw [init_roster] at hin
+    have hnin : InstId.peer name i ∉ coreRoster I.desc := by
+      simpa [List.contains_iff_mem] using peer_not_roster I.desc name i
+    exact hnin hin
+  | step w w' a _ ha ih =>
+    intro hin
+    have hback : InstId.peer name i ∈ w.roster := by
+      cases a with
+      | ingress dst label =>
+        rw [(ingress_phase I w w' dst label (InstId.peer name i)
+          (by simpa [apply] using ha)).2.2.2.2.1] at hin
+        exact hin
+      | finish fid =>
+        rw [finish_roster I w fid w' (by simpa [apply] using ha)] at hin
+        exact hin
+      | recvPrio rid =>
+        rw [prio_roster I w rid w' (by simpa [apply] using ha)] at hin
+        exact hin
+      | recvBulk rid =>
+        rw [bulk_roster I w rid w' (by simpa [apply] using ha)] at hin
+        exact hin
+      | exec eid =>
+        rw [head_roster I w eid w' (by simpa [apply] using ha)] at hin
+        exact hin
+      | spawn template =>
+        simp only [apply, spawn] at ha
+        split at ha
+        · cases ha
+        · next ts hto =>
+          by_cases hgo : (ts.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
+          · simp [hgo] at ha
+            cases ha
+            rw [readCells_roster, (frame_set _ _ _).2.1] at hin
+            simp at hin
+            rcases hin with hin | ⟨hname, _⟩
+            · exact hin
+            · have hsame : ts = t := by
+                have hto' : templateOf I.desc name = some ts := by simpa [hname] using hto
+                injection (hto'.symm.trans ht)
+              have hmul : (Multiplicity.one == Multiplicity.perPeer) = false := by decide
+              simp [hsame, hone, hmul] at hgo
+          · simp [hgo] at ha
+    exact ih hback
+
+theorem edge_reliable (D : Description) (hS : structLines D = []) (e : Edge) (he : e ∈ D.edges)
+    (heff : e.effect = .send ∨ e.effect = .call) : e.reliability = .reliable := by
+  cases hr : e.reliability with
+  | reliable => rfl
+  | superseding =>
+    have hmem : (s!"fail: superseding edge {e.src}/{e.srcState} -[{e.label}]-> {e.dst} must be a non-blocking cell write") ∈
+        cellFails D := by
+      refine List.mem_filterMap.mpr ⟨e, he, ?_⟩
+      cases heff with
+      | inl hs =>
+        have hrelb : (Reliability.superseding != Reliability.superseding) = false := by decide
+        have hcell : (EffectKind.send != EffectKind.cell) = true := by decide
+        simp [cellFails, hr, hs, hrelb, hcell]
+      | inr hc =>
+        have hrelb : (Reliability.superseding != Reliability.superseding) = false := by decide
+        have hcell : (EffectKind.call != EffectKind.cell) = true := by decide
+        simp [cellFails, hr, hc, hrelb, hcell]
+    have hstruct : (s!"fail: superseding edge {e.src}/{e.srcState} -[{e.label}]-> {e.dst} must be a non-blocking cell write") ∈
+        structLines D := by
+      simpa [structLines] using
+        (List.mem_append_left (cellEffectFails D ++ ingressFails D ++ allowedFails D ++ compatFails D)
+          (List.mem_append_right (nameFails D ++ stateFails D ++ endpointFails D ++ kindFails D ++ scopeFails D)
+            hmem))
+    simp [hS] at hstruct
+
+theorem wait_template (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (e : Edge) (he : e ∈ I.desc.edges)
+    (heff : e.effect = .send ∨ e.effect = .call) :
+    ∃ t, templateOf I.desc e.dst = some t ∧ t.multiplicity = .one ∧ t.terminable = false := by
+  have hrel := edge_reliable I.desc hG.struct e he heff
+  have hall := (List.all_eq_true _ _).mp (permanent_target_local I hL) e he
+  have hcond : ((e.effect == .send || e.effect == .call) && e.reliability == .reliable) = true := by
+    cases heff with
+    | inl hs =>
+      simp only [hs, hrel]
+      decide
+    | inr hc =>
+      simp only [hc, hrel]
+      decide
+  simp [hcond] at hall
+  cases ht : templateOf I.desc e.dst with
+  | none => simp [ht] at hall
+  | some t =>
+    simp [ht] at hall
+    refine ⟨t, rfl, ?_, ?_⟩
+    · cases hm : t.multiplicity with
+      | one => rfl
+      | perPeer =>
+        have hf : (Multiplicity.perPeer == Multiplicity.one) = false := by decide
+        simp [hm, hf] at hall
+    · cases hb : t.terminable with
+      | false => rfl
+      | true =>
+        have : ((true : Bool) == false) = false := by decide
+        simp [hb, this] at hall
+
+theorem park_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (id dst : InstId) (isCall : Bool) (k : Cont)
+    (hph : (w.st id).phase = .parked dst isCall k) : (w.st dst).life = .alive := by
+  have hI := inv_reachable I N w hL hR
+  obtain ⟨_, e, he, _, _, hdstn, _, heff, _⟩ := described_park I w hI id dst isCall k hph
+  have heff' : e.effect = .send ∨ e.effect = .call := by cases isCall <;> simp [heff]
+  obtain ⟨t, ht, hone, hterm⟩ := wait_template I hL hG e he heff'
+  have hcore := core_alive_reachable I N w hR e.dst t ht hone hterm
+  cases dst with
+  | core n =>
+    have hn : n = e.dst := hdstn.symm
+    simpa [hn] using hcore
+  | peer n i =>
+    have hname : n = e.dst := hdstn.symm
+    cases hname
+    have hOpen := hI.2.2
+    have hix := ix_zero I N w hR e.dst t ht hone
+    have hempty := (hOpen e.dst i (by simpa [hix] using (Nat.zero_le i))).2.2
+    obtain ⟨p, hp, _, _⟩ := hI.2.1.bwd id (InstId.peer e.dst i) isCall k hph
+    simp [hempty] at hp
+
+theorem reply_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .awaitReply dst k) : (w.st dst).life = .alive := by
+  have hI := inv_reachable I N w hL hR
+  have hO := (inv3_reachable I hL hG N w hR).1.2.1
+  obtain ⟨_, e, he, _, _, hdstn, _, heff, _⟩ := described_reply I w hI id dst k hph
+  obtain ⟨t, ht, hone, hterm⟩ := wait_template I hL hG e he (Or.inr heff)
+  have hcore := core_alive_reachable I N w hR e.dst t ht hone hterm
+  cases dst with
+  | core n =>
+    have hn : n = e.dst := hdstn.symm
+    simpa [hn] using hcore
+  | peer n i =>
+    have hname : n = e.dst := hdstn.symm
+    cases hname
+    have hnin := one_peer_absent I N w hR e.dst t ht hone i
+    have hOpen := hI.2.2
+    have hix := ix_zero I N w hR e.dst t ht hone
+    have hslot := hOpen e.dst i (by simpa [hix] using (Nat.zero_le i))
+    have hT := call_tag_reachable I hL hG N w hR
+    rcases hT.awaiting id (InstId.peer e.dst i) k hph with hmail | hhand | hpend
+    · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+      · simp [(hO.offEmpty (InstId.peer e.dst i) hnin).1] at hm
+      · simp [(hO.offEmpty (InstId.peer e.dst i) hnin).2] at hp
+    · rcases hhand.2.1 with ⟨_, hcar, _⟩
+      simp [carriedCont, hslot.2.1] at hcar
+    · rcases hpend.2.2 with ⟨_, hcar, _⟩
+      simp [carriedCont, hslot.2.1] at hcar
+
+theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hs : List (Node × Nat))
+    (hok : heightsOkB (residualEdges I.desc) hs = true) (n : Nat) (id : InstId)
+    (hn : heightOf hs (nodeAt w id) < n) (hB : Blocked w id) : ∃ act, Enabled I w act := by
+  induction n generalizing id with
+  | zero => omega
+  | succ n ih =>
+    have hlive := hB.1
+    cases hph : (w.st id).phase with
+    | idle =>
+      unfold Blocked at hB
+      simp [hph] at hB
+    | run _ =>
+      unfold Blocked at hB
+      simp [hph] at hB
+    | crashed =>
+      unfold Blocked at hB
+      simp [hph] at hB
+    | awaitEffect k =>
+      exact ⟨.finish id, hA.internal_complete w id k hph⟩
+    | awaitPeer k =>
+      exact ⟨.finish id, hA.peer_complete w id k hph⟩
+    | parked dst isCall k =>
+      have hliveD := park_target_alive I hL hG N w hR id dst isCall k hph
+      have hdrop : heightOf hs (nodeAt w dst) < heightOf hs (nodeAt w id) := by
+        cases isCall with
+        | false =>
+          exact park_below I hL hG N w hR ((inv3_reachable I hL hG N w hR).1.2.1)
+            id dst k hs hok hph hliveD
+        | true => exact call_below I hL hG N w hR id dst k hs hok hph hliveD
+      cases hphD : (w.st dst).phase with
+      | idle =>
+        have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
+          obtain ⟨p, hp, _, _⟩ := (inv_reachable I N w hL hR).2.1.bwd id dst isCall k hph
+          exact Or.inr (fun hempty => by simp [hempty] at hp)
+        exact ⟨.recvBulk dst, can_receive_enabled I hL w dst
+          ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+          ⟨⟨hliveD, hphD⟩, hmail⟩⟩
+      | run kD =>
+        exact ⟨.exec dst, run_enabled I w dst kD hphD hliveD⟩
+      | awaitEffect kD =>
+        exact ⟨.finish dst, hA.internal_complete w dst kD hphD⟩
+      | awaitPeer kD =>
+        exact ⟨.finish dst, hA.peer_complete w dst kD hphD⟩
+      | crashed =>
+        exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
+      | parked _ _ _ =>
+        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+      | awaitReply _ _ =>
+        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+    | awaitReply dst k =>
+      have hliveD := reply_target_alive I hL hG N w hR id dst k hph
+      have hdrop := reply_below I hL hG N w hR id dst k hs hok hph hliveD
+      cases hphD : (w.st dst).phase with
+      | idle =>
+        have hT := call_tag_reachable I hL hG N w hR
+        have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
+          rcases hT.awaiting id dst k hph with hmail | hhand | hpend
+          · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+            · exact Or.inl (fun hempty => by simp [hempty] at hm)
+            · exact Or.inr (fun hempty => by simp [hempty] at hp)
+          · rcases hhand.2.1 with ⟨_, hcar, _⟩
+            simp [carriedCont, hphD] at hcar
+          · rcases hpend.2.2 with ⟨_, hcar, _⟩
+            simp [carriedCont, hphD] at hcar
+        exact ⟨.recvBulk dst, can_receive_enabled I hL w dst
+          ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+          ⟨⟨hliveD, hphD⟩, hmail⟩⟩
+      | run kD =>
+        exact ⟨.exec dst, run_enabled I w dst kD hphD hliveD⟩
+      | awaitEffect kD =>
+        exact ⟨.finish dst, hA.internal_complete w dst kD hphD⟩
+      | awaitPeer kD =>
+        exact ⟨.finish dst, hA.peer_complete w dst kD hphD⟩
+      | crashed =>
+        exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
+      | parked _ _ _ =>
+        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+      | awaitReply _ _ =>
+        exact ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn)) ⟨hliveD, by simp [hphD]⟩
+
+/-- In a reachable world every live wait has some enabled step. The rank of a
+blocking partner is strictly smaller, so the search reaches an idle mailbox, a
+running actor, or an effect or peer `finish`. -/
+theorem blocked_progress (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
+    (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id) :
+    ∃ act, Enabled I w act := by
+  obtain ⟨hs, hok⟩ := hG.ranked
+  exact blocked_go I hL hG hA N w hR hs hok (heightOf hs (nodeAt w id) + 1) id (by omega) hB
+
+/-- A finite execution that has stopped is not holding a live blocked actor. -/
+theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
+    {N : Nat} (e : FinExec I N) (id : InstId) : ¬ Blocked (e.cfg e.len) id := by
+  intro hB
+  have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
+  obtain ⟨act, hen⟩ := blocked_progress I hG hL hA N (e.cfg e.len) hR id hB
+  exact hen (e.maximal act)
+
+/-- A live reader with `label` still on its priority lane can take a step.
+Idle, that step is `recvPrio`, which runs `readCells` and clears the wake. -/
+theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
+    (N : Nat) (w : World) (hR : Reachable I N w) (r : InstId) (label : String)
+    (hlive : (w.st r).life = .alive) (hhas : hasLabel ((w.st r).prio) label) :
+    ∃ act, Enabled I w act ∧ ((w.st r).phase = .idle → act = .recvPrio r) := by
+  cases hph : (w.st r).phase with
+  | idle =>
+    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR) hlive hph hhas, fun _ => rfl⟩
+  | run k =>
+    exact ⟨.exec r, run_enabled I w r k hph hlive, fun hbad => by simp [hph] at hbad⟩
+  | awaitEffect k =>
+    exact ⟨.finish r, hA.internal_complete w r k hph, fun hbad => by simp [hph] at hbad⟩
+  | awaitPeer k =>
+    exact ⟨.finish r, hA.peer_complete w r k hph, fun hbad => by simp [hph] at hbad⟩
+  | parked _ _ _ =>
+    obtain ⟨act, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
+    exact ⟨act, hen, fun hbad => by simp [hph] at hbad⟩
+  | awaitReply _ _ =>
+    obtain ⟨act, hen⟩ := blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩
+    exact ⟨act, hen, fun hbad => by simp [hph] at hbad⟩
+  | crashed =>
+    exact False.elim ((reachable_not_crashed I hL hG N w hR) r (by simp [hph]))
+
+/-- A stopped execution has no live reader still holding a priority wake. -/
+theorem fin_exec_no_wake (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
+    {N : Nat} (e : FinExec I N) (r : InstId) (label : String)
+    (hlive : ((e.cfg e.len).st r).life = .alive)
+    (hhas : hasLabel (((e.cfg e.len).st r).prio) label) : False := by
+  have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
+  obtain ⟨act, hen, _⟩ := cell_wake_enabled I hG hL hA N (e.cfg e.len) hR r label hlive hhas
+  exact hen (e.maximal act)
+
+end Deadlock
