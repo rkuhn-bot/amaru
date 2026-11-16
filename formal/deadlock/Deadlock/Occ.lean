@@ -4500,6 +4500,76 @@ theorem try_fit_other (w : World) (id dst : InstId) (msg : Msg) (k : Cont) (hne 
   · have hne' : dst ≠ id := fun h => hne h.symm
     simp [hi, hne']
 
+/-- Occupancy talks about the roster and actor map. Failures and the tombstone do not. -/
+theorem occ_of_core (I : Impl) (w1 w2 : World) (hN : w1.N = w2.N) (hr : w1.roster = w2.roster)
+    (hix : w1.nextIx = w2.nextIx) (hst : w1.st = w2.st) (h : OccInv I w1) : OccInv I w2 := by
+  rcases h with ⟨nodup, aliveIn, indexed, liveOne, livePeer, offEmpty, sentFrom, parkFrom, parkMsg,
+      balance, slack, still, quiet, clear⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [← hr]; exact nodup
+  · intro id hlife
+    rw [← hr]
+    apply aliveIn
+    rwa [hst]
+  · intro t i hmem
+    rw [← hix]
+    apply indexed
+    rwa [hr]
+  · intro t ht
+    have hc : aliveCount w2 t = aliveCount w1 t := by simp [aliveCount, hst, hr]
+    rw [hc]
+    exact liveOne t ht
+  · intro t ht
+    have hc : aliveCount w2 t = aliveCount w1 t := by simp [aliveCount, hst, hr]
+    rw [hc, ← hN]
+    exact livePeer t ht
+  · intro id hnin
+    have hnin1 : id ∉ w1.roster := by rwa [hr]
+    rw [← hst]
+    exact offEmpty id hnin1
+  · intro id m hm
+    rw [← hr]
+    apply sentFrom
+    rwa [hst]
+  · intro id p hp
+    rw [← hr]
+    apply parkFrom
+    rwa [hst]
+  · intro id p hp
+    apply parkMsg
+    rwa [hst]
+  · intro s d hs
+    rw [← hst, ← hr]
+    apply balance
+    rwa [hr]
+  · intro s d hs hl
+    rw [← hst]
+    apply slack
+    · rwa [hr]
+    · rwa [hst]
+  · intro s d hs hterm
+    rw [← hst, ← hr]
+    apply still
+    · rwa [hr]
+    · exact hterm
+  · intro s d hs hl
+    rw [← hst, ← hr]
+    apply quiet
+    · rwa [hr]
+    · rwa [hst]
+  · intro id hl1
+    rw [← hst]
+    exact clear id hl1
+
+theorem occ_note (I : Impl) (w : World) (id : InstId) (dst : String) (a : Actor)
+    (h : OccInv I (setActor w id a)) : OccInv I (setActor (noteStale w id dst) id a) := by
+  apply occ_of_core I (setActor w id a) (setActor (noteStale w id dst) id a) _ _ _ _ h
+  · simp [setActor, noteStale]
+  · simp [setActor, noteStale]
+  · simp [setActor, noteStale]
+  · funext i
+    simp [setActor, noteStale]
+
 /-- A `trySend` that fits spends one token and stores the message.
 A miss, a dead target, or a full mailbox continues without a charge. -/
 theorem occ_try (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
@@ -4512,13 +4582,14 @@ theorem occ_try (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
   have hph' : (w.st id).phase = .run cont := by simpa [cont] using hph
   have hty' : (w.st id).typestate = cont.toState := by simpa [cont] using hty
   simp [execRun, cont]
-  cases hr : route w I.desc dstName hint with
+  cases hr : route w I.desc id dstName with
   | none =>
     simp [hr]
-    exact occ_advance I w id cont hO hty' hph'
+    exact occ_note I w id dstName (proceed (w.st id) (afterHead cont))
+      (occ_advance I w id cont hO hty' hph')
   | some dst =>
     simp [hr]
-    have hname := route_tname w I.desc dstName hint dst hr
+    have hname := route_tname w I.desc id dstName dst hr
     split
     · next hcond =>
       have hlive : (w.st dst).life = .alive := hcond.1.1
@@ -4825,7 +4896,8 @@ theorem frame_clear (w : World) (id : InstId) (dst : String) (ms : List Msg) :
 
 theorem world_eq (w1 w2 : World) (hN : w1.N = w2.N) (hr : w1.roster = w2.roster)
     (hix : w1.nextIx = w2.nextIx) (hst : w1.st = w2.st) (hc : w1.cell = w2.cell)
-    (ho : w1.observed = w2.observed) : w1 = w2 := by
+    (ho : w1.observed = w2.observed) (hf : w1.failures = w2.failures)
+    (ht : w1.tombstone = w2.tombstone) : w1 = w2 := by
   cases w1
   cases w2
   cases hN
@@ -4834,7 +4906,43 @@ theorem world_eq (w1 w2 : World) (hN : w1.N = w2.N) (hr : w1.roster = w2.roster)
   cases hst
   cases hc
   cases ho
+  cases hf
+  cases ht
   rfl
+
+theorem meta_set (w : World) (id : InstId) (a : Actor) :
+    (setActor w id a).failures = w.failures ∧ (setActor w id a).tombstone = w.tombstone := by
+  simp [setActor]
+
+theorem meta_credit (w : World) (dst : String) (s : InstId) :
+    (creditSender w dst s).failures = w.failures ∧ (creditSender w dst s).tombstone = w.tombstone := by
+  simp [creditSender, setActor]
+
+theorem meta_refund (w : World) (dst : String) (ms : List Msg) :
+    (refundMsgs w dst ms).failures = w.failures ∧ (refundMsgs w dst ms).tombstone = w.tombstone := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp [refundMsgs, List.foldl_cons]
+    have hc := meta_credit w dst m.sender
+    have hi := ih (creditSender w dst m.sender)
+    exact ⟨hi.1.trans hc.1, hi.2.trans hc.2⟩
+
+theorem meta_drain (w : World) (id : InstId) (dst : String) (ms : List Msg) :
+    (drainBox w id dst ms).failures = w.failures ∧ (drainBox w id dst ms).tombstone = w.tombstone := by
+  induction ms generalizing w with
+  | nil => simp [drainBox, setActor]
+  | cons m ms ih =>
+    simp [drainBox]
+    have hs := meta_set w id { (w.st id) with box := ms }
+    have hc := meta_credit (setActor w id { (w.st id) with box := ms }) dst m.sender
+    have hi := ih (creditSender (setActor w id { (w.st id) with box := ms }) dst m.sender)
+    exact ⟨hi.1.trans (hc.1.trans hs.1), hi.2.trans (hc.2.trans hs.2)⟩
+
+theorem meta_clear (w : World) (id : InstId) (dst : String) (ms : List Msg) :
+    (refundClearBox w id dst ms).failures = w.failures ∧
+      (refundClearBox w id dst ms).tombstone = w.tombstone := by
+  simp [refundClearBox, setActor, meta_refund]
 
 /-- Refunding every sender and then clearing the box is the same as dropping
 each message and crediting its sender, including when that sender is `id`. -/
@@ -4854,9 +4962,11 @@ theorem drain_eq_refund (w : World) (id : InstId) (dst : String) (ms : List Msg)
     · intro d
       exact (drain_tok w id dst ms i d).trans (clear_tok w id dst ms i d).symm
     · exact (drain_mid w id dst ms i).trans (clear_mid w id dst ms i).symm
+  have hM := meta_drain w id dst ms
+  have hMc := meta_clear w id dst ms
   exact world_eq _ _ (hD.1.trans hC.1.symm) (hD.2.1.trans hC.2.1.symm)
     (hD.2.2.1.trans hC.2.2.1.symm) hst (hD.2.2.2.1.trans hC.2.2.2.1.symm)
-    (hD.2.2.2.2.trans hC.2.2.2.2.symm)
+    (hD.2.2.2.2.trans hC.2.2.2.2.symm) (hM.1.trans hMc.1.symm) (hM.2.trans hMc.2.symm)
 
 theorem occ_drop_box (I : Impl) (w : World) (id : InstId) (m : Msg) (ms : List Msg) (hO : OccInv I w)
     (hmem : id ∈ w.roster) (hbox : (w.st id).box = m :: ms) :
@@ -4917,6 +5027,32 @@ def drainPark (w : World) (id : InstId) (dst : String) : List Parked → World
 def refundClearPark (w : World) (id : InstId) (dst : String) (ps : List Parked) : World :=
   let wR := refundParked w dst ps
   setActor wR id { (wR.st id) with parked := [] }
+
+theorem meta_refundP (w : World) (dst : String) (ps : List Parked) :
+    (refundParked w dst ps).failures = w.failures ∧ (refundParked w dst ps).tombstone = w.tombstone := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp [refundParked, List.foldl_cons]
+    have hc := meta_credit w dst p.msg.sender
+    have hi := ih (creditSender w dst p.msg.sender)
+    exact ⟨hi.1.trans hc.1, hi.2.trans hc.2⟩
+
+theorem meta_drainP (w : World) (id : InstId) (dst : String) (ps : List Parked) :
+    (drainPark w id dst ps).failures = w.failures ∧ (drainPark w id dst ps).tombstone = w.tombstone := by
+  induction ps generalizing w with
+  | nil => simp [drainPark, setActor]
+  | cons p ps ih =>
+    simp [drainPark]
+    have hs := meta_set w id { (w.st id) with parked := ps }
+    have hc := meta_credit (setActor w id { (w.st id) with parked := ps }) dst p.msg.sender
+    have hi := ih (creditSender (setActor w id { (w.st id) with parked := ps }) dst p.msg.sender)
+    exact ⟨hi.1.trans (hc.1.trans hs.1), hi.2.trans (hc.2.trans hs.2)⟩
+
+theorem meta_clearP (w : World) (id : InstId) (dst : String) (ps : List Parked) :
+    (refundClearPark w id dst ps).failures = w.failures ∧
+      (refundClearPark w id dst ps).tombstone = w.tombstone := by
+  simp [refundClearPark, setActor, meta_refundP]
 
 theorem refundP_tok (w : World) (dst : String) (ps : List Parked) (i : InstId) (d : String) :
     ((refundParked w dst ps).st i).tokens d =
@@ -5142,9 +5278,11 @@ theorem drain_eq_refund_park (w : World) (id : InstId) (dst : String) (ps : List
     · intro d
       exact (drainP_tok w id dst ps i d).trans (clearP_tok w id dst ps i d).symm
     · exact (drainP_mid w id dst ps i).trans (clearP_mid w id dst ps i).symm
+  have hM := meta_drainP w id dst ps
+  have hMc := meta_clearP w id dst ps
   exact world_eq _ _ (hD.1.trans hC.1.symm) (hD.2.1.trans hC.2.1.symm)
     (hD.2.2.1.trans hC.2.2.1.symm) hst (hD.2.2.2.1.trans hC.2.2.2.1.symm)
-    (hD.2.2.2.2.trans hC.2.2.2.2.symm)
+    (hD.2.2.2.2.trans hC.2.2.2.2.symm) (hM.1.trans hMc.1.symm) (hM.2.trans hMc.2.symm)
 
 theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : List Parked)
     (hO : OccInv I w) (hmem : id ∈ w.roster) (hpark : (w.st id).parked = p :: ps)
@@ -5495,6 +5633,12 @@ theorem occ_term_kill (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
     · simp [died, killed, setActor, drained, (frame_drainP (drainBox w id name ms) id name ps).2.2.2.2,
         (frame_drain w id name ms).2.2.2.2, (frame_refundP (refundMsgs w name ms) name ps).2.2.2.2,
         (frame_refund w name ms).2.2.2.2]
+    · simp [died, killed, setActor, drained, (meta_drainP (drainBox w id name ms) id name ps).1,
+        (meta_drain w id name ms).1, (meta_refundP (refundMsgs w name ms) name ps).1,
+        (meta_refund w name ms).1]
+    · simp [died, killed, setActor, drained, (meta_drainP (drainBox w id name ms) id name ps).2,
+        (meta_drain w id name ms).2, (meta_refundP (refundMsgs w name ms) name ps).2,
+        (meta_refund w name ms).2]
   exact ⟨heq, by simpa [heq] using hrel⟩
 
 theorem occ_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
@@ -5522,13 +5666,14 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont
           simp [noBulkSend] at hbulk
           exact absurd (hbulk ht) (by decide)
         simp [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr]
-          exact occ_advance I w id ⟨.send dst label hint :: es, toState, replyTo⟩ hO hty hph
+          exact occ_note I w id dst (proceed (w.st id) (afterHead ⟨.send dst label hint :: es, toState, replyTo⟩))
+            (occ_advance I w id ⟨.send dst label hint :: es, toState, replyTo⟩ hO hty hph)
         | some dstId =>
           simp [hr]
-          have hname := route_tname w I.desc dst hint dstId hr
+          have hname := route_tname w I.desc id dst dstId hr
           exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := none } false
             ⟨.send dst label hint :: es, toState, replyTo⟩ (.send dst label hint) es label hint hO hT
             hph rfl (Or.inl (by simp [hname])) rfl hty hsender hnot
@@ -5545,13 +5690,14 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont
           simp [noBulkSend] at hbulk
           exact absurd (hbulk ht) (by decide)
         simp [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr]
-          exact occ_advance I w id ⟨.call dst label hint :: es, toState, replyTo⟩ hO hty hph
+          exact occ_note I w id dst (proceed (w.st id) (afterHead ⟨.call dst label hint :: es, toState, replyTo⟩))
+            (occ_advance I w id ⟨.call dst label hint :: es, toState, replyTo⟩ hO hty hph)
         | some dstId =>
           simp [hr]
-          have hname := route_tname w I.desc dst hint dstId hr
+          have hname := route_tname w I.desc id dst dstId hr
           exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := some id } true
             ⟨.call dst label hint :: es, toState, replyTo⟩ (.call dst label hint) es label hint hO hT
             hph rfl (Or.inr (by simp [hname])) rfl hty hsender hnot

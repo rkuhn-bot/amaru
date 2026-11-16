@@ -53,6 +53,7 @@ theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
     simpa [apply] using occ_spawn I w w' template hO h
   | ingress dst label =>
     simpa [apply] using occ_ingress I w w' dst label hO h
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hO
@@ -298,7 +299,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
           have hbad := hB id ht
           simp [contRest, hph, hrest, noBulkSend] at hbad
         · simp [execRun, hrest]
-          cases hr : route w I.desc dst hint with
+          cases hr : route w I.desc id dst with
           | none => simp [hr, setActor, hi]
           | some dstId =>
             simp [hr]
@@ -310,7 +311,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
           have hbad := hB id ht
           simp [contRest, hph, hrest, noBulkSend] at hbad
         · simp [execRun, hrest]
-          cases hr : route w I.desc dst hint with
+          cases hr : route w I.desc id dst with
           | none => simp [hr, setActor, hi]
           | some dstId =>
             simp [hr]
@@ -322,7 +323,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
           have hbad := hB id ht
           simp [contRest, hph, hrest, noBulkSend] at hbad
         · simp [execRun, hrest]
-          cases hr : route w I.desc dst hint with
+          cases hr : route w I.desc id dst with
           | none => simp [hr, setActor, hi]
           | some dstId =>
             simp [hr]
@@ -639,6 +640,7 @@ theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB :
   | finish id => simpa [apply] using bulk_finish I w w' id hB h
   | spawn template => simpa [apply] using bulk_spawn I w w' template hB h
   | ingress dst label => simpa [apply] using bulk_ingress I w w' dst label hB h
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hB
@@ -783,5 +785,47 @@ theorem reply_height (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
         heightOf hs ({ template := tname id, state := (w.st id).typestate } : Node) := by
   obtain ⟨hs, hok⟩ := hG.ranked
   exact ⟨hs, reply_below I hL hG N w hR id dst k hs hok hph hlive⟩
+
+/-- A caller blocked on `callee` for this continuation. -/
+def CallWait (ph : Phase) (callee : InstId) (k : Cont) : Prop :=
+  ph = .parked callee true k ∨ ph = .awaitReply callee k
+
+theorem proceed_not_callwait (a : Actor) (k : Cont) (callee : InstId) (k' : Cont) :
+    ¬ CallWait (proceed a k).phase callee k' := by
+  cases hk : k.rest <;> simp [proceed, hk, CallWait]
+
+theorem template_subtree_of (D : Description) (name : String) (t : Template)
+    (ht : templateOf D name = some t) : templateSubtree D name = t.subtree := by
+  simp [templateSubtree, ht]
+
+/-- A nonempty subtree member is terminable. `subtreeFails` is what the checker records. -/
+theorem subtree_member_terminable (D : Description) (hG : GraphOk D) (name : String) (t : Template)
+    (ht : templateOf D name = some t) (hne : t.subtree ≠ "") : t.terminable = true := by
+  have hmap := hG.subtrees
+  simp [subtreeFails] at hmap
+  have hf := hmap t (template_mem D name t ht)
+  simp [hne] at hf
+  cases hmul : t.multiplicity with
+  | perPeer =>
+    rw [hmul] at hf
+    have hper : (Multiplicity.perPeer != Multiplicity.perPeer) = false := by decide
+    rw [hper] at hf
+    cases htm : t.terminable with
+    | true => rfl
+    | false => simp [htm] at hf
+  | one =>
+    rw [hmul] at hf
+    have hper : (Multiplicity.one != Multiplicity.perPeer) = true := by decide
+    rw [hper] at hf
+    simp at hf
+
+theorem same_src_terminable (D : Description) (hG : GraphOk D) (a b : String) (t : Template)
+    (hsame : sameSubtree D a b = true) (ht : templateOf D a = some t) : t.terminable = true := by
+  have hsub : templateSubtree D a ≠ "" := by
+    simp [sameSubtree, Bool.and_eq_true] at hsame
+    intro hempty
+    simp [hempty] at hsame
+  rw [template_subtree_of D a t ht] at hsub
+  exact subtree_member_terminable D hG a t ht hsub
 
 end Deadlock

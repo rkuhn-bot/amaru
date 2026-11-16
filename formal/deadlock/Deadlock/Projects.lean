@@ -313,7 +313,7 @@ theorem exec_ty (I : Impl) (w : World) (id : InstId) (k : Cont) (hT : TyOk I.des
       simp [execRun, hk]
       exact tyOk_id I.desc w id _ hT (by simp) (by simp)
     | send d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp [execRun, hk, hr]
         exact tyOk_proceed I.desc w id (afterHead k) hT (by simp [afterHead, hty])
@@ -321,7 +321,7 @@ theorem exec_ty (I : Impl) (w : World) (id : InstId) (k : Cont) (hT : TyOk I.des
         simp [execRun, hk, hr]
         exact enqueue_ty I.desc w id dst _ false (afterHead k) hT (by simp [afterHead, hty])
     | call d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp [execRun, hk, hr]
         exact tyOk_proceed I.desc w id (afterHead k) hT (by simp [afterHead, hty])
@@ -329,7 +329,7 @@ theorem exec_ty (I : Impl) (w : World) (id : InstId) (k : Cont) (hT : TyOk I.des
         simp [execRun, hk, hr]
         exact enqueue_ty I.desc w id dst _ true (afterHead k) hT (by simp [afterHead, hty])
     | trySend d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp [execRun, hk, hr]
         exact tyOk_proceed I.desc w id (afterHead k) hT (by simp [afterHead, hty])
@@ -705,6 +705,7 @@ theorem ty_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w w
   | finish id => exact finish_ty I w id w' hT hS h
   | spawn template => exact spawn_ty I hG w template w' hT h
   | ingress dst label => exact ingress_ty I w w' dst label hT (by simpa [apply] using h)
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hT
@@ -800,15 +801,15 @@ theorem exec_ix (I : Impl) (w : World) (id : InstId) (k : Cont) (name : String) 
     | internal => simp [execRun, hk, setActor]
     | peer => simp [execRun, hk, setActor]
     | send d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none => simp [execRun, hk, hr, setActor]
       | some dst => simp [execRun, hk, hr, enqueue_ix]
     | call d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none => simp [execRun, hk, hr, setActor]
       | some dst => simp [execRun, hk, hr, enqueue_ix]
     | trySend d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none => simp [execRun, hk, hr, setActor]
       | some dst =>
         simp [execRun, hk, hr]
@@ -951,6 +952,8 @@ theorem ix_preserved (I : Impl) (w w' : World) (a : Action) (name : String) (t :
   | spawn template => exact spawn_ix I w template w' name t ht hmul h
   | ingress dst label =>
     exact congrFun (ingress_phase I w w' dst label (InstId.core name) (by simpa [apply] using h)).2.2.2.2.2.2.1 name
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h, killSubtree_nextIx]
   | stutter =>
     cases stutter_unchanged I w w' h
     rfl

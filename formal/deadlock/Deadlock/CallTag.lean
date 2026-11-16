@@ -4,12 +4,13 @@ set_option autoImplicit false
 
 namespace Deadlock
 
-/-- A call edge does not land on a terminable template. The only transition that
-sets `life` to dead is a killing `terminate`, so a callee of a call cannot die
-while a caller is in `awaitReply`. -/
+/-- A call leaves its subtree only toward a non-terminable template. Inside the
+subtree the target may be terminable: the subtree kill fails that caller in the
+same step. -/
 theorem call_edge_unterminable (D : Description) (hG : GraphOk D) (e : Edge)
     (he : e ∈ D.edges) (hc : e.effect = .call) (t : Template)
-    (ht : templateOf D e.dst = some t) : t.terminable = false := by
+    (ht : templateOf D e.dst = some t) :
+    t.terminable = false ∨ sameSubtree D e.src e.dst = true := by
   have hall := by simpa [callTermFails] using hG.lifecycle
   have hnot : (e.effect != .call) = false := by
     rw [hc]
@@ -17,8 +18,227 @@ theorem call_edge_unterminable (D : Description) (hG : GraphOk D) (e : Edge)
   have hbody := hall e he hnot
   simp [ht] at hbody
   cases hterm : t.terminable
-  · rfl
+  · exact Or.inl rfl
   · simp [hterm] at hbody
+    exact Or.inr hbody
+
+/-- A running `call` cannot name a terminable target. The edge is either outside
+the subtree, which the checker rejects, or inside it, where the caller is itself
+terminable and `BulkFree` forbids the call head. -/
+theorem running_call_not_terminable (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hS : SemInv I w) (hB : BulkFree I w) (id : InstId) (toState : String) (replyTo : Option InstId)
+    (dst label : String) (hint : Nat) (tail : List Eff)
+    (hph : (w.st id).phase = .run ⟨.call dst label hint :: tail, toState, replyTo⟩)
+    (t : Template) (ht : templateOf I.desc dst = some t) (hterm : t.terminable = true) : False := by
+  have hprog := hS.prog id
+  simp [programOk, hph, effectsOk, Bool.and_eq_true] at hprog
+  obtain ⟨e, he, hsrc, _, hdst, heff, _, _⟩ :=
+    hasEdge_mem I.desc (tname id) (w.st id).typestate dst .call .blocking label hprog.1
+  have hsplit := call_edge_unterminable I.desc hG e he heff t (by simpa [hdst] using ht)
+  cases hsplit with
+  | inl hnot => simp [hterm] at hnot
+  | inr hsame =>
+    cases htpl : templateOf I.desc (tname id) with
+    | none =>
+      simp [sameSubtree, templateSubtree, htpl, hsrc] at hsame
+    | some ts =>
+      have htm := same_src_terminable I.desc hG e.src e.dst ts
+        (by simpa [hsrc] using hsame) (by simpa [hsrc] using htpl)
+      have hbad := hB id ⟨ts, htpl, htm⟩
+      simp [contRest, hph, noBulkSend] at hbad
+
+theorem failWaiter_call (w : World) (dead i caller callee : InstId) (k : Cont)
+    (h : CallWait ((failWaiter w dead i).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  by_cases hc : caller = i
+  · rw [hc] at h ⊢
+    unfold failWaiter at h
+    split at h
+    · exact h
+    · cases hph : (w.st i).phase with
+      | parked d _ ck =>
+        simp only [hph] at h
+        by_cases hd : d == dead
+        · simp only [hd, ite_true, setActor] at h
+          exact absurd h (proceed_not_callwait (w.st i) ck callee k)
+        · simp only [hd, ite_false] at h
+          simpa [hph] using h
+      | awaitReply d _ =>
+        simp only [hph] at h
+        by_cases hd : d == dead
+        · simp [hd, setActor, CallWait] at h
+        · simp only [hd, ite_false] at h
+          simpa [hph] using h
+      | idle =>
+        simp only [hph] at h
+        simpa [hph] using h
+      | run _ =>
+        simp only [hph] at h
+        simpa [hph] using h
+      | awaitEffect _ =>
+        simp only [hph] at h
+        simpa [hph] using h
+      | awaitPeer _ =>
+        simp only [hph] at h
+        simpa [hph] using h
+      | crashed =>
+        simp only [hph] at h
+        simpa [hph] using h
+  · rw [failWaiter_other w dead i caller hc] at h
+    exact h
+
+theorem failFold_call (w : World) (dead caller callee : InstId) (k : Cont) (ids : List InstId)
+    (h : CallWait ((ids.foldl (fun w i => failWaiter w dead i) w).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons i ids ih =>
+    simp only [List.foldl_cons] at h
+    exact failWaiter_call _ _ _ _ _ _ (ih _ h)
+
+theorem credit_call (w : World) (name : String) (sender caller callee : InstId) (k : Cont)
+    (h : CallWait ((creditSender w name sender).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  have hp := (credit_phase_life w name sender caller).1
+  simpa [hp] using h
+
+theorem refundMsgs_call (w : World) (name : String) (ms : List Msg) (caller callee : InstId) (k : Cont)
+    (h : CallWait ((refundMsgs w name ms).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  induction ms generalizing w with
+  | nil => simpa [refundMsgs] using h
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons] at h
+    exact credit_call _ _ _ _ _ _ (ih _ h)
+
+theorem refundParked_call (w : World) (name : String) (ps : List Parked) (caller callee : InstId)
+    (k : Cont) (h : CallWait ((refundParked w name ps).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  induction ps generalizing w with
+  | nil => simpa [refundParked] using h
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons] at h
+    exact credit_call _ _ _ _ _ _ (ih _ h)
+
+theorem forgetStep_call (w : World) (dead id caller callee : InstId) (k : Cont)
+    (h : CallWait ((let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  dsimp only at h
+  by_cases hcond : ((w.st id).parked.filter fun p => p.sender != dead) == (w.st id).parked
+  · simp only [hcond, ite_true] at h
+    exact h
+  · simp only [hcond, ite_false, setActor] at h
+    by_cases hc : caller = id
+    · subst hc
+      simpa [CallWait] using h
+    · simpa [hc] using h
+
+theorem forgetFold_call (w : World) (dead caller callee : InstId) (k : Cont) (ids : List InstId)
+    (h : CallWait ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons id ids ih =>
+    simp only [List.foldl_cons] at h
+    exact forgetStep_call _ _ _ _ _ _ (ih _ h)
+
+/-- Killing one member does not create a call wait. A waiter of that member is
+failed, and everyone else's call wait was already there. -/
+theorem killOne_call (w : World) (D : Description) (id caller callee : InstId) (k : Cont)
+    (h : CallWait ((killOne w D id).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  let w1 := readCells D w id
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  let w4 := failWaiters w3 id
+  let w5 := forgetSender w4 id
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5]
+  rw [hbody] at h
+  have h5 : CallWait (w5.st caller).phase callee k := by
+    by_cases hc : caller = id
+    · subst hc
+      simp [setActor, CallWait] at h
+    · simpa [setActor, hc] using h
+  have h4 : CallWait (w4.st caller).phase callee k := by
+    simpa [w5, forgetSender] using forgetFold_call w4 id caller callee k w4.roster h5
+  have h3 : CallWait (w3.st caller).phase callee k := by
+    simpa [w4, failWaiters] using failFold_call w3 id caller callee k w3.roster h4
+  have h2 := refundParked_call w2 (tname id) (w.st id).parked caller callee k (by simpa [w3] using h3)
+  have h1 := refundMsgs_call w1 (tname id) (w.st id).box caller callee k (by simpa [w2] using h2)
+  simpa [w1, cellsSt] using h1
+
+theorem killFold_call (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (caller callee : InstId) (k : Cont)
+    (h : CallWait ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st caller).phase
+        callee k) :
+    CallWait (w.st caller).phase callee k := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons id ids ih =>
+    simp only [List.foldl_cons] at h
+    split at h
+    · exact killOne_call _ _ _ _ _ _ (ih _ h)
+    · exact ih _ h
+
+theorem killSubtree_call (w : World) (D : Description) (sub : String) (key : Nat)
+    (caller callee : InstId) (k : Cont)
+    (h : CallWait ((killSubtree w D sub key).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  simp [killSubtree, plant_st] at h
+  simpa [killMembers] using killFold_call w D sub key w.roster caller callee k h
+
+theorem spawn_keeps_call (I : Impl) (w w' : World) (template : String) (caller callee : InstId) (k : Cont)
+    (h : apply I (.spawn template) w = some w')
+    (hc : CallWait (w'.st caller).phase callee k) : CallWait (w.st caller).phase callee k := by
+  simp only [apply, spawn] at h
+  split at h
+  · cases h
+  · next _ _ =>
+    split at h
+    · cases h
+      simp [cellsSt] at hc
+      by_cases hcaller : caller = InstId.peer template (w.nextIx template)
+      · simp [hcaller, setActor, withTokens, CallWait] at hc
+      · simpa [setActor, hcaller] using hc
+    · cases h
+
+theorem finish_keeps_call (I : Impl) (w w' : World) (id caller callee : InstId) (k : Cont)
+    (h : apply I (.finish id) w = some w')
+    (hc : CallWait (w'.st caller).phase callee k) : CallWait (w.st caller).phase callee k := by
+  simp only [apply] at h
+  unfold finishWait at h
+  cases hph : (w.st id).phase with
+  | awaitEffect kw =>
+    simp [hph] at h
+    cases h
+    by_cases hcaller : caller = id
+    · rw [hcaller] at hc
+      simp [setActor] at hc
+      exact absurd hc (proceed_not_callwait (w.st id) kw callee k)
+    · simpa [setActor, hcaller] using hc
+  | awaitPeer kw =>
+    by_cases hf : peerFinishable I.desc id = true
+    · simp [hph, hf] at h
+      cases h
+      by_cases hcaller : caller = id
+      · rw [hcaller] at hc
+        simp [setActor] at hc
+        exact absurd hc (proceed_not_callwait (w.st id) kw callee k)
+      · simpa [setActor, hcaller] using hc
+    · simp [hph, hf] at h
+  | idle => simp [hph] at h
+  | run _ => simp [hph] at h
+  | parked _ _ _ => simp [hph] at h
+  | awaitReply _ _ => simp [hph] at h
+  | crashed => simp [hph] at h
 
 /-- A fresh enqueue adds at most the parked entry it was given. -/
 theorem enqueue_parked_mem (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
@@ -186,6 +406,37 @@ structure CallTagInv (w : World) : Prop where
   parkedOnly : ∀ c d k, (w.st c).phase = .parked d true k →
     (∃ p, p ∈ (w.st d).parked ∧ p.sender = c ∧ p.msg.callFrom = some c) ∧
     ¬ ∃ m, m ∈ (w.st d).box ∧ m.callFrom = some c
+
+/-- `CallTagInv` reads only actor state, so a world with the same actors satisfies it. -/
+theorem callTag_st {w w' : World} (h : ∀ i, w'.st i = w.st i) (hT : CallTagInv w) : CallTagInv w' where
+  awaiting c d k hk := by
+    rw [h] at hk
+    simpa [mailCall, h] using hT.awaiting c d k hk
+  parkedCall c d k hk := by
+    rw [h] at hk
+    simpa [mailCall, h] using hT.parkedCall c d k hk
+  msgOwner d c hm := by
+    have hm' : mailCall w d c := by simpa [mailCall, h] using hm
+    simpa [h] using hT.msgOwner d c hm'
+  oweOwner d c ho := by
+    have ho' : handlerOwes c (w.st d).phase ∨ replyPending c (w.st d).phase := by
+      simpa [h] using ho
+    simpa [h] using hT.oweOwner d c ho'
+  prioPlain id m hm := hT.prioPlain id m (by simpa [h] using hm)
+  sole d c := by simpa [soleCall, h] using hT.sole d c
+  parkFrom d p hp s := by
+    have hp' : p ∈ (w.st d).parked := by simpa [h] using hp
+    simpa [h] using hT.parkFrom d p hp' s
+  parkedOnly c d k hk := by
+    rw [h] at hk
+    simpa [h] using hT.parkedOnly c d k hk
+
+/-- Recording a failed route does not change actors, so a call-tag invariant carries across. -/
+theorem callTag_note (w0 : World) (sender id : InstId) (dst : String) (a : Actor)
+    (hT : CallTagInv (setActor w0 id a)) :
+    CallTagInv (setActor (noteStale w0 sender dst) id a) :=
+  callTag_st (w := setActor w0 id a) (w' := setActor (noteStale w0 sender dst) id a)
+    (fun _ => rfl) hT
 
 theorem init_prio_empty (I : Impl) (N : Nat) (id : InstId) : ((initWorld I N).st id).prio = [] := by
   rw [init_base_st]
@@ -5851,5 +6102,648 @@ theorem release_plain_tag (w : World) (id : InstId) (ps : List Parked) (hT : Cal
                 have hqP : q = p := hsenders q p (List.mem_cons_of_mem _ hq) (by simp) heq
                 exact (List.nodup_cons.mp hnodup).1 (by rw [← hqP]; exact hq)
               exact Or.inr ⟨k, by simp [setActor, hqs, hk]⟩)
+
+theorem deliver_running (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) :
+    a1.phase = .idle ∨ ∃ k, a1.phase = .run k := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        exact Or.inl rfl
+    · next tr _ =>
+      split at h
+      · cases h
+      · cases h
+        cases tr.program with
+        | nil => exact Or.inl rfl
+        | cons _ _ => exact Or.inr ⟨_, rfl⟩
+
+theorem recvPrio_keeps_call (I : Impl) (w w' : World) (id caller callee : InstId) (k : Cont)
+    (h : apply I (.recvPrio id) w = some w')
+    (hc : CallWait (w'.st caller).phase callee k) : CallWait (w.st caller).phase callee k := by
+  simp only [apply] at h
+  unfold receivePrio at h
+  cases hp : (w.st id).prio with
+  | nil => simp [hp] at h
+  | cons m ms =>
+    by_cases hlive : (w.st id).life = .alive
+    · by_cases hidle : (w.st id).phase = .idle
+      · simp only [hp, hlive, hidle] at h
+        split at h
+        · cases h
+        · split at h
+          · cases h
+          · next w1 a1 hd =>
+            cases h
+            have hst := deliver_st I w id _ m w1 a1 caller hd
+            by_cases hcaller : caller = id
+            · rw [hcaller] at hc
+              simp [setActor] at hc
+              rcases deliver_running I w id _ m w1 a1 hd with hidlePh | ⟨_, hr⟩
+              · simp [hidlePh, CallWait] at hc
+              · simp [hr, CallWait] at hc
+            · simpa [setActor, hcaller, hst] using hc
+      · simp [hp, hlive, hidle] at h
+    · simp [hp, hlive] at h
+
+theorem bulk_credit_call (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (m : Msg)
+    (caller callee : InstId) (k : Cont) (hd : deliver I w id a m = some (w1, a1))
+    (hc : CallWait ((creditSender (setActor w1 id a1) (tname id) m.sender).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  have hcred := (credit_phase_life (setActor w1 id a1) (tname id) m.sender caller).1
+  rw [hcred] at hc
+  by_cases hcaller : caller = id
+  · rw [hcaller] at hc
+    simp [setActor] at hc
+    rcases deliver_running I w id _ m w1 a1 hd with hidle | ⟨_, hr⟩
+    · simp [hidle, CallWait] at hc
+    · simp [hr, CallWait] at hc
+  · have hst := deliver_st I w id _ m w1 a1 caller hd
+    simpa [setActor, hcaller, hst] using hc
+
+theorem resume_bit_call (a : Actor) (dst callee : InstId) (c : Bool) (ck k : Cont)
+    (hph : a.phase = .parked dst c ck)
+    (h : CallWait (resumeSender a c dst).phase callee k) : CallWait a.phase callee k := by
+  cases c with
+  | false =>
+    cases hk : ck.rest <;> simp [resumeSender, hph, hk, proceed, CallWait] at h
+  | true =>
+    simp [resumeSender, hph, CallWait] at h
+    rcases h with ⟨rfl, rfl⟩
+    exact Or.inl hph
+
+theorem not_call_runner (w : World) (id : InstId) (a : Actor) (caller callee : InstId) (k : Cont)
+    (hnot : ¬ CallWait a.phase callee k)
+    (hc : CallWait ((setActor w id a).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  by_cases hcaller : caller = id
+  · rw [hcaller] at hc
+    simp [setActor] at hc
+    exact absurd hc hnot
+  · simpa [setActor, hcaller] using hc
+
+theorem deliver_not_call (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (callee : InstId) (k : Cont) (hd : deliver I w id a m = some (w1, a1)) :
+    ¬ CallWait a1.phase callee k := by
+  intro h
+  rcases deliver_running I w id a m w1 a1 hd with hidle | ⟨_, hr⟩
+  · simp [hidle, CallWait] at h
+  · simp [hr, CallWait] at h
+
+/-- Resuming the parked sender of a delivered message does not create a call wait.
+The sender was already parked on this mailbox, and every other phase is unchanged
+or is the idle-or-running phase `deliver` just installed. -/
+theorem installed_resume_call (I : Impl) (w w1 : World) (id : InstId) (a : Actor) (dm : Msg)
+    (installed a1 : Actor) (p : Parked) (credited : InstId) (hM : MailInv w)
+    (caller callee : InstId) (k : Cont) (hp : p ∈ (w.st id).parked)
+    (hd : deliver I w id a dm = some (w1, a1)) (hphase : installed.phase = a1.phase)
+    (hc : CallWait ((setActor (creditSender (setActor w1 id installed) (tname id) credited) p.sender
+      (resumeSender ((creditSender (setActor w1 id installed) (tname id) credited).st p.sender)
+        p.isCall id)).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  let wA := setActor w1 id installed
+  let wB := creditSender wA (tname id) credited
+  let resumed := resumeSender (wB.st p.sender) p.isCall id
+  have hc0 : CallWait ((setActor wB p.sender resumed).st caller).phase callee k := by
+    simpa [wA, wB, resumed] using hc
+  have hcred (i : InstId) : (wB.st i).phase = (wA.st i).phase :=
+    (credit_phase_life wA (tname id) credited i).1
+  by_cases hself : p.sender = id
+  · have hseen : (wB.st id).phase = a1.phase := by rw [hcred id]; simp [wA, setActor, hphase]
+    have hres : resumed.phase = a1.phase := by
+      rcases deliver_running I w id a dm w1 a1 hd with hidle | ⟨_, hr⟩
+      · simp [resumed, resumeSender, hself, hseen, hidle]
+      · simp [resumed, resumeSender, hself, hseen, hr]
+    by_cases hcaller : caller = id
+    · rw [hcaller, hself] at hc0
+      simp [setActor] at hc0
+      rw [hres] at hc0
+      exact absurd hc0 (deliver_not_call I w id a dm w1 a1 callee k hd)
+    · have hstep : ((setActor wB p.sender resumed).st caller).phase = (wB.st caller).phase := by
+        simp [setActor, hcaller, hself]
+      rw [hstep] at hc0
+      rw [hcred caller] at hc0
+      have hA : (wA.st caller).phase = (w.st caller).phase := by
+        have hset := setActor_other w1 id caller installed hcaller
+        simpa [wA, hset] using (congrArg (·.phase) (deliver_st I w id a dm w1 a1 caller hd))
+      simpa [hA] using hc0
+  · have hseen : (wB.st p.sender).phase = (w.st p.sender).phase := by
+      rw [hcred p.sender]
+      have hset := setActor_other w1 id p.sender installed hself
+      simpa [wA, hset] using (congrArg (·.phase) (deliver_st I w id a dm w1 a1 p.sender hd))
+    by_cases hcaller : caller = p.sender
+    · obtain ⟨k0, hparked⟩ := hM.fwd id p hp
+      rw [hcaller] at hc0
+      simp [setActor] at hc0
+      have hbit := resume_bit_call (wB.st p.sender) id callee p.isCall k0 k
+        (by rw [hseen]; exact hparked) hc0
+      rw [hseen] at hbit
+      rw [hcaller]
+      exact hbit
+    · have hstep : ((setActor wB p.sender resumed).st caller).phase = (wB.st caller).phase := by
+        simp [setActor, hcaller]
+      rw [hstep, hcred caller] at hc0
+      by_cases hid : caller = id
+      · rw [hid] at hc0
+        simp [wA, setActor] at hc0
+        rw [hphase] at hc0
+        exact absurd hc0 (deliver_not_call I w id a dm w1 a1 callee k hd)
+      · have hA : (wA.st caller).phase = (w.st caller).phase := by
+          have hset := setActor_other w1 id caller installed hid
+          simpa [wA, hset] using (congrArg (·.phase) (deliver_st I w id a dm w1 a1 caller hd))
+        simpa [hA] using hc0
+
+theorem bulk_resume_call (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (p : Parked)
+    (ps : List Parked) (hM : MailInv w) (caller callee : InstId) (k : Cont)
+    (hpark : (w.st id).parked = p :: ps) (hd : deliver I w id a p.msg = some (w1, a1))
+    (hc : CallWait ((setActor (creditSender (setActor w1 id a1) (tname id) p.msg.sender) p.sender
+      (resumeSender ((creditSender (setActor w1 id a1) (tname id) p.msg.sender).st p.sender) p.isCall id)).st
+        caller).phase callee k) :
+    CallWait (w.st caller).phase callee k :=
+  installed_resume_call I w w1 id a p.msg a1 a1 p p.msg.sender hM caller callee k
+    (by simpa [hpark] using List.mem_cons_self p ps) hd rfl hc
+
+theorem bulk_admit_call (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (m : Msg)
+    (p : Parked) (ps : List Parked) (hM : MailInv w) (caller callee : InstId) (k : Cont)
+    (hpark : (w.st id).parked = p :: ps) (hd : deliver I w id a m = some (w1, a1))
+    (hc : CallWait ((setActor (creditSender (setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps })
+      (tname id) m.sender) p.sender
+      (resumeSender ((creditSender (setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps })
+        (tname id) m.sender).st p.sender) p.isCall id)).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k :=
+  installed_resume_call I w w1 id a m { a1 with box := a1.box ++ [p.msg], parked := ps } a1 p
+    m.sender hM caller callee k (by simpa [hpark] using List.mem_cons_self p ps) hd (by simp) hc
+
+theorem recvBulk_keeps_call (I : Impl) (w w' : World) (id : InstId) (hM : MailInv w)
+    (caller callee : InstId) (k : Cont) (h : apply I (.recvBulk id) w = some w')
+    (hc : CallWait (w'.st caller).phase callee k) : CallWait (w.st caller).phase callee k := by
+  simp only [apply] at h
+  unfold receiveBulk at h
+  by_cases hlive : (w.st id).life = .alive
+  · by_cases hidle : (w.st id).phase = .idle
+    · simp [hlive, hidle] at h
+      cases hbox : (w.st id).box with
+      | nil =>
+        cases hpark : (w.st id).parked with
+        | nil => simp [hbox, hpark] at h
+        | cons p ps =>
+          simp [hbox, hpark] at h
+          split at h
+          · cases h
+          · next w1 a1 hd =>
+            cases h
+            exact bulk_resume_call I w w1 id _ a1 p ps hM caller callee k hpark hd hc
+      | cons m ms =>
+        cases hpark : (w.st id).parked with
+        | nil =>
+          simp [hbox, hpark] at h
+          split at h
+          · cases h
+          · next w1 a1 hd =>
+            cases h
+            exact bulk_credit_call I w w1 id _ a1 m caller callee k hd hc
+        | cons p ps =>
+          simp [hbox, hpark] at h
+          split at h
+          · cases h
+          · next w1 a1 hd =>
+            cases h
+            exact bulk_admit_call I w w1 id _ a1 m p ps hM caller callee k hpark hd hc
+    · simp [hlive, hidle] at h
+  · simp [hlive] at h
+
+theorem parked_false_not_call (dst callee : InstId) (k ck : Cont) :
+    ¬ CallWait (Phase.parked dst false k) callee ck := by
+  intro h
+  rcases h with h | h <;> cases h
+
+theorem await_not_call (kw : Cont) (callee : InstId) (k : Cont) :
+    ¬ CallWait (Phase.awaitEffect kw) callee k := by
+  intro h
+  rcases h with h | h <;> cases h
+
+theorem peer_not_call (kw : Cont) (callee : InstId) (k : Cont) :
+    ¬ CallWait (Phase.awaitPeer kw) callee k := by
+  intro h
+  rcases h with h | h <;> cases h
+
+theorem crash_not_call (callee : InstId) (k : Cont) : ¬ CallWait Phase.crashed callee k := by
+  intro h
+  rcases h with h | h <;> cases h
+
+theorem idle_not_call (callee : InstId) (k : Cont) : ¬ CallWait Phase.idle callee k := by
+  intro h
+  rcases h with h | h <;> cases h
+
+/-- A resolved route names the template that was asked for. -/
+theorem route_name (w : World) (D : Description) (sender : InstId) (dst : String) (id : InstId)
+    (h : route w D sender dst = some id) : tname id = dst := by
+  simp only [route] at h
+  cases ht : templateOf D dst with
+  | none => simp [ht] at h
+  | some t =>
+    simp [ht] at h
+    cases hm : t.multiplicity with
+    | one =>
+      simp [hm] at h
+      rcases h with ⟨_, rfl⟩
+      rfl
+    | perPeer =>
+      simp [hm] at h
+      cases hk : memberKey sender with
+      | none => simp [hk] at h
+      | some k =>
+        simp [hk] at h
+        rcases h with ⟨_, rfl⟩
+        rfl
+
+theorem enqueue_plain_call (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
+    (caller callee : InstId) (ck : Cont)
+    (hc : CallWait ((enqueueOrPark w D sender dst msg false k).st caller).phase callee ck) :
+    CallWait (w.st caller).phase callee ck := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hsame : sender = dst
+      · subst hsame
+        rw [enqueue_room_self_send w D sender msg k hlive hroom.1 hroom.2] at hc
+        exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+      · rw [enqueue_room_other_send w D sender dst msg k hlive hsame hroom.1 hroom.2] at hc
+        have hprev := not_call_runner
+          (setActor w dst { (w.st dst) with
+            box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+            nextMid := (w.st dst).nextMid + 1 })
+          sender (proceed (chargeSender (w.st sender) (tname dst)) k) caller callee ck
+          (proceed_not_callwait _ _ _ _) hc
+        by_cases hdst : caller = dst
+        · subst hdst
+          simp [setActor] at hprev
+          exact hprev
+        · simpa [setActor, hdst] using hprev
+    · by_cases hsame : sender = dst
+      · subst hsame
+        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := hroom
+        rw [enqueue_park_self w D sender msg false k hlive hroomS] at hc
+        exact not_call_runner w sender _ caller callee ck (parked_false_not_call sender callee k ck) hc
+      · have hroomO : ¬ ((w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst) := hroom
+        rw [enqueue_park_other w D sender dst msg false k hlive hsame hroomO] at hc
+        have hprev := not_call_runner
+          (setActor w dst { (w.st dst) with
+            parked := (w.st dst).parked ++
+              [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := false }],
+            nextMid := (w.st dst).nextMid + 1 })
+          sender { chargeSender (w.st sender) (tname dst) with phase := .parked dst false k }
+          caller callee ck (parked_false_not_call dst callee k ck) hc
+        by_cases hdst : caller = dst
+        · subst hdst
+          simp [setActor] at hprev
+          exact hprev
+        · simpa [setActor, hdst] using hprev
+  · rw [enqueue_dead w D sender dst msg false k hlive] at hc
+    exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+
+/-- A blocking enqueue either parks the sender on `dst`, or leaves every other actor. -/
+theorem enqueue_true_sender (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
+    (caller callee : InstId) (ck : Cont)
+    (hc : CallWait ((enqueueOrPark w D sender dst msg true k).st caller).phase callee ck) :
+    (caller = sender ∧ callee = dst ∧ ck = k) ∨
+      (caller ≠ sender ∧ CallWait (w.st caller).phase callee ck) := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by simpa [hsame] using hlive
+        have hparkS : (w.st sender).parked = [] := by simpa [hsame] using hroom.1
+        have hcapS : (w.st sender).box.length < capBulk D w.N sender := by simpa [hsame] using hroom.2
+        subst hsame
+        rw [enqueue_room_self_call w D sender msg k hliveS hparkS hcapS] at hc
+        by_cases hcaller : caller = sender
+        · subst hcaller
+          simp only [setActor, CallWait] at hc
+          rcases hc with hc | hc
+          · cases hc
+          · cases hc
+            left
+            exact ⟨rfl, rfl, rfl⟩
+        · right
+          refine ⟨hcaller, ?_⟩
+          simpa [setActor, hcaller] using hc
+      · rw [enqueue_room_other_call w D sender dst msg k hlive hsame hroom.1 hroom.2] at hc
+        by_cases hcaller : caller = sender
+        · subst hcaller
+          simp only [setActor, CallWait] at hc
+          rcases hc with hc | hc
+          · cases hc
+          · cases hc
+            left
+            exact ⟨rfl, rfl, rfl⟩
+        · right
+          have hprev : CallWait ((setActor w dst { (w.st dst) with
+              box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
+              nextMid := (w.st dst).nextMid + 1 }).st caller).phase callee ck := by
+            simpa [setActor, hcaller] using hc
+          refine ⟨hcaller, ?_⟩
+          by_cases hdst : caller = dst
+          · subst hdst
+            simp [setActor] at hprev
+            exact hprev
+          · simpa [setActor, hdst] using hprev
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by simpa [hsame] using hlive
+        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := by
+          simpa [hsame] using hroom
+        subst hsame
+        rw [enqueue_park_self w D sender msg true k hliveS hroomS] at hc
+        by_cases hcaller : caller = sender
+        · subst hcaller
+          simp only [setActor, CallWait] at hc
+          rcases hc with hc | hc
+          · cases hc
+            left
+            exact ⟨rfl, rfl, rfl⟩
+          · cases hc
+        · right
+          refine ⟨hcaller, ?_⟩
+          simpa [setActor, hcaller] using hc
+      · rw [enqueue_park_other w D sender dst msg true k hlive hsame hroom] at hc
+        by_cases hcaller : caller = sender
+        · subst hcaller
+          simp only [setActor, CallWait] at hc
+          rcases hc with hc | hc
+          · cases hc
+            left
+            exact ⟨rfl, rfl, rfl⟩
+          · cases hc
+        · right
+          have hprev : CallWait ((setActor w dst { (w.st dst) with
+              parked := (w.st dst).parked ++
+                [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := true }],
+              nextMid := (w.st dst).nextMid + 1 }).st caller).phase callee ck := by
+            simpa [setActor, hcaller] using hc
+          refine ⟨hcaller, ?_⟩
+          by_cases hdst : caller = dst
+          · subst hdst
+            simp [setActor] at hprev
+            exact hprev
+          · simpa [setActor, hdst] using hprev
+  · rw [enqueue_dead w D sender dst msg true k hlive] at hc
+    by_cases hcaller : caller = sender
+    · subst hcaller
+      simp [setActor] at hc
+      exact absurd hc (proceed_not_callwait _ _ _ _)
+    · right
+      refine ⟨hcaller, ?_⟩
+      simpa [setActor, hcaller] using hc
+
+theorem reply_keeps_call (w : World) (sender caller callee : InstId) (ck k : Cont)
+    (hc : CallWait ((performReply w sender k).st caller).phase callee ck) :
+    CallWait (w.st caller).phase callee ck := by
+  unfold performReply at hc
+  cases hto : k.replyTo with
+  | none =>
+    simp [hto] at hc
+    exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+  | some c =>
+    simp [hto] at hc
+    cases hph : (w.st c).phase with
+    | awaitReply dst ck0 =>
+      simp [hph] at hc
+      by_cases hd : dst = sender
+      · simp [hd] at hc
+        have hprev := not_call_runner (setActor w c (proceed (w.st c) ck0)) sender _ caller callee ck
+          (proceed_not_callwait _ _ _ _) hc
+        by_cases hcc : caller = c
+        · subst hcc
+          simp [setActor] at hprev
+          exact absurd hprev (proceed_not_callwait _ _ _ _)
+        · simpa [setActor, hcc] using hprev
+      · simp [hd] at hc
+        exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+    | idle =>
+      simp [hph] at hc
+      exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+    | run _ =>
+      simp [hph] at hc
+      exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+    | parked _ _ _ =>
+      simp [hph] at hc
+      exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+    | awaitEffect _ =>
+      simp [hph] at hc
+      exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+    | awaitPeer _ =>
+      simp [hph] at hc
+      exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+    | crashed =>
+      simp [hph] at hc
+      exact not_call_runner w sender _ caller callee ck (proceed_not_callwait _ _ _ _) hc
+
+theorem release_keeps_call (w : World) (id caller callee : InstId) (k : Cont) (ps : List Parked)
+    (hc : CallWait ((releaseParked w id ps).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  induction ps generalizing w with
+  | nil => simpa [releaseParked] using hc
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons] at hc
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip] at hc
+      exact ih w hc
+    · rw [if_neg hskip] at hc
+      have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id)) hc
+      by_cases hcaller : caller = p.sender
+      · rw [hcaller] at hmid
+        simp [setActor] at hmid
+        cases hph : (w.st p.sender).phase with
+        | parked _ _ ck =>
+          simp [resumeSender, hph] at hmid
+          exact absurd hmid (proceed_not_callwait (w.st p.sender) ck callee k)
+        | awaitReply _ _ =>
+          simp [resumeSender, hph] at hmid
+          rw [hcaller, hph]
+          exact hmid
+        | idle => simp [resumeSender, hph, CallWait] at hmid
+        | run _ => simp [resumeSender, hph, CallWait] at hmid
+        | awaitEffect _ => simp [resumeSender, hph, CallWait] at hmid
+        | awaitPeer _ => simp [resumeSender, hph, CallWait] at hmid
+        | crashed => simp [resumeSender, hph, CallWait] at hmid
+      · simpa [setActor, hcaller] using hmid
+
+theorem execRun_keeps_call (I : Impl) (hG : GraphOk I.desc) (w : World) (id : InstId) (krun : Cont)
+    (hS : SemInv I w) (hB : BulkFree I w) (hph : (w.st id).phase = .run krun)
+    (caller callee : InstId) (k : Cont) (t : Template) (ht : templateOf I.desc (tname callee) = some t)
+    (hterm : t.terminable = true)
+    (hc : CallWait ((execRun I w id (w.st id) krun).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  cases hrest : krun.rest with
+  | nil =>
+    simp [execRun, hrest] at hc
+    exact not_call_runner w id _ caller callee k (idle_not_call callee k) hc
+  | cons e tail =>
+    cases e with
+    | send dst label hint =>
+      simp [execRun, hrest] at hc
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp [hr] at hc
+        exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | some dstId =>
+        simp [hr] at hc
+        exact enqueue_plain_call w I.desc id dstId { label := label, sender := id, callFrom := none }
+          (afterHead krun) caller callee k hc
+    | trySend dst label hint =>
+      simp [execRun, hrest] at hc
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp [hr] at hc
+        exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | some dstId =>
+        simp [hr] at hc
+        split at hc
+        · exact enqueue_plain_call w I.desc id dstId
+            { label := label, sender := id, callFrom := none, reliable := false }
+            (afterHead krun) caller callee k hc
+        · exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+    | call dst label hint =>
+      simp [execRun, hrest] at hc
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp [hr] at hc
+        exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | some dstId =>
+        simp [hr] at hc
+        rcases enqueue_true_sender w I.desc id dstId { label := label, sender := id, callFrom := some id }
+            (afterHead krun) caller callee k hc with ⟨_, hcal, _⟩ | ⟨_, hprev⟩
+        · have hrun : (w.st id).phase =
+              .run ⟨.call dst label hint :: tail, krun.toState, krun.replyTo⟩ := by
+            cases krun with
+            | mk rest toState replyTo =>
+              have hrest' : rest = .call dst label hint :: tail := hrest
+              rw [hrest'] at hph
+              exact hph
+          exact False.elim <|
+            running_call_not_terminable I hG w hS hB id krun.toState krun.replyTo dst label hint tail
+              hrun t (by simpa [hcal, route_name w I.desc id dst dstId hr] using ht) hterm
+        · exact hprev
+    | reply =>
+      simp [execRun, hrest] at hc
+      exact reply_keeps_call w id caller callee k krun hc
+    | selfSchedule label =>
+      simp [execRun, hrest] at hc
+      split at hc
+      · exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      · split at hc
+        · exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+        · exact not_call_runner w id _ caller callee k (crash_not_call callee k) hc
+    | cell dst label value =>
+      simp only [execRun, hrest] at hc
+      cases hdirty : (w.cell dst label).dirty with
+      | false =>
+        rw [if_neg (show ¬ ((w.cell dst label).dirty = true) from by simp [hdirty])] at hc
+        rw [wakeReaders, wakes_phase (readersOf _ dst) I.desc _ dst label id caller] at hc
+        exact not_call_runner _ id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | true =>
+        simp [hdirty] at hc
+        exact not_call_runner _ id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+    | internal =>
+      simp [execRun, hrest] at hc
+      exact not_call_runner w id _ caller callee k (await_not_call (afterHead krun) callee k) hc
+    | peer =>
+      simp [execRun, hrest] at hc
+      exact not_call_runner w id _ caller callee k (peer_not_call (afterHead krun) callee k) hc
+    | terminate =>
+      simp only [execRun, hrest] at hc
+      cases htpl : templateOf I.desc (tname id) with
+      | none =>
+        simp [htpl] at hc
+        exact hc
+      | some ts =>
+        simp only [htpl] at hc
+        by_cases hkill : (ts.terminable && !hasParkedCall (w.st id).parked) = true
+        · rw [if_pos hkill] at hc
+          let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+            (tname id) (w.st id).parked
+          let dead : Actor :=
+            { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+          have hrel := release_keeps_call (setActor base id dead) id caller callee k (w.st id).parked
+            (by simpa [base, dead] using hc)
+          by_cases hcaller : caller = id
+          · rw [hcaller] at hrel
+            simp [setActor, dead, CallWait] at hrel
+          · rw [setActor_other base id caller dead hcaller] at hrel
+            have hpark := (refundParked_phase_life
+              (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box) (tname id)
+              (w.st id).parked caller).1
+            have hmsg := (refundMsgs_phase_life (readCells I.desc w id) (tname id) (w.st id).box
+              caller).1
+            have hcell := congrArg (·.phase) (cellsSt I.desc w id caller)
+            simp only [base] at hrel
+            rw [hpark, hmsg, hcell] at hrel
+            exact hrel
+        · rw [if_neg hkill] at hc
+          exact hc
+
+theorem exec_keeps_call (I : Impl) (hG : GraphOk I.desc) (w w' : World) (id : InstId)
+    (hS : SemInv I w) (hB : BulkFree I w) (caller callee : InstId) (k : Cont) (t : Template)
+    (ht : templateOf I.desc (tname callee) = some t) (hterm : t.terminable = true)
+    (hc : CallWait (w'.st caller).phase callee k) (h : apply I (.exec id) w = some w') :
+    CallWait (w.st caller).phase callee k := by
+  simp only [apply] at h
+  unfold execHead at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run krun =>
+      simp [hph] at h
+      cases h
+      exact execRun_keeps_call I hG w id krun hS hB hph caller callee k t ht hterm hc
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
+
+/-- No reachable call wait names a terminable callee. Creating one would run a
+`call` head, and a terminable caller is forbidden from doing that. -/
+theorem no_terminable_call_target (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (caller callee : InstId) (k : Cont)
+    (hph : CallWait (w.st caller).phase callee k) (t : Template)
+    (ht : templateOf I.desc (tname callee) = some t) : t.terminable = false := by
+  induction hR generalizing caller callee k with
+  | init => simp [init_phase, CallWait] at hph
+  | step w w' a prev happ ih =>
+    have hInv := inv2_reachable I hL hG N w prev
+    have hS : SemInv I w := hInv.1.1
+    have hM : MailInv w := hInv.1.2.1
+    have hB : BulkFree I w := hInv.2.2.2
+    cases a with
+    | stutter =>
+      cases stutter_unchanged I w w' happ
+      exact ih caller callee k hph ht
+    | ingress dst label =>
+      have hkeep := (ingress_phase I w w' dst label caller (by simpa [apply] using happ)).1
+      exact ih caller callee k (by simpa [hkeep] using hph) ht
+    | kill sub key =>
+      have hw := kill_apply_world I w w' sub key happ
+      rw [hw] at hph
+      exact ih caller callee k (killSubtree_call w I.desc sub key caller callee k hph) ht
+    | spawn template =>
+      exact ih caller callee k (spawn_keeps_call I w w' template caller callee k happ hph) ht
+    | finish id =>
+      exact ih caller callee k (finish_keeps_call I w w' id caller callee k happ hph) ht
+    | recvPrio id =>
+      exact ih caller callee k (recvPrio_keeps_call I w w' id caller callee k happ hph) ht
+    | recvBulk id =>
+      exact ih caller callee k (recvBulk_keeps_call I w w' id hM caller callee k happ hph) ht
+    | exec id =>
+      cases hterm : t.terminable with
+      | false => rfl
+      | true =>
+        have hnot := ih caller callee k
+          (exec_keeps_call I hG w w' id hS hB caller callee k t ht hterm hph happ) ht
+        rwa [hterm] at hnot
 
 end Deadlock

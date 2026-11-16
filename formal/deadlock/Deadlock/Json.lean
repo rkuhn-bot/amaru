@@ -222,9 +222,16 @@ private def decodeTemplate (v : JVal) : Except String Template := do
   let terminable ← decodeBoolField v "terminable" false
   let untimedPeer ← decodeBoolField v "untimedPeer" false
   let mustFit ← decodeBoolField v "mustFit" true
+  let subtree ← match jget v "subtree" with
+    | none => pure ""
+    | some x => asString x "subtree"
+  let timeoutKills ← decodeBoolField v "timeoutKills" false
+  let supervisor ← match jget v "supervisor" with
+    | none => pure ""
+    | some x => asString x "supervisor"
   return {
     name, multiplicity := mult, capacity, priorityCapacity, priorityBound, states, initial,
-    terminable, untimedPeer, mustFit
+    terminable, untimedPeer, mustFit, subtree, timeoutKills, supervisor
   }
 
 private def decodeEdge (v : JVal) : Except String Edge := do

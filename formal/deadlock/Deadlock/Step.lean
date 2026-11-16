@@ -21,8 +21,30 @@ theorem head_call (D : Description) (t st d l : String) (n : Nat) (es : List Eff
   simp [effectsOk, Bool.and_eq_true] at h
   exact h
 
-theorem route_tname (w : World) (D : Description) (dst : String) (hint : Nat) (id : InstId)
-    (h : route w D dst hint = some id) : tname id = dst := by
+/-- A missed route records a failure and does not change any actor. Invariants
+that read only `st` carry across. -/
+theorem sem_note (I : Impl) (w : World) (sender : InstId) (dst : String) (id : InstId) (a : Actor)
+    (hS : SemInv I (setActor w id a)) : SemInv I (setActor (noteStale w sender dst) id a) := by
+  apply sem_stable I (setActor w id a) (setActor (noteStale w sender dst) id a) hS
+  · intro g _ r _
+    simp [setActor, noteStale]
+  · intro g _ r _
+    simp [setActor, noteStale]
+  · intro i
+    simpa [setActor, noteStale] using hS.cont i
+  · intro i
+    simpa [setActor, noteStale] using hS.prog i
+  · intro i
+    simpa [setActor, noteStale] using hS.waited i
+
+theorem mail_note (w : World) (sender : InstId) (dst : String) (id : InstId) (a : Actor)
+    (hM : MailInv (setActor w id a)) : MailInv (setActor (noteStale w sender dst) id a) := by
+  apply mail_copy (setActor w id a) _ hM
+  intro i
+  simp [setActor, noteStale]
+
+theorem route_tname (w : World) (D : Description) (sender : InstId) (dst : String) (id : InstId)
+    (h : route w D sender dst = some id) : tname id = dst := by
   unfold route at h
   split at h
   · cases h
@@ -37,11 +59,15 @@ theorem route_tname (w : World) (D : Description) (dst : String) (hint : Nat) (i
       · simp [hl] at h
     | perPeer =>
       rw [hm] at h
-      by_cases hl : (w.st (InstId.peer dst hint)).life = .alive
-      · simp [hl] at h
-        cases h
-        rfl
-      · simp [hl] at h
+      cases hk : memberKey sender with
+      | none => simp [hk] at h
+      | some k =>
+        simp [hk] at h
+        by_cases hl : (w.st (InstId.peer dst k)).life = .alive
+        · simp [hl] at h
+          cases h
+          rfl
+        · simp [hl] at h
 
 /-- `send`, `call`, `internal`, and `peer` preserve `SemInv`. The running actor is `w.st id`. -/
 theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff) (es : List Eff)
@@ -73,12 +99,12 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
   · obtain ⟨d, l, n, he⟩ := he
     subst he
     have hhead := head_send _ _ _ d l n es hprog
-    cases hr : route w I.desc d n with
+    cases hr : route w I.desc id d with
     | none =>
       simp [execRun, hr]
       have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .send d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
-      exact sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+      exact sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2)
     | some dstId =>
       simp [execRun, hr]
       apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := none } false
@@ -86,16 +112,16 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       · simp [afterHead, hty]
       · simpa [afterHead] using htail
       · refine ⟨l, ?_⟩
-        simpa [route_tname w I.desc d n dstId hr] using hhead.1
+        simpa [route_tname w I.desc id d dstId hr] using hhead.1
   · obtain ⟨d, l, n, he⟩ := he
     subst he
     have hhead := head_call _ _ _ d l n es hprog
-    cases hr : route w I.desc d n with
+    cases hr : route w I.desc id d with
     | none =>
       simp [execRun, hr]
       have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .call d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
-      exact sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+      exact sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2)
     | some dstId =>
       simp [execRun, hr]
       apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := some id } true
@@ -103,7 +129,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       · simp [afterHead, hty]
       · simpa [afterHead] using htail
       · refine ⟨l, ?_⟩
-        simpa [route_tname w I.desc d n dstId hr] using hhead.1
+        simpa [route_tname w I.desc id d dstId hr] using hhead.1
 
 /-- The same heads, including a send or call that parks, preserve `MailInv`. -/
 theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff) (es : List Eff)
@@ -126,20 +152,20 @@ theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
     exact mail_set_free w id _ hM hfree (by simp [notParked]) rfl
   · obtain ⟨d, l, n, he⟩ := he
     subst he
-    cases hr : route w I.desc d n with
+    cases hr : route w I.desc id d with
     | none =>
       simp [execRun, hr]
-      exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
+      exact mail_note w id d id _ (mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _))
     | some dstId =>
       simp [execRun, hr]
       exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := none } false
         (afterHead { k with rest := .send d l n :: es }) hM hfree
   · obtain ⟨d, l, n, he⟩ := he
     subst he
-    cases hr : route w I.desc d n with
+    cases hr : route w I.desc id d with
     | none =>
       simp [execRun, hr]
-      exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
+      exact mail_note w id d id _ (mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _))
     | some dstId =>
       simp [execRun, hr]
       exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := some id } true
@@ -180,13 +206,13 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
   have htail : effectsOk I.desc (tname id) (w.st id).typestate es = true := head_rest _ _ _ _ es hprog
   have hfree : notParked (w.st id).phase := run_not_parked w id _ hphase
   simp [execRun]
-  cases hr : route w I.desc d n with
+  cases hr : route w I.desc id d with
   | none =>
     simp [hr]
     have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
       (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
-    refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2, ?_⟩
-    exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
+    refine ⟨sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2), ?_⟩
+    exact mail_note w id d id _ (mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _))
   | some dstId =>
     simp [hr]
     split
@@ -1670,7 +1696,7 @@ theorem exec_run_open (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : Open
       simp [execRun, hk]
       exact open_busy w id _ hO (busy_run id w k hph)
     | send d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp [execRun, hk, hr]
         exact open_busy w id _ hO (busy_run id w k hph)
@@ -1678,7 +1704,7 @@ theorem exec_run_open (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : Open
         simp [execRun, hk, hr]
         exact enqueue_open w I.desc id dst _ false _ hO (busy_run id w k hph)
     | call d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp [execRun, hk, hr]
         exact open_busy w id _ hO (busy_run id w k hph)
@@ -1686,7 +1712,7 @@ theorem exec_run_open (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : Open
         simp [execRun, hk, hr]
         exact enqueue_open w I.desc id dst _ true _ hO (busy_run id w k hph)
     | trySend d l n =>
-      cases hr : route w I.desc d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp [execRun, hk, hr]
         exact open_busy w id _ hO (busy_run id w k hph)
@@ -1839,6 +1865,7 @@ theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w'
   | ingress dst label =>
     exact ⟨ingress_sem I w w' dst label hS ha, ingress_mail I w w' dst label hM ha,
       open_ingress I w w' dst label hO ha⟩
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' ha
     exact ⟨hS, hM, hO⟩

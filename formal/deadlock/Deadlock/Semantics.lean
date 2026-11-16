@@ -22,6 +22,22 @@ def tname : InstId → String
   | .core n => n
   | .peer n _ => n
 
+/-- The per-peer index is the subtree key. A core has none. -/
+def memberKey : InstId → Option Nat
+  | .core _ => none
+  | .peer _ k => some k
+
+/-- `id` is a live-or-dead role of subtree `sub` at `key`. -/
+def isMember (D : Description) (id : InstId) (sub : String) (key : Nat) : Bool :=
+  match id with
+  | .core _ => false
+  | .peer role k => k == key && sub != "" && templateSubtree D role == sub
+
+def timeoutKillsB (D : Description) (name : String) : Bool :=
+  match templateOf D name with
+  | some t => t.timeoutKills
+  | none => false
+
 inductive Life where
   | absent
   | alive
@@ -109,6 +125,10 @@ structure World where
   st : InstId → Actor
   cell : String → String → Cell
   observed : InstId → String → Nat
+  /-- A route that named a per-peer role and did not resolve. Explicit, not a drop. -/
+  failures : List (InstId × String) := []
+  /-- The key of the last subtree kill, once the supervisor has been handed the tombstone. -/
+  tombstone : Option Nat := none
 
 def setActor (w : World) (id : InstId) (a : Actor) : World :=
   { w with st := fun i => if i = id then a else w.st i }
@@ -218,8 +238,9 @@ def aliveCount (w : World) (template : String) : Nat :=
   w.roster.foldl (fun n id =>
     if tname id == template && (w.st id).life == .alive then n + 1 else n) 0
 
-/-- A live target only. Absent and dead names are not routes. -/
-def route (w : World) (D : Description) (dst : String) (hint : Nat) : Option InstId :=
+/-- A live target only. A per-peer role is addressed by the sender's subtree key,
+not by a literal hint. A dead or never-spawned key does not resolve. -/
+def route (w : World) (D : Description) (sender : InstId) (dst : String) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
@@ -228,8 +249,30 @@ def route (w : World) (D : Description) (dst : String) (hint : Nat) : Option Ins
       let id := InstId.core dst
       if (w.st id).life == .alive then some id else none
     | .perPeer =>
-      let id := InstId.peer dst hint
-      if (w.st id).life == .alive then some id else none
+      match memberKey sender with
+      | none => none
+      | some k =>
+        let id := InstId.peer dst k
+        if (w.st id).life == .alive then some id else none
+
+/-- Record a route that did not resolve. The sender then leaves the effect. -/
+def noteStale (w : World) (sender : InstId) (dst : String) : World :=
+  { w with failures := w.failures ++ [(sender, dst)] }
+
+@[simp] theorem noteStale_st (w : World) (sender : InstId) (dst : String) (i : InstId) :
+    (noteStale w sender dst).st i = w.st i := rfl
+
+@[simp] theorem noteStale_roster (w : World) (sender : InstId) (dst : String) :
+    (noteStale w sender dst).roster = w.roster := rfl
+
+@[simp] theorem noteStale_cell (w : World) (sender : InstId) (dst : String) :
+    (noteStale w sender dst).cell = w.cell := rfl
+
+@[simp] theorem noteStale_nextIx (w : World) (sender : InstId) (dst : String) :
+    (noteStale w sender dst).nextIx = w.nextIx := rfl
+
+@[simp] theorem noteStale_observed (w : World) (sender : InstId) (dst : String) :
+    (noteStale w sender dst).observed = w.observed := rfl
 
 def proceed (a : Actor) (k : Cont) : Actor :=
   match k.rest with
@@ -413,14 +456,14 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
     let k' := afterHead k
     match eff with
     | .send dst label hint =>
-      match route w I.desc dst hint with
-      | none => setActor w id (proceed a k')
+      match route w I.desc id dst with
+      | none => setActor (noteStale w id dst) id (proceed a k')
       | some dstId =>
         let msg : Msg := { label := label, sender := id, callFrom := none }
         enqueueOrPark w I.desc id dstId msg false k'
     | .trySend dst label hint =>
-      match route w I.desc dst hint with
-      | none => setActor w id (proceed a k')
+      match route w I.desc id dst with
+      | none => setActor (noteStale w id dst) id (proceed a k')
       | some dstId =>
         let target := w.st dstId
         let cap := capBulk I.desc w.N dstId
@@ -432,10 +475,10 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
         else
           setActor w id (proceed a k')
     | .call dst label hint =>
-      match route w I.desc dst hint with
+      match route w I.desc id dst with
       | none =>
-        -- No live target: the call is excluded, not turned into a wait on a dummy name.
-        setActor w id (proceed a k')
+        -- No live target: the call is failed explicitly, not turned into a wait on a dummy name.
+        setActor (noteStale w id dst) id (proceed a k')
       | some dstId =>
         let msg : Msg := { label := label, sender := id, callFrom := some id }
         enqueueOrPark w I.desc id dstId msg true k'
@@ -781,6 +824,94 @@ def spawn (I : Impl) (w : World) (template : String) : Option World :=
       some (readCells I.desc w id)
     else none
 
+/-- Drop parked entries whose sender is `dead`. -/
+def forgetSender (w : World) (dead : InstId) : World :=
+  w.roster.foldl (fun w id =>
+    let a := w.st id
+    let ps := a.parked.filter fun p => p.sender != dead
+    if ps == a.parked then w else setActor w id { a with parked := ps }) w
+
+/-- A live actor waiting on `dead` is failed: a call returns to idle, a blocking
+send runs its continuation. -/
+def failWaiter (w : World) (dead : InstId) (i : InstId) : World :=
+  if (w.st i).life != .alive then w
+  else
+    match (w.st i).phase with
+    | .parked d _ k =>
+      if d == dead then setActor w i (proceed (w.st i) k) else w
+    | .awaitReply d _ =>
+      if d == dead then setActor w i { (w.st i) with phase := .idle } else w
+    | _ => w
+
+def failWaiters (w : World) (dead : InstId) : World :=
+  w.roster.foldl (fun w i => failWaiter w dead i) w
+
+/-- Kill one member: refund what its mailbox held, fail whoever was waiting on
+it, cancel its own outbound parks, and leave it dead with an empty mailbox. -/
+def killOne (w : World) (D : Description) (id : InstId) : World :=
+  let a0 := w.st id
+  let w := readCells D w id
+  let w := refundMsgs w (tname id) a0.box
+  let w := refundParked w (tname id) a0.parked
+  let w := failWaiters w id
+  let w := forgetSender w id
+  let cur := w.st id
+  setActor w id { cur with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+
+def killMembers (w : World) (D : Description) (sub : String) (key : Nat) : World :=
+  w.roster.foldl (fun w id =>
+    if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w
+
+/-- The supervisor named by any role of `sub`, if one is set. -/
+def subtreeSupervisor (D : Description) (sub : String) : String :=
+  (D.templates.findSome? fun t =>
+    if t.subtree == sub && t.supervisor != "" then some t.supervisor else none).getD ""
+
+/-- The supervisor's receipt for a subtree kill. It is the world field, not a bulk
+message: a bulk message would spend a credit the supervisor may not hold, and a
+credit that is not there cannot be a guaranteed delivery. A later respawn uses
+a fresh key, so this receipt does not name the new subtree. `subtreeSupervisor`
+is the role the receipt is for; an empty name still records the key. -/
+def plantTombstone (w : World) (D : Description) (sub : String) (key : Nat) : World :=
+  let _receiver := subtreeSupervisor D sub
+  { w with tombstone := some key }
+
+@[simp] theorem plant_st (w : World) (D : Description) (sub : String) (key : Nat) (i : InstId) :
+    (plantTombstone w D sub key).st i = w.st i := rfl
+
+@[simp] theorem plant_roster (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).roster = w.roster := rfl
+
+@[simp] theorem plant_nextIx (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).nextIx = w.nextIx := rfl
+
+@[simp] theorem plant_N (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).N = w.N := rfl
+
+@[simp] theorem plant_cell (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).cell = w.cell := rfl
+
+@[simp] theorem plant_observed (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).observed = w.observed := rfl
+
+@[simp] theorem plant_failures (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).failures = w.failures := rfl
+
+@[simp] theorem plant_tomb (w : World) (D : Description) (sub : String) (key : Nat) :
+    (plantTombstone w D sub key).tombstone = some key := rfl
+
+/-- Kill every live member of subtree `sub` at `key`, then hand the supervisor one tombstone. -/
+def killSubtree (w : World) (D : Description) (sub : String) (key : Nat) : World :=
+  plantTombstone (killMembers w D sub key) D sub key
+
+/-- A timeout is armed when some live `timeoutKills` member of this key is in `awaitPeer`. -/
+def killWait (w : World) (D : Description) (sub : String) (key : Nat) : Bool :=
+  w.roster.any fun id =>
+    isMember D id sub key && (w.st id).life == .alive && timeoutKillsB D (tname id) &&
+      match (w.st id).phase with
+      | .awaitPeer _ => true
+      | _ => false
+
 inductive Action where
   | recvBulk (s : InstId)
   | recvPrio (s : InstId)
@@ -788,16 +919,26 @@ inductive Action where
   | finish (s : InstId)
   | spawn (template : String)
   | ingress (dst : InstId) (label : String)
-  /-- Scheduler idle. Enabled only when no roster actor can `recv`, `exec`, or `finish`.
+  /-- Kill every live member of subtree `sub` at `key`. One step. -/
+  | kill (sub : String) (key : Nat)
+  /-- Scheduler idle. Enabled only when no roster actor can `recv`, `exec`, `finish`, or `kill`.
   Ingress may still be enabled; taking it is the environment's choice. -/
   | stutter
   deriving DecidableEq, Repr
 
+/-- A subtree timeout is armed. The runtime must take the kill. -/
+def killBusy (I : Impl) (w : World) : Bool :=
+  w.roster.any fun id =>
+    (w.st id).life == .alive && timeoutKillsB I.desc (tname id) &&
+      match (w.st id).phase with
+      | .awaitPeer _ => true
+      | _ => false
+
 /-- A roster actor has a step the runtime is obliged to consider. -/
 def runtimeBusy (I : Impl) (w : World) : Bool :=
-  w.roster.any fun id =>
+  w.roster.any (fun id =>
     (receiveBulk I w id).isSome || (receivePrio I w id).isSome ||
-    (execHead I w id).isSome || (finishWait I w id).isSome
+    (execHead I w id).isSome || (finishWait I w id).isSome) || killBusy I w
 
 def apply (I : Impl) (a : Action) (w : World) : Option World :=
   match a with
@@ -807,7 +948,30 @@ def apply (I : Impl) (a : Action) (w : World) : Option World :=
   | .finish s => finishWait I w s
   | .spawn template => spawn I w template
   | .ingress dst label => receiveIngress I w dst label
+  | .kill sub key =>
+    if killWait w I.desc sub key then some (killSubtree w I.desc sub key) else none
   | .stutter => if runtimeBusy I w then none else some w
+
+/-- Data branch of `awaitPeer`: the segment arrived and the continuation runs.
+This is `finish` when the wait is finishable. -/
+def peerData (I : Impl) (w : World) (id : InstId) : Option World :=
+  match (w.st id).phase with
+  | .awaitPeer k =>
+    if peerFinishable I.desc id then some (setActor w id (proceed (w.st id) k)) else none
+  | _ => none
+
+/-- Timeout branch of `awaitPeer`. A `timeoutKills` member kills the whole subtree. -/
+def peerTimeout (I : Impl) (w : World) (id : InstId) : Option World :=
+  match (w.st id).phase with
+  | .awaitPeer _ =>
+    match memberKey id with
+    | some k =>
+      let sub := templateSubtree I.desc (tname id)
+      if timeoutKillsB I.desc (tname id) && killWait w I.desc sub k then
+        some (killSubtree w I.desc sub k)
+      else none
+    | none => none
+  | _ => none
 
 theorem stutter_unchanged (I : Impl) (w w' : World) (h : apply I .stutter w = some w') : w' = w := by
   simp [apply, runtimeBusy] at h
@@ -930,5 +1094,969 @@ def terminateBeforeReply : List Eff → Bool
   | .terminate :: _ => true
   | .reply :: _ => false
   | _ :: es => terminateBeforeReply es
+
+theorem killWait_imp_busy (I : Impl) (w : World) (sub : String) (key : Nat)
+    (h : killWait w I.desc sub key = true) : killBusy I w = true := by
+  simp only [killWait, killBusy, List.any_eq_true] at h ⊢
+  obtain ⟨id, hid, hmem⟩ := h
+  refine ⟨id, hid, ?_⟩
+  have h1 := (Bool.and_eq_true _ _).mp hmem
+  have h2 := (Bool.and_eq_true _ _).mp h1.1
+  have h3 := (Bool.and_eq_true _ _).mp h2.1
+  simp only [Bool.and_eq_true]
+  exact ⟨⟨h3.2, h2.2⟩, h1.2⟩
+
+theorem failWaiter_roster (w : World) (dead i : InstId) : (failWaiter w dead i).roster = w.roster := by
+  unfold failWaiter
+  split
+  · rfl
+  · cases hph : (w.st i).phase <;> simp [hph, setActor] <;> split <;> simp [setActor]
+
+theorem failWaiter_nextIx (w : World) (dead i : InstId) : (failWaiter w dead i).nextIx = w.nextIx := by
+  unfold failWaiter
+  split
+  · rfl
+  · cases hph : (w.st i).phase <;> simp [hph, setActor] <;> split <;> simp [setActor]
+
+theorem failWaiter_N (w : World) (dead i : InstId) : (failWaiter w dead i).N = w.N := by
+  unfold failWaiter
+  split
+  · rfl
+  · cases hph : (w.st i).phase <;> simp [hph, setActor] <;> split <;> simp [setActor]
+
+theorem failWaiter_other (w : World) (dead i j : InstId) (h : j ≠ i) :
+    (failWaiter w dead i).st j = w.st j := by
+  unfold failWaiter
+  split
+  · rfl
+  · cases hph : (w.st i).phase <;> simp [hph, setActor, h] <;> split <;> simp [setActor, h]
+
+theorem failWaiter_life (w : World) (dead i j : InstId) :
+    ((failWaiter w dead i).st j).life = (w.st j).life := by
+  by_cases hj : j = i
+  · rw [hj]
+    unfold failWaiter
+    split
+    · rfl
+    · cases hph : (w.st i).phase with
+      | parked _ _ k =>
+        simp [hph]
+        split
+        · cases hk : k.rest <;> simp [setActor, proceed, hk]
+        · rfl
+      | awaitReply _ _ =>
+        simp [hph]
+        split <;> simp [setActor]
+      | idle => simp [hph]
+      | run _ => simp [hph]
+      | awaitEffect _ => simp [hph]
+      | awaitPeer _ => simp [hph]
+      | crashed => simp [hph]
+  · rw [failWaiter_other w dead i j hj]
+
+theorem failWaiters_roster (w : World) (dead : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).roster) = w.roster := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rw [ih, failWaiter_roster]
+
+theorem failWaiters_nextIx (w : World) (dead : InstId) (ids : List InstId) :
+    (ids.foldl (fun w i => failWaiter w dead i) w).nextIx = w.nextIx := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rw [ih, failWaiter_nextIx]
+
+theorem failWaiters_N (w : World) (dead : InstId) (ids : List InstId) :
+    (ids.foldl (fun w i => failWaiter w dead i) w).N = w.N := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rw [ih, failWaiter_N]
+
+theorem credit_roster (w : World) (dst : String) (s : InstId) :
+    (creditSender w dst s).roster = w.roster := rfl
+
+theorem credit_nextIx (w : World) (dst : String) (s : InstId) :
+    (creditSender w dst s).nextIx = w.nextIx := rfl
+
+theorem credit_N (w : World) (dst : String) (s : InstId) : (creditSender w dst s).N = w.N := rfl
+
+theorem refundMsgs_roster (w : World) (dst : String) (ms : List Msg) :
+    (refundMsgs w dst ms).roster = w.roster := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, credit_roster]
+
+theorem refundMsgs_nextIx (w : World) (dst : String) (ms : List Msg) :
+    (refundMsgs w dst ms).nextIx = w.nextIx := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, credit_nextIx]
+
+theorem refundMsgs_N (w : World) (dst : String) (ms : List Msg) :
+    (refundMsgs w dst ms).N = w.N := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, credit_N]
+
+theorem refundParked_roster (w : World) (dst : String) (ps : List Parked) :
+    (refundParked w dst ps).roster = w.roster := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    have hfold : refundParked w dst (p :: ps) =
+        refundParked (creditSender w dst p.msg.sender) dst ps := by
+      simp [refundParked, List.foldl_cons]
+    rw [hfold, ih, credit_roster]
+
+theorem refundParked_nextIx (w : World) (dst : String) (ps : List Parked) :
+    (refundParked w dst ps).nextIx = w.nextIx := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    have hfold : refundParked w dst (p :: ps) =
+        refundParked (creditSender w dst p.msg.sender) dst ps := by
+      simp [refundParked, List.foldl_cons]
+    rw [hfold, ih, credit_nextIx]
+
+theorem refundParked_N (w : World) (dst : String) (ps : List Parked) :
+    (refundParked w dst ps).N = w.N := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    have hfold : refundParked w dst (p :: ps) =
+        refundParked (creditSender w dst p.msg.sender) dst ps := by
+      simp [refundParked, List.foldl_cons]
+    rw [hfold, ih, credit_N]
+
+theorem cellsN (D : Description) (w : World) (id : InstId) : (readCells D w id).N = w.N := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons _ ls ih =>
+    simp only [List.foldl_cons, setCell, setObserved]
+    exact ih _
+
+theorem cellsRoster (D : Description) (w : World) (id : InstId) : (readCells D w id).roster = w.roster := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons _ ls ih =>
+    simp only [List.foldl_cons, setCell, setObserved]
+    exact ih _
+
+theorem readCells_nextIx (D : Description) (w : World) (id : InstId) (name : String) :
+    (readCells D w id).nextIx name = w.nextIx name := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons _ ls ih =>
+    simp only [List.foldl_cons, setCell, setObserved]
+    exact ih _
+
+theorem forgetFold_roster (w : World) (dead : InstId) (ids : List InstId) :
+    (ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w).roster = w.roster := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · exact ih w
+    · rw [← show (setActor w id
+        { (w.st id) with parked := (w.st id).parked.filter fun p => p.sender != dead }).roster = w.roster from rfl]
+      exact ih _
+
+theorem forget_roster (w : World) (dead : InstId) : (forgetSender w dead).roster = w.roster := by
+  simpa [forgetSender] using forgetFold_roster w dead w.roster
+
+theorem forgetFold_nextIx (w : World) (dead : InstId) (ids : List InstId) (name : String) :
+    (ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w).nextIx name =
+      w.nextIx name := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · exact ih w
+    · rw [← show (setActor w id
+        { (w.st id) with parked := (w.st id).parked.filter fun p => p.sender != dead }).nextIx name =
+        w.nextIx name from rfl]
+      exact ih _
+
+theorem forget_nextIx (w : World) (dead : InstId) (name : String) :
+    (forgetSender w dead).nextIx name = w.nextIx name := by
+  simpa [forgetSender] using forgetFold_nextIx w dead w.roster name
+
+theorem forgetFold_N (w : World) (dead : InstId) (ids : List InstId) :
+    (ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w).N = w.N := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · exact ih w
+    · rw [← show (setActor w id
+        { (w.st id) with parked := (w.st id).parked.filter fun p => p.sender != dead }).N = w.N from rfl]
+      exact ih _
+
+theorem forget_N (w : World) (dead : InstId) : (forgetSender w dead).N = w.N := by
+  simpa [forgetSender] using forgetFold_N w dead w.roster
+
+theorem killOne_roster (w : World) (D : Description) (id : InstId) :
+    (killOne w D id).roster = w.roster := by
+  unfold killOne
+  dsimp only [setActor]
+  rw [forget_roster]
+  simp only [failWaiters]
+  rw [failWaiters_roster, refundParked_roster, refundMsgs_roster, cellsRoster]
+
+theorem killOne_nextIx (w : World) (D : Description) (id : InstId) (name : String) :
+    (killOne w D id).nextIx name = w.nextIx name := by
+  unfold killOne
+  dsimp only [setActor]
+  rw [forget_nextIx]
+  simp only [failWaiters]
+  rw [failWaiters_nextIx, refundParked_nextIx, refundMsgs_nextIx, readCells_nextIx]
+
+theorem killOne_N (w : World) (D : Description) (id : InstId) : (killOne w D id).N = w.N := by
+  unfold killOne
+  dsimp only [setActor]
+  rw [forget_N]
+  simp only [failWaiters]
+  rw [failWaiters_N, refundParked_N, refundMsgs_N, cellsN]
+
+theorem killFold_roster (w : World) (D : Description) (sub : String) (key : Nat) (ids : List InstId) :
+    (ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).roster =
+      w.roster := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · have hfold := ih (killOne w D id)
+      simpa [killOne_roster] using hfold
+    · exact ih w
+
+theorem killMembers_roster (w : World) (D : Description) (sub : String) (key : Nat) :
+    (killMembers w D sub key).roster = w.roster := by
+  simpa [killMembers] using killFold_roster w D sub key w.roster
+
+theorem killFold_nextIx (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (name : String) :
+    (ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).nextIx name =
+      w.nextIx name := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · have hfold := ih (killOne w D id)
+      simpa [killOne_nextIx] using hfold
+    · exact ih w
+
+theorem killMembers_nextIx (w : World) (D : Description) (sub : String) (key : Nat) (name : String) :
+    (killMembers w D sub key).nextIx name = w.nextIx name := by
+  simpa [killMembers] using killFold_nextIx w D sub key w.roster name
+
+theorem killFold_N (w : World) (D : Description) (sub : String) (key : Nat) (ids : List InstId) :
+    (ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).N = w.N := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · have hfold := ih (killOne w D id)
+      simpa [killOne_N] using hfold
+    · exact ih w
+
+theorem killMembers_N (w : World) (D : Description) (sub : String) (key : Nat) :
+    (killMembers w D sub key).N = w.N := by
+  simpa [killMembers] using killFold_N w D sub key w.roster
+
+theorem killSubtree_roster (w : World) (D : Description) (sub : String) (key : Nat) :
+    (killSubtree w D sub key).roster = w.roster := by
+  simp [killSubtree, killMembers_roster]
+
+theorem killSubtree_nextIx (w : World) (D : Description) (sub : String) (key : Nat) (name : String) :
+    (killSubtree w D sub key).nextIx name = w.nextIx name := by
+  simp [killSubtree, killMembers_nextIx]
+
+theorem killSubtree_N (w : World) (D : Description) (sub : String) (key : Nat) :
+    (killSubtree w D sub key).N = w.N := by
+  simp [killSubtree, killMembers_N]
+
+theorem kill_apply_world (I : Impl) (w w' : World) (sub : String) (key : Nat)
+    (h : apply I (.kill sub key) w = some w') : w' = killSubtree w I.desc sub key := by
+  simp only [apply] at h
+  split at h
+  · cases h
+    rfl
+  · simp at h
+
+theorem cellsSt (D : Description) (w : World) (id i : InstId) : (readCells D w id).st i = w.st i := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons l ls ih =>
+    simp only [List.foldl_cons]
+    let mid := setObserved
+      (setCell w (tname id) l { (w.cell (tname id) l) with dirty := false }) id l (w.cell (tname id) l).value
+    have hmid : mid.st i = w.st i := by simp [mid, setCell, setObserved]
+    exact (ih mid).trans hmid
+
+theorem credit_phase_life (w : World) (name : String) (sender i : InstId) :
+    ((creditSender w name sender).st i).phase = (w.st i).phase ∧
+      ((creditSender w name sender).st i).life = (w.st i).life := by
+  by_cases h : i = sender
+  · subst h
+    simp [creditSender, setActor, bumpToken]
+  · simp [creditSender, setActor, h]
+
+theorem refundMsgs_phase_life (w : World) (name : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w name ms).st i).phase = (w.st i).phase ∧
+      ((refundMsgs w name ms).st i).life = (w.st i).life := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    have hcred := credit_phase_life w name m.sender i
+    have hih := ih (creditSender w name m.sender)
+    exact ⟨hih.1.trans hcred.1, hih.2.trans hcred.2⟩
+
+theorem refundParked_phase_life (w : World) (name : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w name ps).st i).phase = (w.st i).phase ∧
+      ((refundParked w name ps).st i).life = (w.st i).life := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    have hcred := credit_phase_life w name p.msg.sender i
+    have hih := ih (creditSender w name p.msg.sender)
+    exact ⟨hih.1.trans hcred.1, hih.2.trans hcred.2⟩
+
+theorem failFold_off (w : World) (dead s : InstId) (ids : List InstId) (hs : s ∉ ids) :
+    (ids.foldl (fun w i => failWaiter w dead i) w).st s = w.st s := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    have hne : s ≠ i := fun h => hs (by simpa [h] using List.Mem.head _)
+    have hs' : s ∉ ids := fun h => hs (List.Mem.tail _ h)
+    simp only [List.foldl_cons]
+    rw [ih _ hs', failWaiter_other w dead i s hne]
+
+theorem forgetFold_off (w : World) (dead s : InstId) (ids : List InstId) (hs : s ∉ ids) :
+    (ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s = w.st s := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    have hne : s ≠ id := fun h => hs (by simpa [h] using List.Mem.head _)
+    have hs' : s ∉ ids := fun h => hs (List.Mem.tail _ h)
+    simp only [List.foldl_cons]
+    split
+    · exact ih _ hs'
+    · have hih := ih (setActor w id
+        { (w.st id) with parked := (w.st id).parked.filter fun p => p.sender != dead }) hs'
+      simpa [setActor, hne] using hih
+
+theorem forget_off (w : World) (dead s : InstId) (hs : s ∉ w.roster) :
+    (forgetSender w dead).st s = w.st s := by
+  simpa [forgetSender] using forgetFold_off w dead s w.roster hs
+
+/-- An off-roster id is not the member being removed, so a kill leaves its phase and life. -/
+theorem killOne_off (w : World) (D : Description) (id s : InstId) (hs : s ∉ w.roster) (hne : s ≠ id) :
+    ((killOne w D id).st s).phase = (w.st s).phase ∧ ((killOne w D id).st s).life = (w.st s).life := by
+  let w1 := readCells D w id
+  have hst1 : w1.st s = w.st s := cellsSt D w id s
+  have hrs1 : w1.roster = w.roster := cellsRoster D w id
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have hst2 := refundMsgs_phase_life w1 (tname id) (w.st id).box s
+  have hrs2 : w2.roster = w1.roster := refundMsgs_roster w1 (tname id) (w.st id).box
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have hst3 := refundParked_phase_life w2 (tname id) (w.st id).parked s
+  have hrs3 : w3.roster = w2.roster := refundParked_roster w2 (tname id) (w.st id).parked
+  have hs3 : s ∉ w3.roster := by rw [hrs3, hrs2, hrs1]; exact hs
+  let w4 := failWaiters w3 id
+  have hst4 : w4.st s = w3.st s := by
+    simpa [w4, failWaiters] using failFold_off w3 id s w3.roster hs3
+  have hrs4 : w4.roster = w3.roster := by
+    simpa [w4, failWaiters] using failWaiters_roster w3 id w3.roster
+  let w5 := forgetSender w4 id
+  have hst5 : w5.st s = w4.st s := forget_off w4 id s (by rw [hrs4]; exact hs3)
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5]
+  rw [hbody, setActor_other _ _ _ _ hne, hst5, hst4]
+  exact ⟨hst3.1.trans (hst2.1.trans (congrArg (·.phase) hst1)),
+    hst3.2.trans (hst2.2.trans (congrArg (·.life) hst1))⟩
+
+theorem killFold_off (w : World) (D : Description) (sub : String) (key : Nat) (ids : List InstId)
+    (s : InstId) (hs : s ∉ w.roster) (hdead : (w.st s).life ≠ .alive) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+      (w.st s).phase ∧
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life =
+      (w.st s).life := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D id sub key && ((w.st id).life == .alive)) = true
+    · by_cases hsid : s = id
+      · subst hsid
+        have hlive : ((w.st s).life == .alive) = true := ((Bool.and_eq_true _ _).mp hcond).2
+        exact absurd (by simpa [beq_iff_eq] using hlive) hdead
+      · rw [if_pos hcond]
+        have hpre := killOne_off w D id s hs hsid
+        have hs' : s ∉ (killOne w D id).roster := by rw [killOne_roster]; exact hs
+        have hdead' : ((killOne w D id).st s).life ≠ .alive := by rw [hpre.2]; exact hdead
+        have hih := ih (killOne w D id) hs' hdead'
+        exact ⟨hih.1.trans hpre.1, hih.2.trans hpre.2⟩
+    · rw [if_neg hcond]
+      exact ih w hs hdead
+
+theorem killMembers_off (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hs : s ∉ w.roster) (hdead : (w.st s).life ≠ .alive) :
+    ((killMembers w D sub key).st s).phase = (w.st s).phase ∧
+      ((killMembers w D sub key).st s).life = (w.st s).life := by
+  simpa [killMembers] using killFold_off w D sub key w.roster s hs hdead
+
+theorem killSubtree_off (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hs : s ∉ w.roster) (hdead : (w.st s).life ≠ .alive) :
+    ((killSubtree w D sub key).st s).phase = (w.st s).phase ∧
+      ((killSubtree w D sub key).st s).life = (w.st s).life := by
+  have hmem := killMembers_off w D sub key s hs hdead
+  simp [killSubtree, plant_st, hmem.1, hmem.2]
+
+/-- A phase a kill does not rewrite, except by killing the actor who is in it. -/
+def holdsPhase (ph : Phase) : Bool :=
+  match ph with
+  | .parked _ _ _ => false
+  | .awaitReply _ _ => false
+  | _ => true
+
+theorem bump_rest (a : Actor) (dst : String) (delta : Int) :
+    (bumpToken a dst delta).phase = a.phase ∧ (bumpToken a dst delta).life = a.life ∧
+      (bumpToken a dst delta).box = a.box ∧ (bumpToken a dst delta).prio = a.prio ∧
+      (bumpToken a dst delta).parked = a.parked ∧
+      (bumpToken a dst delta).typestate = a.typestate := by
+  simp [bumpToken]
+
+theorem credit_rest (w : World) (name : String) (sender i : InstId) :
+    ((creditSender w name sender).st i).phase = (w.st i).phase ∧
+      ((creditSender w name sender).st i).life = (w.st i).life ∧
+      ((creditSender w name sender).st i).box = (w.st i).box ∧
+      ((creditSender w name sender).st i).prio = (w.st i).prio ∧
+      ((creditSender w name sender).st i).parked = (w.st i).parked ∧
+      ((creditSender w name sender).st i).typestate = (w.st i).typestate := by
+  unfold creditSender
+  by_cases h : i = sender
+  · simp [setActor, h, bump_rest]
+  · simp [setActor, h]
+
+theorem refundMsgs_rest (w : World) (name : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w name ms).st i).phase = (w.st i).phase ∧
+      ((refundMsgs w name ms).st i).life = (w.st i).life ∧
+      ((refundMsgs w name ms).st i).box = (w.st i).box ∧
+      ((refundMsgs w name ms).st i).prio = (w.st i).prio ∧
+      ((refundMsgs w name ms).st i).parked = (w.st i).parked ∧
+      ((refundMsgs w name ms).st i).typestate = (w.st i).typestate := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    have h1 := credit_rest w name m.sender i
+    have h2 := ih (creditSender w name m.sender)
+    exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
+      h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.1.trans h1.2.2.2.2.1,
+      h2.2.2.2.2.2.trans h1.2.2.2.2.2⟩
+
+theorem refundParked_rest (w : World) (name : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w name ps).st i).phase = (w.st i).phase ∧
+      ((refundParked w name ps).st i).life = (w.st i).life ∧
+      ((refundParked w name ps).st i).box = (w.st i).box ∧
+      ((refundParked w name ps).st i).prio = (w.st i).prio ∧
+      ((refundParked w name ps).st i).parked = (w.st i).parked ∧
+      ((refundParked w name ps).st i).typestate = (w.st i).typestate := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    have h1 := credit_rest w name p.msg.sender i
+    have h2 := ih (creditSender w name p.msg.sender)
+    exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
+      h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.1.trans h1.2.2.2.2.1,
+      h2.2.2.2.2.2.trans h1.2.2.2.2.2⟩
+
+theorem proceed_keeps_box (a : Actor) (k : Cont) : (proceed a k).box = a.box := by
+  unfold proceed
+  split <;> rfl
+
+theorem proceed_keeps_prio (a : Actor) (k : Cont) : (proceed a k).prio = a.prio := by
+  unfold proceed
+  split <;> rfl
+
+theorem proceed_keeps_parked (a : Actor) (k : Cont) : (proceed a k).parked = a.parked := by
+  unfold proceed
+  split <;> rfl
+
+theorem failWaiter_mail (w : World) (dead i j : InstId) :
+    ((failWaiter w dead i).st j).box = (w.st j).box ∧
+      ((failWaiter w dead i).st j).prio = (w.st j).prio ∧
+      ((failWaiter w dead i).st j).parked = (w.st j).parked := by
+  unfold failWaiter
+  split
+  · exact ⟨rfl, rfl, rfl⟩
+  · cases hph : (w.st i).phase with
+    | parked d b k =>
+      simp [hph]
+      split
+      · by_cases hj : j = i
+        · simp [setActor, hj, proceed_keeps_box, proceed_keeps_prio, proceed_keeps_parked]
+        · simp [setActor, hj]
+      · exact ⟨rfl, rfl, rfl⟩
+    | awaitReply d k =>
+      simp [hph]
+      split
+      · by_cases hj : j = i <;> simp [setActor, hj]
+      · exact ⟨rfl, rfl, rfl⟩
+    | idle => simp [hph]
+    | run _ => simp [hph]
+    | awaitEffect _ => simp [hph]
+    | awaitPeer _ => simp [hph]
+    | crashed => simp [hph]
+
+theorem failWaiter_holds (w : World) (dead i j : InstId) (hh : holdsPhase (w.st j).phase = true) :
+    ((failWaiter w dead i).st j).phase = (w.st j).phase ∧
+      ((failWaiter w dead i).st j).typestate = (w.st j).typestate := by
+  by_cases hj : j = i
+  · rw [hj] at hh ⊢
+    unfold failWaiter
+    split
+    · exact ⟨rfl, rfl⟩
+    · cases hph : (w.st i).phase with
+      | parked _ _ _ => simp [holdsPhase, hph] at hh
+      | awaitReply _ _ => simp [holdsPhase, hph] at hh
+      | idle => simp [hph]
+      | run _ => simp [hph]
+      | awaitEffect _ => simp [hph]
+      | awaitPeer _ => simp [hph]
+      | crashed => simp [hph]
+  · have h := failWaiter_other w dead i j hj
+    exact ⟨congrArg (·.phase) h, congrArg (·.typestate) h⟩
+
+theorem failFold_mail (w : World) (dead s : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).box = (w.st s).box ∧
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st s).prio = (w.st s).prio ∧
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st s).parked = (w.st s).parked := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have h1 := failWaiter_mail w dead i s
+    have h2 := ih (failWaiter w dead i)
+    exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.trans h1.2.2⟩
+
+theorem failFold_holds (w : World) (dead s : InstId) (ids : List InstId)
+    (hh : holdsPhase (w.st s).phase = true) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = (w.st s).phase ∧
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st s).typestate = (w.st s).typestate := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have h1 := failWaiter_holds w dead i s hh
+    have hh' : holdsPhase ((failWaiter w dead i).st s).phase = true := by
+      rw [h1.1, hh]
+    have h2 := ih (failWaiter w dead i) hh'
+    exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+
+theorem forgetFold_mail (w : World) (dead s : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).box =
+      (w.st s).box ∧
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).prio =
+      (w.st s).prio ∧
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).phase =
+      (w.st s).phase ∧
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).life =
+      (w.st s).life ∧
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).typestate =
+      (w.st s).typestate := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · exact ih _
+    · have hset : ((setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }).st s).box = (w.st s).box ∧
+        ((setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }).st s).prio = (w.st s).prio ∧
+        ((setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }).st s).phase = (w.st s).phase ∧
+        ((setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }).st s).life = (w.st s).life ∧
+        ((setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }).st s).typestate =
+          (w.st s).typestate := by
+        by_cases hs : s = id
+        · simp [setActor, hs]
+        · simp [setActor, hs]
+      have hih := ih (setActor w id { (w.st id) with
+        parked := (w.st id).parked.filter fun p => p.sender != dead })
+      exact ⟨hih.1.trans hset.1, hih.2.1.trans hset.2.1, hih.2.2.1.trans hset.2.2.1,
+        hih.2.2.2.1.trans hset.2.2.2.1, hih.2.2.2.2.trans hset.2.2.2.2⟩
+
+theorem filter_sublist {α : Type} (p : α → Bool) : ∀ xs : List α, (List.filter p xs).Sublist xs
+  | [] => by simp
+  | x :: xs => by
+    simp only [List.filter]
+    split
+    · exact List.Sublist.cons_cons x (filter_sublist p xs)
+    · exact List.Sublist.cons x (filter_sublist p xs)
+
+theorem forgetFold_parked_sub (w : World) (dead s : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).parked.Sublist
+      (w.st s).parked := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · exact ih _
+    · have hset : ((setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }).st s).parked.Sublist
+          (w.st s).parked := by
+        by_cases hs : s = id
+        · simpa [setActor, hs] using filter_sublist (fun p => p.sender != dead) (w.st id).parked
+        · simp [setActor, hs]
+      exact List.Sublist.trans (ih _) hset
+
+/-- Killing `id` is the refund, the failure of whoever waited on it, and a dead idle actor. -/
+theorem killOne_body (w : World) (D : Description) (id : InstId) :
+    killOne w D id =
+      let w1 := readCells D w id
+      let w2 := refundMsgs w1 (tname id) (w.st id).box
+      let w3 := refundParked w2 (tname id) (w.st id).parked
+      let w4 := failWaiters w3 id
+      let w5 := forgetSender w4 id
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := rfl
+
+theorem killOne_self (w : World) (D : Description) (id : InstId) :
+    ((killOne w D id).st id).life = .dead ∧ ((killOne w D id).st id).phase = .idle ∧
+      ((killOne w D id).st id).box = [] ∧ ((killOne w D id).st id).prio = [] ∧
+      ((killOne w D id).st id).parked = [] := by
+  rw [killOne_body]
+  simp [setActor]
+
+theorem failFold_life (w : World) (dead s : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st s).life = (w.st s).life := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    exact (ih (failWaiter w dead i)).trans (failWaiter_life w dead i s)
+
+theorem killOne_other_rest (w : World) (D : Description) (id i : InstId) (hne : i ≠ id) :
+    ((killOne w D id).st i).box = (w.st i).box ∧
+      ((killOne w D id).st i).prio = (w.st i).prio ∧
+      ((killOne w D id).st i).life = (w.st i).life := by
+  let w1 := readCells D w id
+  have hst1 : w1.st i = w.st i := cellsSt D w id i
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have h2 := refundMsgs_rest w1 (tname id) (w.st id).box i
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have h3 := refundParked_rest w2 (tname id) (w.st id).parked i
+  let w4 := failWaiters w3 id
+  have hmail4 := failFold_mail w3 id i w3.roster
+  have hlife4 := failFold_life w3 id i w3.roster
+  let w5 := forgetSender w4 id
+  have h5 := forgetFold_mail w4 id i w4.roster
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody, setActor_other _ _ _ _ hne]
+  refine ⟨?_, ?_, ?_⟩
+  · exact h5.1.trans (hmail4.1.trans (h3.2.2.1.trans (h2.2.2.1.trans (congrArg (·.box) hst1))))
+  · exact h5.2.1.trans (hmail4.2.1.trans (h3.2.2.2.1.trans (h2.2.2.2.1.trans (congrArg (·.prio) hst1))))
+  · exact h5.2.2.2.1.trans (hlife4.trans (h3.2.1.trans (h2.2.1.trans (congrArg (·.life) hst1))))
+
+theorem killOne_holds (w : World) (D : Description) (id i : InstId) (hne : i ≠ id)
+    (hh : holdsPhase (w.st i).phase = true) :
+    ((killOne w D id).st i).phase = (w.st i).phase ∧
+      ((killOne w D id).st i).typestate = (w.st i).typestate := by
+  let w1 := readCells D w id
+  have hst1 : w1.st i = w.st i := cellsSt D w id i
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have h2 := refundMsgs_rest w1 (tname id) (w.st id).box i
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have h3 := refundParked_rest w2 (tname id) (w.st id).parked i
+  have hh3 : holdsPhase (w3.st i).phase = true := by
+    rw [h3.1, h2.1, congrArg (·.phase) hst1, hh]
+  let w4 := failWaiters w3 id
+  have h4 := failFold_holds w3 id i w3.roster hh3
+  let w5 := forgetSender w4 id
+  have h5 := forgetFold_mail w4 id i w4.roster
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody, setActor_other _ _ _ _ hne]
+  exact ⟨h5.2.2.1.trans (h4.1.trans (h3.1.trans (h2.1.trans (congrArg (·.phase) hst1)))),
+    h5.2.2.2.2.trans (h4.2.trans (h3.2.2.2.2.2.trans (h2.2.2.2.2.2.trans
+      (congrArg (·.typestate) hst1))))⟩
+
+theorem nil_sublist {α : Type} : ∀ xs : List α, ([] : List α).Sublist xs
+  | [] => List.Sublist.refl []
+  | x :: xs => List.Sublist.cons x (nil_sublist xs)
+
+theorem killOne_parked_sub (w : World) (D : Description) (id i : InstId) :
+    ((killOne w D id).st i).parked.Sublist (w.st i).parked := by
+  by_cases hne : i = id
+  · rw [hne, (killOne_self w D id).2.2.2.2]
+    exact nil_sublist _
+  · let w1 := readCells D w id
+    have hst1 : w1.st i = w.st i := cellsSt D w id i
+    let w2 := refundMsgs w1 (tname id) (w.st id).box
+    have h2 := refundMsgs_rest w1 (tname id) (w.st id).box i
+    let w3 := refundParked w2 (tname id) (w.st id).parked
+    have h3 := refundParked_rest w2 (tname id) (w.st id).parked i
+    let w4 := failWaiters w3 id
+    have h4 := failFold_mail w3 id i w3.roster
+    let w5 := forgetSender w4 id
+    have h5 := forgetFold_parked_sub w4 id i w4.roster
+    have hbody : killOne w D id =
+        setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+      simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+    rw [hbody, setActor_other _ _ _ _ hne]
+    have hpark : (w4.st i).parked = (w.st i).parked := by
+      have h4p : (w4.st i).parked = (w3.st i).parked := by
+        simpa [w4, failWaiters] using h4.2.2
+      exact h4p.trans (h3.2.2.2.2.1.trans (h2.2.2.2.2.1.trans (congrArg (·.parked) hst1)))
+    exact List.Sublist.trans h5 (by rw [hpark]; exact List.Sublist.refl _)
+
+/-- An actor that is already not alive stays that way: a kill never reuses its id. -/
+theorem killFold_stays_dead (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId) (hdead : (w.st s).life ≠ .alive) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life ≠
+      .alive := by
+  induction ids generalizing w with
+  | nil => simpa using hdead
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · next hcond =>
+      by_cases hs : s = id
+      · have hlive : (w.st id).life = .alive := by
+          simp only [Bool.and_eq_true, beq_iff_eq] at hcond
+          exact hcond.2
+        rw [← hs] at hlive
+        exact absurd hlive hdead
+      · exact ih (killOne w D id) ((killOne_other_rest w D id s hs).2.2.symm ▸ hdead)
+    · exact ih w hdead
+
+theorem killMembers_stays_dead (w : World) (D : Description) (sub : String) (key : Nat)
+    (s : InstId) (hdead : (w.st s).life ≠ .alive) :
+    ((killMembers w D sub key).st s).life ≠ .alive := by
+  simpa [killMembers] using killFold_stays_dead w D sub key w.roster s hdead
+
+theorem killSubtree_stays_dead (w : World) (D : Description) (sub : String) (key : Nat)
+    (s : InstId) (hdead : (w.st s).life ≠ .alive) :
+    ((killSubtree w D sub key).st s).life ≠ .alive := by
+  simpa [killSubtree, plant_st] using killMembers_stays_dead w D sub key s hdead
+
+/-- If `s` is still alive after the fold, no step killed it, so its bulk mail is unchanged
+and a phase the kill does not rewrite is still that phase. -/
+theorem killFold_if_alive (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId)
+    (hlive : ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life =
+        .alive) :
+    (w.st s).life = .alive ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).box =
+        (w.st s).box ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).prio =
+        (w.st s).prio ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).parked.Sublist
+        (w.st s).parked ∧
+      (holdsPhase (w.st s).phase = true →
+        ((ids.foldl (fun w id =>
+          if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+          (w.st s).phase ∧
+        ((ids.foldl (fun w id =>
+          if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).typestate =
+          (w.st s).typestate) := by
+  induction ids generalizing w with
+  | nil =>
+    dsimp [List.foldl] at hlive ⊢
+    refine ⟨hlive, rfl, rfl, List.Sublist.refl _, ?_⟩
+    intro _
+    exact ⟨rfl, rfl⟩
+  | cons id ids ih =>
+    simp only [List.foldl_cons] at hlive ⊢
+    split at hlive
+    · next hcond =>
+      simp only [hcond] at hlive ⊢
+      have hih := ih (killOne w D id) hlive
+      by_cases hs : s = id
+      · rw [hs] at hih
+        simp [(killOne_self w D id).1] at hih
+      · have hrest := killOne_other_rest w D id s hs
+        have hpark := killOne_parked_sub w D id s
+        refine ⟨hrest.2.2.symm.trans hih.1, hih.2.1.trans hrest.1, hih.2.2.1.trans hrest.2.1,
+          List.Sublist.trans hih.2.2.2.1 hpark, ?_⟩
+        intro hh
+        have hhold := killOne_holds w D id s hs hh
+        have hh' : holdsPhase ((killOne w D id).st s).phase = true := by rw [hhold.1, hh]
+        have hph := hih.2.2.2.2 hh'
+        exact ⟨hph.1.trans hhold.1, hph.2.trans hhold.2⟩
+    · next hcond =>
+      simp only [hcond] at hlive ⊢
+      exact ih w hlive
+
+theorem killMembers_if_alive (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hlive : ((killMembers w D sub key).st s).life = .alive) :
+    (w.st s).life = .alive ∧ ((killMembers w D sub key).st s).box = (w.st s).box ∧
+      ((killMembers w D sub key).st s).prio = (w.st s).prio ∧
+      ((killMembers w D sub key).st s).parked.Sublist (w.st s).parked ∧
+      (holdsPhase (w.st s).phase = true →
+        ((killMembers w D sub key).st s).phase = (w.st s).phase ∧
+          ((killMembers w D sub key).st s).typestate = (w.st s).typestate) := by
+  simpa [killMembers] using killFold_if_alive w D sub key w.roster s hlive
+
+theorem killSubtree_if_alive (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hlive : ((killSubtree w D sub key).st s).life = .alive) :
+    (w.st s).life = .alive ∧ ((killSubtree w D sub key).st s).box = (w.st s).box ∧
+      ((killSubtree w D sub key).st s).prio = (w.st s).prio ∧
+      ((killSubtree w D sub key).st s).parked.Sublist (w.st s).parked ∧
+      (holdsPhase (w.st s).phase = true →
+        ((killSubtree w D sub key).st s).phase = (w.st s).phase ∧
+          ((killSubtree w D sub key).st s).typestate = (w.st s).typestate) := by
+  have hlive' : ((killMembers w D sub key).st s).life = .alive := by
+    simpa [killSubtree, plant_st] using hlive
+  have hmem := killMembers_if_alive w D sub key s hlive'
+  simpa [killSubtree, plant_st] using hmem
+
+/-- An actor that is already not alive is not killed, so its mail and a stable phase stay. -/
+theorem killFold_if_dead (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId) (hdead : (w.st s).life ≠ .alive) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).life =
+        (w.st s).life ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).box =
+        (w.st s).box ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).prio =
+        (w.st s).prio ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).parked.Sublist
+        (w.st s).parked ∧
+      (holdsPhase (w.st s).phase = true →
+        ((ids.foldl (fun w id =>
+          if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+          (w.st s).phase ∧
+        ((ids.foldl (fun w id =>
+          if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).typestate =
+          (w.st s).typestate) := by
+  induction ids generalizing w with
+  | nil =>
+    dsimp [List.foldl]
+    exact ⟨rfl, rfl, rfl, List.Sublist.refl _, fun _ => ⟨rfl, rfl⟩⟩
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · next hcond =>
+      by_cases hs : s = id
+      · have hlive : (w.st id).life = .alive := by
+          simp only [Bool.and_eq_true, beq_iff_eq] at hcond
+          exact hcond.2
+        rw [← hs] at hlive
+        exact absurd hlive hdead
+      · have hrest := killOne_other_rest w D id s hs
+        have hpark := killOne_parked_sub w D id s
+        have hdead' : ((killOne w D id).st s).life ≠ .alive := by rw [hrest.2.2]; exact hdead
+        have hih := ih (killOne w D id) hdead'
+        refine ⟨hih.1.trans hrest.2.2, hih.2.1.trans hrest.1, hih.2.2.1.trans hrest.2.1,
+          List.Sublist.trans hih.2.2.2.1 hpark, ?_⟩
+        intro hh
+        have hhold := killOne_holds w D id s hs hh
+        have hh' : holdsPhase ((killOne w D id).st s).phase = true := by rw [hhold.1]; exact hh
+        have hph := hih.2.2.2.2 hh'
+        exact ⟨hph.1.trans hhold.1, hph.2.trans hhold.2⟩
+    · exact ih w hdead
+
+theorem killSubtree_if_dead (w : World) (D : Description) (sub : String) (key : Nat) (s : InstId)
+    (hdead : (w.st s).life ≠ .alive) :
+    ((killSubtree w D sub key).st s).life = (w.st s).life ∧
+      ((killSubtree w D sub key).st s).box = (w.st s).box ∧
+      ((killSubtree w D sub key).st s).prio = (w.st s).prio ∧
+      ((killSubtree w D sub key).st s).parked.Sublist (w.st s).parked ∧
+      (holdsPhase (w.st s).phase = true →
+        ((killSubtree w D sub key).st s).phase = (w.st s).phase ∧
+          ((killSubtree w D sub key).st s).typestate = (w.st s).typestate) := by
+  have hmem := killFold_if_dead w D sub key w.roster s hdead
+  simpa [killSubtree, killMembers, plant_st] using hmem
+
+theorem sublist_nil {α : Type} {xs : List α} (h : xs.Sublist ([] : List α)) : xs = [] := by
+  cases h
+  rfl
 
 end Deadlock

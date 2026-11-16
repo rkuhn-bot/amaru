@@ -580,6 +580,22 @@ def replyFails (D : Description) : List String :=
       some s!"fail: call {e.src} -[{e.label}]-> {e.dst} is not answered in the dequeue transition"
     else none
 
+/-- Shared subtree name, or empty when `name` is a lone actor. -/
+def templateSubtree (D : Description) (name : String) : String :=
+  match templateOf D name with
+  | some t => t.subtree
+  | none => ""
+
+/-- Both roles name the same nonempty subtree, so one kill ends both. -/
+def sameSubtree (D : Description) (a b : String) : Bool :=
+  let s := templateSubtree D a
+  s != "" && s == templateSubtree D b
+
+/-- `name` belongs to a subtree that has a timeout role. -/
+def subtreeKillable (D : Description) (name : String) : Bool :=
+  let s := templateSubtree D name
+  s != "" && D.templates.any fun t => t.subtree == s && t.timeoutKills
+
 def callTermFails (D : Description) : List String :=
   D.edges.filterMap fun e =>
     if e.effect != .call then none
@@ -587,7 +603,10 @@ def callTermFails (D : Description) : List String :=
       match templateOf D e.dst with
       | none => some s!"fail: call {e.label} targets unknown template {e.dst}"
       | some t =>
-        if t.terminable then some s!"fail: call {e.label} targets terminable template {e.dst}"
+        -- A call may enter a terminable role only inside that role's subtree.
+        -- Anything else must be a permanent core: a kill there would not fail this caller.
+        if t.terminable && !sameSubtree D e.src e.dst then
+          some s!"fail: call {e.label} targets terminable template {e.dst}"
         else none
 
 /-- Templates that may interact with `name`. In group mode that is the shared
@@ -623,6 +642,33 @@ def templatePure (D : Description) (name : String) : Bool :=
   match templateOf D name with
   | none => false
   | some t => t.untimedPeer && !timedCohortEnds D name
+
+def pureKillMsg (name : String) : String :=
+  s!"fail: {name} is a pure untimed peer and its own timeout does not kill the subtree"
+
+/-- A nonempty subtree is a per-peer cohort that dies in one step. A pure untimed
+peer must be that timeout itself: a sibling's wait does not make this mailbox
+finishable, so the kill has to be enabled on this actor. -/
+def subtreeFails (D : Description) : List String :=
+  D.templates.filterMap fun t =>
+    if t.subtree == "" then
+      if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
+      else if templatePure D t.name then some (pureKillMsg t.name)
+      else none
+    else if t.multiplicity != .perPeer then
+      some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
+    else if !t.terminable then
+      some s!"fail: subtree {t.subtree} member {t.name} is not terminable"
+    else if !(D.templates.any fun u => u.subtree == t.subtree && u.timeoutKills) then
+      some s!"fail: subtree {t.subtree} has no timeoutKills role"
+    else if t.supervisor != "" &&
+        (match templateOf D t.supervisor with
+          | some s => !(s.multiplicity == .one)
+          | none => true) then
+      some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not a permanent core"
+    else if templatePure D t.name && !t.timeoutKills then
+      some (pureKillMsg t.name)
+    else none
 
 def pureTermMsg (name : String) : String :=
   s!"fail: template {name} is an untimed peer end and is not terminable; a permanent mailbox would stall with the peer"
@@ -706,13 +752,14 @@ def issues (D : Description) : List Issue :=
   optText (replyFails D).isEmpty (String.intercalate "\n" (replyFails D)) ++
   optText (callTermFails D).isEmpty (String.intercalate "\n" (callTermFails D)) ++
   optText (peerFails D).isEmpty (String.intercalate "\n" (peerFails D)) ++
+  optText (subtreeFails D).isEmpty (String.intercalate "\n" (subtreeFails D)) ++
   certIssue D ++
   optText (overflowFails D).isEmpty ("fail: overflowing mailbox\n" ++ String.intercalate "\n" (overflowFails D))
 
 def checkBool (D : Description) : Bool :=
   (structLines D).isEmpty && (freshFails D).isEmpty && (priorityFails D).isEmpty &&
     (replyFails D).isEmpty && (callTermFails D).isEmpty && (peerFails D).isEmpty &&
-    acyclicB D && (overflowFails D).isEmpty
+    (subtreeFails D).isEmpty && acyclicB D && (overflowFails D).isEmpty
 
 def nodeStr (n : Node) : String := s!"({n.template}, {n.state})"
 
@@ -742,6 +789,7 @@ structure GraphOk (D : Description) : Prop where
   replies : replyFails D = []
   lifecycle : callTermFails D = []
   peers : peerFails D = []
+  subtrees : subtreeFails D = []
   acyclic : Acyclic (edgeBool (residualEdges D))
   /-- A concrete rank witnessing acyclicity: every residual edge drops the rank. -/
   ranked : ∃ hs : List (Node × Nat), heightsOkB (residualEdges D) hs = true
@@ -769,8 +817,9 @@ theorem acyclicB_heights (D : Description) (h : acyclicB D = true) :
 
 theorem checkBool_sound (D : Description) (h : checkBool D = true) : GraphOk D := by
   simp only [checkBool] at h
-  obtain ⟨h7, hO⟩ := bool_and_parts _ _ h
-  obtain ⟨h6, hA⟩ := bool_and_parts _ _ h7
+  obtain ⟨h8, hO⟩ := bool_and_parts _ _ h
+  obtain ⟨h7, hA⟩ := bool_and_parts _ _ h8
+  obtain ⟨h6, hSub⟩ := bool_and_parts _ _ h7
   obtain ⟨h5, hE⟩ := bool_and_parts _ _ h6
   obtain ⟨h4, hL⟩ := bool_and_parts _ _ h5
   obtain ⟨h3, hR⟩ := bool_and_parts _ _ h4
@@ -784,6 +833,7 @@ theorem checkBool_sound (D : Description) (h : checkBool D = true) : GraphOk D :
     replies := isEmpty_true _ hR
     lifecycle := isEmpty_true _ hL
     peers := isEmpty_true _ hE
+    subtrees := isEmpty_true _ hSub
     acyclic := heightsOkB_acyclic _ _ hHeights
     ranked := ⟨hs, hHeights⟩
     credit := isEmpty_true _ hO
@@ -832,7 +882,9 @@ theorem certify_of_cycle (D : Description) (c : List Node) (h : Issue.cycle c �
           · rcases List.mem_append.mp h with h | h
             · rcases List.mem_append.mp h with h | h
               · rcases List.mem_append.mp h with h | h
-                · exact absurd h (cycle_not_optText _ _ _)
+                · rcases List.mem_append.mp h with h | h
+                  · exact absurd h (cycle_not_optText _ _ _)
+                  · exact absurd h (cycle_not_optText _ _ _)
                 · exact absurd h (cycle_not_optText _ _ _)
               · exact absurd h (cycle_not_optText _ _ _)
             · exact absurd h (cycle_not_optText _ _ _)

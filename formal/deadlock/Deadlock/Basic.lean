@@ -147,6 +147,12 @@ structure Template where
   violated bound does not by itself fail the check: blocking sends stay residual and
   must be ordered by the state graph. Default in the JSON schema is true. -/
   mustFit : Bool
+  /-- Roles that share a nonempty name die together. Empty means a lone actor. -/
+  subtree : String := ""
+  /-- An `awaitPeer` on this role is the timeout that kills `subtree`. -/
+  timeoutKills : Bool := false
+  /-- Permanent core that receives the one tombstone when `subtree` is killed. -/
+  supervisor : String := ""
   deriving DecidableEq, Repr, Inhabited, BEq
 
 structure Edge where

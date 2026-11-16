@@ -10,18 +10,22 @@ namespace Deadlock
 theorem await_callee_unterminable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) (id dst : InstId) (k : Cont)
     (hph : (w.st id).phase = .awaitReply dst k) (t : Template)
-    (ht : templateOf I.desc (tname dst) = some t) : t.terminable = false := by
+    (ht : templateOf I.desc (tname dst) = some t) :
+    t.terminable = false ∨ sameSubtree I.desc (tname id) (tname dst) = true := by
   have hI := inv_reachable I N w hL hR
-  obtain ⟨_, e, he, _, _, hdst, _, heff, _⟩ := described_reply I w hI id dst k hph
-  exact call_edge_unterminable I.desc hG e he heff t (by simpa [hdst] using ht)
+  obtain ⟨_, e, he, hsrc, _, hdst, _, heff, _⟩ := described_reply I w hI id dst k hph
+  have hsub := call_edge_unterminable I.desc hG e he heff t (by simpa [hdst] using ht)
+  simpa [hsrc, hdst] using hsub
 
 theorem parked_call_unterminable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) (id dst : InstId) (k : Cont)
     (hph : (w.st id).phase = .parked dst true k) (t : Template)
-    (ht : templateOf I.desc (tname dst) = some t) : t.terminable = false := by
+    (ht : templateOf I.desc (tname dst) = some t) :
+    t.terminable = false ∨ sameSubtree I.desc (tname id) (tname dst) = true := by
   have hI := inv_reachable I N w hL hR
-  obtain ⟨_, e, he, _, _, hdst, _, heff, _⟩ := described_park I w hI id dst true k hph
-  exact call_edge_unterminable I.desc hG e he heff t (by simpa [hdst] using ht)
+  obtain ⟨_, e, he, hsrc, _, hdst, _, heff, _⟩ := described_park I w hI id dst true k hph
+  have hsub := call_edge_unterminable I.desc hG e he heff t (by simpa [hdst] using ht)
+  simpa [hsrc, hdst] using hsub
 
 theorem resume_life (a : Actor) (b : Bool) (dst : InstId) : (resumeSender a b dst).life = a.life := by
   cases hph : a.phase with
@@ -215,6 +219,7 @@ theorem step_keeps_run (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) 
     (k : Cont) (hp : (w.st s).phase = .run k) (hl : (w.st s).life = .alive)
     (h : apply I a w = some w') (hnot : a ≠ .exec s) : (w'.st s).phase = .run k := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -374,9 +379,9 @@ theorem terminable_no_parked_call (I : Impl) (hL : LocalOk I) (hG : GraphOk I.de
   cases hc : p.isCall
   · rfl
   · obtain ⟨t, ht, htm⟩ := hterm
-    have hbad := parked_call_unterminable I hL hG N w hR p.sender id k
-      (by simpa [hc] using hph) t ht
-    simp [htm] at hbad
+    have hnot := no_terminable_call_target I hL hG N w hR p.sender id k
+      (Or.inl (by simpa [hc] using hph)) t ht
+    simp [htm] at hnot
 
 theorem release_keeps_victim (w : World) (id : InstId) (ps : List Parked) :
     ((releaseParked w id ps).st id).phase = (w.st id).phase ∧
@@ -731,7 +736,7 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
       cases e with
       | send dst label hint =>
         simp [execRun, hrest] at hc
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
@@ -752,7 +757,7 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | call dst label hint =>
         simp [execRun, hrest] at hc
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
@@ -773,7 +778,7 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | trySend dst label hint =>
         simp [execRun, hrest] at hc
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
@@ -945,6 +950,7 @@ theorem term_ok_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (h
   | exec id => simpa [apply] using term_ok_head I hL w w' id hT h
   | finish id => simpa [apply] using term_ok_finish I hL w w' id hT h
   | spawn template => simpa [apply] using term_ok_spawn I hL w w' template hT h
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hT
@@ -990,7 +996,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
         simpa [hrest, hidle] using h
       | send dst label hint =>
         simp [execRun, hrest] at h
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at h
           exact after_shorter ⟨.send dst label hint :: tail, toState, replyTo⟩ k' _ (by simp [hrest]) h
@@ -1003,7 +1009,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
       | call dst label hint =>
         simp [execRun, hrest] at h
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at h
           exact after_shorter ⟨.call dst label hint :: tail, toState, replyTo⟩ k' _ (by simp [hrest]) h
@@ -1016,7 +1022,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
       | trySend dst label hint =>
         simp [execRun, hrest] at h
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at h
           exact after_shorter _ k' _ (by simp [hrest]) h
@@ -1340,14 +1346,14 @@ theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : C
     cases eff with
     | send dst label hint =>
       simp [execRun, hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
       | some dstId =>
         refine ⟨enqueue_phase_other w I.desc id dstId _ false _ s hs,
           enqueue_life w I.desc id dstId _ false _ s⟩
     | trySend dst label hint =>
       simp [execRun, hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
       | some dstId =>
         simp [hr]
@@ -1359,7 +1365,7 @@ theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : C
         · refine ⟨?_, ?_⟩ <;> simp [setActor_other, hs, proceed_life]
     | call dst label hint =>
       simp [execRun, hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => refine ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
       | some dstId =>
         refine ⟨enqueue_phase_other w I.desc id dstId _ true _ s hs,
@@ -1513,6 +1519,7 @@ theorem step_keeps_quiet (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w
     (hl : (w.st s).life = .alive) (h : apply I a w = some w') (hnot : a ≠ .finish s) :
     (w'.st s).phase = (w.st s).phase ∧ (w'.st s).life = (w.st s).life := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨rfl, rfl⟩
@@ -2153,7 +2160,7 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
           simp [setCell, setActor, proceed, afterHead, phaseFuel, hrest, htail]
     | trySend dst label hint =>
       simp [execRun, hrest]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none =>
         simp [hr, setActor]
         exact proceed_after_fuel (w.st id) k (.trySend dst label hint) tail hrest
@@ -2198,7 +2205,7 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
       omega
     | send dst label hint =>
       simp [execRun, hrest]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none =>
         simp [hr, setActor]
         exact proceed_after_fuel (w.st id) k (.send dst label hint) tail hrest
@@ -2233,7 +2240,7 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
         omega
     | call dst label hint =>
       simp [execRun, hrest]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none =>
         simp [hr, setActor]
         exact proceed_after_fuel (w.st id) k (.call dst label hint) tail hrest
@@ -2272,6 +2279,7 @@ theorem step_run_alive (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) 
     (k : Cont) (hp : (w.st s).phase = .run k) (hl : (w.st s).life = .alive)
     (h : apply I a w = some w') (hnot : a ≠ .exec s) : (w'.st s).life = .alive := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -2877,7 +2885,7 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
       cases e with
       | send dst label hint =>
         simp [execRun, hrest] at hc
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
@@ -2899,7 +2907,7 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | call dst label hint =>
         simp [execRun, hrest] at hc
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
@@ -2921,7 +2929,7 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
       | trySend dst label hint =>
         simp [execRun, hrest] at hc
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
@@ -3246,6 +3254,7 @@ theorem prog_src_head (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
 theorem prog_src_apply (I : Impl) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (h : apply I a w = some w') : ProgSrc I w' := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -3652,7 +3661,7 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
         exact lane_schedule I hL hG w hLane hS id label tail toState replyTo (by simpa [hrest] using hph)
       | send dst label hint =>
         simp [execRun, hrest]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact lane_same I w _ hLane (fun i => by
             by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi])
@@ -3661,7 +3670,7 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
           exact lane_same I w _ hLane (fun i => enqueue_prio w I.desc id dstId _ false _ i)
       | call dst label hint =>
         simp [execRun, hrest]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact lane_same I w _ hLane (fun i => by
             by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi])
@@ -3677,7 +3686,7 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
       | trySend dst label hint =>
         exact lane_same I w _ hLane (fun i => by
           simp [execRun, hrest]
-          cases hr : route w I.desc dst hint with
+          cases hr : route w I.desc id dst with
           | none =>
             by_cases hi : i = id <;> simp [hr, setActor, proceed_prio, hi]
           | some dstId =>
@@ -3791,6 +3800,7 @@ theorem lane_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : Worl
 theorem lane_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (h : apply I a w = some w') : LaneOk I w' := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -3924,9 +3934,10 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
           (by simpa [hrest] using hph) hpre i
       | send dst label hint =>
         simp only [execRun, hrest]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+          simp only [hr]
+          exact set_not_crashed w hpre id (proceed (w.st id) (afterHead
             ⟨.send dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
         | some dstId =>
           simpa [hr] using enqueue_not_crashed w hpre I.desc id dstId
@@ -3934,9 +3945,10 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i
       | call dst label hint =>
         simp only [execRun, hrest]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+          simp only [hr]
+          exact set_not_crashed w hpre id (proceed (w.st id) (afterHead
             ⟨.call dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
         | some dstId =>
           simpa [hr] using enqueue_not_crashed w hpre I.desc id dstId
@@ -3954,9 +3966,10 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
         simpa [execRun, hrest] using set_not_crashed w hpre id _ hp i
       | trySend dst label hint =>
         simp only [execRun, hrest]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using set_not_crashed w hpre id (proceed (w.st id) (afterHead
+          simp only [hr]
+          exact set_not_crashed w hpre id (proceed (w.st id) (afterHead
             ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
         | some dstId =>
           simp only [hr]
@@ -4200,6 +4213,7 @@ theorem apply_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a :
     (w w' : World) (hpre : NoCrash w) (hLane : LaneOk I w) (hS : ProgSrc I w)
     (h : apply I a w = some w') : NoCrash w' := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -4785,9 +4799,10 @@ theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
       cases e with
       | send dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using queue_actor w id (proceed (w.st id)
+          simp only [hr]
+          exact queue_actor w id (proceed (w.st id)
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
         | some dstId =>
           simpa [hr] using enqueue_queue w I.desc id dstId
@@ -4795,9 +4810,10 @@ theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb
       | call dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using queue_actor w id (proceed (w.st id)
+          simp only [hr]
+          exact queue_actor w id (proceed (w.st id)
             (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
         | some dstId =>
           simpa [hr] using enqueue_queue w I.desc id dstId
@@ -4821,9 +4837,10 @@ theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
           · simpa [hany, hlt] using queue_actor w id { (w.st id) with phase := .crashed } mb rfl
       | trySend dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using queue_actor w id (proceed (w.st id)
+          simp only [hr]
+          exact queue_actor w id (proceed (w.st id)
             (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
         | some dstId =>
           simp only [hr]
@@ -4928,6 +4945,7 @@ theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = so
     (hO : OpenSlots w) (mb : InstId) (hlive : (w'.st mb).life = .alive) :
     QueueStep ((w.st mb).parked) ((w'.st mb).parked) := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl rfl
@@ -5099,6 +5117,7 @@ theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = som
     parkIndex ((w'.st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
       parkIndex ((w'.st dst).parked) s < ((w'.st dst).parked).length := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨Nat.le_refl _, hin⟩
@@ -5871,7 +5890,7 @@ theorem exec_send_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k :
     (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
   unfold execRun
   simp [hk]
-  cases hr : route w I.desc dst hint with
+  cases hr : route w I.desc id dst with
   | none =>
     exact copy_accepted I w id (proceed a (afterHead k)) hA (by simp [ha, proceed_box])
       (by simp [ha, proceed_parked])
@@ -5885,12 +5904,12 @@ theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
     MailAccepted I (execRun I w id a k) := by
   unfold execRun
   simp [hk]
-  cases hr : route w I.desc dst hint with
+  cases hr : route w I.desc id dst with
   | none =>
     exact copy_accepted I w id (proceed a (afterHead k)) hA (by simp [ha, proceed_box])
       (by simp [ha, proceed_parked])
   | some dstId =>
-    have hname := route_tname w I.desc dst hint dstId hr
+    have hname := route_tname w I.desc id dst dstId hr
     have hsite : callSite I (tname dstId) label := by
       rw [hname]
       obtain ⟨tr, hmem, _, pre, happ⟩ := hS id k.rest (by simp [carried, hph])
@@ -5928,7 +5947,7 @@ theorem exec_try_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : 
     (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
   unfold execRun
   simp [hk, ha]
-  cases hr : route w I.desc dst hint with
+  cases hr : route w I.desc id dst with
   | none => exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
   | some dstId =>
     simp only [hr]
@@ -6143,6 +6162,7 @@ theorem prio_box_msg (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio 
 theorem mail_step (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (hA : MailAccepted I w) (h : apply I a w = some w') : MailAccepted I w' := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -6689,14 +6709,14 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
     cases eff with
     | send dst label hint =>
       simp [execRun, hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => simp [hr, setActor, hne, proceed_life]
       | some dstId =>
         simp [hr]
         exact enqueue_life w I.desc id dstId _ false _ i
     | trySend dst label hint =>
       simp [execRun, hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => simp [hr, setActor, hne, proceed_life]
       | some dstId =>
         simp [hr]
@@ -6706,7 +6726,7 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
         · simp [setActor, hne, proceed_life]
     | call dst label hint =>
       simp [execRun, hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => simp [hr, setActor, hne, proceed_life]
       | some dstId =>
         simp [hr]
@@ -6864,6 +6884,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
         templateOf I.desc (tname i) = some t ∧
         (t.terminable && !hasParkedCall (w.st i).parked) = true := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact False.elim (hdead hl)
@@ -6926,7 +6947,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
               exfalso
               rw [hme] at hdead
               simp [execRun, hk] at hdead
-              cases hr : route w I.desc dst hint with
+              cases hr : route w I.desc id dst with
               | none => simp [hr, setActor, proceed_life, hlid] at hdead
               | some dstId =>
                 simp [hr] at hdead
@@ -6937,7 +6958,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
               exfalso
               rw [hme] at hdead
               simp [execRun, hk] at hdead
-              cases hr : route w I.desc dst hint with
+              cases hr : route w I.desc id dst with
               | none => simp [hr, setActor, proceed_life, hlid] at hdead
               | some dstId =>
                 simp [hr] at hdead
@@ -6951,7 +6972,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
               exfalso
               rw [hme] at hdead
               simp [execRun, hk] at hdead
-              cases hr : route w I.desc dst hint with
+              cases hr : route w I.desc id dst with
               | none => simp [hr, setActor, proceed_life, hlid] at hdead
               | some dstId =>
                 simp [hr] at hdead
@@ -7111,6 +7132,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
     (hph : (w.st s).phase = .parked dst false k) :
     (w'.st s).phase = .parked dst false k ∨ (w'.st s).phase = (proceed (w.st s) k).phase := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl hph
@@ -7318,7 +7340,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
           cases e with
           | send name label hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc name hint with
+            cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, proceed_life, hph])
             | some dstId =>
               simp [hr]
@@ -7326,7 +7348,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
                 ({ label := label, sender := id, callFrom := none } : Msg) false (afterHead kE) s hsne).trans hph)
           | call name label hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc name hint with
+            cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
             | some dstId =>
               simp [hr]
@@ -7334,7 +7356,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
                 ({ label := label, sender := id, callFrom := some id } : Msg) true (afterHead kE) s hsne).trans hph)
           | trySend name label hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc name hint with
+            cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
             | some dstId =>
               simp [hr]
@@ -7470,6 +7492,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
     (hph : (w.st s).phase = .awaitReply dst k) :
     (w'.st s).phase = .awaitReply dst k ∨ (w'.st s).phase = (proceed (w.st s) k).phase := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl hph
@@ -7644,7 +7667,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
               | crashed => exact Or.inl (by simp [hcall, setActor, hsne, hph])
           | send name label hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc name hint with
+            cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
             | some dstId =>
               simp [hr]
@@ -7652,7 +7675,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
                 ({ label := label, sender := id, callFrom := none } : Msg) false (afterHead kE) s hsne).trans hph)
           | call name label hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc name hint with
+            cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
             | some dstId =>
               simp [hr]
@@ -7660,7 +7683,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
                 ({ label := label, sender := id, callFrom := some id } : Msg) true (afterHead kE) s hsne).trans hph)
           | trySend name label hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc name hint with
+            cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
             | some dstId =>
               simp [hr]
@@ -7897,6 +7920,11 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
     (h : apply I a w = some w') (hdead : (w.st id).life ≠ .alive)
     (hempty : (w.st id).parked = []) : (w'.st id).parked = [] := by
   cases a with
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    have hsub := (killSubtree_if_dead w I.desc sub key id hdead).2.2.2.1
+    rw [hempty] at hsub
+    exact sublist_nil hsub
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -7944,7 +7972,7 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
             cases e with
             | send name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_parked, hempty]
               | some dstId =>
                 simp [hr]
@@ -7952,7 +7980,7 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead k) hji hdead
             | call name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_parked, hempty]
               | some dstId =>
                 simp [hr]
@@ -7960,7 +7988,7 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead k) hji hdead
             | trySend name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_parked, hempty]
               | some dstId =>
                 simp [hr]
@@ -8352,6 +8380,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
     (hpre : PhaseWait ((w.st s).phase)) (hpost : PhaseWait ((w'.st s).phase)) :
     (w'.st s).typestate = (w.st s).typestate := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     rfl
@@ -8484,7 +8513,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
             cases e with
             | send name label hint =>
               simp [execRun, hk] at hpost ⊢
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none =>
                 simp [hr, setActor, hs] at hpost ⊢
               | some dstId =>
@@ -8493,7 +8522,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead kE) hpost
             | call name label hint =>
               simp [execRun, hk] at hpost ⊢
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hs] at hpost ⊢
               | some dstId =>
                 simp [hr] at hpost ⊢
@@ -8501,7 +8530,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead kE) hpost
             | trySend name label hint =>
               simp [execRun, hk] at hpost ⊢
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hs] at hpost ⊢
               | some dstId =>
                 simp [hr] at hpost ⊢
@@ -8632,6 +8661,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
     (hph : (w.st s).phase = .parked dst true k) :
     (w'.st s).phase = .parked dst true k ∨ (w'.st s).phase = .awaitReply dst k := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl hph
@@ -8837,7 +8867,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
             cases e with
             | send name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => exact Or.inl (by simp [hr, setActor, hsj, hph])
               | some dstId =>
                 simp [hr]
@@ -8845,7 +8875,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead kE) s hsj).trans hph)
             | call name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => exact Or.inl (by simp [hr, setActor, hsj, hph])
               | some dstId =>
                 simp [hr]
@@ -8853,7 +8883,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead kE) s hsj).trans hph)
             | trySend name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => exact Or.inl (by simp [hr, setActor, hsj, hph])
               | some dstId =>
                 simp [hr]
@@ -8999,10 +9029,10 @@ theorem call_callee_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : 
       | false => simp [hb] at hflag
       | true => rfl
     rcases hph with hpark | hawait
-    · exact absurd hterm (by
-        simpa using parked_call_unterminable I hL hG N w hR s dst k hpark t ht)
-    · exact absurd hterm (by
-        simpa using await_callee_unterminable I hL hG N w hR s dst k hawait t ht)
+    · have hnot := no_terminable_call_target I hL hG N w hR s dst k (Or.inl hpark) t ht
+      simp [hterm] at hnot
+    · have hnot := no_terminable_call_target I hL hG N w hR s dst k (Or.inr hawait) t ht
+      simp [hterm] at hnot
 
 theorem call_callee_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
     (s dst : InstId) (k : Cont) (i n : Nat)
@@ -9542,8 +9572,8 @@ theorem terminable_no_call_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
   | none => rfl
   | some c =>
     obtain ⟨k, hph⟩ := box_awaits w hT id m c hm hc
-    have hbad := await_callee_unterminable I hL hG N w hR c id k hph t ht
-    simp [hterm] at hbad
+    have hnot := no_terminable_call_target I hL hG N w hR c id k (Or.inr hph) t ht
+    simp [hterm] at hnot
 
 theorem parked_callfrom_none (w : World) (hT : CallTagInv w) (hM : MailInv w) (id : InstId)
     (p : Parked) (hp : p ∈ (w.st id).parked) (hc : p.isCall = false) : p.msg.callFrom = none := by
@@ -9679,11 +9709,12 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
         cases e with
         | send dst label hint =>
           simp [execRun, hrest]
-          cases hroute : route w I.desc dst hint with
+          cases hroute : route w I.desc id dst with
           | none =>
-            simp
-            exact run_tail_tag w id k (.send dst label hint) es hT hph hrest
-              (by intro h; cases h) (by intro h; cases h)
+            simp only [hroute]
+            exact callTag_note w id id dst (proceed (w.st id) (afterHead k))
+              (run_tail_tag w id k (.send dst label hint) es hT hph hrest
+                (by intro h; cases h) (by intro h; cases h))
           | some dstId =>
             simp
             exact enqueue_send_tag w I.desc id dstId
@@ -9691,11 +9722,12 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
               hrest (by intro h; cases h) (by intro h; cases h) rfl
         | trySend dst label hint =>
           simp [execRun, hrest]
-          cases hroute : route w I.desc dst hint with
+          cases hroute : route w I.desc id dst with
           | none =>
-            simp
-            exact run_tail_tag w id k (.trySend dst label hint) es hT hph hrest
-              (by intro h; cases h) (by intro h; cases h)
+            simp only [hroute]
+            exact callTag_note w id id dst (proceed (w.st id) (afterHead k))
+              (run_tail_tag w id k (.trySend dst label hint) es hT hph hrest
+                (by intro h; cases h) (by intro h; cases h))
           | some dstId =>
             simp
             split
@@ -9706,11 +9738,12 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
                 (by intro h; cases h) (by intro h; cases h)
         | call dst label hint =>
           simp [execRun, hrest]
-          cases hroute : route w I.desc dst hint with
+          cases hroute : route w I.desc id dst with
           | none =>
-            simp
-            exact run_tail_tag w id k (.call dst label hint) es hT hph hrest
-              (by intro h; cases h) (by intro h; cases h)
+            simp only [hroute]
+            exact callTag_note w id id dst (proceed (w.st id) (afterHead k))
+              (run_tail_tag w id k (.call dst label hint) es hT hph hrest
+                (by intro h; cases h) (by intro h; cases h))
           | some dstId =>
             simp
             exact enqueue_call_tag w I.desc id dstId
@@ -9763,6 +9796,7 @@ theorem call_tag_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
   | init => exact call_tag_init I N
   | step w w' a prev happ ih =>
     cases a with
+    | kill sub key => sorry
     | stutter =>
       cases stutter_unchanged I w w' happ
       exact ih
@@ -10335,9 +10369,10 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
       cases e with
       | send dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using box_actor w id (proceed (w.st id)
+          simp only [hr]
+          exact box_actor w id (proceed (w.st id)
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
         | some dstId =>
           simpa [hr] using enqueue_box w I.desc id dstId
@@ -10345,9 +10380,10 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb
       | call dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using box_actor w id (proceed (w.st id)
+          simp only [hr]
+          exact box_actor w id (proceed (w.st id)
             (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
         | some dstId =>
           simpa [hr] using enqueue_box w I.desc id dstId
@@ -10376,9 +10412,10 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
           · simpa [hany, hlt] using box_actor w id { (w.st id) with phase := .crashed } mb rfl
       | trySend dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
-          simpa [hr] using box_actor w id (proceed (w.st id)
+          simp only [hr]
+          exact box_actor w id (proceed (w.st id)
             (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
         | some dstId =>
           simp only [hr]
@@ -10490,6 +10527,9 @@ theorem box_pos_mono (I : Impl) (a : Action) (w w' : World) (h : apply I a w = s
       callPos (w'.st d).box c < (w'.st d).box.length := by
   have hgrow : BoxGrow (w.st d).box (w'.st d).box := by
     cases a with
+    | kill sub key =>
+      rw [kill_apply_world I w w' sub key h] at halive ⊢
+      exact Or.inl (killSubtree_if_alive w I.desc sub key d halive).2.1
     | stutter =>
       cases stutter_unchanged I w w' h
       exact Or.inl rfl
@@ -10729,7 +10769,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
       cases e with
       | send dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed, hidle]
         | some dstId =>
           simpa [hr, hidle] using enqueue_phase_other w I.desc id dstId
@@ -10737,7 +10777,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hne
       | call dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed, hidle]
         | some dstId =>
           simpa [hr, hidle] using enqueue_phase_other w I.desc id dstId
@@ -10745,7 +10785,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
             (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hne
       | trySend dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed, hidle]
         | some dstId =>
           simp only [hr]
@@ -10893,7 +10933,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
       cases e with
       | call dst label hint =>
         simp only [execRun] at hyes
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
           · by_cases hmb : mb = id
@@ -10926,7 +10966,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
               exact hne hid
       | send dst label hint =>
         simp only [execRun] at hyes
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
           · by_cases hmb : mb = id
@@ -10957,7 +10997,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
               simp at hc
       | trySend dst label hint =>
         simp only [execRun] at hyes
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
           · by_cases hmb : mb = id
@@ -11403,6 +11443,7 @@ theorem no_new_mailCall (I : Impl) (a : Action) (w w' : World) (c d : InstId) (k
     (hph' : (w'.st c).phase = .awaitReply d k)
     (hno : ¬ anyCall w c) : ¬ anyCall w' c := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -11484,6 +11525,10 @@ theorem dead_stays_idle (I : Impl) (a : Action) (w w' : World) (i : InstId)
     (h : apply I a w = some w') (hdead : (w.st i).life ≠ .alive)
     (hidle : (w.st i).phase = .idle) : (w'.st i).phase = .idle := by
   cases a with
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    exact ((killSubtree_if_dead w I.desc sub key i hdead).2.2.2.2
+      (by simp [holdsPhase, hidle])).1.trans hidle
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -11634,6 +11679,9 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
     (h : apply I a w = some w') (hdead : (w.st id).life ≠ .alive)
     (hempty : (w.st id).box = []) : (w'.st id).box = [] := by
   cases a with
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    exact ((killSubtree_if_dead w I.desc sub key id hdead).2.1).trans hempty
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -11686,7 +11734,7 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
             cases e with
             | send name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_box, hempty]
               | some dstId =>
                 simp [hr]
@@ -11694,7 +11742,7 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead k) hdead hempty
             | call name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_box, hempty]
               | some dstId =>
                 simp [hr]
@@ -11702,7 +11750,7 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead k) hdead hempty
             | trySend name label hint =>
               simp [execRun, hk]
-              cases hr : route w I.desc name hint with
+              cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_box, hempty]
               | some dstId =>
                 simp [hr]
@@ -12496,6 +12544,10 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
     (hpre : (w.st r).life = .alive) (hlive : (w'.st r).life = .alive)
     (hm : m ∈ (w.st r).prio) : m ∈ (w'.st r).prio := by
   cases a with
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at hlive ⊢
+    rw [(killSubtree_if_alive w I.desc sub key r hlive).2.2.1]
+    exact hm
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -12618,7 +12670,7 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
                 exact hm
           | send dst label hint =>
             simp [execRun, hk]
-            cases hrte : route w I.desc dst hint with
+            cases hrte : route w I.desc id dst with
             | none =>
               by_cases hri : r = id
               · subst hri
@@ -12631,7 +12683,7 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
                 { label := label, sender := id, callFrom := none } false (afterHead k) r] using hm
           | call dst label hint =>
             simp [execRun, hk]
-            cases hrte : route w I.desc dst hint with
+            cases hrte : route w I.desc id dst with
             | none =>
               by_cases hri : r = id
               · subst hri
@@ -12644,7 +12696,7 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
                 { label := label, sender := id, callFrom := some id } true (afterHead k) r] using hm
           | trySend dst label hint =>
             simp [execRun, hk]
-            cases hrte : route w I.desc dst hint with
+            cases hrte : route w I.desc id dst with
             | none =>
               by_cases hri : r = id
               · rw [hri] at hm
@@ -12824,6 +12876,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
     (w'.cell dst label).value = (w.cell dst label).value ∧
       ((w.cell dst label).dirty = false → (w'.cell dst label).dirty = false) := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨rfl, fun hd => hd⟩
@@ -12962,7 +13015,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
                 simp [ht, hfalse]
           | send d0 l0 hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc d0 hint with
+            cases hr : route w I.desc id d0 with
             | none => simp [hr, setActor]
             | some dstId =>
               simpa [hr, enqueue_cell] using
@@ -12970,7 +13023,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
                   false (afterHead k) dst label
           | call d0 l0 hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc d0 hint with
+            cases hr : route w I.desc id d0 with
             | none => simp [hr, setActor]
             | some dstId =>
               simpa [hr, enqueue_cell] using
@@ -12978,7 +13031,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
                   true (afterHead k) dst label
           | trySend d0 l0 hint =>
             simp [execRun, hk]
-            cases hr : route w I.desc d0 hint with
+            cases hr : route w I.desc id d0 with
             | none => simp [hr, setActor]
             | some dstId =>
               simp [hr]
@@ -13069,6 +13122,9 @@ theorem born_step (I : Impl) (a : Action) (w w' : World) (i : InstId)
     (h : apply I a w = some w')     (hdead : (w.st i).life ≠ .alive) (hlive : (w'.st i).life = .alive) :
     ∃ template, a = .spawn template ∧ i = InstId.peer template (w.nextIx template) := by
   cases a with
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at hlive
+    exact absurd hlive (killSubtree_stays_dead w I.desc sub key i hdead)
   | stutter =>
     cases stutter_unchanged I w w' h
     exact False.elim (hdead hlive)

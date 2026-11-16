@@ -26,6 +26,7 @@ def actionSubject : Action → Option InstId
   | .finish s => some s
   | .ingress s _ => some s
   | .spawn _ => none
+  | .kill _ _ => none
   | .stutter => none
 
 /-- `id` is blocked on `dst`. -/
@@ -108,6 +109,7 @@ theorem on_partner (w : World) (id dst : InstId) (act : Action) (hwait : WaitsOn
     exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
   | ingress _ _ => exact h.2.elim
   | spawn _ => exact False.elim (by simp [actionSubject] at h)
+  | kill _ _ => exact False.elim (by simp [actionSubject] at h)
   | stutter => exact False.elim (by simp [actionSubject] at h)
 
 theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
@@ -190,12 +192,12 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
     cases e with
     | send dst label hint =>
       simp [hk]
-      cases route w I.desc dst hint with
+      cases route w I.desc id dst with
       | none => simp [setActor]
       | some dstId => exact enqueue_roster w I.desc id dstId _ false _
     | trySend dst label hint =>
       simp [hk]
-      cases hr : route w I.desc dst hint with
+      cases hr : route w I.desc id dst with
       | none => simp [hr, setActor]
       | some dstId =>
         simp [hr]
@@ -206,7 +208,7 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
         · simp [hroom, setActor]
     | call dst label hint =>
       simp [hk]
-      cases route w I.desc dst hint with
+      cases route w I.desc id dst with
       | none => simp [setActor]
       | some dstId => exact enqueue_roster w I.desc id dstId _ true _
     | reply => simp [hk, perform_roster]
@@ -376,6 +378,10 @@ theorem one_peer_absent (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
               have hmul : (Multiplicity.one == Multiplicity.perPeer) = false := by decide
               simp [hsame, hone, hmul] at hgo
           · simp [hgo] at ha
+      | kill sub key =>
+        have hw := kill_apply_world I w w' sub key (by simpa [apply] using ha)
+        rw [hw, killSubtree_roster] at hin
+        exact hin
       | stutter =>
         cases stutter_unchanged I w w' (by simpa [apply] using ha)
         exact hin
@@ -645,6 +651,14 @@ theorem quiet_no_forced (I : Impl) (w : World)
   cases a with
   | spawn _ => simp [forced] at hf
   | ingress _ _ => simp [forced] at hf
+  | kill sub key =>
+    intro hen
+    have hwait : killWait w I.desc sub key = true := by
+      simp [Enabled, apply] at hen
+      cases hcond : killWait w I.desc sub key <;> simp [hcond] at hen
+      rfl
+    have hbusy := killWait_imp_busy I w sub key hwait
+    simp [runtimeBusy, hbusy] at hb
   | stutter => simp [forced] at hf
   | recvBulk s =>
     intro hen
@@ -695,6 +709,15 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
     (h : apply I a w = some w') (s : InstId) (hs : s ∉ w'.roster) :
     (w'.st s).phase = .idle ∧ (w'.st s).life ≠ .alive := by
   cases a with
+  | kill sub key =>
+    have hw := kill_apply_world I w w' sub key h
+    have hs0 : s ∉ w.roster := by
+      rw [hw, killSubtree_roster] at hs
+      exact hs
+    obtain ⟨hidle, hdead⟩ := hoff s hs0
+    have hkeep := killSubtree_off w I.desc sub key s hs0 hdead
+    rw [hw]
+    exact ⟨hkeep.1.trans hidle, by rw [hkeep.2]; exact hdead⟩
   | stutter =>
     have heq := stutter_unchanged I w w' h
     subst heq

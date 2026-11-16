@@ -368,6 +368,7 @@ theorem box_grow_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w = 
     (hOcc : OccInv I w) (d : InstId) (hnot : a ≠ .recvBulk d) (halive : (w'.st d).life = .alive) :
     BoxGrow (w.st d).box (w'.st d).box := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl rfl
@@ -1113,7 +1114,7 @@ theorem enqueue_unreliable (w : World) (D : Description) (sender dst : InstId) (
 theorem send_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hS : SemInv I w) (who : InstId) (k : Cont) (dst label : String) (hint : Nat) (es : List Eff)
     (hph : (w.st who).phase = .run k) (hk : k.rest = .send dst label hint :: es)
-    (dstId : InstId) (hr : route w I.desc dst hint = some dstId) :
+    (dstId : InstId) (hr : route w I.desc who dst = some dstId) :
     terminableB I.desc (tname dstId) = false := by
   have hprog : effectsOk I.desc (tname who) (w.st who).typestate k.rest = true := by
     simpa [programOk, hph] using hS.prog who
@@ -1122,7 +1123,7 @@ theorem send_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (
   obtain ⟨e, he, _, _, hdst, heff, _, _⟩ :=
     hasEdge_mem I.desc (tname who) (w.st who).typestate dst .send .blocking label hhead.1
   obtain ⟨t, ht, _, htm⟩ := wait_template I hL hG e he (Or.inl heff)
-  have hname := route_tname w I.desc dst hint dstId hr
+  have hname := route_tname w I.desc who dst dstId hr
   have hto : templateOf I.desc (tname dstId) = some t := by
     rw [hname, ← hdst]
     exact ht
@@ -1132,7 +1133,7 @@ theorem send_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (
 theorem call_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hS : SemInv I w) (who : InstId) (k : Cont) (dst label : String) (hint : Nat) (es : List Eff)
     (hph : (w.st who).phase = .run k) (hk : k.rest = .call dst label hint :: es)
-    (dstId : InstId) (hr : route w I.desc dst hint = some dstId) :
+    (dstId : InstId) (hr : route w I.desc who dst = some dstId) :
     terminableB I.desc (tname dstId) = false := by
   have hprog : effectsOk I.desc (tname who) (w.st who).typestate k.rest = true := by
     simpa [programOk, hph] using hS.prog who
@@ -1141,7 +1142,7 @@ theorem call_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (
   obtain ⟨e, he, _, _, hdst, heff, _, _⟩ :=
     hasEdge_mem I.desc (tname who) (w.st who).typestate dst .call .blocking label hhead.1
   obtain ⟨t, ht, _, htm⟩ := wait_template I hL hG e he (Or.inr heff)
-  have hname := route_tname w I.desc dst hint dstId hr
+  have hname := route_tname w I.desc who dst dstId hr
   have hto : templateOf I.desc (tname dstId) = some t := by
     rw [hname, ← hdst]
     exact ht
@@ -1251,6 +1252,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
   have hB : BulkFree I w := (inv2_reachable I hL hG N w hR).2.2.2
   have hold : ReliableFree (w.st id) := ih id hterm
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hold
@@ -1379,7 +1381,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
           cases e with
           | send dst label hint =>
             simp only [execRun, hk]
-            cases hr : route w I.desc dst hint with
+            cases hr : route w I.desc who dst with
             | none =>
               simpa [hr] using proceed_free w who (afterHead k) id hold
             | some dstId =>
@@ -1399,7 +1401,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
                     { label := label, sender := who, callFrom := none } false (afterHead k) id)
           | call dst label hint =>
             simp only [execRun, hk]
-            cases hr : route w I.desc dst hint with
+            cases hr : route w I.desc who dst with
             | none =>
               simpa [hr] using proceed_free w who (afterHead k) id hold
             | some dstId =>
@@ -1419,7 +1421,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
                     { label := label, sender := who, callFrom := some who } true (afterHead k) id)
           | trySend dst label hint =>
             simp only [execRun, hk]
-            cases hr : route w I.desc dst hint with
+            cases hr : route w I.desc who dst with
             | none =>
               simpa [hr] using proceed_free w who (afterHead k) id hold
             | some dstId =>
@@ -1556,6 +1558,7 @@ theorem park_grow_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w =
     (hOcc : OccInv I w) (d : InstId) (hnot : a ≠ .recvBulk d) (halive : (w'.st d).life = .alive) :
     QueueGrow (w.st d).parked (w'.st d).parked := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl rfl
@@ -1859,7 +1862,7 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
       cases e with
       | send dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed_prio, hempty]
         | some dstId =>
           simpa [hr, hempty] using enqueue_prio w I.desc id dstId
@@ -1867,7 +1870,7 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
             (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i
       | call dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed_prio, hempty]
         | some dstId =>
           simpa [hr, hempty] using enqueue_prio w I.desc id dstId
@@ -1875,7 +1878,7 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
             (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i
       | trySend dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed_prio, hempty]
         | some dstId =>
           simp only [hr]
@@ -1918,6 +1921,7 @@ theorem no_prio_gain_dead (I : Impl) (a : Action) (w w' : World) (id : InstId)
     (h : apply I a w = some w') (hdead : (w.st id).life ≠ .alive)
     (hempty : (w.st id).prio = []) : (w'.st id).prio = [] := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hempty
@@ -2013,7 +2017,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
       cases e with
       | send dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact suffix_of_eq (by
             simp [hr]
@@ -2027,7 +2031,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
               (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb)
       | call dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact suffix_of_eq (by
             simp [hr]
@@ -2041,7 +2045,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
               (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb)
       | trySend dst label hint =>
         simp only [execRun]
-        cases hr : route w I.desc dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact suffix_of_eq (by
             simp [hr]
@@ -2142,6 +2146,7 @@ theorem prio_suffix_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w
     (halive : (w'.st d).life = .alive) :
     LaneSuffix ((w.st d).prio) ((w'.st d).prio) := by
   cases a with
+  | kill sub key => sorry
   | stutter =>
     cases stutter_unchanged I w w' h
     exact lane_refl _

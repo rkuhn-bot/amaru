@@ -160,14 +160,16 @@ def labelHandled (I : Impl) : Bool :=
             (e.effect != .call || tr.acceptsCall)
     else true
 
-/-- A reliable send or call may target only a non-terminable multiplicity-one
-template. Those cores do not die, so the sender cannot proceed past a dead name. -/
+/-- A reliable send or call leaves the sender's subtree only toward a
+non-terminable multiplicity-one core. Inside the subtree the target may be a
+terminable member: the subtree kill credits or fails that message. -/
 def permanentTarget (I : Impl) : Bool :=
   I.desc.edges.all fun e =>
     if (e.effect == .send || e.effect == .call) && e.reliability == .reliable then
       match templateOf I.desc e.dst with
       | none => false
-      | some t => t.multiplicity == .one && t.terminable == false
+      | some t =>
+        (t.multiplicity == .one && t.terminable == false) || sameSubtree I.desc e.src e.dst
     else true
 
 def noSelfSchedule : List Eff → Bool
