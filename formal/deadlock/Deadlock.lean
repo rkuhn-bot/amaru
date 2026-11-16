@@ -156,3 +156,4 @@ import Deadlock.Rank
 #print axioms Deadlock.below_idle
 #print axioms Deadlock.never_stuck
 #print axioms Deadlock.deadlock_freedom
+#print axioms Deadlock.cell_fresh

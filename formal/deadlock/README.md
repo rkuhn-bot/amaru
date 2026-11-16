@@ -73,15 +73,16 @@ theorem deadlock_freedom (I) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assump
 
 `Deadlock` is the one in `Semantics.lean`: some actor is stuck forever on a
 blocking send, a call reply, a cell wait, or an internal effect. `CellFresh`
-says that after a cell write strictly raises the stored value, some later step
-of a live reader of that template is a receive or an exec that read-and-clears,
-and the value it records is at least the written one.
+says that after a declared cell label strictly rises, every reader instance of
+that template which is alive at the write and stays alive eventually records
+at least the written value. A dead or never-spawned reader is outside the
+claim. `effectsOk` and `cellEffectFails` reject a cell write that is not a
+declared non-blocking cell edge; `undeclared-cell.json` is the failing example.
 
-`deadlock_freedom` proves `¬ Deadlock` for every fair run. The conjunction
-with unrestricted `CellFresh` is not a theorem: a fair run can raise a cell
-that has no live reader, and `readCells` only records labels of declared cell
-edges. `THEOREM.md` states the proved theorems, those two counterexamples, and
-the axiom list. Nothing in the development uses `sorry`.
+`deadlock_freedom` proves `¬ Deadlock`. `cell_fresh` proves `CellFresh` under
+the same hypotheses, using `Fair.prio`. `THEOREM.md` states both theorems, the
+two runs that motivated the statement, and the axiom list. Nothing in the
+development uses `sorry`.
 
 ## Assumptions
 
@@ -129,8 +130,11 @@ list. It is the part that used to be assumed as `Refines.projects`,
   template. `floor` is `budget - debt`, and `debt` is the per-instance sum of
   edge occupancies out of that state (`b` for multiplicity `one`, `a` for
   `perPeer`).
-- A program's `send` / `trySend` / `call` effects are edges from the
-  **target** state (typestate moves when the transition starts).
+- A program's `send` / `trySend` / `call` / `cell` effects are edges from the
+  **target** state (typestate moves when the transition starts). A `cell`
+  effect must be a non-blocking cell edge into that template with the same
+  label. A listed `cellEffects` entry with no such edge fails the graph check
+  (`undeclared-cell.json`).
 - An `acceptsCall` program has exactly one `reply`, and no `terminate` before
   it. Any other program has no `reply`. `terminate` occurs only on a
   `terminable` template, and a terminable template's programs do no bulk send.
@@ -194,10 +198,6 @@ for a send the actor did not itself perform.
 
 ## What is not covered
 
-- **Unrestricted `CellFresh`.** `¬ Deadlock` is proved. A priority wake that
-  sits on the lane of a live reader is what `Fair.prio` drains; a write with
-  no live reader, and a label that is not a declared cell edge, are not
-  observed. See `THEOREM.md`.
 - **Reachable worlds satisfy `Inv`, and `projects` is proved from that.** The
   items below are closed. The one state this bullet does not claim is the
   intermediate after a queue is cleared and before its senders resume.
@@ -379,8 +379,8 @@ for a send the actor did not itself perform.
   mint a new `callFrom`, so the callee keeps the reply obligation and is never
   idle. `below_idle`   is strong induction on residual height. `never_stuck` and
   `deadlock_freedom` say a fair run has no actor blocked forever.
-  The dead-instance lift is not done. `CellFresh` is not the unrestricted
-  claim; `THEOREM.md` records what is proved.
+  `cell_fresh` says a declared cell write is observed by every reader that
+  stays alive, using `Fair.prio`. The dead-instance lift is not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
@@ -434,6 +434,7 @@ by the semantic rework, and the old examples keep their verdicts.
 | `examples/overflow.json` | `fail: overflowing mailbox` |
 | `examples/lost-reply.json` | `fail: call source -[Ping]-> sink is not answered in the dequeue transition` |
 | `examples/lost-wake.json` | `fail: superseding edge Wake misses cell conditions readPoints, dirtyBit` |
+| `examples/undeclared-cell.json` | `fail: cell effect writer/idle -[Ghost]-> reader is not a declared cell edge` |
 | `examples/token-relation.json` | `pass` — 3-role fetch token, closed under its transitions and under restart |
 | `examples/token-relation-gap.json` | `fail: compatibility broken by transition fetch_blocks idle -> busy [OnTip]` with the pre/post tuple |
 | `examples/token-relation-coarse.json` | `fail: residual cycle` — the extra `(holding, busy)` tuple is closed, and it restores the cycle |

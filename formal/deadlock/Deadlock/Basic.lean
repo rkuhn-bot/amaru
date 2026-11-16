@@ -189,6 +189,15 @@ structure CompatGroup where
   allowed : List (List RoleState)
   deriving DecidableEq, Repr, Inhabited, BEq
 
+/-- A cell write a program performs: template `src` in `srcState` writes label
+`label` of template `dst`. It is legal only as a declared cell edge. -/
+structure CellEffect where
+  src : String
+  srcState : String
+  dst : String
+  label : String
+  deriving DecidableEq, Repr, Inhabited, BEq
+
 /-- A typestate step the relation must be closed under. Program transitions are
 listed by the exporter. Restart and terminate are added by the checker. -/
 structure CompatStep where
@@ -213,6 +222,9 @@ structure Description where
   /-- Typestate steps the compatibility check closes under. Empty for `all`
   and for the legacy pairwise format. -/
   steps : List CompatStep
+  /-- Cell writes named by the exporter. Each must be a declared cell edge.
+  Empty when the graph does not list programs. -/
+  cellEffects : List CellEffect := []
   deriving DecidableEq, Repr, Inhabited, BEq
 
 structure Node where

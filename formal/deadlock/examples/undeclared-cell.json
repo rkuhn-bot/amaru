@@ -1,0 +1,36 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "undeclared-cell",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "writer",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    },
+    {
+      "name": "reader",
+      "multiplicity": "one",
+      "capacity": 10,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    }
+  ],
+  "edges": [],
+  "cellEffects": [
+    { "src": "writer", "srcState": "idle", "dst": "reader", "label": "Ghost" }
+  ]
+}

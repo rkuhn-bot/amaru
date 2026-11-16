@@ -8,6 +8,9 @@ Nothing in the development uses `sorry` or `admit`.
 ```lean
 theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
     (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ) : ¬ Deadlock ρ
+
+theorem cell_fresh (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
+    (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ) : CellFresh ρ
 ```
 
 A fair reachable run has no actor blocked forever. The proof is strong
@@ -18,56 +21,50 @@ strictly lower actor. An `awaitReply` cannot last: while the caller stays
 there it cannot mint a new `callFrom`, so `CallTagInv` keeps the callee in
 `handlerOwes` or `replyPending`, and that phase is not `idle`.
 
-`Fair.prio` is not used. Adding it does not change `deadlock_freedom`.
-`recvBulk` stays enabled when `recvPrio` is enabled; the step relation is
-unchanged.
+`cell_fresh` is the cell half of the target conjunction, for the `CellFresh`
+below. After a declared cell label strictly rises, every reader instance of
+that template which is already alive and stays alive eventually has `observed`
+at least the post-write value. The rise is an `exec` of `.cell`. If the bit
+was clean, that step wakes every live reader; if it was already dirty, the
+label has been on the lane since the last clean-to-dirty write, because a
+later read or a killing `terminate` would have cleared the bit. `Fair.prio`
+then takes `recvPrio`, and that delivery's `readCells` records the current
+value. Cell values only rise, so the recorded value is at least the written
+one.
 
-## What was asked, and what is false
+`deadlock_freedom` does not use `Fair.prio`. `recvBulk` stays enabled when
+`recvPrio` is enabled; the step relation is unchanged.
 
-The target written in `README.md` is
+## Why `CellFresh` is stated this way
 
-```lean
-theorem deadlock_freedom (I) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I) :
-  ∀ N, ∀ ρ : Run I N, Fair ρ → ¬ Deadlock ρ ∧ CellFresh ρ
-```
-
-The first conjunct is the theorem above. The second conjunct is **not true**
-of this semantics, even after `Fair.prio`.
-
-`CellFresh` says: if `cell dst label` strictly increases at step `i`, then
-some later step `j > i` is `recvBulk r`, `recvPrio r`, or `exec r` for a live
-`r` with `tname r = dst`, and `observed r label` at `j + 1` is at least the
-post-write value.
-
-Two fair runs fail it.
+An earlier statement quantified over every reader name and every label a
+program might write, and asked for a later `recvBulk`, `recvPrio`, or `exec`.
+Two fair runs fail that statement. Both are closed by the statement and the
+checker, not by a change to the step relation.
 
 **No live reader.** Let `R` be `perPeer`, or a `one` template that has already
 taken a killing `terminate`. Let `W` be a non-terminable `one` whose program
 contains `.cell R L 1`. `W` runs that effect. The cell goes from 0 to 1 and
 `dirty` becomes true. `readersOf` is empty, so `wakeReaders` enqueues nothing.
-No instance of `R` ever takes `recvBulk`, `recvPrio`, or `exec`. `Fair.prio`
-holds because `recvPrio` of a reader that does not exist is never enabled.
-`Fair.weak` and `Fair.bulk` hold. `LocalOk` does not reject the program:
-`effectsOk` does not require a cell effect to be an edge.
+No instance of `R` is ever alive to take `recvPrio`. `Fair.prio` holds because
+`recvPrio` of a reader that does not exist is never enabled. A dead or
+never-spawned reader has nothing to be fresh about, so `CellFresh` quantifies
+only over instances that are alive at the write and stay alive.
 
-**Undeclared label.** `readCells` stores `observed` only for
-`cellLabels`, the labels of edges with `effect = cell` and `dst` equal to the
-reader's template. A program can still write some other label. A later
-`recvPrio` of a live reader records the edge labels and leaves that
-`observed` entry at its initial 0, which is below the written value.
+**Undeclared label.** `readCells` stores `observed` only for `cellLabels`, the
+labels of edges with `effect = cell` and `dst` equal to the reader's template.
+A program could write some other label, and a later `recvPrio` of a live
+reader would leave that `observed` entry at 0. `effectsOk` now rejects a
+`.cell R L _` effect unless it is a non-blocking cell edge into `R` with label
+`L`. `GraphOk.struct` includes `cellEffectFails`: a listed `cellEffects` entry
+with no such edge is not `GraphOk`. `examples/undeclared-cell.json` fails with
 
-`Fair.prio` is the right hypothesis for the scheduler gap (a run that always
-prefers `recvBulk` while a priority wake is enabled only at idle instants).
-It does not create a reader, and it does not make `readCells` record a label
-that is not an edge.
+```
+fail: cell effect writer/idle -[Ghost]-> reader is not a declared cell edge
+```
 
-What the priority rule does give, and what is in the development as lemmas
-rather than as `CellFresh`: a non-terminable multiplicity-`one` template's
-core stays alive (`core_alive`); a declared cell label is a priority label
-(`edge_in_prio`); an idle live actor with that label on its lane has
-`recvPrio` enabled (`recv_prio_enabled`), because a priority message has
-`callFrom = none` (`CallTagInv.prioPlain`) and such a delivery returns
-`some`. The drain itself is `Fair.prio`.
+`CellFresh` assumes `label ∈ cellLabels`, which is what that check forces of
+every program `LocalOk` accepts.
 
 ## Definitions the statement uses
 
@@ -129,18 +126,22 @@ by `Assumptions`, not by the height induction.
 ```lean
 def CellFresh {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   ∀ i dst label,
+    label ∈ cellLabels I.desc dst →
     ((ρ.cfg i).cell dst label).value < ((ρ.cfg (i + 1)).cell dst label).value →
-    ∃ j r, i < j ∧ tname r = dst ∧ ((ρ.cfg j).st r).life = .alive ∧
-      (ρ.act j = .recvBulk r ∨ ρ.act j = .recvPrio r ∨ ρ.act j = .exec r) ∧
-      ((ρ.cfg (i + 1)).cell dst label).value ≤ ((ρ.cfg (j + 1)).observed r label)
+    ∀ r, tname r = dst →
+      (∀ t, i ≤ t → ((ρ.cfg t).st r).life = .alive) →
+      ∃ j, i < j ∧
+        ((ρ.cfg (i + 1)).cell dst label).value ≤ ((ρ.cfg j).observed r label)
 ```
 
-A cell write sets `value := max(old, payload)` and `dirty := true`. If `dirty`
-was clear it upserts one priority wake per live reader (`wakeReaders`).
-`readCells` clears `dirty` and stores the value in `observed`, and it runs
-from `deliver` (hence `recvBulk` and `recvPrio`), from spawn, and from a
-killing `terminate` (`exec`). Spawn is not one of the three witness actions.
-An `exec` that is not `terminate` does not call `readCells`.
+`cellLabels` is the labels of edges with `effect = cell` and `dst` equal to
+the reader template. A cell write sets `value := max(old, payload)` and
+`dirty := true`. If `dirty` was clear it upserts one priority wake per live
+reader (`wakeReaders`). `readCells` clears `dirty` and stores the value in
+`observed`. It runs from `deliver` (hence `recvBulk` and `recvPrio`), from
+spawn, and from a killing `terminate`. The witness index is a world after the
+reading step, so `observed` there already holds the value. An `exec` that is
+not `terminate` does not call `readCells`.
 
 ### `GraphOk`
 
@@ -170,7 +171,11 @@ def LocalOk (I : Impl) : Prop := localOkB I = true
 `compatFails I.desc = []`, and `stepsCoverB`. A terminable template's
 programs contain no bulk `send`, `trySend`, or `call` (`noBulkSend` inside
 `transitionOk`). `prioOk` bounds the declared priority labels by
-`priorityBound`.
+`priorityBound`. Inside `transitionOk`, `effectsOk` requires every
+`.cell R L _` effect to be a non-blocking cell edge from the transition's
+template and target state into `R` with label `L`. The same shape is
+`cellEffectFails` on a description's `cellEffects` list, and that list is part
+of `structLines`, so `GraphOk.struct` rejects an undeclared cell write.
 
 ### `Assumptions`
 
@@ -228,6 +233,7 @@ From `lake build Deadlock` (`#print axioms`):
 'Deadlock.below_idle' depends on axioms: [propext, Classical.choice, Quot.sound]
 'Deadlock.never_stuck' depends on axioms: [propext, Classical.choice, Quot.sound]
 'Deadlock.deadlock_freedom' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Deadlock.cell_fresh' depends on axioms: [propext, Classical.choice, Quot.sound]
 ```
 
 `propext`, `Classical.choice`, and `Quot.sound` are the standard Lean kernel

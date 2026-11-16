@@ -814,7 +814,7 @@ theorem name_lines (D : Description) (hG : GraphOk D) : nameFails D = [] := by
   have h := hG.struct
   unfold structLines at h
   exact append_nil_left (append_nil_left (append_nil_left (append_nil_left
-    (append_nil_left (append_nil_left (append_nil_left (append_nil_left h)))))))
+    (append_nil_left (append_nil_left (append_nil_left (append_nil_left (append_nil_left h))))))))
 
 theorem accum_fresh {α : Type} [DecidableEq α] (acc xs : List α) (hacc : acc.Nodup)
     (h : (xs.foldl (fun acc x => if acc.elem x then acc else acc ++ [x]) acc).length =
@@ -1444,7 +1444,7 @@ theorem endpoint_lines (D : Description) (hG : GraphOk D) : endpointFails D = []
   have h := hG.struct
   unfold structLines at h
   exact append_nil_right (append_nil_left (append_nil_left (append_nil_left
-    (append_nil_left (append_nil_left (append_nil_left h))))))
+    (append_nil_left (append_nil_left (append_nil_left (append_nil_left h)))))))
 
 theorem edge_dst_template (D : Description) (h : endpointFails D = []) (e : Edge) (he : e ∈ D.edges) :
     hasTemplate D e.dst = true := by
@@ -1585,6 +1585,9 @@ theorem sends_outside (D : Description) (template state dst : String) (es : List
         | false => rfl
         | true => exact absurd ((beq_iff_eq).mp hbb) hne
       simp [hne]
+      exact ih hok.2
+    | cell _ _ _ =>
+      simp [effectsOk, sendsTo, Bool.and_eq_true] at hok
       exact ih hok.2
     | _ =>
       simp [effectsOk, sendsTo] at hok ⊢

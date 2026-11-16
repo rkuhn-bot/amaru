@@ -143,6 +143,19 @@ theorem lost_wake_fails : render lostWakeDesc =
     "fail: superseding edge Wake misses cell conditions readPoints, dirtyBit" := by
   native_decide
 
+def undeclaredCellDesc : Description where
+  name := "undeclared-cell"
+  freshNames := true
+  templates := [tpl "writer" 10 ["idle"] "idle" true, tpl "reader" 10 ["idle"] "idle" true]
+  edges := []
+  compatibility := .all
+  steps := []
+  cellEffects := [{ src := "writer", srcState := "idle", dst := "reader", label := "Ghost" }]
+
+theorem undeclared_cell_fails : render undeclaredCellDesc =
+    "fail: cell effect writer/idle -[Ghost]-> reader is not a declared cell edge" := by
+  native_decide
+
 def rs (role state : String) : RoleState := { role, state }
 
 def fetchRoles : List String := ["select_chain", "fetch_blocks", "header_store"]

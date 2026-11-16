@@ -278,6 +278,14 @@ private def decodeGroups (v : JVal) : Except String CompatMode := do
   let groups ← (← asArr (← field v "groups") "groups").mapM decodeGroup
   return .groups groups
 
+private def decodeCellEffect (v : JVal) : Except String CellEffect := do
+  return {
+    src := ← asString (← field v "src") "cellEffect.src"
+    srcState := ← asString (← field v "srcState") "cellEffect.srcState"
+    dst := ← asString (← field v "dst") "cellEffect.dst"
+    label := ← asString (← field v "label") "cellEffect.label"
+  }
+
 private def decodeStep (v : JVal) : Except String CompatStep := do
   return {
     template := ← asString (← field v "template") "transition.template"
@@ -305,7 +313,10 @@ def decodeDescription (v : JVal) : Except String Description := do
   let steps ← match jget v "transitions" with
     | none => pure []
     | some xs => (← asArr xs "transitions").mapM decodeStep
-  return { name, freshNames, templates, edges, compatibility, steps }
+  let cellEffects ← match jget v "cellEffects" with
+    | none => pure []
+    | some xs => (← asArr xs "cellEffects").mapM decodeCellEffect
+  return { name, freshNames, templates, edges, compatibility, steps, cellEffects }
 
 def parseDescription (s : String) : Except String Description := do
   decodeDescription (← parseJson s)

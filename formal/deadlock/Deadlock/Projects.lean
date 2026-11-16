@@ -580,7 +580,7 @@ theorem state_lines (D : Description) (hG : GraphOk D) : stateFails D = [] := by
   unfold structLines at h
   exact append_nil_right
     (append_nil_left (append_nil_left (append_nil_left (append_nil_left
-      (append_nil_left (append_nil_left (append_nil_left h)))))))
+      (append_nil_left (append_nil_left (append_nil_left (append_nil_left h))))))))
 
 theorem filterMap_mem_none {α β : Type} (f : α → Option β) (xs : List α) (a : α)
     (h : xs.filterMap f = []) (ha : a ∈ xs) : f a = none := by

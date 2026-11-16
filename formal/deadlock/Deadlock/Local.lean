@@ -39,6 +39,7 @@ def effectsOk (D : Description) (template toState : String) : List Eff → Bool
   | .send d l _ :: es => hasEdge D template toState d .send .blocking l && effectsOk D template toState es
   | .trySend d l _ :: es => hasEdge D template toState d .trySend .nonBlocking l && effectsOk D template toState es
   | .call d l _ :: es => hasEdge D template toState d .call .blocking l && effectsOk D template toState es
+  | .cell d l _ :: es => hasEdge D template toState d .cell .nonBlocking l && effectsOk D template toState es
   | _ :: es => effectsOk D template toState es
 
 def hasTerminate : List Eff → Bool
@@ -157,14 +158,17 @@ structure Assumptions (I : Impl) : Prop where
     ∀ (w : World) (id : InstId) (k : Cont),
       (w.st id).phase = .awaitPeer k → Enabled I w (.finish id)
 
-/-- After a cell write that raises the stored value to `v`, some later step of a
-live reader of that template read-and-clears and records a value ≥ `v`. -/
+/-- After a declared cell label strictly rises, every instance of that template
+which is already alive and stays alive eventually records at least the written
+value. A reader that is dead or never spawned has nothing to observe. -/
 def CellFresh {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   ∀ i dst label,
+    label ∈ cellLabels I.desc dst →
     ((ρ.cfg i).cell dst label).value < ((ρ.cfg (i + 1)).cell dst label).value →
-    ∃ j r, i < j ∧ tname r = dst ∧ ((ρ.cfg j).st r).life = .alive ∧
-      (ρ.act j = .recvBulk r ∨ ρ.act j = .recvPrio r ∨ ρ.act j = .exec r) ∧
-      ((ρ.cfg (i + 1)).cell dst label).value ≤ ((ρ.cfg (j + 1)).observed r label)
+    ∀ r, tname r = dst →
+      (∀ t, i ≤ t → ((ρ.cfg t).st r).life = .alive) →
+      ∃ j, i < j ∧
+        ((ρ.cfg (i + 1)).cell dst label).value ≤ ((ρ.cfg j).observed r label)
 
 /-! Boolean checks imply the facts the invariant uses. -/
 

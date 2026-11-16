@@ -543,9 +543,20 @@ def compatFails (D : Description) : List String :=
   | .groups gs =>
     gs.flatMap (fun g => groupWellformed D g ++ groupClosure D g) ++ uncoveredEdges D gs
 
+/-- A listed cell write is a non-blocking cell edge with the same endpoints and label. -/
+def declaredCell (D : Description) (src ss dst label : String) : Bool :=
+  D.edges.any fun e =>
+    e.src == src && e.srcState == ss && e.dst == dst && e.effect == .cell &&
+      e.kind == .nonBlocking && e.label == label
+
+def cellEffectFails (D : Description) : List String :=
+  D.cellEffects.filterMap fun w =>
+    if declaredCell D w.src w.srcState w.dst w.label then none
+    else some s!"fail: cell effect {w.src}/{w.srcState} -[{w.label}]-> {w.dst} is not a declared cell edge"
+
 def structLines (D : Description) : List String :=
   nameFails D ++ stateFails D ++ endpointFails D ++ kindFails D ++ scopeFails D ++
-    cellFails D ++ ingressFails D ++ allowedFails D ++ compatFails D
+    cellFails D ++ cellEffectFails D ++ ingressFails D ++ allowedFails D ++ compatFails D
 
 def priorityFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
