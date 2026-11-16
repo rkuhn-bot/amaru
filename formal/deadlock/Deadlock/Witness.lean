@@ -58,8 +58,13 @@ def producerId : InstId := .core "producer"
 
 def sinkId : InstId := .core "sink"
 
+def runFrom (I : Impl) : Option World → List Action → Option World
+  | w, [] => w
+  | none, _ :: _ => none
+  | some w, a :: as => runFrom I (apply I a w) as
+
 def afterActs (acts : List Action) : Option World :=
-  acts.foldl (fun acc a => acc.bind (apply parkImpl a)) (some (initWorld parkImpl 0))
+  runFrom parkImpl (some (initWorld parkImpl 0)) acts
 
 def phaseTag : Phase → Nat
   | .parked _ _ _ => 1
@@ -81,5 +86,68 @@ theorem parks_on_second_send : producerTag (afterActs parkActs) = 1 := by native
 /-- The sink then receives, which admits the parked send and resumes the producer. -/
 theorem resumes_after_receive :
     producerTag (afterActs (parkActs ++ [.recvBulk sinkId])) = 2 := by native_decide
+
+theorem run_reachable (I : Impl) (N : Nat) (w0 : World) (h0 : Reachable I N w0)
+    (acts : List Action) (w : World) (h : runFrom I (some w0) acts = some w) : Reachable I N w := by
+  induction acts generalizing w0 with
+  | nil =>
+    simp [runFrom] at h
+    cases h
+    exact h0
+  | cons a acts ih =>
+    simp [runFrom] at h
+    cases ha : apply I a w0 with
+    | none =>
+      cases acts <;> simp [runFrom, ha] at h
+    | some w1 =>
+      simp [ha] at h
+      exact ih w1 (Reachable.step w0 w1 a h0 ha) h
+
+theorem run_snoc (I : Impl) (w0 : World) (acts : List Action) (a : Action) :
+    runFrom I (some w0) (acts ++ [a]) = (runFrom I (some w0) acts).bind (apply I a) := by
+  induction acts generalizing w0 with
+  | nil => simp [runFrom, Option.bind]
+  | cons b bs ih =>
+    simp [runFrom, List.cons_append]
+    cases apply I b w0 with
+    | none =>
+      cases bs <;> simp [runFrom, Option.bind]
+    | some w1 => simp [ih]
+
+/-- The parked producer is a reachable world, not an extra initial state. -/
+theorem park_reachable : ∃ w, afterActs parkActs = some w ∧ Reachable parkImpl 0 w ∧
+    ∃ dst isCall k, (w.st producerId).phase = .parked dst isCall k := by
+  have htag := parks_on_second_send
+  cases hw : afterActs parkActs with
+  | none => simp [producerTag, hw] at htag
+  | some w =>
+    have hR := run_reachable parkImpl 0 (initWorld parkImpl 0) Reachable.init parkActs w
+      (by simpa [afterActs] using hw)
+    cases hph : (w.st producerId).phase with
+    | parked dst isCall k =>
+      exact ⟨w, rfl, hR, ⟨dst, isCall, k, hph⟩⟩
+    | idle => simp [producerTag, phaseTag, hw, hph] at htag
+    | run _ => simp [producerTag, phaseTag, hw, hph] at htag
+    | awaitReply _ _ => simp [producerTag, phaseTag, hw, hph] at htag
+    | awaitEffect _ => simp [producerTag, phaseTag, hw, hph] at htag
+    | awaitPeer _ => simp [producerTag, phaseTag, hw, hph] at htag
+    | crashed => simp [producerTag, phaseTag, hw, hph] at htag
+
+/-- From that reachable world, receiving at the sink is enabled and the producer is idle again. -/
+theorem park_unblocks : ∃ w w', afterActs parkActs = some w ∧ Reachable parkImpl 0 w ∧
+    (∃ dst isCall k, (w.st producerId).phase = .parked dst isCall k) ∧
+    apply parkImpl (.recvBulk sinkId) w = some w' ∧ (w'.st producerId).phase = .idle := by
+  obtain ⟨w, hw, hR, dst, isCall, k, hph⟩ := park_reachable
+  have htag := resumes_after_receive
+  have hrun : runFrom parkImpl (some (initWorld parkImpl 0)) parkActs = some w := by
+    simpa [afterActs] using hw
+  have hfold := run_snoc parkImpl (initWorld parkImpl 0) parkActs (.recvBulk sinkId)
+  simp [afterActs, hfold, hrun, Option.bind] at htag
+  cases ha : apply parkImpl (.recvBulk sinkId) w with
+  | none => simp [ha, Option.bind, producerTag] at htag
+  | some w' =>
+    simp [ha, Option.bind, producerTag, phaseTag] at htag
+    cases hph' : (w'.st producerId).phase <;> simp [hph', phaseTag] at htag
+    exact ⟨w, w', hw, hR, ⟨dst, isCall, k, hph⟩, ha, hph'⟩
 
 end Deadlock

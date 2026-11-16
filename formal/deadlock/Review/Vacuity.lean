@@ -22,8 +22,7 @@ is `spawn`. `Action.ingress` makes that case split non-exhaustive:
 
 The old conclusion `vacuous : ∀ I N ρ, ¬Deadlock ρ ∧ CellFresh ρ`, with no
 `LocalOk`, `GraphOk`, `Assumptions`, or `Fair` hypothesis, therefore no longer
-builds. `parkImpl` passes `park_graph_ok` and `park_local_ok`. On that
-instance `parks_on_second_send` is the world after ingress and two sends, with
-the producer parked, and `resumes_after_receive` is the world after the sink
-receives, with the producer idle again.
+builds. `parkImpl` passes `park_graph_ok` and `park_local_ok`. `park_reachable` is a
+world reached from the initial world in which the producer is parked, and
+`park_unblocks` is the enabled `recvBulk` that leaves the producer idle.
 -/

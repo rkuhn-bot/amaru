@@ -5,6 +5,29 @@ Nothing in the development uses `sorry` or `admit`.
 
 ## What is proved
 
+The statements that do not depend on an infinite `Fair` `Run` are these.
+
+`park_graph_ok` and `park_local_ok` are one checked instance (`GraphOk` and
+`LocalOk`). `park_reachable` is a world reached from `initWorld` in which the
+producer is parked on the sink. `park_unblocks` is the next step: `recvBulk`
+on the sink applies, and the producer is idle again. That world is in the set
+a safety theorem about reachable worlds quantifies over, and it is not quiet.
+
+`FinExec` is a finite execution from `initWorld` that has stopped: no action
+applies to the last world. `fin_exec_reachable` says every prefix, including
+the last world, is `Reachable`. `blocking_park_not_terminal` and
+`fin_exec_not_blocked_on_idle` say that world cannot be one where a live actor
+is parked on a blocking send or call whose target is idle: `recvBulk` on that
+target is enabled. This is only the idle-target case. A parked call, an
+`awaitReply`, an effect wait, and a peer wait are not yet covered by a single
+"no live blocked actor at the end" theorem. The height ranking that would
+discharge those (`park_below`, `call_below`, `reply_below`) is proved;
+assembling it into `blocked_progress` for every wait, including a target that
+is itself blocked, is not in this revision.
+
+The infinite-run theorems are still here, as corollaries of fairness rather
+than as the statement that shows the model is non-vacuous:
+
 ```lean
 theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
     (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ) : ¬ Deadlock ρ
@@ -19,7 +42,10 @@ peer waits are discharged by `Assumptions.internal_complete` and
 `Assumptions.peer_complete`. A blocking send or a parked call waits on a
 strictly lower actor. An `awaitReply` cannot last: while the caller stays
 there it cannot mint a new `callFrom`, so `CallTagInv` keeps the callee in
-`handlerOwes` or `replyPending`, and that phase is not `idle`.
+`handlerOwes` or `replyPending`, and that phase is not `idle`. `cell_fresh`
+still uses `Fair.prio` on an infinite run. The matching safety fact, that a
+stopped execution cannot leave a live reader with that label still queued, is
+not a separate theorem yet.
 
 `cell_fresh` is the cell half of the target conjunction, for the `CellFresh`
 below. After a declared cell label strictly rises, every reader instance of
@@ -86,7 +112,7 @@ structure Fair {I : Impl} {N : Nat} (ρ : Run I N) : Prop where
   weak : ∀ (a : Action) (i : Nat), forced a = true →
     (∀ j, i ≤ j → Enabled I (ρ.cfg j) a) → ∃ j, i ≤ j ∧ ρ.act j = a
   bulk : ∀ (s : InstId),
-    (∀ i, ∃ j, i ≤ j ∧ CanReceive (ρ.cfg j) s) →
+    (∀ i, ∃ j, i ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk s)) →
     (∀ i, ∃ j, i ≤ j ∧ ρ.act j = .recvBulk s)
   prio : ∀ (s : InstId),
     (∀ i, ∃ j, i ≤ j ∧ Enabled I (ρ.cfg j) (.recvPrio s)) →
@@ -94,11 +120,12 @@ structure Fair {I : Impl} {N : Nat} (ρ : Run I N) : Prop where
 ```
 
 `forced (.spawn _) = false` and `forced _ = true` otherwise. `Enabled` is
-`apply ≠ none`. `CanReceive` is idle, alive, and a nonempty bulk box or parked
-list. `prio` is strong fairness: enabled infinitely often implies taken
-infinitely often. It is the runtime draining a priority wake rather than
-leaving it behind the bulk mailbox. `recvBulk` is not disabled by a nonempty
-priority lane.
+`apply ≠ none`. `bulk` is stated on `Enabled`, not on `CanReceive`: a call at
+the head can make the mailbox look ready while `deliver` refuses it.
+`uniqueKeys` and `callTotal` are what turn readiness into `Enabled`. `prio`
+is strong fairness: enabled infinitely often implies taken infinitely often.
+It is the runtime draining a priority wake rather than leaving it behind the
+bulk mailbox. `recvBulk` is not disabled by a nonempty priority lane.
 
 ### `Deadlock`
 
@@ -224,6 +251,19 @@ not terminable. In-place restart is not a step of this semantics.
 
 The dead-instance lift (a dead actor may still be owed a message) is not in
 this development.
+
+## Still open
+
+- **F4/F5.** Per-peer subtree kill, calls inside a subtree, and routing by a
+  subtree key. Design only, in `SUBTREE.md`. Not implemented.
+- **F7.** Peer waits are not given their own timeout. `Assumptions.peer_complete`
+  is an oracle flag, not a clock.
+- **F10.** No liveness theorem that a message accepted into a mailbox is
+  eventually delivered. `cell_fresh` is the cell special case, and it still
+  assumes a `Fair` infinite run.
+- **F11.** `CellFlags` is not checked against the set of writers. A cell edge
+  is accepted when the flag word passes `cellFails`, not when the program
+  effects are shown to be the only writers.
 
 ## Axioms
 
