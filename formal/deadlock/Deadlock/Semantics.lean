@@ -540,6 +540,12 @@ structure Fair {I : Impl} {N : Nat} (ρ : Run I N) : Prop where
   bulk : ∀ (s : InstId),
     (∀ i, ∃ j, i ≤ j ∧ CanReceive (ρ.cfg j) s) →
     (∀ i, ∃ j, i ≤ j ∧ ρ.act j = .recvBulk s)
+  /-- The runtime drains a priority lane that is enabled infinitely often.
+  `recvBulk` stays enabled beside `recvPrio`; this is the policy that the
+  priority wake is not left behind a bulk mailbox. -/
+  prio : ∀ (s : InstId),
+    (∀ i, ∃ j, i ≤ j ∧ Enabled I (ρ.cfg j) (.recvPrio s)) →
+    (∀ i, ∃ j, i ≤ j ∧ ρ.act j = .recvPrio s)
 
 inductive WaitKind where
   | blockingSend (dst : InstId)

@@ -10768,4 +10768,209 @@ theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA :
   obtain ⟨s, i, _, hS, _⟩ := deadlock_kind ρ hA hF hD
   exact never_stuck I hL hG hA ρ hF s i hS
 
+/-- A priority message whose label is `l`. -/
+def hasLabel (ms : List Msg) (l : String) : Prop :=
+  ∃ m, m ∈ ms ∧ m.label = l
+
+theorem hasLabel_any (ms : List Msg) (l : String) (h : hasLabel ms l) :
+    (ms.any fun p => p.label == l) = true := by
+  rcases h with ⟨m, hm, hl⟩
+  induction ms with
+  | nil => cases hm
+  | cons p ps ih =>
+    cases hm with
+    | head => simp [List.any_cons, hl]
+    | tail _ ht =>
+      have ih' := ih ht
+      rw [List.any_cons]
+      by_cases hp : p.label = l
+      · simp [hp]
+      · have hf : (p.label == l) = false := by simpa [beq_iff_eq] using hp
+        simpa [hf] using ih'
+
+theorem any_hasLabel (ms : List Msg) (l : String) (h : (ms.any fun p => p.label == l) = true) :
+    hasLabel ms l := by
+  induction ms with
+  | nil => simp at h
+  | cons p ps ih =>
+    rw [List.any_cons] at h
+    by_cases hp : (p.label == l) = true
+    · exact ⟨p, List.Mem.head _, (beq_iff_eq).mp hp⟩
+    · have hf : (p.label == l) = false := by
+        cases hb : p.label == l <;> simp_all
+      rw [hf, Bool.false_or] at h
+      obtain ⟨m, hm, hl⟩ := ih h
+      exact ⟨m, List.Mem.tail _ hm, hl⟩
+
+theorem not_hasLabel_any (ms : List Msg) (l : String) (h : ¬ hasLabel ms l) :
+    (ms.any fun p => p.label == l) = false := by
+  cases ha : (ms.any fun p => p.label == l)
+  · rfl
+  · exact absurd (any_hasLabel ms l ha) h
+
+theorem upsert_hasLabel (ms : List Msg) (m : Msg) (l : String) (h : hasLabel ms l) :
+    hasLabel (upsertPrio ms m) l := by
+  rcases h with ⟨p, hp, hl⟩
+  unfold upsertPrio
+  by_cases hany : (ms.any fun q => q.label == m.label) = true
+  · simpa [hany] using ⟨p, hp, hl⟩
+  · refine ⟨p, ?_, hl⟩
+    have hf : (ms.any fun q => q.label == m.label) = false := by
+      cases hb : (ms.any fun q => q.label == m.label) <;> simp_all
+    simp [hf]
+    exact Or.inl hp
+
+theorem tryWake_hasLabel (D : Description) (w : World) (dstId : InstId) (label wake : String)
+    (writer i : InstId) (h : hasLabel ((w.st i).prio) wake) :
+    hasLabel (((tryWake D w dstId label writer).st i).prio) wake := by
+  unfold tryWake
+  by_cases hif : ((w.st dstId).life == .alive &&
+      decide ((w.st dstId).prio.length < capPrio D w.N dstId) &&
+      !((w.st dstId).prio.any fun p => p.label == label)) = true
+  · simp [hif, setActor]
+    by_cases hi : i = dstId
+    · simpa [hi] using upsert_hasLabel _ _ wake h
+    · simpa [hi] using h
+  · simpa [hif] using h
+
+theorem tryWake_install (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer : InstId) (hlive : (w.st dstId).life = .alive)
+    (hroom : (w.st dstId).prio.length < capPrio D w.N dstId)
+    (hfresh : ((w.st dstId).prio.any fun p => p.label == label) = false) :
+    hasLabel (((tryWake D w dstId label writer).st dstId).prio) label := by
+  unfold tryWake
+  simp [hlive, hroom, hfresh, upsertPrio, setActor]
+  exact ⟨{ label := label, sender := writer, callFrom := none },
+    List.mem_append.mpr (Or.inr (List.Mem.head _)), rfl⟩
+
+theorem fold_tryWake_hasLabel (D : Description) (ids : List InstId) (w : World)
+    (label : String) (writer r : InstId) (wake : String)
+    (h : hasLabel ((w.st r).prio) wake) :
+    hasLabel (((ids.foldl (fun w id => tryWake D w id label writer) w).st r).prio) wake := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    exact ih _ (tryWake_hasLabel D w j label wake writer r h)
+
+/-- The latest index `≤ n` at which `d` is false. `d 0` is false. -/
+def lastClean (d : Nat → Bool) : Nat → Nat
+  | 0 => 0
+  | n + 1 => if d (n + 1) = false then n + 1 else lastClean d n
+
+theorem lastClean_spec (d : Nat → Bool) (n : Nat) (h0 : d 0 = false) :
+    lastClean d n ≤ n ∧ d (lastClean d n) = false ∧
+      ∀ u, lastClean d n < u → u ≤ n → d u = true := by
+  induction n with
+  | zero =>
+    refine ⟨Nat.le_refl _, h0, ?_⟩
+    intro u hu hun
+    omega
+  | succ n ih =>
+    by_cases h : d (n + 1) = false
+    · simp [lastClean, h]
+      intro u hu hun
+      omega
+    · have ht : d (n + 1) = true := by cases hb : d (n + 1) <;> simp_all
+      simp [lastClean, h]
+      refine ⟨Nat.le_trans ih.1 (Nat.le_succ _), ih.2.1, ?_⟩
+      intro u hu hun
+      have hle : u ≤ n ∨ u = n + 1 := by omega
+      cases hle with
+      | inl hlu => exact ih.2.2 u hu hlu
+      | inr heq => simpa [heq] using ht
+
+theorem core_of_one (D : Description) (dst : String) (t : Template)
+    (ht : templateOf D dst = some t) (hone : t.multiplicity = .one) :
+    InstId.core dst ∈ coreRoster D := by
+  have hname := template_name D dst t ht
+  rw [coreRoster]
+  refine List.mem_filterMap.mpr ⟨t, template_mem D dst t ht, ?_⟩
+  rw [hone]
+  have hb : (Multiplicity.one == Multiplicity.one) = true := rfl
+  simp [hb, hname]
+
+theorem init_core_alive (I : Impl) (N : Nat) (dst : String) (t : Template)
+    (ht : templateOf I.desc dst = some t) (hone : t.multiplicity = .one) :
+    ((initWorld I N).st (InstId.core dst)).life = .alive := by
+  have hmem := core_of_one I.desc dst t ht hone
+  unfold initWorld
+  rw [fold_read_st]
+  simp [hmem, initActor, tname, ht, withTokens]
+
+theorem core_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
+    (dst : String) (t : Template) (ht : templateOf I.desc dst = some t)
+    (hone : t.multiplicity = .one) (hterm : t.terminable = false) :
+    ∀ n, ((ρ.cfg n).st (InstId.core dst)).life = .alive := by
+  intro n
+  induction n with
+  | zero => simpa [ρ.start] using init_core_alive I N dst t ht hone
+  | succ n ih =>
+    by_cases hdie : ((ρ.cfg (n + 1)).st (InstId.core dst)).life = .alive
+    · exact hdie
+    · obtain ⟨tail, toState, replyTo, t', _, _, ht', hflag⟩ :=
+        only_terminate_kills I (ρ.act n) (ρ.cfg n) (ρ.cfg (n + 1)) (InstId.core dst)
+          (ρ.valid n) ih hdie
+      have hto : templateOf I.desc dst = some t' := by simpa [tname] using ht'
+      have hsame : t' = t := by
+        injection (hto.symm.trans ht)
+      simp [hsame, hterm] at hflag
+
+theorem readCells_value (D : Description) (w : World) (reader : InstId) (d l : String) :
+    ((readCells D w reader).cell d l).value = (w.cell d l).value := by
+  unfold readCells
+  induction cellLabels D (tname reader) generalizing w with
+  | nil => simp
+  | cons lab labs ih =>
+    simp only [List.foldl_cons]
+    have hstep : ((setObserved
+        (setCell w (tname reader) lab { (w.cell (tname reader) lab) with dirty := false })
+        reader lab (w.cell (tname reader) lab).value).cell d l).value = (w.cell d l).value := by
+      simp [setObserved, setCell]
+      by_cases hd : d = tname reader
+      · by_cases hl : l = lab <;> simp [hd, hl]
+      · simp [hd]
+    exact (ih _).trans hstep
+
+theorem edge_in_prio (I : Impl) (dst label : String) (h : label ∈ cellLabels I.desc dst) :
+    label ∈ prioLabels I dst := by
+  have hmem : label ∈
+      (I.transitions.filterMap fun tr =>
+        if tr.template == dst then some (selfLabels tr.program) else none).flatten ++
+      cellLabels I.desc dst ++
+      (I.transitions.map fun tr => cellWakeLabels dst tr.program).flatten := by
+    exact List.mem_append.mpr (Or.inl (List.mem_append.mpr (Or.inr h)))
+  simpa [prioLabels] using mem_dedup _ label hmem
+
+theorem deliver_noncall (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (hl : a.life = .alive) (hc : m.callFrom = none) :
+    ∃ w1 a1, deliver I w id a m = some (w1, a1) := by
+  simp [deliver, hl, hc]
+  split
+  · exact ⟨_, _, rfl⟩
+  · rename_i tr _
+    have hsome : m.callFrom.isSome = false := by simp [hc]
+    simp [hsome]
+
+theorem recv_prio_enabled (I : Impl) (w : World) (r : InstId) (label : String) (hT : CallTagInv w)
+    (hlive : (w.st r).life = .alive) (hidle : (w.st r).phase = .idle)
+    (hhas : hasLabel ((w.st r).prio) label) :
+    Enabled I w (.recvPrio r) := by
+  rcases hhas with ⟨m, hm, _⟩
+  cases hp : (w.st r).prio with
+  | nil => simp [hp] at hm
+  | cons m0 ms =>
+    have hplain : m0.callFrom = none := hT.prioPlain r m0 (by simp [hp])
+    obtain ⟨w1, a1, hdel⟩ := deliver_noncall I w r { (w.st r) with prio := ms } m0
+      (by simp [hlive]) hplain
+    have hdel' : deliver I w r
+        { life := (w.st r).life, typestate := (w.st r).typestate, phase := (w.st r).phase,
+          box := (w.st r).box, prio := ms, parked := (w.st r).parked,
+          tokens := (w.st r).tokens } m0 = some (w1, a1) := by
+      simpa [hlive, hidle] using hdel
+    unfold Enabled apply receivePrio
+    simp [hp, hlive, hidle]
+    rw [hlive, hidle] at hdel'
+    simp [hdel']
+
 end Deadlock

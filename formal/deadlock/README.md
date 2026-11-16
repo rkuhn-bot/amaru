@@ -77,11 +77,11 @@ says that after a cell write strictly raises the stored value, some later step
 of a live reader of that template is a receive or an exec that read-and-clears,
 and the value it records is at least the written one.
 
-**This statement is not yet a theorem.** The height induction that would
-discharge a blocking send or a call reply — destination at strictly lower
-rank, finite program, FIFO index in `parked` then `box`, one reply before
-terminate — is not closed. What is closed is recorded below. Nothing in the
-development uses `sorry`.
+`deadlock_freedom` proves `¬ Deadlock` for every fair run. The conjunction
+with unrestricted `CellFresh` is not a theorem: a fair run can raise a cell
+that has no live reader, and `readCells` only records labels of declared cell
+edges. `THEOREM.md` states the proved theorems, those two counterexamples, and
+the axiom list. Nothing in the development uses `sorry`.
 
 ## Assumptions
 
@@ -107,8 +107,13 @@ structure Assumptions (I : Impl) : Prop where
 `I.transitions`. In the Lean model the list is the model, so the field is the
 identity on that list; applying the development to Rust is assuming the
 exporter told the truth. `internal_complete` and `peer_complete` are A-int and
-A-peer. Fair scheduling is the separate `Fair` hypothesis (F1 on forced
-actions, F3 so priority does not starve the bulk mailbox). Spawn is not forced.
+A-peer. Fair scheduling is the separate `Fair` hypothesis. `Fair.weak` is F1
+on forced actions. `Fair.bulk` is F3, so a mailbox that can receive infinitely
+often is received infinitely often. `Fair.prio` is strong fairness for
+`recvPrio`: enabled infinitely often means taken infinitely often. That is the
+runtime draining a priority wake rather than leaving it behind the bulk
+mailbox. `recvBulk` stays enabled when the priority lane is also enabled; the
+step relation is unchanged. Spawn is not forced.
 
 `not_stuck_effect_assumed` and `not_stuck_peer_assumed` use those two fields.
 They are not derived from `GraphOk`.
@@ -189,10 +194,10 @@ for a send the actor did not itself perform.
 
 ## What is not covered
 
-- **The height induction itself**, and therefore `¬ Deadlock` for
-  `blockingSend` and `callReply`, and `CellFresh`. Cycle-freedom
-  (`heightsOkB_acyclic`) is proved and is only the well-foundedness of that
-  induction.
+- **Unrestricted `CellFresh`.** `¬ Deadlock` is proved. A priority wake that
+  sits on the lane of a live reader is what `Fair.prio` drains; a write with
+  no live reader, and a label that is not a declared cell edge, are not
+  observed. See `THEOREM.md`.
 - **Reachable worlds satisfy `Inv`, and `projects` is proved from that.** The
   items below are closed. The one state this bullet does not claim is the
   intermediate after a queue is cleared and before its senders resume.
@@ -372,9 +377,10 @@ for a send the actor did not itself perform.
   caller leaves `awaitReply`. A handler that still has work before the reply
   is not walked step by step: while the caller stays in `awaitReply` it cannot
   mint a new `callFrom`, so the callee keeps the reply obligation and is never
-  idle. `below_idle` is strong induction on residual height. `never_stuck` and
+  idle. `below_idle`   is strong induction on residual height. `never_stuck` and
   `deadlock_freedom` say a fair run has no actor blocked forever.
-  `CellFresh` and the dead-instance lift are not done.
+  The dead-instance lift is not done. `CellFresh` is not the unrestricted
+  claim; `THEOREM.md` records what is proved.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
