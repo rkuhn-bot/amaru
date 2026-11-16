@@ -629,11 +629,17 @@ def hasTimedPeer (D : Description) (name : String) : Bool :=
   | none => false
   | some t => !t.untimedPeer && D.edges.any fun e => e.src == name && e.effect == .peer
 
-/-- Some template in the cohort has a timed peer wait. That timeout is what can
-end a chain that would otherwise sit on an untimed peer, for example a
-mini-protocol timeout that kills the peer. -/
+/-- A timed peer in `name`'s subtree whose timeout kills that subtree. The kill,
+not a sibling's `finish`, is what ends a chain parked on an untimed member. -/
+def hasKillingPeer (D : Description) (name : String) : Bool :=
+  let s := templateSubtree D name
+  s != "" && D.templates.any fun t =>
+    t.subtree == s && t.timeoutKills && hasTimedPeer D t.name
+
+/-- An untimed peer ends a chain only when a timed peer in its subtree can end
+that chain by killing it. A cohort timed peer that merely `finish`es does not. -/
 def timedCohortEnds (D : Description) (name : String) : Bool :=
-  (cohortOf D name).any (hasTimedPeer D)
+  hasKillingPeer D name
 
 /-- An untimed peer with no timed cohort cut. `finish` stays disabled, so the
 wait is a legitimate end of its own chain and must not sit inside another
@@ -693,7 +699,8 @@ def cellPureFails (D : Description) : List String :=
 
 /-- A blocking send or a call makes the source depend on the destination. An
 untimed peer there is interior to the source's chain. It is allowed only when
-`timedCohortEnds`: a timed peer in the cohort can end the chain. -/
+`timedCohortEnds`: a timed peer in the same subtree kills that subtree, and the
+kill is what ends the chain. -/
 def interiorFails (D : Description) : List String :=
   D.edges.filterMap fun e =>
     if (e.kind == .blocking || e.effect == .call) = false then none
@@ -705,9 +712,9 @@ def interiorFails (D : Description) : List String :=
 
 /-- Untimed peer waits are allowed. `peerFails` rejects three placements: a pure
 untimed template that is not terminable, a cell wake of a pure untimed template,
-and a blocking send or call onto an untimed template whose cohort has no timed
-peer. The last of those is the interior wait. A timed peer in the cohort is the
-cut that makes the dependency legal. -/
+and a blocking send or call onto an untimed template that no subtree kill can
+end. The last of those is the interior wait. A timed peer whose timeout kills
+the subtree is the cut that makes the dependency legal. -/
 def peerFails (D : Description) : List String :=
   pureTermFails D ++ cellPureFails D ++ interiorFails D
 

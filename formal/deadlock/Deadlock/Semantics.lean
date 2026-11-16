@@ -539,8 +539,9 @@ def peerUntimed (D : Description) (id : InstId) : Bool :=
   | none => false
 
 /-- `finish` is enabled for this peer wait. A timed template always is. An
-untimed template is when a timed peer in its cohort can end the chain. A pure
-untimed wait (`templatePure`) is not: it is an external stall. -/
+untimed template is when a timed peer in its subtree can kill that subtree.
+A pure untimed wait (`templatePure`) is not: nothing kills it, so it is an
+external stall. -/
 def peerFinishable (D : Description) (id : InstId) : Bool :=
   match templateOf D (tname id) with
   | none => true

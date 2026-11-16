@@ -567,16 +567,25 @@ def takenPrio (a : Actor) (mid : Nat) : Prop :=
   | m :: _ => m.mid = mid
   | [] => False
 
-/-- Every reliable message is later the head consumed by `recvBulk` or `recvPrio`,
-matched by the id the storing actor assigned. A try-drop send and a superseding
-cell wake are not obligations. An admitted call leaves `awaitReply`. -/
+/-- A reliable message is later consumed by `recvBulk` or `recvPrio`, matched by
+the id the storing actor assigned, or a subtree kill credits it and fails whoever
+was waiting on that id. A route that does not resolve is failed by `noteStale`
+before the message is stored, so it is not an obligation here. A try-drop send
+and a superseding cell wake are not obligations. An admitted call leaves
+`awaitReply`. -/
 def Delivered {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   (∀ i id m, m ∈ ((ρ.cfg i).st id).box → m.reliable = true →
-    ∃ j, i ≤ j ∧ ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) m.mid) ∧
+    ∃ j, i ≤ j ∧
+      ((ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) m.mid) ∨
+        ∃ sub key, ρ.act j = .kill sub key ∧ isMember I.desc id sub key = true)) ∧
   (∀ i id p, p ∈ ((ρ.cfg i).st id).parked → p.msg.reliable = true →
-    ∃ j, i ≤ j ∧ ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) p.msg.mid) ∧
+    ∃ j, i ≤ j ∧
+      ((ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) p.msg.mid) ∨
+        ∃ sub key, ρ.act j = .kill sub key ∧ isMember I.desc id sub key = true)) ∧
   (∀ i id m, m ∈ ((ρ.cfg i).st id).prio → m.reliable = true →
-    ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) m.mid) ∧
+    ∃ j, i ≤ j ∧
+      ((ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) m.mid) ∨
+        ∃ sub key, ρ.act j = .kill sub key ∧ isMember I.desc id sub key = true)) ∧
   (∀ i c d k, ((ρ.cfg i).st c).phase = .awaitReply d k →
     ∃ j, i ≤ j ∧ ((ρ.cfg j).st c).phase ≠ .awaitReply d k)
 
@@ -592,12 +601,14 @@ theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (hG : GraphOk I.desc) 
     | succ n ih =>
       by_cases hlive : ((ρ.cfg (i + n + 1)).st id).life = .alive
       · exact hlive
-      · rcases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
+      · cases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
           (ρ.valid (i + n)) ih hlive with
-        | inl ⟨_, _, _, tpl, _, _, htpl, hflag⟩ =>
+        | inl hExecKill =>
+          rcases hExecKill with ⟨_, _, _, tpl, _, _, htpl, hflag⟩
           simp [Bool.and_eq_true] at hflag
           simp [terminableB, htpl, hflag.1] at hterm
-        | inr ⟨sub, key, _, hmem⟩ =>
+        | inr hSubKill =>
+          rcases hSubKill with ⟨sub, key, _, hmem⟩
           simp [member_terminable I.desc hG.subtrees id sub key hmem] at hterm
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
 
@@ -717,14 +728,16 @@ theorem dead_box_empty (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
   | init => exact (init_box I N id).1
   | step w w' a _ ha ih =>
     by_cases hprev : (w.st id).life = .alive
-    · rcases only_terminate_kills I a w w' id ha hprev hdead with
-      | inl ⟨tail, toState, replyTo, t, hact, hrun, ht, hflag⟩ =>
+    · cases only_terminate_kills I a w w' id ha hprev hdead with
+      | inl hExecKill =>
+        rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hflag⟩
         have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
           simp [apply, hact, execHead, hprev, hrun] at ha
           exact ha.symm
         rw [hstep]
         exact kill_box_empty I w id t tail toState replyTo ht hflag
-      | inr ⟨sub, key, hact, _⟩ =>
+      | inr hSubKill =>
+        rcases hSubKill with ⟨sub, key, hact, _⟩
         rw [hact] at ha
         have hk := kill_apply_world I w w' sub key ha
         rw [hk] at hdead ⊢
@@ -831,9 +844,10 @@ theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : N
       by_cases hlive : ((ρ.cfg (i + n + 1)).st id).life = .alive
       · exact hlive
       · have hempty : ((ρ.cfg (i + n + 1)).st id).box = [] := by
-          rcases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
+          cases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
               (ρ.valid (i + n)) ih hlive with
-          | inl ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩ =>
+          | inl hExecKill =>
+            rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩
             have hstep : ρ.cfg (i + n + 1) =
                 execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
                   ⟨.terminate :: tail, toState, replyTo⟩ := by
@@ -842,7 +856,8 @@ theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : N
               exact hv.symm
             rw [hstep]
             exact kill_box_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hflag
-          | inr ⟨sub, key, hact, _⟩ =>
+          | inr hSubKill =>
+            rcases hSubKill with ⟨sub, key, hact, _⟩
             have hv := ρ.valid (i + n)
             rw [hact] at hv
             have hk := kill_apply_world I (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) sub key hv
@@ -864,9 +879,10 @@ theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i 
       by_cases hlive : ((ρ.cfg (i + n + 1)).st id).life = .alive
       · exact hlive
       · have hempty : ((ρ.cfg (i + n + 1)).st id).parked = [] := by
-          rcases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
+          cases only_terminate_kills I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) id
               (ρ.valid (i + n)) ih hlive with
-          | inl ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩ =>
+          | inl hExecKill =>
+            rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, htpl, hflag⟩
             have hstep : ρ.cfg (i + n + 1) =
                 execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
                   ⟨.terminate :: tail, toState, replyTo⟩ := by
@@ -875,7 +891,8 @@ theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i 
               exact hv.symm
             rw [hstep]
             exact kill_park_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hflag
-          | inr ⟨sub, key, hact, _⟩ =>
+          | inr hSubKill =>
+            rcases hSubKill with ⟨sub, key, hact, _⟩
             have hv := ρ.valid (i + n)
             rw [hact] at hv
             have hk := kill_apply_world I (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) sub key hv
@@ -979,15 +996,16 @@ theorem fair_parked (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
     simpa [Nat.add_sub_cancel_left] using hk
 
 /-- A terminable actor stores no reliable message. A try-send and a cell wake
-may sit in its lanes; a reliable send, call, ingress, or self-schedule may not. -/
-def ReliableFree (a : Actor) : Prop :=
+may sit in its lanes. A same-subtree send or call is a program the sender, itself
+terminable, is not allowed to run, so it never lands. -/
+def ReliableFree (_D : Description) (_host : InstId) (a : Actor) : Prop :=
   (∀ m ∈ a.box, m.reliable = false) ∧
   (∀ p ∈ a.parked, p.msg.reliable = false) ∧
   (∀ m ∈ a.prio, m.reliable = false)
 
-theorem transport_free {a b : Actor} (h : ReliableFree a)
+theorem transport_free {D : Description} {host : InstId} {a b : Actor} (h : ReliableFree D host a)
     (hbox : b.box = a.box) (hpark : b.parked = a.parked) (hprio : b.prio = a.prio) :
-    ReliableFree b := by
+    ReliableFree D host b := by
   refine ⟨?_, ?_, ?_⟩
   · intro m hm
     rw [hbox] at hm
@@ -1000,7 +1018,7 @@ theorem transport_free {a b : Actor} (h : ReliableFree a)
     exact h.2.2 m hm
 
 theorem reliable_free_init (I : Impl) (N : Nat) (id : InstId) :
-    ReliableFree ((initWorld I N).st id) := by
+    ReliableFree I.desc id ((initWorld I N).st id) := by
   have h := init_box I N id
   have hp := init_prio_empty I N id
   refine ⟨?_, ?_, ?_⟩
@@ -1117,8 +1135,8 @@ theorem finish_prio (I : Impl) (w w' : World) (id i : InstId) (h : finishWait I 
 
 theorem enqueue_unreliable (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) (i : InstId) (hrel : msg.reliable = false)
-    (hfree : ReliableFree (w.st i)) :
-    ReliableFree ((enqueueOrPark w D sender dst msg isCall k).st i) := by
+    (hfree : ReliableFree D i (w.st i)) :
+    ReliableFree D i ((enqueueOrPark w D sender dst msg isCall k).st i) := by
   refine ⟨?_, ?_, ?_⟩
   · intro m hm
     rcases enqueue_box_mem w D sender dst msg isCall k i m hm with hm | ⟨_, heq, _⟩
@@ -1132,43 +1150,47 @@ theorem enqueue_unreliable (w : World) (D : Description) (sender dst : InstId) (
     rw [enqueue_prio w D sender dst msg isCall k i] at hm
     exact hfree.2.2 m hm
 
-/-- A blocking send from a checked program lands on a template that does not die. -/
+/-- A blocking send from a checked program lands on a permanent core, or stays in the subtree. -/
 theorem send_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hS : SemInv I w) (who : InstId) (k : Cont) (dst label : String) (hint : Nat) (es : List Eff)
     (hph : (w.st who).phase = .run k) (hk : k.rest = .send dst label hint :: es)
     (dstId : InstId) (hr : route w I.desc who dst = some dstId) :
-    terminableB I.desc (tname dstId) = false := by
+    terminableB I.desc (tname dstId) = false ∨ sameSubtree I.desc (tname who) (tname dstId) = true := by
   have hprog : effectsOk I.desc (tname who) (w.st who).typestate k.rest = true := by
     simpa [programOk, hph] using hS.prog who
   rw [hk] at hprog
   have hhead := head_send I.desc (tname who) (w.st who).typestate dst label hint es hprog
-  obtain ⟨e, he, _, _, hdst, heff, _, _⟩ :=
+  obtain ⟨e, he, hsrc, _, hdst, heff, _, _⟩ :=
     hasEdge_mem I.desc (tname who) (w.st who).typestate dst .send .blocking label hhead.1
-  obtain ⟨t, ht, _, htm⟩ := wait_template I hL hG e he (Or.inl heff)
+  obtain ⟨t, ht, hdisj⟩ := wait_template I hL hG e he (Or.inl heff)
   have hname := route_tname w I.desc who dst dstId hr
   have hto : templateOf I.desc (tname dstId) = some t := by
     rw [hname, ← hdst]
     exact ht
-  simp [terminableB, hto, htm]
+  rcases hdisj with ⟨_, htm⟩ | hsub
+  · exact Or.inl (by simp [terminableB, hto, htm])
+  · exact Or.inr (by simpa [hsrc, hname, hdst] using hsub)
 
-/-- A blocking call from a checked program lands on a template that does not die. -/
+/-- A blocking call from a checked program lands on a permanent core, or stays in the subtree. -/
 theorem call_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hS : SemInv I w) (who : InstId) (k : Cont) (dst label : String) (hint : Nat) (es : List Eff)
     (hph : (w.st who).phase = .run k) (hk : k.rest = .call dst label hint :: es)
     (dstId : InstId) (hr : route w I.desc who dst = some dstId) :
-    terminableB I.desc (tname dstId) = false := by
+    terminableB I.desc (tname dstId) = false ∨ sameSubtree I.desc (tname who) (tname dstId) = true := by
   have hprog : effectsOk I.desc (tname who) (w.st who).typestate k.rest = true := by
     simpa [programOk, hph] using hS.prog who
   rw [hk] at hprog
   have hhead := head_call I.desc (tname who) (w.st who).typestate dst label hint es hprog
-  obtain ⟨e, he, _, _, hdst, heff, _, _⟩ :=
+  obtain ⟨e, he, hsrc, _, hdst, heff, _, _⟩ :=
     hasEdge_mem I.desc (tname who) (w.st who).typestate dst .call .blocking label hhead.1
-  obtain ⟨t, ht, _, htm⟩ := wait_template I hL hG e he (Or.inr heff)
+  obtain ⟨t, ht, hdisj⟩ := wait_template I hL hG e he (Or.inr heff)
   have hname := route_tname w I.desc who dst dstId hr
   have hto : templateOf I.desc (tname dstId) = some t := by
     rw [hname, ← hdst]
     exact ht
-  simp [terminableB, hto, htm]
+  rcases hdisj with ⟨_, htm⟩ | hsub
+  · exact Or.inl (by simp [terminableB, hto, htm])
+  · exact Or.inr (by simpa [hsrc, hname, hdst] using hsub)
 
 theorem kill_prio_empty (I : Impl) (w : World) (id : InstId) (t : Template) (tail : List Eff)
     (toState : String) (replyTo : Option InstId)
@@ -1212,8 +1234,8 @@ theorem kill_off (I : Impl) (w : World) (who i : InstId) (t : Template) (tail : 
     simp [base, refundP_prio, refund_prio, readCells_st]
 
 theorem try_wake_free (D : Description) (w : World) (dstId : InstId) (label : String)
-    (writer i : InstId) (h : ReliableFree (w.st i)) :
-    ReliableFree ((tryWake D w dstId label writer).st i) := by
+    (writer i : InstId) (h : ReliableFree D i (w.st i)) :
+    ReliableFree D i ((tryWake D w dstId label writer).st i) := by
   have hbox := try_wake_box D w dstId label writer i
   have hpark := try_wake_parked D w dstId label writer i
   refine ⟨?_, ?_, ?_⟩
@@ -1250,29 +1272,107 @@ theorem try_wake_free (D : Description) (w : World) (dstId : InstId) (label : St
       exact h.2.2 m hm
 
 theorem wakes_free (D : Description) (ids : List InstId) (w : World) (label : String)
-    (writer i : InstId) (h : ReliableFree (w.st i)) :
-    ReliableFree ((ids.foldl (fun w id => tryWake D w id label writer) w).st i) := by
+    (writer i : InstId) (h : ReliableFree D i (w.st i)) :
+    ReliableFree D i ((ids.foldl (fun w id => tryWake D w id label writer) w).st i) := by
   induction ids generalizing w with
   | nil => simpa using h
   | cons j js ih =>
     simp only [List.foldl_cons]
     exact ih _ (try_wake_free D w j label writer i h)
 
-theorem proceed_free (w : World) (who : InstId) (k : Cont) (i : InstId)
-    (h : ReliableFree (w.st i)) :
-    ReliableFree ((setActor w who (proceed (w.st who) k)).st i) :=
+theorem proceed_free {D : Description} {host : InstId} (w : World) (who : InstId) (k : Cont) (i : InstId)
+    (h : ReliableFree D host (w.st i)) :
+    ReliableFree D host ((setActor w who (proceed (w.st who) k)).st i) :=
   transport_free h (set_proceed_box w who k i) (set_proceed_parked w who k i)
     (set_proceed_prio w who k i)
+
+theorem same_subtree_ne (D : Description) (a b : String) (h : sameSubtree D a b = true) :
+    templateSubtree D a ≠ "" := by
+  simp only [sameSubtree, Bool.and_eq_true] at h
+  intro heq
+  have hb : (templateSubtree D a == "") = true := by simpa [heq]
+  simp [bne, hb] at h
+
+/-- A role with a subtree name is terminable: that is what `subtreeFails` checks. -/
+theorem subtree_role_terminable (D : Description) (hfail : subtreeFails D = []) (name : String)
+    (hne : templateSubtree D name ≠ "") : terminableB D name = true := by
+  cases ht : templateOf D name with
+  | none => simp [templateSubtree, ht] at hne
+  | some t =>
+    have htree : t.subtree ≠ "" := by simpa [templateSubtree, ht] using hne
+    have hmem : t ∈ D.templates := (templateOf_mem D name t ht).1
+    have hclass :
+        (if t.subtree == "" then
+          if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
+          else if templatePure D t.name then some (pureKillMsg t.name) else none
+        else if t.multiplicity != .perPeer then
+          some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
+        else if !t.terminable then
+          some s!"fail: subtree {t.subtree} member {t.name} is not terminable"
+        else if !(D.templates.any fun u => u.subtree == t.subtree && u.timeoutKills) then
+          some s!"fail: subtree {t.subtree} has no timeoutKills role"
+        else if t.supervisor != "" &&
+            (match templateOf D t.supervisor with
+              | some s => !(s.multiplicity == .one)
+              | none => true) then
+          some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not a permanent core"
+        else if templatePure D t.name && !t.timeoutKills then
+          some (pureKillMsg t.name)
+        else none) = none := by
+      cases hc : (if t.subtree == "" then
+          if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
+          else if templatePure D t.name then some (pureKillMsg t.name) else none
+        else if t.multiplicity != .perPeer then
+          some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
+        else if !t.terminable then
+          some s!"fail: subtree {t.subtree} member {t.name} is not terminable"
+        else if !(D.templates.any fun u => u.subtree == t.subtree && u.timeoutKills) then
+          some s!"fail: subtree {t.subtree} has no timeoutKills role"
+        else if t.supervisor != "" &&
+            (match templateOf D t.supervisor with
+              | some s => !(s.multiplicity == .one)
+              | none => true) then
+          some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not a permanent core"
+        else if templatePure D t.name && !t.timeoutKills then
+          some (pureKillMsg t.name)
+        else none) with
+      | none => rfl
+      | some msg =>
+        have hin : msg ∈ subtreeFails D := by
+          unfold subtreeFails
+          exact List.mem_filterMap.mpr ⟨t, hmem, hc⟩
+        simp [hfail] at hin
+    have hneB : (t.subtree == "") = false := by
+      cases hb : t.subtree == "" with
+      | false => rfl
+      | true =>
+        have heq : t.subtree = "" := by simpa [beq_iff_eq] using hb
+        exact absurd heq htree
+    simp only [hneB, ite_false] at hclass
+    have hmult : (t.multiplicity != .perPeer) = false := by
+      cases hb : t.multiplicity != .perPeer with
+      | false => rfl
+      | true => simp [hb] at hclass
+    simp only [hmult, ite_false] at hclass
+    have htermB : (!t.terminable) = false := by
+      cases hb : !t.terminable with
+      | false => rfl
+      | true => simp [hb] at hclass
+    have hterm : t.terminable = true := by
+      cases hb : t.terminable with
+      | true => rfl
+      | false => simp [hb] at htermB
+    simp [terminableB, ht, hterm]
 
 /-- One step keeps every terminable actor free of reliable mail. -/
 theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w w' : World) (a : Action) (hR : Reachable I N w) (h : apply I a w = some w')
-    (ih : ∀ id, terminableB I.desc (tname id) = true → ReliableFree (w.st id))
+    (ih : ∀ id, terminableB I.desc (tname id) = true → ReliableFree I.desc id (w.st id))
     (id : InstId) (hterm : terminableB I.desc (tname id) = true) :
-    ReliableFree (w'.st id) := by
+    ReliableFree I.desc id (w'.st id) := by
   have hS : SemInv I w := (inv_reachable I N w hL hR).1
   have hB : BulkFree I w := (inv2_reachable I hL hG N w hR).2.2.2
-  have hold : ReliableFree (w.st id) := ih id hterm
+  have hold : ReliableFree I.desc id (w.st id) := ih id hterm
   cases a with
   | kill sub key =>
     rw [kill_apply_world I w w' sub key h]
@@ -1284,7 +1384,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
           rw [hk.2.1] at hm
           exact hold.1 m hm
         · intro p hp
-          exact hold.2.1 p (List.Sublist.mem hk.2.2.2.1 hp)
+          exact hold.2.1 p (List.Sublist.mem hp hk.2.2.2.1)
         · intro m hm
           rw [hk.2.2.1] at hm
           exact hold.2.2 m hm
@@ -1302,7 +1402,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
         rw [hk.2.1] at hm
         exact hold.1 m hm
       · intro p hp
-        exact hold.2.1 p (List.Sublist.mem hk.2.2.2.1 hp)
+        exact hold.2.1 p (List.Sublist.mem hp hk.2.2.2.1)
       · intro m hm
         rw [hk.2.2.1] at hm
         exact hold.2.2 m hm
@@ -1436,15 +1536,22 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
             simp only [execRun, hk]
             cases hr : route w I.desc who dst with
             | none =>
-              simpa [hr] using proceed_free w who (afterHead k) id hold
+              simpa [hr, noteStale_st] using
+                proceed_free (noteStale w who dst) who (afterHead k) id
+                  (by simpa [noteStale_st] using hold)
             | some dstId =>
               simp only [hr]
               by_cases hid : id = dstId
-              · have hbad := send_lands_permanent I hL hG w hS who k dst label hint es hphase hk
+              · have hdisj := send_lands_permanent I hL hG w hS who k dst label hint es hphase hk
                   dstId hr
-                rw [← hid] at hbad
-                rw [hbad] at hterm
-                cases hterm
+                rcases hdisj with hperm | hsub
+                · rw [← hid] at hperm
+                  rw [hperm] at hterm
+                  cases hterm
+                · have hwho := subtree_role_terminable I.desc hG.subtrees (tname who)
+                    (same_subtree_ne I.desc (tname who) (tname dstId) hsub)
+                  have hbad := hB who ((terminable_name_iff I.desc (tname who)).mp hwho)
+                  simp [contRest, hphase, hk, noBulkSend] at hbad
               · exact transport_free hold
                   (enqueue_box_off w I.desc who dstId
                     { label := label, sender := who, callFrom := none } false (afterHead k) id hid)
@@ -1456,15 +1563,22 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
             simp only [execRun, hk]
             cases hr : route w I.desc who dst with
             | none =>
-              simpa [hr] using proceed_free w who (afterHead k) id hold
+              simpa [hr, noteStale_st] using
+                proceed_free (noteStale w who dst) who (afterHead k) id
+                  (by simpa [noteStale_st] using hold)
             | some dstId =>
               simp only [hr]
               by_cases hid : id = dstId
-              · have hbad := call_lands_permanent I hL hG w hS who k dst label hint es hphase hk
+              · have hdisj := call_lands_permanent I hL hG w hS who k dst label hint es hphase hk
                   dstId hr
-                rw [← hid] at hbad
-                rw [hbad] at hterm
-                cases hterm
+                rcases hdisj with hperm | hsub
+                · rw [← hid] at hperm
+                  rw [hperm] at hterm
+                  cases hterm
+                · have hwho := subtree_role_terminable I.desc hG.subtrees (tname who)
+                    (same_subtree_ne I.desc (tname who) (tname dstId) hsub)
+                  have hbad := hB who ((terminable_name_iff I.desc (tname who)).mp hwho)
+                  simp [contRest, hphase, hk, noBulkSend] at hbad
               · exact transport_free hold
                   (enqueue_box_off w I.desc who dstId
                     { label := label, sender := who, callFrom := some who } true (afterHead k) id hid)
@@ -1476,7 +1590,9 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
             simp only [execRun, hk]
             cases hr : route w I.desc who dst with
             | none =>
-              simpa [hr] using proceed_free w who (afterHead k) id hold
+              simpa [hr, noteStale_st] using
+                proceed_free (noteStale w who dst) who (afterHead k) id
+                  (by simpa [noteStale_st] using hold)
             | some dstId =>
               simp only [hr]
               split
@@ -1506,7 +1622,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
                 (proceed ((setCell w dst label
                     { value := max (w.cell dst label).value value, dirty := true }).st who)
                   (afterHead k))
-            have hbase : ReliableFree (baseW.st id) := by
+            have hbase : ReliableFree I.desc id (baseW.st id) := by
               by_cases hi : id = who
               · rw [hi, setActor_self]
                 apply transport_free (by simpa [hi] using hold)
@@ -1571,7 +1687,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
 
 theorem reliable_free_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) :
-    ∀ id, terminableB I.desc (tname id) = true → ReliableFree (w.st id) := by
+    ∀ id, terminableB I.desc (tname id) = true → ReliableFree I.desc id (w.st id) := by
   induction hR with
   | init =>
     intro id _
@@ -1582,7 +1698,7 @@ theorem reliable_free_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc
 
 /-- A reliable message cannot sit on a template the checker allows to die. -/
 theorem reliable_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
-    (w : World) (hR : Reachable I N w) (id : InstId) (hheld : ¬ReliableFree (w.st id)) :
+    (w : World) (hR : Reachable I N w) (id : InstId) (hheld : ¬ReliableFree I.desc id (w.st id)) :
     terminableB I.desc (tname id) = false := by
   cases hb : terminableB I.desc (tname id) with
   | false => rfl
@@ -2100,14 +2216,16 @@ theorem prio_permanent_alive (I : Impl) (N : Nat) (w : World) (hR : Reachable I 
     by_cases hpre : (w.st id).life = .alive
     · by_cases hlive : (w'.st id).life = .alive
       · exact hlive
-      · rcases only_terminate_kills I a w w' id ha hpre hlive with
-        | inl ⟨_, _, _, _, _, _, ht, hflag⟩ =>
+      · cases only_terminate_kills I a w w' id ha hpre hlive with
+        | inl hExecKill =>
+          rcases hExecKill with ⟨_, _, _, _, _, _, ht, hflag⟩
           simp [Bool.and_eq_true] at hflag
           simp [terminableB, ht, hflag.1] at hterm
-        | inr ⟨sub, key, hact, _⟩ =>
+        | inr hSubKill =>
+          rcases hSubKill with ⟨sub, key, hact, _⟩
           rw [hact] at ha
           have hk := kill_apply_world I w w' sub key ha
-          rw [hk] at hlive ⊢
+          rw [hk] at hlive hne ⊢
           exact absurd (killSubtree_died w I.desc sub key id hpre hlive).2.2.2.2.1 hne
     · have hempty : (w.st id).prio = [] := by
         by_cases hp : (w.st id).prio = []
@@ -2483,13 +2601,22 @@ theorem prio_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
   exact prio_mid_taken I hL hG hA ρ hF id m.mid i hterm hlive hpos
 
 /-- A fair run of a checked graph delivers every reliable message, matched by the
-id of the actor that accepted it, and every admitted call leaves `awaitReply`.
-`Assumptions` is only `rust_refines`. -/
+id of the actor that accepted it, or a subtree kill credits it. Every admitted
+call leaves `awaitReply`. `Assumptions` is only `rust_refines`. A checked
+terminable actor never holds the reliable message, so the receive disjunct is
+the one this proof uses; the kill disjunct is the obligation for a message a
+subtree kill refunds. -/
 theorem fair_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) : Delivered ρ :=
-  ⟨fun i id m hm hr => box_delivered I hL hG hA ρ hF i id m hm hr,
-   fun i id p hp hr => park_delivered I hL hG hA ρ hF i id p hp hr,
-   fun i id m hm hr => prio_delivered I hL hG hA ρ hF i id m hm hr,
+  ⟨fun i id m hm hr =>
+      have ⟨j, hj, hact, htaken⟩ := box_delivered I hL hG hA ρ hF i id m hm hr
+      ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩,
+   fun i id p hp hr =>
+      have ⟨j, hj, hact, htaken⟩ := park_delivered I hL hG hA ρ hF i id p hp hr
+      ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩,
+   fun i id m hm hr =>
+      have ⟨j, hj, hact, htaken⟩ := prio_delivered I hL hG hA ρ hF i id m hm hr
+      ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩,
    fun i c d k hph => call_answered I hL hG hA ρ hF i c d k hph⟩
 
 end Deadlock

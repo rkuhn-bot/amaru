@@ -359,6 +359,15 @@ theorem loss_act_not_recv (j : Nat) (hj : 5 ≤ j) : nthAct lossActs j ≠ .recv
     simp [hj5, nthAct, lossActs]
   · simp [nthAct, hlt]
 
+theorem loss_act_not_kill (j : Nat) (hj : 5 ≤ j) (sub : String) (key : Nat) :
+    nthAct lossActs j ≠ .kill sub key := by
+  by_cases hlt : j < lossActs.length
+  · have hj5 : j = 5 := by
+      simp [lossActs] at hlt
+      omega
+    simp [hj5, nthAct, lossActs]
+  · simp [nthAct, hlt]
+
 /-- The killing run is fair: after the mailbox is cleared, nothing forced stays enabled. -/
 theorem loss_fair : Fair lossRun := by
   have hquiet (j : Nat) (hj : lossActs.length ≤ j) :
@@ -400,7 +409,9 @@ theorem loss_not_delivered : ¬ Delivered lossRun := by
     have hr : m.reliable = true := by
       simp [lossHeld, hbox] at hheld
       exact hheld
-    obtain ⟨j, hj, hact, _⟩ := hD.1 5 lossId m (by simp [lossRun, hbox]) hr
-    exact loss_act_not_recv j hj (by simpa [lossRun] using hact)
+    obtain ⟨j, hj, hsettled⟩ := hD.1 5 lossId m (by simp [lossRun, hbox]) hr
+    rcases hsettled with ⟨hact, _⟩ | ⟨sub, key, hact, _⟩
+    · exact loss_act_not_recv j hj (by simpa [lossRun] using hact)
+    · exact loss_act_not_kill j hj sub key (by simpa [lossRun] using hact)
 
 end Deadlock

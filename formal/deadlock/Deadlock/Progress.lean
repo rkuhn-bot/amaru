@@ -121,12 +121,15 @@ theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I 
   | step w w' a _ ha ih =>
     by_cases hdie : (w'.st (InstId.core dst)).life = .alive
     · exact hdie
-    · rcases only_terminate_kills I a w w' (InstId.core dst) ha ih hdie with
-      | inl ⟨_, _, _, t', _, _, ht', hflag⟩ =>
+    · cases only_terminate_kills I a w w' (InstId.core dst) ha ih hdie with
+      | inl hExecKill =>
+        rcases hExecKill with ⟨_, _, _, t', _, _, ht', hflag⟩
         have hto : templateOf I.desc dst = some t' := by simpa [tname] using ht'
         have hsame : t' = t := by injection (hto.symm.trans ht)
         simp [hsame, hterm] at hflag
-      | inr ⟨_, _, _, hmem⟩ => simp [isMember] at hmem
+      | inr hSubKill =>
+        rcases hSubKill with ⟨_, _, _, hmem⟩
+        simp [isMember] at hmem
 
 theorem enqueue_roster (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) : (enqueueOrPark w D sender dst msg isCall k).roster = w.roster := by
@@ -415,7 +418,8 @@ theorem edge_reliable (D : Description) (hS : structLines D = []) (e : Edge) (he
 
 theorem wait_template (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (e : Edge) (he : e ∈ I.desc.edges)
     (heff : e.effect = .send ∨ e.effect = .call) :
-    ∃ t, templateOf I.desc e.dst = some t ∧ t.multiplicity = .one ∧ t.terminable = false := by
+    ∃ t, templateOf I.desc e.dst = some t ∧
+      ((t.multiplicity = .one ∧ t.terminable = false) ∨ sameSubtree I.desc e.src e.dst = true) := by
   have hrel := edge_reliable I.desc hG.struct e he heff
   have hall := (List.all_eq_true _ _).mp (permanent_target_local I hL) e he
   have hcond : ((e.effect == .send || e.effect == .call) && e.reliability == .reliable) = true := by
@@ -426,72 +430,55 @@ theorem wait_template (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (e : Edg
     | inr hc =>
       simp only [hc, hrel]
       decide
-  simp [hcond] at hall
   cases ht : templateOf I.desc e.dst with
-  | none => simp [ht] at hall
+  | none =>
+    simpa [hcond, ht] using hall
   | some t =>
-    simp [ht] at hall
-    refine ⟨t, rfl, ?_, ?_⟩
-    · cases hm : t.multiplicity with
-      | one => rfl
+    have hbody :
+        ((t.multiplicity == .one && t.terminable == false) ||
+          sameSubtree I.desc e.src e.dst) = true := by
+      simpa [hcond, ht] using hall
+    rw [Bool.or_eq_true] at hbody
+    rcases hbody with hperm | hsub
+    · rw [Bool.and_eq_true] at hperm
+      cases hm : t.multiplicity with
+      | one =>
+        exact ⟨t, rfl, Or.inl ⟨hm, (beq_iff_eq).mp (by simpa [hm] using hperm.2)⟩⟩
       | perPeer =>
         have hf : (Multiplicity.perPeer == Multiplicity.one) = false := by decide
-        simp [hm, hf] at hall
-    · cases hb : t.terminable with
-      | false => rfl
-      | true =>
-        have : ((true : Bool) == false) = false := by decide
-        simp [hb, this] at hall
+        rw [hm, hf] at hperm
+        nomatch hperm.1
+    · exact ⟨t, rfl, Or.inr hsub⟩
 
 theorem park_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id dst : InstId) (isCall : Bool) (k : Cont)
     (hph : (w.st id).phase = .parked dst isCall k) : (w.st dst).life = .alive := by
   have hI := inv_reachable I N w hL hR
-  obtain ⟨_, e, he, _, _, hdstn, _, heff, _⟩ := described_park I w hI id dst isCall k hph
-  have heff' : e.effect = .send ∨ e.effect = .call := by cases isCall <;> simp [heff]
-  obtain ⟨t, ht, hone, hterm⟩ := wait_template I hL hG e he heff'
-  have hcore := core_alive_reachable I N w hR e.dst t ht hone hterm
-  cases dst with
-  | core n =>
-    have hn : n = e.dst := hdstn.symm
-    simpa [hn] using hcore
-  | peer n i =>
-    have hname : n = e.dst := hdstn.symm
-    cases hname
-    have hOpen := hI.2.2
-    have hix := ix_zero I N w hR e.dst t ht hone
-    have hempty := (hOpen e.dst i (by simpa [hix] using (Nat.zero_le i))).2.2
-    obtain ⟨p, hp, _, _⟩ := hI.2.1.bwd id (InstId.peer e.dst i) isCall k hph
-    simp [hempty] at hp
+  obtain ⟨p, hp, _, _⟩ := hI.2.1.bwd id dst isCall k hph
+  exact mailbox_alive I hL N w hR dst (by
+    intro hempty
+    simp [hempty] at hp)
 
 theorem reply_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id dst : InstId) (k : Cont)
     (hph : (w.st id).phase = .awaitReply dst k) : (w.st dst).life = .alive := by
-  have hI := inv_reachable I N w hL hR
-  have hO := (inv3_reachable I hL hG N w hR).1.2.1
-  obtain ⟨_, e, he, _, _, hdstn, _, heff, _⟩ := described_reply I w hI id dst k hph
-  obtain ⟨t, ht, hone, hterm⟩ := wait_template I hL hG e he (Or.inr heff)
-  have hcore := core_alive_reachable I N w hR e.dst t ht hone hterm
-  cases dst with
-  | core n =>
-    have hn : n = e.dst := hdstn.symm
-    simpa [hn] using hcore
-  | peer n i =>
-    have hname : n = e.dst := hdstn.symm
-    cases hname
-    have hnin := one_peer_absent I N w hR e.dst t ht hone i
-    have hOpen := hI.2.2
-    have hix := ix_zero I N w hR e.dst t ht hone
-    have hslot := hOpen e.dst i (by simpa [hix] using (Nat.zero_le i))
-    have hT := call_tag_reachable I hL hG N w hR
-    rcases hT.awaiting id (InstId.peer e.dst i) k hph with hmail | hhand | hpend
-    · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
-      · simp [(hO.offEmpty (InstId.peer e.dst i) hnin).1] at hm
-      · simp [(hO.offEmpty (InstId.peer e.dst i) hnin).2] at hp
-    · rcases hhand.2.1 with ⟨_, hcar, _⟩
-      simp [carriedCont, hslot.2.1] at hcar
-    · rcases hpend.2.2 with ⟨_, hcar, _⟩
-      simp [carriedCont, hslot.2.1] at hcar
+  have hT := call_tag_reachable I hL hG N w hR
+  rcases hT.awaiting id dst k hph with hmail | hhand | hpend
+  · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+    · exact box_alive I hL hG N w hR dst (by
+        intro hempty
+        simp [hempty] at hm)
+    · exact mailbox_alive I hL N w hR dst (by
+        intro hempty
+        simp [hempty] at hp)
+  · exact busy_alive I N w hR dst (by
+      intro hidle
+      rcases hhand.2.1 with ⟨_, hcar, _⟩
+      simp [carriedCont, hidle] at hcar)
+  · exact busy_alive I N w hR dst (by
+      intro hidle
+      rcases hpend.2.2 with ⟨_, hcar, _⟩
+      simp [carriedCont, hidle] at hcar)
 
 theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I) (N : Nat)
     (w : World) (hR : Reachable I N w) (hs : List (Node × Nat))
@@ -623,10 +610,11 @@ theorem runtimeBusy_roster (I : Impl) (w : World) (hb : runtimeBusy I w = false)
     (hid : id ∈ w.roster) :
     receiveBulk I w id = none ∧ receivePrio I w id = none ∧
       execHead I w id = none ∧ finishWait I w id = none := by
+  rw [runtimeBusy, Bool.or_eq_false_iff] at hb
   have hall : ∀ x ∈ w.roster,
       ((receiveBulk I w x).isSome || (receivePrio I w x).isSome ||
         (execHead I w x).isSome || (finishWait I w x).isSome) = false := by
-    simpa [runtimeBusy] using (List.any_eq_false.mp hb)
+    simpa using (List.any_eq_false.mp hb.1)
   have hfalse := hall id hid
   rw [Bool.or_eq_false_iff] at hfalse
   rw [Bool.or_eq_false_iff] at hfalse
