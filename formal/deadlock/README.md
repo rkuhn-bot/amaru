@@ -357,7 +357,13 @@ for a send the actor did not itself perform.
   both are nonempty the box head is installed with the parked list still in
   place; a non-call head is then appended and its sender resumed, and a call
   head is appended and its sender moved to `awaitReply` in the same step.
-  `exec`, `call_tag_reachable`, the delivery walk, the handler reply,
+  `exec_tag` is the same fact for one step of a running actor: a plain send,
+  a call, a reply, a cell write, a self-schedule, an effect or peer wait, and
+  a killing `terminate`. A killing `terminate` is allowed only on a terminable
+  template, which has no parked call and no call in its box, and the
+  continuation it drops has reply count zero, so clearing the mailbox and
+  releasing the parked list moves no tag. `call_tag_reachable` is that
+  invariant on every reachable world. The delivery walk, the handler reply,
   `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift
   are not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not

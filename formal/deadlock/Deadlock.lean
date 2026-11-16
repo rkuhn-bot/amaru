@@ -151,3 +151,5 @@ import Deadlock.Rank
 #print axioms Deadlock.deliver_parked_tag
 #print axioms Deadlock.parked_tail_call
 #print axioms Deadlock.recvBulk_tag
+#print axioms Deadlock.exec_tag
+#print axioms Deadlock.call_tag_reachable
