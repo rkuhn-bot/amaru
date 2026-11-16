@@ -1722,50 +1722,6 @@ theorem park_pos_drop (mid : Nat) (p : Parked) (ps : List Parked) (hne : p.msg.m
   simp [List.map_cons, posOf, hne, List.length_cons] at hlen ⊢
   omega
 
-theorem countParked_zero_sender (sender : InstId) (ps : List Parked)
-    (h : countParked sender ps = 0) : ∀ p ∈ ps, p.sender ≠ sender := by
-  induction ps with
-  | nil =>
-    intro p hp
-    cases hp
-  | cons p ps ih =>
-    simp only [countParked] at h
-    have hhead : p.sender ≠ sender := by
-      intro heq
-      simp [heq] at h
-    have htail : countParked sender ps = 0 := by
-      by_cases heq : p.sender = sender
-      · exact absurd heq hhead
-      · simp [heq] at h
-        exact h
-    intro q hq
-    cases hq with
-    | head => exact hhead
-    | tail _ hq => exact ih htail q hq
-
-/-- An alive subtree member is terminable, so Lemma 1 leaves none of its mail parked
-on `s`. A kill therefore does not shorten `s`. -/
-theorem killed_not_parked (I : Impl) (w : World) (hO : OccInv I w) (hG : GraphOk I.desc)
-    (sub : String) (key : Nat) (s : InstId) (hs : s ∈ w.roster) :
-    ∀ id, isMember I.desc id sub key = true → (w.st id).life = .alive →
-      ∀ p ∈ (w.st s).parked, p.sender ≠ id := by
-  intro id hmem halive p hp
-  have hB := member_terminable I.desc hG.subtrees id sub key hmem
-  have hname : terminableName I.desc (tname id) := by
-    cases ht : templateOf I.desc (tname id) with
-    | none => simp [terminableB, ht] at hB
-    | some t =>
-      have ht' : t.terminable = true := by simpa [terminableB, ht] using hB
-      exact ⟨t, ht, ht'⟩
-  have hin := hO.aliveIn id halive
-  have hz := hO.still id (tname s) hin hname
-  have hle := owed_ge_here w.st (tname s) id s w.roster hO.nodup hs rfl
-  have hcount : countParked id (w.st s).parked = 0 := by
-    have hle' : countFrom id (w.st s).box + countParked id (w.st s).parked ≤ 0 := by
-      simpa [hz] using hle
-    omega
-  exact countParked_zero_sender id (w.st s).parked hcount p hp
-
 /-- Outside this actor's own `recvBulk`, parked mail only grows at the end.
 A kill keeps it exactly: a checked subtree member is terminable, so it has no
 outstanding mail to cancel. -/

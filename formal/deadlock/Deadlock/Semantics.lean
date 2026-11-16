@@ -1833,6 +1833,56 @@ theorem forgetFold_parked_keep (w : World) (dead s : InstId) (ids : List InstId)
           exact h p (hpark ▸ hp)
         exact (ih _ hsend).trans hpark
 
+/-- Forgetting one sender leaves a mailbox as it was, or as that mailbox with the sender removed. -/
+theorem forgetFold_parked_fate (w : World) (dead s : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).parked =
+      (w.st s).parked ∨
+    ((ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w
+      else setActor w id { a with parked := ps }) w).st s).parked =
+      (w.st s).parked.filter fun p => p.sender != dead := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hkeep : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = true
+    · simp only [hkeep, ite_true]
+      exact ih w
+    · have hf : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = false := by
+        cases hb : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) <;>
+          simp_all
+      simp only [hf]
+      by_cases hs : s = id
+      · subst hs
+        let w' := setActor w s { (w.st s) with
+          parked := (w.st s).parked.filter fun p => p.sender != dead }
+        have hset : (w'.st s).parked =
+            (w.st s).parked.filter fun p => p.sender != dead := by
+          simp [w', setActor]
+        have hih := ih w'
+        rw [hset] at hih
+        have hidem :
+            ((w.st s).parked.filter fun p => p.sender != dead).filter (fun p => p.sender != dead) =
+              (w.st s).parked.filter fun p => p.sender != dead := by
+          have hfilt := List.filter_filter (p := fun p : Parked => p.sender != dead)
+            (q := fun p : Parked => p.sender != dead) (l := (w.st s).parked)
+          simpa [Bool.and_self] using hfilt
+        rcases hih with hih | hih
+        · exact Or.inr hih
+        · exact Or.inr (hih.trans hidem)
+      · let w' := setActor w id { (w.st id) with
+          parked := (w.st id).parked.filter fun p => p.sender != dead }
+        have hpark : (w'.st s).parked = (w.st s).parked := by simp [w', setActor, hs]
+        have hih := ih w'
+        rw [hpark] at hih
+        exact hih
+
 theorem killOne_parked_keep (w : World) (D : Description) (id i : InstId)
     (hne : i ≠ id) (h : ∀ p ∈ (w.st i).parked, p.sender ≠ id) :
     ((killOne w D id).st i).parked = (w.st i).parked := by
@@ -1857,6 +1907,31 @@ theorem killOne_parked_keep (w : World) (D : Description) (id i : InstId)
     intro p hp
     exact h p (hpark ▸ hp)
   exact (forgetFold_parked_keep w4 id i w4.roster hsend).trans hpark
+
+/-- Killing someone else leaves this mailbox intact, or drops only that sender's parked entries. -/
+theorem killOne_parked_fate (w : World) (D : Description) (id i : InstId) (hne : i ≠ id) :
+    ((killOne w D id).st i).parked = (w.st i).parked ∨
+      ((killOne w D id).st i).parked =
+        (w.st i).parked.filter fun p => p.sender != id := by
+  let w1 := readCells D w id
+  have hst1 : w1.st i = w.st i := cellsSt D w id i
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have h2 := refundMsgs_rest w1 (tname id) (w.st id).box i
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have h3 := refundParked_rest w2 (tname id) (w.st id).parked i
+  let w4 := failWaiters w3 id
+  have h4 := failFold_mail w3 id i w3.roster
+  let w5 := forgetSender w4 id
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody, setActor_other _ _ _ _ hne]
+  have hpark : (w4.st i).parked = (w.st i).parked := by
+    have h4p : (w4.st i).parked = (w3.st i).parked := by
+      simpa [w4, failWaiters] using h4.2.2
+    exact h4p.trans (h3.2.2.2.2.1.trans (h2.2.2.2.2.1.trans (congrArg (·.parked) hst1)))
+  have hfate := forgetFold_parked_fate w4 id i w4.roster
+  simpa [w5, forgetSender, hpark] using hfate
 
 /-- Killing `id` is the refund, the failure of whoever waited on it, and a dead idle actor. -/
 theorem killOne_body (w : World) (D : Description) (id : InstId) :
@@ -1980,6 +2055,33 @@ theorem killFold_stays_dead (w : World) (D : Description) (sub : String) (key : 
         exact absurd hlive hdead
       · exact ih (killOne w D id) ((killOne_other_rest w D id s hs).2.2.symm ▸ hdead)
     · exact ih w hdead
+
+/-- A dead idle actor stays idle: a later kill does not put it back to work. -/
+theorem killFold_keeps_idle (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s : InstId)
+    (hdead : (w.st s).life = .dead) (hidle : (w.st s).phase = .idle) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+      .idle := by
+  induction ids generalizing w with
+  | nil => simpa using hidle
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D id sub key && (w.st id).life == .alive) = true
+    · simp only [hcond, ite_true]
+      by_cases hs : s = id
+      · subst hs
+        have hlive : (w.st s).life = .alive := by
+          simp only [Bool.and_eq_true, beq_iff_eq] at hcond
+          exact hcond.2
+        rw [hdead] at hlive
+        cases hlive
+      · have hh : holdsPhase (w.st s).phase = true := by rw [hidle]; rfl
+        have hph := (killOne_holds w D id s hs hh).1
+        have hlife := (killOne_other_rest w D id s hs).2.2
+        exact ih (killOne w D id) (hlife.symm ▸ hdead) (hph.symm ▸ hidle)
+    · simp only [hcond]
+      exact ih w hdead hidle
 
 theorem killMembers_stays_dead (w : World) (D : Description) (sub : String) (key : Nat)
     (s : InstId) (hdead : (w.st s).life ≠ .alive) :

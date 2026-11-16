@@ -5130,10 +5130,15 @@ theorem exec_queue (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
             exact Or.inl rfl
 
 theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
-    (hO : OpenSlots w) (mb : InstId) (hlive : (w'.st mb).life = .alive) :
+    (hO : OpenSlots w) (hOcc : OccInv I w) (hG : GraphOk I.desc) (mb : InstId)
+    (hlive : (w'.st mb).life = .alive) :
     QueueStep ((w.st mb).parked) ((w'.st mb).parked) := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at hlive ⊢
+    have hpre : (w.st mb).life = .alive := (killSubtree_if_alive w I.desc sub key mb hlive).1
+    exact Or.inl (killSubtree_parked_keep w I.desc sub key mb
+      (killed_not_parked I w hOcc hG sub key mb (hOcc.aliveIn mb hpre)) hlive)
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl rfl
@@ -5295,6 +5300,114 @@ theorem bulk_head_leaves (I : Impl) (w w' : World) (id : InstId) (h : receiveBul
         simp only [setActor_self, admitted] at hbad
         exact resume_not_parked _ id k p.isCall c (hpre.trans hph) d bit k' hbad
 
+/-- Dropping another sender's parked entries does not move `s` later in the queue. -/
+theorem index_filter (ps : List Parked) (dead s : InstId) (hs : s ≠ dead)
+    (hin : parkIndex ps s < ps.length) :
+    parkIndex (ps.filter fun p => p.sender != dead) s ≤ parkIndex ps s ∧
+      parkIndex (ps.filter fun p => p.sender != dead) s <
+        (ps.filter fun p => p.sender != dead).length := by
+  induction ps with
+  | nil => simp [parkIndex] at hin
+  | cons p ps ih =>
+    by_cases hps : p.sender = s
+    · rw [parkIndex_head p ps s hps]
+      have hkeep : (p.sender != dead) = true := by
+        rw [hps]
+        simpa [bne, beq_iff_eq] using hs
+      have hfilter : (p :: ps).filter (fun q => q.sender != dead) =
+          p :: ps.filter (fun q => q.sender != dead) := by
+        simp [List.filter_cons, hkeep]
+      rw [hfilter, parkIndex_head p _ s hps]
+      exact ⟨Nat.le_refl _, Nat.zero_lt_succ _⟩
+    · rw [parkIndex_skip p ps s hps] at hin ⊢
+      have hin' : parkIndex ps s < ps.length := Nat.lt_of_succ_lt_succ hin
+      by_cases hdead : p.sender = dead
+      · have hdrop : (p.sender != dead) = false := by simpa [bne, beq_iff_eq] using hdead
+        have hfilter : (p :: ps).filter (fun q => q.sender != dead) =
+            ps.filter (fun q => q.sender != dead) := by
+          rw [List.filter_cons, hdrop]
+          simp
+        rw [hfilter]
+        obtain ⟨hle, hlt⟩ := ih hin'
+        exact ⟨Nat.le_trans hle (Nat.le_succ _), hlt⟩
+      · have hkeep : (p.sender != dead) = true := by simpa [bne, beq_iff_eq] using hdead
+        have hfilter : (p :: ps).filter (fun q => q.sender != dead) =
+            p :: ps.filter (fun q => q.sender != dead) := by
+          simp [List.filter_cons, hkeep]
+        rw [hfilter, parkIndex_skip p _ s hps]
+        obtain ⟨hle, hlt⟩ := ih hin'
+        exact ⟨Nat.succ_le_succ hle, Nat.succ_lt_succ hlt⟩
+
+/-- While the sender stays parked and the receiver stays alive, a kill fold does not
+raise the sender's index. Killing either of them would end the wait. -/
+theorem killFold_index (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (s dst : InstId) (c : Bool) (k' : Cont)
+    (hph : ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+      .parked dst c k')
+    (halive : ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st dst).life =
+      .alive)
+    (hin : parkIndex ((w.st dst).parked) s < ((w.st dst).parked).length) :
+    parkIndex (((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st dst).parked) s ≤
+        parkIndex ((w.st dst).parked) s ∧
+      parkIndex (((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st dst).parked) s <
+        (((ids.foldl (fun w id =>
+          if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st dst).parked).length := by
+  induction ids generalizing w with
+  | nil =>
+    simp at hph halive ⊢
+    exact hin
+  | cons j js ih =>
+    simp only [List.foldl_cons] at hph halive ⊢
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true] at hph halive ⊢
+      by_cases hs : s = j
+      · subst hs
+        have hself := killOne_self w D s
+        have hidle := killFold_keeps_idle (killOne w D s) D sub key js s hself.1 hself.2.1
+        rw [hidle] at hph
+        cases hph
+      · by_cases hd : dst = j
+        · subst hd
+          have hself := killOne_self w D dst
+          exact absurd halive (killFold_stays_dead (killOne w D dst) D sub key js dst
+            (by rw [hself.1]; intro h; cases h))
+        · have hfate := killOne_parked_fate w D j dst hd
+          have hidx : parkIndex (((killOne w D j).st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
+              parkIndex (((killOne w D j).st dst).parked) s <
+                (((killOne w D j).st dst).parked).length := by
+            rcases hfate with heq | heq
+            · rw [heq]
+              exact ⟨Nat.le_refl _, hin⟩
+            · rw [heq]
+              exact index_filter ((w.st dst).parked) j s hs hin
+          obtain ⟨hle, hlt⟩ := ih (killOne w D j) hph halive hidx.2
+          exact ⟨Nat.le_trans hle hidx.1, hlt⟩
+    · simp only [hcond] at hph halive ⊢
+      exact ih w hph halive hin
+
+theorem killSubtree_index (w : World) (D : Description) (sub : String) (key : Nat)
+    (s dst : InstId) (c : Bool) (k' : Cont)
+    (hph : ((killSubtree w D sub key).st s).phase = .parked dst c k')
+    (halive : ((killSubtree w D sub key).st dst).life = .alive)
+    (hin : parkIndex ((w.st dst).parked) s < ((w.st dst).parked).length) :
+    parkIndex (((killSubtree w D sub key).st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
+      parkIndex (((killSubtree w D sub key).st dst).parked) s <
+        (((killSubtree w D sub key).st dst).parked).length := by
+  have hph' : ((w.roster.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st s).phase =
+      .parked dst c k' := by
+    simpa [killSubtree, killMembers, plant_st] using hph
+  have halive' : ((w.roster.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st dst).life =
+      .alive := by
+    simpa [killSubtree, killMembers, plant_st] using halive
+  simpa [killSubtree, killMembers, plant_st] using
+    killFold_index w D sub key w.roster s dst c k' hph' halive' hin
+
 /-- While a parked wait stays parked on a live receiver, its queue index does not increase. -/
 theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
     (hO : OpenSlots w) (s dst : InstId) (c : Bool) (k k' : Cont)
@@ -5305,7 +5418,9 @@ theorem step_index (I : Impl) (a : Action) (w w' : World) (h : apply I a w = som
     parkIndex ((w'.st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
       parkIndex ((w'.st dst).parked) s < ((w'.st dst).parked).length := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at hph' halive' ⊢
+    exact killSubtree_index w I.desc sub key s dst c k' hph' halive' hin
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨Nat.le_refl _, hin⟩

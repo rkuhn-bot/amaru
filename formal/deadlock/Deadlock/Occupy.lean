@@ -31,6 +31,27 @@ theorem countParked_append (sender : InstId) (ps : List Parked) (p : Parked) :
   | nil => simp [countParked]
   | cons h t ih => simp [countParked, ih, Nat.add_assoc, Nat.add_left_comm]
 
+theorem countParked_zero_sender (sender : InstId) (ps : List Parked)
+    (h : countParked sender ps = 0) : ∀ p ∈ ps, p.sender ≠ sender := by
+  induction ps with
+  | nil =>
+    intro p hp
+    cases hp
+  | cons p ps ih =>
+    simp only [countParked] at h
+    have hhead : p.sender ≠ sender := by
+      intro heq
+      simp [heq] at h
+    have htail : countParked sender ps = 0 := by
+      by_cases heq : p.sender = sender
+      · exact absurd heq hhead
+      · simp [heq] at h
+        exact h
+    intro q hq
+    cases hq with
+    | head => exact hhead
+    | tail _ hq => exact ih htail q hq
+
 theorem countFrom_cons_tail (sender : InstId) (m : Msg) (ms : List Msg) :
     countFrom sender (m :: ms) = (if m.sender = sender then 1 else 0) + countFrom sender ms := by
   simp [countFrom]

@@ -330,6 +330,28 @@ theorem owed_ge_here (st : InstId → Actor) (dstName : String) (sender id : Ins
     | inr htail =>
       exact Nat.le_trans (ih hcons.2 htail) (Nat.le_add_left _ _)
 
+/-- An alive subtree member is terminable, so Lemma 1 leaves none of its mail parked on `s`. -/
+theorem killed_not_parked (I : Impl) (w : World) (hO : OccInv I w) (hG : GraphOk I.desc)
+    (sub : String) (key : Nat) (s : InstId) (hs : s ∈ w.roster) :
+    ∀ id, isMember I.desc id sub key = true → (w.st id).life = .alive →
+      ∀ p ∈ (w.st s).parked, p.sender ≠ id := by
+  intro id hmem halive p hp
+  have hB := member_terminable I.desc hG.subtrees id sub key hmem
+  have hname : terminableName I.desc (tname id) := by
+    cases ht : templateOf I.desc (tname id) with
+    | none => simp [terminableB, ht] at hB
+    | some t =>
+      have ht' : t.terminable = true := by simpa [terminableB, ht] using hB
+      exact ⟨t, ht, ht'⟩
+  have hin := hO.aliveIn id halive
+  have hz := hO.still id (tname s) hin hname
+  have hle := owed_ge_here w.st (tname s) id s w.roster hO.nodup hs rfl
+  have hcount : countParked id (w.st s).parked = 0 := by
+    have hle' : countFrom id (w.st s).box + countParked id (w.st s).parked ≤ 0 := by
+      simpa [hz] using hle
+    omega
+  exact countParked_zero_sender id (w.st s).parked hcount p hp
+
 theorem mail_le_owed (st : InstId → Actor) (dstName : String) (id : InstId) (ids : List InstId)
     (nodup : ids.Nodup) (hmem : id ∈ ids) (hname : tname id = dstName)
     (hbox : ∀ m ∈ (st id).box, m.sender ∈ ids) (hpark : ∀ p ∈ (st id).parked, p.sender ∈ ids) :
