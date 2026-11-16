@@ -363,9 +363,11 @@ for a send the actor did not itself perform.
   template, which has no parked call and no call in its box, and the
   continuation it drops has reply count zero, so clearing the mailbox and
   releasing the parked list moves no tag. `call_tag_reachable` is that
-  invariant on every reachable world. The delivery walk, the handler reply,
-  `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift
-  are not done.
+  invariant on every reachable world. While a caller stays in `awaitReply`, its
+  call sits in the callee's box. One bulk receive there either installs the
+  handler or moves that message strictly closer to the head. The rest of the
+  delivery walk, the handler reply, `never_stuck`, `deadlock_freedom`,
+  `CellFresh`, and the dead-instance lift are not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request
