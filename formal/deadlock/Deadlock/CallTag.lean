@@ -5561,4 +5561,45 @@ theorem enqueue_send_tag (w : World) (D : Description) (sender dst : InstId) (ms
   · rw [enqueue_dead w D sender dst msg false (afterHead kRun) hlive]
     exact run_tail_tag w sender kRun e es hT hph hrest hne hterm
 
+/-- A self-schedule either proceeds or arms one plain priority label. The overflow
+branch is the one `lane_has_room` rules out for a declared label. -/
+theorem schedule_tag (I : Impl) (w : World) (hT : CallTagInv w) (id : InstId) (k : Cont)
+    (label : String) (es : List Eff) (hph : (w.st id).phase = .run k)
+    (hrest : k.rest = .selfSchedule label :: es)
+    (hroom : ((w.st id).prio.any fun p => p.label == label) = false →
+      (w.st id).prio.length < capPrio I.desc w.N id) :
+    CallTagInv (execRun I w id (w.st id) k) := by
+  simp [execRun, hrest]
+  cases hany : ((w.st id).prio.any fun p => p.label == label)
+  · have hlt := hroom hany
+    rw [List.any_eq_false] at hany
+    have hno : ¬ ∃ x, x ∈ (w.st id).prio ∧ x.label = label := by
+      intro ⟨x, hx, hl⟩
+      have hf := hany x hx
+      rw [(beq_iff_eq).mpr hl] at hf
+      simp at hf
+    simp [hno, hlt]
+    let grown := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none }
+    have hplain : ∀ m, m ∈ grown → m.callFrom = none := by
+      intro m hm
+      simp [upsertPrio, grown, hno, List.mem_append, List.mem_singleton] at hm
+      rcases hm with hold | heq
+      · exact hT.prioPlain id m hold
+      · rw [heq]
+    have hP := prio_keep_tag w id grown hT hplain
+    have hphP : ((setActor w id { (w.st id) with prio := grown }).st id).phase = .run k := by
+      simp [setActor, hph]
+    have hrun := run_tail_tag (setActor w id { (w.st id) with prio := grown }) id k
+      (.selfSchedule label) es hP hphP hrest (by intro h; cases h) (by intro h; cases h)
+    have hself : (setActor w id { (w.st id) with prio := grown }).st id =
+        { (w.st id) with prio := grown } := by simp [setActor]
+    rw [setActor_same, hself] at hrun
+    simpa [grown] using hrun
+  · rw [List.any_eq_true] at hany
+    obtain ⟨x, hx, hb⟩ := hany
+    have hyes : ∃ x, x ∈ (w.st id).prio ∧ x.label = label := ⟨x, hx, (beq_iff_eq).mp hb⟩
+    simp [hyes]
+    exact run_tail_tag w id k (.selfSchedule label) es hT hph hrest
+      (by intro h; cases h) (by intro h; cases h)
+
 end Deadlock
