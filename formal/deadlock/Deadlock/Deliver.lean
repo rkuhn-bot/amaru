@@ -368,7 +368,9 @@ theorem box_grow_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w = 
     (hOcc : OccInv I w) (d : InstId) (hnot : a ≠ .recvBulk d) (halive : (w'.st d).life = .alive) :
     BoxGrow (w.st d).box (w'.st d).box := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at halive ⊢
+    exact Or.inl (killSubtree_if_alive w I.desc sub key d halive).2.1
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl rfl
@@ -1252,7 +1254,38 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
   have hB : BulkFree I w := (inv2_reachable I hL hG N w hR).2.2.2
   have hold : ReliableFree (w.st id) := ih id hterm
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    by_cases hwas : (w.st id).life = .alive
+    · by_cases hnow : ((killSubtree w I.desc sub key).st id).life = .alive
+      · have hk := killSubtree_if_alive w I.desc sub key id hnow
+        refine ⟨?_, ?_, ?_⟩
+        · intro m hm
+          rw [hk.2.1] at hm
+          exact hold.1 m hm
+        · intro p hp
+          exact hold.2.1 p (List.Sublist.mem hk.2.2.2.1 hp)
+        · intro m hm
+          rw [hk.2.2.1] at hm
+          exact hold.2.2 m hm
+      · have hd := killSubtree_died w I.desc sub key id hwas hnow
+        refine ⟨?_, ?_, ?_⟩
+        · intro m hm
+          simp [hd.2.2.2.1] at hm
+        · intro p hp
+          simp [hd.2.2.2.2.2] at hp
+        · intro m hm
+          simp [hd.2.2.2.2.1] at hm
+    · have hk := killSubtree_if_dead w I.desc sub key id hwas
+      refine ⟨?_, ?_, ?_⟩
+      · intro m hm
+        rw [hk.2.1] at hm
+        exact hold.1 m hm
+      · intro p hp
+        exact hold.2.1 p (List.Sublist.mem hk.2.2.2.1 hp)
+      · intro m hm
+        rw [hk.2.2.1] at hm
+        exact hold.2.2 m hm
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hold
@@ -1553,12 +1586,63 @@ theorem park_pos_drop (mid : Nat) (p : Parked) (ps : List Parked) (hne : p.msg.m
   simp [List.map_cons, posOf, hne, List.length_cons] at hlen ⊢
   omega
 
-/-- Outside this actor's own `recvBulk`, parked mail only grows at the end. -/
-theorem park_grow_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
-    (hOcc : OccInv I w) (d : InstId) (hnot : a ≠ .recvBulk d) (halive : (w'.st d).life = .alive) :
+theorem countParked_zero_sender (sender : InstId) (ps : List Parked)
+    (h : countParked sender ps = 0) : ∀ p ∈ ps, p.sender ≠ sender := by
+  induction ps with
+  | nil =>
+    intro p hp
+    cases hp
+  | cons p ps ih =>
+    simp only [countParked] at h
+    have hhead : p.sender ≠ sender := by
+      intro heq
+      simp [heq] at h
+    have htail : countParked sender ps = 0 := by
+      by_cases heq : p.sender = sender
+      · exact absurd heq hhead
+      · simp [heq] at h
+        exact h
+    intro q hq
+    cases hq with
+    | head => exact hhead
+    | tail _ hq => exact ih htail q hq
+
+/-- An alive subtree member is terminable, so Lemma 1 leaves none of its mail parked
+on `s`. A kill therefore does not shorten `s`. -/
+theorem killed_not_parked (I : Impl) (w : World) (hO : OccInv I w) (hG : GraphOk I.desc)
+    (sub : String) (key : Nat) (s : InstId) (hs : s ∈ w.roster) :
+    ∀ id, isMember I.desc id sub key = true → (w.st id).life = .alive →
+      ∀ p ∈ (w.st s).parked, p.sender ≠ id := by
+  intro id hmem halive p hp
+  have hB := member_terminable I.desc hG.subtrees id sub key hmem
+  have hname : terminableName I.desc (tname id) := by
+    cases ht : templateOf I.desc (tname id) with
+    | none => simp [terminableB, ht] at hB
+    | some t =>
+      have ht' : t.terminable = true := by simpa [terminableB, ht] using hB
+      exact ⟨t, ht, ht'⟩
+  have hin := hO.aliveIn id halive
+  have hz := hO.still id (tname s) hin hname
+  have hle := owed_ge_here w.st (tname s) id s w.roster hO.nodup hs rfl
+  have hcount : countParked id (w.st s).parked = 0 := by
+    have hle' : countFrom id (w.st s).box + countParked id (w.st s).parked ≤ 0 := by
+      simpa [hz] using hle
+    omega
+  exact countParked_zero_sender id (w.st s).parked hcount p hp
+
+/-- Outside this actor's own `recvBulk`, parked mail only grows at the end.
+A kill keeps it exactly: a checked subtree member is terminable, so it has no
+outstanding mail to cancel. -/
+theorem park_grow_step (I : Impl) (hG : GraphOk I.desc) (a : Action) (w w' : World)
+    (h : apply I a w = some w') (hOcc : OccInv I w) (d : InstId) (hnot : a ≠ .recvBulk d)
+    (halive : (w'.st d).life = .alive) :
     QueueGrow (w.st d).parked (w'.st d).parked := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at halive ⊢
+    have hpre : (w.st d).life = .alive := (killSubtree_if_alive w I.desc sub key d halive).1
+    exact Or.inl (killSubtree_parked_keep w I.desc sub key d
+      (killed_not_parked I w hOcc hG sub key d (hOcc.aliveIn d hpre)) halive)
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl rfl
@@ -1639,7 +1723,7 @@ theorem park_pos_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat
     have hprev := ih (fun t h1 h2 => halive t h1 (Nat.le_trans h2 (Nat.le_succ _)))
       (fun t h1 h2 => hnorecv t h1 (by omega))
     have hOcc := (inv2_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).2.1
-    have hgrow := park_grow_step I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1))
+    have hgrow := park_grow_step I hG (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1))
       (ρ.valid (i + n)) hOcc d
       (hnorecv (i + n) (Nat.le_add_right i n) (by omega))
       (halive (i + n + 1) (by omega) (by omega))
@@ -1921,7 +2005,10 @@ theorem no_prio_gain_dead (I : Impl) (a : Action) (w w' : World) (id : InstId)
     (h : apply I a w = some w') (hdead : (w.st id).life ≠ .alive)
     (hempty : (w.st id).prio = []) : (w'.st id).prio = [] := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    rw [(killSubtree_if_dead w I.desc sub key id hdead).2.2.1]
+    exact hempty
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hempty
@@ -2146,7 +2233,9 @@ theorem prio_suffix_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w
     (halive : (w'.st d).life = .alive) :
     LaneSuffix ((w.st d).prio) ((w'.st d).prio) := by
   cases a with
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h] at halive ⊢
+    exact suffix_of_eq (killSubtree_if_alive w I.desc sub key d halive).2.2.1
   | stutter =>
     cases stutter_unchanged I w w' h
     exact lane_refl _
