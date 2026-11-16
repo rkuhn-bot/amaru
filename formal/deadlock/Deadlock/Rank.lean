@@ -5109,218 +5109,191 @@ theorem mail_from_park (I : Impl) (w : World) (hA : MailAccepted I w) (id : Inst
   · exact hA.2 id p h
   · exact h
 
-theorem deliver_box_here (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
-    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.box = a.box ∧ a1.parked = a.parked := by
-  simp only [deliver] at h
-  split at h
-  · cases h
-  · split at h
-    · split at h
-      · cases h
-      · cases h
-        exact ⟨rfl, rfl⟩
-    · split at h
-      · cases h
-      · cases h
-        split <;> exact ⟨rfl, rfl⟩
+theorem charge_box (a : Actor) (name : String) : (chargeSender a name).box = a.box := by
+  simp [chargeSender, bumpToken]
 
-theorem prio_box_msg (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio I w id = some w')
-    (m : Msg) (hm : m ∈ (w'.st i).box) : m ∈ (w.st i).box := by
-  unfold receivePrio at h
-  cases hprio : (w.st id).prio with
-  | nil => simp [hprio] at h
-  | cons m0 ms =>
-    simp [hprio] at h
-    split at h
-    · simp at h
-    · next w1 a1 hdel =>
-      rcases h with ⟨_, hw⟩
-      injection hw with hw
-      rw [← hw] at hm
-      have hbx := (deliver_box_here I w id ({ (w.st id) with prio := ms }) m0 w1 a1 hdel).1
-      have hst := deliver_st I w id _ m0 w1 a1 i hdel
-      by_cases hi : i = id
-      · rw [hi] at hm
-        simp [setActor, hbx] at hm
-        simpa [hi] using hm
-      · simp [setActor, hi, hst] at hm
-        exact hm
+theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (mb : InstId) (m : Msg)
+    (hm : m ∈ ((enqueueOrPark w D sender dst msg isCall k).st mb).box) :
+    m ∈ (w.st mb).box ∨
+      (mb = dst ∧ m = msg ∧ (w.st dst).life = .alive) := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
+        have hparkS : (w.st sender).parked = [] := by rw [hsame]; exact hroom.1
+        have hcapS : (w.st sender).box.length < capBulk D w.N sender := by rw [hsame]; exact hroom.2
+        cases isCall
+        · rw [← hsame] at hm
+          rw [enqueue_room_self_send w D sender msg k hliveS hparkS hcapS] at hm
+          by_cases hmb : mb = sender
+          · simp [setActor, hmb, proceed_box, charge_box, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
+          · simp [setActor, hmb] at hm
+            exact Or.inl hm
+        · rw [← hsame] at hm
+          rw [enqueue_room_self_call w D sender msg k hliveS hparkS hcapS] at hm
+          by_cases hmb : mb = sender
+          · simp [setActor, hmb, charge_box, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
+          · simp [setActor, hmb] at hm
+            exact Or.inl hm
+      · have hflip : ¬ dst = sender := fun h => hsame h.symm
+        cases isCall
+        · rw [enqueue_room_other_send w D sender dst msg k hlive hsame hroom.1 hroom.2] at hm
+          by_cases hmb : mb = dst
+          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+            simp [setActor, hmb, hne, hflip, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb, hm, hlive⟩
+          · by_cases hsender : mb = sender
+            · simp [setActor, hmb, hsender, hflip, proceed_box, charge_box] at hm
+              exact Or.inl (by rw [← hsender] at hm; exact hm)
+            · simp [setActor, hmb, hsender, hflip] at hm
+              exact Or.inl hm
+        · rw [enqueue_room_other_call w D sender dst msg k hlive hsame hroom.1 hroom.2] at hm
+          by_cases hmb : mb = dst
+          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
+            simp [setActor, hmb, hne, hflip, List.mem_append, List.mem_singleton] at hm
+            rcases hm with hm | hm
+            · exact Or.inl (by rw [← hmb] at hm; exact hm)
+            · exact Or.inr ⟨hmb, hm, hlive⟩
+          · by_cases hsender : mb = sender
+            · simp [setActor, hmb, hsender, hflip, charge_box] at hm
+              exact Or.inl (by rw [← hsender] at hm; exact hm)
+            · simp [setActor, hmb, hsender, hflip] at hm
+              exact Or.inl hm
+    · by_cases hsame : sender = dst
+      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
+        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := by
+          rw [hsame]; exact hroom
+        rw [← hsame] at hm
+        rw [enqueue_park_self w D sender msg isCall k hliveS hroomS] at hm
+        by_cases hmb : mb = sender
+        · simp [setActor, hmb, charge_box] at hm
+          exact Or.inl (by rw [← hmb] at hm; exact hm)
+        · simp [setActor, hmb] at hm
+          exact Or.inl hm
+      · rw [enqueue_park_other w D sender dst msg isCall k hlive hsame hroom] at hm
+        by_cases hmb : mb = dst
+        · have hflip : ¬ dst = sender := fun h => hsame h.symm
+          simp [setActor, hmb, hflip] at hm
+          exact Or.inl (by rw [← hmb] at hm; exact hm)
+        · by_cases hsender : mb = sender
+          · simp [setActor, hmb, hsender, charge_box] at hm
+            exact Or.inl (by rw [← hsender] at hm; exact hm)
+          · simp [setActor, hmb, hsender] at hm
+            exact Or.inl hm
+  · rw [enqueue_dead w D sender dst msg isCall k hlive] at hm
+    by_cases hmb : mb = sender
+    · simp [setActor, hmb, proceed_box] at hm
+      exact Or.inl (by rw [← hmb] at hm; exact hm)
+    · simp [setActor, hmb] at hm
+      exact Or.inl hm
 
-theorem bulk_keeps_accepted (I : Impl) (w w' : World) (id : InstId) (hA : MailAccepted I w)
-    (h : receiveBulk I w id = some w') : MailAccepted I w' := by
-  refine ⟨?_, ?_⟩
-  · intro i m hm
-    cases hc : m.callFrom with
-    | none => exact Or.inl hc
-    | some _ =>
-      unfold receiveBulk at h
-      by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
-      · simp [hready] at h
-      · simp [hready] at h
-        cases hbox : (w.st id).box with
-        | nil =>
-          cases hpark : (w.st id).parked with
-          | nil => simp [hbox, hpark] at h
-          | cons p ps =>
-            simp [hbox, hpark] at h
-            split at h
-            · simp at h
-            · next w1 a1 hdel =>
-              cases h
-              have hcred := (credit_same (setActor w1 id a1) (tname id) p.msg.sender i).1
-              by_cases hs : i = p.sender
-              · simp [setActor] at hm
-                rw [hs] at hm
-                rw [resume_box, hcred] at hm
-                by_cases hi : p.sender = id
-                · have hbx := (deliver_box_here I w id ({ (w.st id) with box := [], parked := ps }) p.msg w1 a1 hdel).1
-                  simp [setActor, hi, hbx, hbox] at hm
-                · have hst := deliver_st I w id _ p.msg w1 a1 p.sender hdel
-                  simp [setActor, hi, hst] at hm
-                  exact hA.1 p.sender m (by rw [hs]; exact hm)
-              · rw [hcred] at hm
-                simp [setActor, hs] at hm
-                by_cases hi : i = id
-                · have hbx := (deliver_box_here I w id ({ (w.st id) with box := [], parked := ps }) p.msg w1 a1 hdel).1
-                  simp [setActor, hi, hbx, hbox] at hm
-                · have hst := deliver_st I w id _ p.msg w1 a1 i hdel
-                  simp [setActor, hi, hst] at hm
-                  exact hA.1 i m hm
-        | cons m0 ms =>
-          cases hpark : (w.st id).parked with
-          | nil =>
-            simp [hbox, hpark] at h
-            split at h
-            · simp at h
-            · next w1 a1 hdel =>
-              cases h
-              have hcred := (credit_same (setActor w1 id a1) (tname id) m0.sender i).1
-              rw [hcred] at hm
-              by_cases hi : i = id
-              · have hbx := (deliver_box_here I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel).1
-                simp [setActor, hi, hbx] at hm
-                exact hA.1 id m (by simp [hbox, hm])
-              · have hst := deliver_st I w id _ m0 w1 a1 i hdel
-                by_cases hs : i = m0.sender
-                · simp [setActor, hs] at hm
-                  exact hA.1 i m (by simpa [hst] using hm)
-                · simp [setActor, hs, hst] at hm
-                  exact hA.1 i m hm
-          | cons p ps =>
-            simp [hbox, hpark] at h
-            split at h
-            · simp at h
-            · next w1 a1 hdel =>
-              cases h
-              -- admitted message is the old parked head; the tail was the old box
-              have hpre := (credit_same (setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps })
-                (tname id) m0.sender i).1
-              -- world is setActor (credit ...) p.sender resumed
-              by_cases hs : i = p.sender
-              · simp [setActor, hs] at hm
-                rw [resume_box] at hm
-                rw [hpre] at hm
-                by_cases hi : p.sender = id
-                · have hbx := (deliver_box_here I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel).1
-                  simp [setActor, hi, hbx] at hm
-                  simp [List.mem_append, List.mem_singleton] at hm
-                  rcases hm with hm | rfl
-                  · exact hA.1 id m (by simp [hbox, hm])
-                  · exact hA.2 id p (by simp [hpark])
-                · have hst := deliver_st I w id _ m0 w1 a1 p.sender hdel
-                  simp [setActor, hi, hst] at hm
-                  exact hA.1 i m (by rw [hs]; exact hm)
-              · rw [setActor_other _ _ _ _ hs] at hm
-                rw [hpre] at hm
-                by_cases hi : i = id
-                · have hbx := (deliver_box_here I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel).1
-                  simp [setActor, hi, hbx] at hm
-                  simp [List.mem_append, List.mem_singleton] at hm
-                  rcases hm with hm | rfl
-                  · exact hA.1 id m (by simp [hbox, hm])
-                  · exact hA.2 id p (by simp [hpark])
-                · have hst := deliver_st I w id _ m0 w1 a1 i hdel
-                  simp [setActor, hi, hst] at hm
-                  exact hA.1 i m hm
-  · intro i q hq
-    cases hc : q.msg.callFrom with
-    | none => exact Or.inl hc
-    | some _ =>
-      unfold receiveBulk at h
-      by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
-      · simp [hready] at h
-      · simp [hready] at h
-        cases hbox : (w.st id).box with
-        | nil =>
-          cases hpark : (w.st id).parked with
-          | nil => simp [hbox, hpark] at h
-          | cons p ps =>
-            simp [hbox, hpark] at h
-            split at h
-            · simp at h
-            · next w1 a1 hdel =>
-              cases h
-              have hpk := (credit_same (setActor w1 id a1) (tname id) p.msg.sender i).2.1
-              by_cases hs : i = p.sender
-              · simp [setActor, hs] at hq
-                rw [resume_parked, hpk] at hq
-                by_cases hi : p.sender = id
-                · have hpK := (deliver_box_here I w id ({ (w.st id) with parked := ps }) p.msg w1 a1 hdel).2
-                  simp [setActor, hi, hpK, hpark] at hq
-                  exact hA.2 id q (List.mem_cons_of_mem _ hq)
-                · have hst := deliver_st I w id _ p.msg w1 a1 p.sender hdel
-                  simp [setActor, hi, hst] at hq
-                  exact hA.2 p.sender q (by rw [hs]; exact hq)
-              · simp [setActor, hs, hpk] at hq
-                by_cases hi : i = id
-                · have hpK := (deliver_box_here I w id ({ (w.st id) with parked := ps }) p.msg w1 a1 hdel).2
-                  simp [setActor, hi, hpK, hpark] at hq
-                  exact hA.2 id q (List.mem_cons_of_mem _ hq)
-                · have hst := deliver_st I w id _ p.msg w1 a1 i hdel
-                  simp [setActor, hi, hst] at hq
-                  exact hA.2 i q hq
-        | cons m0 ms =>
-          cases hpark : (w.st id).parked with
-          | nil =>
-            simp [hbox, hpark] at h
-            split at h
-            · simp at h
-            · next w1 a1 hdel =>
-              cases h
-              have hpk := (credit_same (setActor w1 id a1) (tname id) m0.sender i).2.1
-              rw [hpk] at hq
-              by_cases hi : i = id
-              · have hpK := (deliver_box_here I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel).2
-                simp [setActor, hi, hpK, hpark] at hq
-              · have hst := deliver_st I w id _ m0 w1 a1 i hdel
-                simp [setActor, hi, hst] at hq
-                exact hA.2 i q hq
-          | cons p ps =>
-            simp [hbox, hpark] at h
-            split at h
-            · simp at h
-            · next w1 a1 hdel =>
-              cases h
-              have hinner := setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps }
-              have hpk := (credit_same hinner (tname id) m0.sender i).2.1
-              by_cases hs : i = p.sender
-              · simp [setActor, hs] at hq
-                rw [resume_parked, hpk] at hq
-                by_cases hi : p.sender = id
-                · have hpK := (deliver_box_here I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel).2
-                  simp [setActor, hi, hpK, hpark] at hq
-                  exact hA.2 id q (List.mem_cons_of_mem _ hq)
-                · have hst := deliver_st I w id _ m0 w1 a1 p.sender hdel
-                  simp [setActor, hi, hst] at hq
-                  exact hA.2 p.sender q (by rw [hs]; exact hq)
-              · simp [setActor, hs, hpk] at hq
-                by_cases hi : i = id
-                · have hpK := (deliver_box_here I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel).2
-                  simp [setActor, hi, hpK, hpark] at hq
-                  exact hA.2 id q (List.mem_cons_of_mem _ hq)
-                · have hst := deliver_st I w id _ m0 w1 a1 i hdel
-                  simp [setActor, hi, hst] at hq
-                  exact hA.2 i q hq
+theorem foldl_keep {α} [DecidableEq α] (acc xs : List α) (x : α) (h : x ∈ acc ∨ x ∈ xs) :
+    x ∈ xs.foldl (fun acc y => if acc.elem y then acc else acc ++ [y]) acc := by
+  induction xs generalizing acc with
+  | nil =>
+    simp at h
+    simpa using h
+  | cons y ys ih =>
+    simp only [List.foldl_cons]
+    by_cases he : acc.elem y = true
+    · simp only [he, ite_true]
+      apply ih
+      cases h with
+      | inl hx => exact Or.inl hx
+      | inr hxs =>
+        cases List.mem_cons.mp hxs with
+        | inl heq =>
+          subst heq
+          exact Or.inl (List.elem_iff.mp he)
+        | inr ht => exact Or.inr ht
+    · have hf : acc.elem y = false := by
+        cases hbb : acc.elem y <;> simp_all
+      simp only [hf]
+      apply ih
+      cases h with
+      | inl hx => exact Or.inl (List.mem_append_left _ hx)
+      | inr hxs =>
+        cases List.mem_cons.mp hxs with
+        | inl heq =>
+          subst heq
+          exact Or.inl (List.mem_append_right _ (by simp))
+        | inr ht => exact Or.inr ht
+
+theorem dedup_mem {α} [DecidableEq α] (xs : List α) (x : α) (h : x ∈ xs) : x ∈ dedup xs := by
+  simpa [dedup] using foldl_keep [] xs x (Or.inr h)
+
+def callPairs (es : List Eff) : List (String × String) :=
+  es.filterMap fun e =>
+    match e with
+    | .call dst lab _ => some (dst, lab)
+    | _ => none
+
+theorem callSites_pairs (trs : List Transition) : callSites trs =
+    match trs with
+    | [] => []
+    | tr :: ts => dedup (callPairs tr.program ++ callSites ts) := by
+  cases trs <;> rfl
+
+theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (h : Eff.call d l n ∈ es) :
+    (d, l) ∈ callPairs es := by
+  induction es with
+  | nil => cases h
+  | cons e es ih =>
+    cases h with
+    | head => simp [callPairs, List.filterMap]
+    | tail _ ht =>
+      cases e with
+      | call a b c =>
+        rw [callPairs, List.filterMap_cons]
+        exact List.mem_cons_of_mem _ (by simpa [callPairs] using ih ht)
+      | send a b c =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | trySend a b c =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | reply =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | selfSchedule a =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | cell a b c =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | internal =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | peer =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+      | terminate =>
+        rw [callPairs, List.filterMap_cons]
+        simpa [callPairs] using ih ht
+
+theorem call_in_sites (trs : List Transition) (tr : Transition) (hm : tr ∈ trs) (d l : String) (n : Nat)
+    (h : Eff.call d l n ∈ tr.program) : (d, l) ∈ callSites trs := by
+  induction trs with
+  | nil => cases hm
+  | cons x xs ih =>
+    cases hm with
+    | head =>
+      rw [callSites_pairs]
+      apply dedup_mem
+      exact List.mem_append_left _ (filter_call_mem tr.program d l n h)
+    | tail _ hm =>
+      simp [callSites]
+      apply dedup_mem
+      exact List.mem_append_right _ (by simpa [callSites] using ih hm)
 
 theorem copy_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (hA : MailAccepted I w)
     (hb : a.box = (w.st id).box) (hp : a.parked = (w.st id).parked) :
@@ -5355,151 +5328,493 @@ theorem append_ok (I : Impl) (w : World) (dst : InstId) (msg : Msg) (hA : MailAc
       exact hA.2 dst p (by simpa [setActor] using hp)
     · exact hA.2 i p (by simpa [setActor, hi] using hp)
 
-theorem park_ok (I : Impl) (w : World) (dst : InstId) (entry : Parked) (hA : MailAccepted I w)
-    (hmsg : msgOk I dst entry.msg) :
-    MailAccepted I (setActor w dst { (w.st dst) with parked := (w.st dst).parked ++ [entry] }) := by
+theorem enqueue_accepted (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (isCall : Bool)
+    (k : Cont) (hA : MailAccepted I w) (hmsg : msgOk I dst msg) :
+    MailAccepted I (enqueueOrPark w I.desc sender dst msg isCall k) := by
   refine ⟨?_, ?_⟩
   · intro i m hm
-    by_cases hi : i = dst
-    · rw [hi] at hm ⊢
-      exact hA.1 dst m (by simpa [setActor] using hm)
-    · exact hA.1 i m (by simpa [setActor, hi] using hm)
+    rcases enqueue_box_mem w I.desc sender dst msg isCall k i m hm with hold | ⟨hid, heq, _⟩
+    · exact hA.1 i m hold
+    · rw [hid, heq]
+      exact hmsg
   · intro i p hp
-    by_cases hi : i = dst
-    · rw [hi] at hp ⊢
-      simp [setActor, List.mem_append, List.mem_singleton] at hp
-      rcases hp with hp | rfl
-      · exact hA.2 dst p hp
-      · exact hmsg
-    · exact hA.2 i p (by simpa [setActor, hi] using hp)
+    rcases enqueue_parked_mem w I.desc sender dst msg isCall k i p hp with hold | ⟨hid, _, heq, _, _⟩
+    · exact hA.2 i p hold
+    · rw [hid, heq]
+      exact hmsg
 
-theorem enqueue_ok (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (isCall : Bool) (k : Cont)
-    (hA : MailAccepted I w) (hmsg : msgOk I dst msg) :
-    MailAccepted I (enqueueOrPark w I.desc sender dst msg isCall k) := by
-  unfold enqueueOrPark
-  by_cases hlive : (w.st dst).life = .alive
-  · simp [hlive]
-    by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst
-    · simp [hroom]
-      by_cases hsame : sender = dst
-      · rw [hsame]
-        cases isCall
-        · exact append_ok I w dst msg hA hmsg |> fun h =>
-            copy_accepted I _ dst (proceed { chargeSender (w.st dst) (tname dst) with box := (w.st dst).box ++ [msg] } k)
-              h (by simp [setActor, proceed_box, chargeSender, bumpToken])
-              (by simp [setActor, proceed_parked, chargeSender, bumpToken])
-        · exact append_ok I w dst msg hA hmsg |> fun h =>
-            copy_accepted I _ dst { chargeSender (w.st dst) (tname dst) with
-                box := (w.st dst).box ++ [msg], phase := .awaitReply dst k } h
-              (by simp [setActor, chargeSender, bumpToken])
-              (by simp [setActor, chargeSender, bumpToken])
-      · cases isCall
-        · have hstored : MailAccepted I (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) :=
-            append_ok I w dst msg hA hmsg
-          exact copy_accepted I _ sender (proceed (chargeSender (w.st sender) (tname dst)) k) hstored
-            (by simp [setActor, hsame, proceed_box, chargeSender, bumpToken])
-            (by simp [setActor, hsame, proceed_parked, chargeSender, bumpToken])
-        · have hstored : MailAccepted I (setActor w dst { (w.st dst) with box := (w.st dst).box ++ [msg] }) :=
-            append_ok I w dst msg hA hmsg
-          exact copy_accepted I _ sender { chargeSender (w.st sender) (tname dst) with phase := .awaitReply dst k }
-            hstored (by simp [setActor, hsame, chargeSender, bumpToken])
-            (by simp [setActor, hsame, chargeSender, bumpToken])
-    · simp [hroom]
-      by_cases hsame : sender = dst
-      · rw [hsame]
-        exact park_ok I w dst { sender := dst, msg := msg, isCall := isCall } hA hmsg |> fun h =>
-          copy_accepted I _ dst { chargeSender (w.st dst) (tname dst) with
-              parked := (w.st dst).parked ++ [{ sender := dst, msg := msg, isCall := isCall }],
-              phase := .parked dst isCall k } h
-            (by simp [setActor, chargeSender, bumpToken])
-            (by simp [setActor, chargeSender, bumpToken])
-      · have hstored := park_ok I w dst { sender := sender, msg := msg, isCall := isCall } hA hmsg
-        exact copy_accepted I _ sender { chargeSender (w.st sender) (tname dst) with phase := .parked dst isCall k }
-          hstored (by simp [setActor, hsame, chargeSender, bumpToken])
-          (by simp [setActor, hsame, chargeSender, bumpToken])
-  · simp [hlive]
-    exact copy_accepted I w sender (proceed (w.st sender) k) hA proceed_box proceed_parked
+theorem deliver_box_of (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : a1.box = a.box ∧ a1.parked = a.parked := by
+  simp only [deliver] at h
+  split at h
+  · cases h
+  · split at h
+    · split at h
+      · cases h
+      · cases h
+        exact ⟨rfl, rfl⟩
+    · split at h
+      · cases h
+      · cases h
+        split <;> exact ⟨rfl, rfl⟩
+
+/-- A bulk receive only moves messages already in that mailbox. -/
+theorem bulk_keeps_accepted (I : Impl) (w w' : World) (id : InstId) (hA : MailAccepted I w)
+    (h : receiveBulk I w id = some w') : MailAccepted I w' := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons q qs =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          injection h with hw
+          have hdel' : deliver I w id ({ (w.st id) with parked := qs }) q.msg = some (w1, a1) := by
+            simpa [hbox] using hdel
+          have hkeep := deliver_box_of I w id ({ (w.st id) with parked := qs }) q.msg w1 a1 hdel'
+          refine ⟨?_, ?_⟩
+          · intro i m hm
+            rw [← hw] at hm
+            by_cases hs : i = q.sender
+            · subst hs
+              rw [setActor_self, resume_box] at hm
+              have hcr := (credit_same (setActor w1 id a1) (tname id) q.msg.sender q.sender).1
+              rw [hcr] at hm
+              by_cases hid : q.sender = id
+              · rw [hid, setActor_self, hkeep.1, hbox] at hm
+                simp at hm
+              · have hne : q.sender ≠ id := hid
+                rw [setActor_other _ _ _ _ hne, deliver_st I w id _ q.msg w1 a1 q.sender hdel'] at hm
+                exact hA.1 q.sender m hm
+            · rw [setActor_other _ _ _ _ hs] at hm
+              have hcr := (credit_same (setActor w1 id a1) (tname id) q.msg.sender i).1
+              rw [hcr] at hm
+              by_cases hid : i = id
+              · rw [hid, setActor_self, hkeep.1, hbox] at hm
+                simp at hm
+              · rw [setActor_other _ _ _ _ hid, deliver_st I w id _ q.msg w1 a1 i hdel'] at hm
+                exact hA.1 i m hm
+          · intro i p hp
+            rw [← hw] at hp
+            by_cases hs : i = q.sender
+            · subst hs
+              rw [setActor_self, resume_parked] at hp
+              have hcr := (credit_same (setActor w1 id a1) (tname id) q.msg.sender q.sender).2.1
+              rw [hcr] at hp
+              by_cases hid : q.sender = id
+              · rw [hid] at hp ⊢
+                rw [setActor_self, hkeep.2] at hp
+                exact hA.2 id p (by
+                  have hp' : p ∈ q :: qs := List.mem_cons_of_mem _ hp
+                  simpa [hpark] using hp')
+              · have hne : q.sender ≠ id := hid
+                rw [setActor_other _ _ _ _ hne, deliver_st I w id _ q.msg w1 a1 q.sender hdel'] at hp
+                exact hA.2 q.sender p hp
+            · rw [setActor_other _ _ _ _ hs] at hp
+              have hcr := (credit_same (setActor w1 id a1) (tname id) q.msg.sender i).2.1
+              rw [hcr] at hp
+              by_cases hid : i = id
+              · rw [hid] at hp ⊢
+                rw [setActor_self, hkeep.2] at hp
+                exact hA.2 id p (by
+                  have hp' : p ∈ q :: qs := List.mem_cons_of_mem _ hp
+                  simpa [hpark] using hp')
+              · rw [setActor_other _ _ _ _ hid, deliver_st I w id _ q.msg w1 a1 i hdel'] at hp
+                exact hA.2 i p hp
+    | cons m0 ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          injection h with hw
+          have hdel' : deliver I w id ({ (w.st id) with box := ms }) m0 = some (w1, a1) := by
+            simpa [hpark] using hdel
+          have hkeep := deliver_box_of I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel'
+          refine ⟨?_, ?_⟩
+          · intro i m hm
+            rw [← hw] at hm
+            have hcr := (credit_same (setActor w1 id a1) (tname id) m0.sender i).1
+            rw [hcr] at hm
+            by_cases hi : i = id
+            · rw [hi] at hm ⊢
+              rw [setActor_self, hkeep.1] at hm
+              exact hA.1 id m (by
+                have hm' : m ∈ m0 :: ms := List.mem_cons_of_mem _ hm
+                simpa [hbox] using hm')
+            · rw [setActor_other _ _ _ _ hi, deliver_st I w id _ m0 w1 a1 i hdel'] at hm
+              exact hA.1 i m hm
+          · intro i p hp
+            rw [← hw] at hp
+            have hcr := (credit_same (setActor w1 id a1) (tname id) m0.sender i).2.1
+            rw [hcr] at hp
+            by_cases hi : i = id
+            · rw [hi] at hp ⊢
+              rw [setActor_self, hkeep.2, hpark] at hp
+              simp at hp
+            · rw [setActor_other _ _ _ _ hi, deliver_st I w id _ m0 w1 a1 i hdel'] at hp
+              exact hA.2 i p hp
+      | cons q qs =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          injection h with hw
+          have hdel' : deliver I w id ({ (w.st id) with box := ms }) m0 = some (w1, a1) := by
+            simpa [hpark] using hdel
+          have hkeep := deliver_box_of I w id ({ (w.st id) with box := ms }) m0 w1 a1 hdel'
+          let admitted : Actor := { a1 with box := a1.box ++ [q.msg], parked := qs }
+          refine ⟨?_, ?_⟩
+          · intro i m hm
+            rw [← hw] at hm
+            by_cases hs : i = q.sender
+            · subst hs
+              rw [setActor_self, resume_box] at hm
+              have hcr := (credit_same (setActor w1 id admitted) (tname id) m0.sender q.sender).1
+              rw [hcr] at hm
+              by_cases hid : q.sender = id
+              · rw [hid] at hm ⊢
+                rw [setActor_self] at hm
+                simp [admitted, hkeep.1, List.mem_append, List.mem_singleton] at hm
+                rcases hm with hm | rfl
+                · exact hA.1 id m (by
+                    have hm' : m ∈ m0 :: ms := List.mem_cons_of_mem _ hm
+                    simpa [hbox] using hm')
+                · exact hA.2 id q (by simp [hpark])
+              · have hne : q.sender ≠ id := hid
+                rw [setActor_other _ _ _ _ hne, deliver_st I w id _ m0 w1 a1 q.sender hdel'] at hm
+                exact hA.1 q.sender m hm
+            · rw [setActor_other _ _ _ _ hs] at hm
+              have hcr := (credit_same (setActor w1 id admitted) (tname id) m0.sender i).1
+              rw [hcr] at hm
+              by_cases hid : i = id
+              · rw [hid] at hm ⊢
+                rw [setActor_self] at hm
+                simp [admitted, hkeep.1, List.mem_append, List.mem_singleton] at hm
+                rcases hm with hm | rfl
+                · exact hA.1 id m (by
+                    have hm' : m ∈ m0 :: ms := List.mem_cons_of_mem _ hm
+                    simpa [hbox] using hm')
+                · exact hA.2 id q (by simp [hpark])
+              · rw [setActor_other _ _ _ _ hid, deliver_st I w id _ m0 w1 a1 i hdel'] at hm
+                exact hA.1 i m hm
+          · intro i p hp
+            rw [← hw] at hp
+            by_cases hs : i = q.sender
+            · subst hs
+              rw [setActor_self, resume_parked] at hp
+              have hcr := (credit_same (setActor w1 id admitted) (tname id) m0.sender q.sender).2.1
+              rw [hcr] at hp
+              by_cases hid : q.sender = id
+              · rw [hid] at hp ⊢
+                rw [setActor_self] at hp
+                simp [admitted] at hp
+                exact hA.2 id p (by
+                  have hp' : p ∈ q :: qs := List.mem_cons_of_mem _ hp
+                  simpa [hpark] using hp')
+              · have hne : q.sender ≠ id := hid
+                rw [setActor_other _ _ _ _ hne, deliver_st I w id _ m0 w1 a1 q.sender hdel'] at hp
+                exact hA.2 q.sender p hp
+            · rw [setActor_other _ _ _ _ hs] at hp
+              have hcr := (credit_same (setActor w1 id admitted) (tname id) m0.sender i).2.1
+              rw [hcr] at hp
+              by_cases hid : i = id
+              · rw [hid] at hp ⊢
+                rw [setActor_self] at hp
+                simp [admitted] at hp
+                exact hA.2 id p (by
+                  have hp' : p ∈ q :: qs := List.mem_cons_of_mem _ hp
+                  simpa [hpark] using hp')
+              · rw [setActor_other _ _ _ _ hid, deliver_st I w id _ m0 w1 a1 i hdel'] at hp
+                exact hA.2 i p hp
+
+theorem tryWake_mail (D : Description) (w : World) (dstId : InstId) (label : String) (writer i : InstId) :
+    ((tryWake D w dstId label writer).st i).box = (w.st i).box ∧
+      ((tryWake D w dstId label writer).st i).parked = (w.st i).parked := by
+  dsimp [tryWake]
+  split
+  · by_cases hi : i = dstId <;> simp [setActor, hi]
+  · simp
+
+theorem wakes_mail (ids : List InstId) (D : Description) (w : World) (dst label : String)
+    (writer i : InstId) :
+    ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).box = (w.st i).box ∧
+      ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).parked = (w.st i).parked := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    have h1 := tryWake_mail D w j label writer i
+    have h2 := ih (tryWake D w j label writer)
+    exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+
+theorem refund_mail (w : World) (name : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w name ms).st i).box = (w.st i).box ∧
+      ((refundMsgs w name ms).st i).parked = (w.st i).parked := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    have hstep := credit_same w name m.sender i
+    have hrest := ih (creditSender w name m.sender)
+    exact ⟨hrest.1.trans hstep.1, hrest.2.trans hstep.2.1⟩
+
+theorem refundP_mail (w : World) (name : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w name ps).st i).box = (w.st i).box ∧
+      ((refundParked w name ps).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    have hstep := credit_same w name p.msg.sender i
+    have hrest := ih (creditSender w name p.msg.sender)
+    exact ⟨hrest.1.trans hstep.1, hrest.2.trans hstep.2.1⟩
+
+theorem release_mail (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
+    ((releaseParked w id ps).st i).box = (w.st i).box ∧
+      ((releaseParked w id ps).st i).parked = (w.st i).parked := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+    · rw [if_pos hskip]
+      exact ih w
+    · rw [if_neg hskip]
+      have hmid := ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+      have hset : ((setActor w p.sender (resumeSender (w.st p.sender) false id)).st i).box = (w.st i).box ∧
+          ((setActor w p.sender (resumeSender (w.st p.sender) false id)).st i).parked = (w.st i).parked := by
+        by_cases hi : i = p.sender
+        · rw [hi]
+          exact ⟨by simp [setActor_self, resume_box], by simp [setActor_self, resume_parked]⟩
+        · exact ⟨by simp [setActor_other _ _ _ _ hi, resume_box],
+            by simp [setActor_other _ _ _ _ hi, resume_parked]⟩
+      exact ⟨hmid.1.trans hset.1, hmid.2.trans hset.2⟩
 
 theorem exec_send_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (dst label : String) (hint : Nat) (es : List Eff)
-    (hk : k.rest = .send dst label hint :: es) (hA : MailAccepted I w) :
+    (dst label : String) (hint : Nat) (es : List Eff) (hk : k.rest = .send dst label hint :: es)
+    (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
+  unfold execRun
+  simp [hk]
+  cases hr : route w I.desc dst hint with
+  | none =>
+    exact copy_accepted I w id (proceed a (afterHead k)) hA (by simp [ha, proceed_box])
+      (by simp [ha, proceed_parked])
+  | some dstId =>
+    exact enqueue_accepted I w id dstId { label := label, sender := id, callFrom := none } false
+      (afterHead k) hA (Or.inl rfl)
+
+theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (dst label : String) (hint : Nat) (es : List Eff) (hk : k.rest = .call dst label hint :: es)
+    (hS : ProgSrc I w) (hA : MailAccepted I w) (ha : a = w.st id) (hph : (w.st id).phase = .run k) :
     MailAccepted I (execRun I w id a k) := by
   unfold execRun
   simp [hk]
-  split
-  · exact copy_accepted I w id (proceed a (afterHead k)) hA proceed_box proceed_parked
-  · next dstId _ =>
-    exact enqueue_ok I w id dstId { label := label, sender := id, callFrom := none } false (afterHead k) hA
-      (Or.inl rfl)
+  cases hr : route w I.desc dst hint with
+  | none =>
+    exact copy_accepted I w id (proceed a (afterHead k)) hA (by simp [ha, proceed_box])
+      (by simp [ha, proceed_parked])
+  | some dstId =>
+    have hname := route_tname w I.desc dst hint dstId hr
+    have hsite : callSite I (tname dstId) label := by
+      rw [hname]
+      obtain ⟨tr, hmem, _, pre, happ⟩ := hS id k.rest (by simp [carried, hph])
+      have hin : Eff.call dst label hint ∈ tr.program := by
+        rw [← happ, hk]
+        exact List.mem_append_right _ (List.Mem.head _)
+      exact call_in_sites I.transitions tr hmem dst label hint hin
+    exact enqueue_accepted I w id dstId { label := label, sender := id, callFrom := some id } true
+      (afterHead k) hA (Or.inr hsite)
+
+def tryFitWorld (w : World) (id dstId : InstId) (label : String) (k : Cont) : World :=
+  let msg : Msg := { label := label, sender := id, callFrom := none }
+  let charged := chargeSender (w.st id) (tname dstId)
+  let w1 := setActor w id charged
+  let w2 := setActor w1 dstId { w1.st dstId with box := (w1.st dstId).box ++ [msg] }
+  setActor w2 id (proceed (w2.st id) k)
+
+theorem try_fit_mail (I : Impl) (w : World) (id dstId : InstId) (label : String) (k : Cont)
+    (hA : MailAccepted I w) : MailAccepted I (tryFitWorld w id dstId label k) := by
+  let msg : Msg := { label := label, sender := id, callFrom := none }
+  let charged := chargeSender (w.st id) (tname dstId)
+  have h1 := copy_accepted I w id charged hA (charge_box _ _) (charge_parked _ _)
+  let w1 := setActor w id charged
+  have h2 := append_ok I w1 dstId msg h1 (Or.inl rfl)
+  let w2 := setActor w1 dstId { w1.st dstId with box := (w1.st dstId).box ++ [msg] }
+  simpa [tryFitWorld, msg, charged, w1, w2] using
+    copy_accepted I w2 id (proceed (w2.st id) k) h2 (by simp [proceed_box]) (by simp [proceed_parked])
 
 theorem exec_try_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (dst label : String) (hint : Nat) (hA : MailAccepted I w) :
-    MailAccepted I (execRun I w id a k) := by
-  exact hA
+    (dst label : String) (hint : Nat) (es : List Eff) (hk : k.rest = .trySend dst label hint :: es)
+    (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
+  unfold execRun
+  simp [hk, ha]
+  cases hr : route w I.desc dst hint with
+  | none => exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+  | some dstId =>
+    simp only [hr]
+    split
+    · simpa [tryFitWorld] using try_fit_mail I w id dstId label (afterHead k) hA
+    · exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
 
-theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (dst label : String) (hint : Nat) (hS : ProgSrc I w) (hA : MailAccepted I w)
-    (hph : (w.st id).phase = .run k) :
-    MailAccepted I (execRun I w id a k) := by
-  exact hA
+theorem exec_cell_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (dst label : String) (value : Nat) (es : List Eff) (hk : k.rest = .cell dst label value :: es)
+    (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
+  unfold execRun
+  simp [hk, ha]
+  let c : Cell := { value := max (w.cell dst label).value value, dirty := true }
+  let wS := setCell w dst label c
+  have hSmail : MailAccepted I wS := by
+    unfold MailAccepted at hA ⊢
+    simpa [wS, setCell] using hA
+  split
+  · exact copy_accepted I wS id (proceed (wS.st id) (afterHead k)) hSmail (proceed_box _ _) (proceed_parked _ _)
+  · let wA := setActor wS id (proceed (wS.st id) (afterHead k))
+    have hAmail := copy_accepted I wS id (proceed (wS.st id) (afterHead k)) hSmail (proceed_box _ _)
+      (proceed_parked _ _)
+    refine ⟨?_, ?_⟩
+    · intro i m hm
+      have hpre : m ∈ (wA.st i).box := by
+        have hw := (wakes_mail (readersOf wA dst) I.desc wA dst label id i).1
+        simpa [wakeReaders, wA, wS, c, hw] using hm
+      exact hAmail.1 i m hpre
+    · intro i p hp
+      have hpre : p ∈ (wA.st i).parked := by
+        have hw := (wakes_mail (readersOf wA dst) I.desc wA dst label id i).2
+        simpa [wakeReaders, wA, wS, c, hw] using hp
+      exact hAmail.2 i p hpre
 
 theorem exec_term_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (hA : MailAccepted I w) :
+    (es : List Eff) (hk : k.rest = .terminate :: es) (hA : MailAccepted I w) (ha : a = w.st id) :
     MailAccepted I (execRun I w id a k) := by
-  exact hA
-
-theorem cell_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (dst label : String) (value : Nat) (hA : MailAccepted I w) :
-    MailAccepted I (execRun I w id a k) := by
-  exact hA
+  unfold execRun
+  simp [hk, ha]
+  cases ht : templateOf I.desc (tname id) with
+  | none => exact hA
+  | some t =>
+    split
+    · rename_i t' hts
+      injection hts with hteq
+      subst hteq
+      split
+      · let wR := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+          (tname id) (w.st id).parked
+        let dead : Actor :=
+          { wR.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+        let wD := setActor wR id dead
+        refine ⟨?_, ?_⟩
+        · intro i m hm
+          have hpre : m ∈ (wD.st i).box := by
+            have hrel := (release_mail wD id (w.st id).parked i).1
+            simpa [wD, wR, dead, hrel] using hm
+          by_cases hi : i = id
+          · subst hi
+            simp [wD, setActor, dead] at hpre
+          · have hbox : (wD.st i).box = (w.st i).box := by
+              simp [wD, setActor, hi, wR, readCells_st, refund_box, refundP_box]
+            rw [hbox] at hpre
+            exact hA.1 i m hpre
+        · intro i p hp
+          have hpre : p ∈ (wD.st i).parked := by
+            have hrel := (release_mail wD id (w.st id).parked i).2
+            simpa [wD, wR, dead, hrel] using hp
+          by_cases hi : i = id
+          · subst hi
+            simp [wD, setActor, dead] at hpre
+          · have hpark : (wD.st i).parked = (w.st i).parked := by
+              simp [wD, setActor, hi, wR, readCells_st, refund_park, refundP_park]
+            rw [hpark] at hpre
+            exact hA.2 i p hpre
+      · exact hA
+    · rename_i hbad
+      simp at hbad
 
 theorem exec_run_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (hS : ProgSrc I w) (hA : MailAccepted I w) (hph : (w.st id).phase = .run k) :
+    (hS : ProgSrc I w) (hA : MailAccepted I w) (ha : a = w.st id) (hph : (w.st id).phase = .run k) :
     MailAccepted I (execRun I w id a k) := by
-  have ha : a = w.st id := rfl
   unfold execRun
   cases hk : k.rest with
   | nil =>
-    exact copy_accepted I w id { a with phase := .idle, typestate := k.toState } hA (by simp) (by simp)
+    exact copy_accepted I w id { a with phase := .idle, typestate := k.toState } hA (by rw [ha]) (by rw [ha])
   | cons e es =>
     cases e with
     | internal =>
-      exact copy_accepted I w id { a with phase := .awaitEffect (afterHead k) } hA (by simp) (by simp)
+      exact copy_accepted I w id { a with phase := .awaitEffect (afterHead k) } hA (by rw [ha]) (by rw [ha])
     | peer =>
-      exact copy_accepted I w id { a with phase := .awaitPeer (afterHead k) } hA (by simp) (by simp)
-    | reply =>
-      simp [performReply]
-      split
-      · exact copy_accepted I w id (proceed a (afterHead k)) hA proceed_box proceed_parked
-      · next caller =>
-        split
-        · next dst ck =>
-          split
-          · exact copy_accepted I _
-              (setActor w caller (proceed (w.st caller) ck)) id (proceed a (afterHead k))
-              (copy_accepted I w caller (proceed (w.st caller) ck) hA proceed_box proceed_parked)
-              (by simp [setActor, proceed_box]) (by simp [setActor, proceed_parked])
-          · exact copy_accepted I w id (proceed a (afterHead k)) hA proceed_box proceed_parked
-        · exact copy_accepted I w id (proceed a (afterHead k)) hA proceed_box proceed_parked
+      exact copy_accepted I w id { a with phase := .awaitPeer (afterHead k) } hA (by rw [ha]) (by rw [ha])
     | selfSchedule label =>
-      simp
+      simp [hk, ha]
       split
-      · exact copy_accepted I w id (proceed a (afterHead k)) hA proceed_box proceed_parked
+      · exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
       · split
-        · exact copy_accepted I w id
-            (proceed { a with prio := upsertPrio a.prio { label := label, sender := id, callFrom := none } } (afterHead k))
-            hA (by simp [proceed_box]) (by simp [proceed_parked])
-        · exact copy_accepted I w id { a with phase := .crashed } hA (by simp) (by simp)
-    | cell dst label value =>
-      exact cell_accepted I w id a k dst label value hA
+        · exact copy_accepted I w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none } } (afterHead k)) hA (by simp [proceed_box]) (by simp [proceed_parked])
+        · exact copy_accepted I w id { (w.st id) with phase := .crashed } hA rfl rfl
+    | reply =>
+      simp [hk, ha, performReply]
+      cases hr : k.replyTo with
+      | none =>
+        simp [hr]
+        exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+      | some caller =>
+        simp [hr]
+        cases hphC : (w.st caller).phase with
+        | awaitReply dst ck =>
+          simp [hphC]
+          by_cases hs : dst = id
+          · rw [hs]
+            simp
+            by_cases hsc : id = caller
+            · subst hsc
+              exact copy_accepted I (setActor w id (proceed (w.st id) ck)) id
+                (proceed ((setActor w id (proceed (w.st id) ck)).st id) (afterHead k))
+                (copy_accepted I w id (proceed (w.st id) ck) hA (proceed_box _ _) (proceed_parked _ _))
+                (proceed_box _ _) (proceed_parked _ _)
+            · exact copy_accepted I (setActor w caller (proceed (w.st caller) ck)) id
+                (proceed ((setActor w caller (proceed (w.st caller) ck)).st id) (afterHead k))
+                (copy_accepted I w caller (proceed (w.st caller) ck) hA (proceed_box _ _) (proceed_parked _ _))
+                (by simp [setActor, hsc, proceed_box]) (by simp [setActor, hsc, proceed_parked])
+          · simp [hs]
+            exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+        | idle =>
+          simp [hphC]
+          exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+        | run _ =>
+          simp [hphC]
+          exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+        | parked _ _ _ =>
+          simp [hphC]
+          exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+        | awaitEffect _ =>
+          simp [hphC]
+          exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+        | awaitPeer _ =>
+          simp [hphC]
+          exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+        | crashed =>
+          simp [hphC]
+          exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
     | send dst label hint =>
-      exact exec_send_accepted I w id a k dst label hint es hk hA
+      rw [← hk]
+      exact exec_send_accepted I w id a k dst label hint es hk hA ha
     | trySend dst label hint =>
-      exact exec_try_accepted I w id a k dst label hint hA
+      rw [← hk]
+      exact exec_try_accepted I w id a k dst label hint es hk hA ha
     | call dst label hint =>
-      exact exec_call_accepted I hL w id a k dst label hint hS hA hph
+      rw [← hk]
+      exact exec_call_accepted I hL w id a k dst label hint es hk hS hA ha hph
+    | cell dst label value =>
+      rw [← hk]
+      exact exec_cell_accepted I w id a k dst label value es hk hA ha
     | terminate =>
-      exact exec_term_accepted I w id a k hA
+      rw [← hk]
+      exact exec_term_accepted I w id a k es hk hA ha
 
 theorem exec_keeps_accepted (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     (hS : ProgSrc I w) (hA : MailAccepted I w) (h : execHead I w id = some w') : MailAccepted I w' := by
@@ -5510,7 +5825,7 @@ theorem exec_keeps_accepted (I : Impl) (hL : LocalOk I) (w w' : World) (id : Ins
     | run k =>
       simp [hph] at h
       cases h
-      exact exec_run_accepted I hL w id (w.st id) k hS hA hph
+      exact exec_run_accepted I hL w id (w.st id) k hS hA rfl hph
     | idle => simp [hph] at h
     | parked _ _ _ => simp [hph] at h
     | awaitReply _ _ => simp [hph] at h
@@ -5529,6 +5844,28 @@ theorem call_old_park (I : Impl) (w : World) (hA : MailAccepted I w) (id : InstI
 
 /-- One step keeps every queued call inside a mailbox `callTotal` covers.
 A non-call is accepted outright. -/
+theorem prio_box_msg (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio I w id = some w')
+    (m : Msg) (hm : m ∈ (w'.st i).box) : m ∈ (w.st i).box := by
+  unfold receivePrio at h
+  cases hprio : (w.st id).prio with
+  | nil => simp [hprio] at h
+  | cons m0 ms =>
+    simp [hprio] at h
+    split at h
+    · simp at h
+    · next w1 a1 hdel =>
+      rcases h with ⟨_, hw⟩
+      injection hw with hw
+      rw [← hw] at hm
+      have hbx := (deliver_box_of I w id ({ (w.st id) with prio := ms }) m0 w1 a1 hdel).1
+      have hst := deliver_st I w id _ m0 w1 a1 i hdel
+      by_cases hi : i = id
+      · rw [hi] at hm ⊢
+        simp [setActor, hbx] at hm
+        exact hm
+      · simp [setActor, hi, hst] at hm
+        exact hm
+
 theorem mail_step (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (hA : MailAccepted I w) (h : apply I a w = some w') : MailAccepted I w' := by
   cases a with
@@ -5555,11 +5892,13 @@ theorem mail_step (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hS : 
     refine ⟨?_, ?_⟩
     · intro i m hm
       by_cases hi : i = id
-      · exact hA.1 i m (by simpa [setActor, hi, proceed_box] using hm)
+      · rw [hi] at hm ⊢
+        exact hA.1 id m (by simpa [setActor, proceed_box] using hm)
       · exact hA.1 i m (by simpa [setActor, hi] using hm)
     · intro i p hp
       by_cases hi : i = id
-      · exact hA.2 i p (by simpa [setActor, hi, proceed_parked] using hp)
+      · rw [hi] at hp ⊢
+        exact hA.2 id p (by simpa [setActor, proceed_parked] using hp)
       · exact hA.2 i p (by simpa [setActor, hi] using hp)
   | recvPrio id =>
     simp only [apply] at h
@@ -9432,9 +9771,6 @@ theorem recv_box_progress (I : Impl) (hL : LocalOk I) (w w' : World) (d c : Inst
             exact Or.inl (callPos_mem (ms ++ [p.msg]) c (by rw [hposA, hlen]; omega))
           · simp [hbox', hposA, callPos, hc]
 
-theorem charge_box (a : Actor) (name : String) : (chargeSender a name).box = a.box := by
-  simp [chargeSender, bumpToken]
-
 /-- A bulk mailbox grows only by keeping its messages and appending behind them. -/
 def BoxGrow (old new : List Msg) : Prop :=
   new = old ∨ ∃ m, new = old ++ [m]
@@ -10198,92 +10534,6 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
             simp [htpl, hkill, readCells_st]
             exact hrel _ _ (by simp [setActor, hne, hpre])
           · simp [htpl, hkill, hidle]
-
-/-- A message in a box after `enqueueOrPark` was already there, or it is the message
-just enqueued into the live target. -/
-theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
-    (isCall : Bool) (k : Cont) (mb : InstId) (m : Msg)
-    (hm : m ∈ ((enqueueOrPark w D sender dst msg isCall k).st mb).box) :
-    m ∈ (w.st mb).box ∨
-      (mb = dst ∧ m = msg ∧ (w.st dst).life = .alive) := by
-  by_cases hlive : (w.st dst).life = .alive
-  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
-    · by_cases hsame : sender = dst
-      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
-        have hparkS : (w.st sender).parked = [] := by rw [hsame]; exact hroom.1
-        have hcapS : (w.st sender).box.length < capBulk D w.N sender := by rw [hsame]; exact hroom.2
-        cases isCall
-        · rw [← hsame] at hm
-          rw [enqueue_room_self_send w D sender msg k hliveS hparkS hcapS] at hm
-          by_cases hmb : mb = sender
-          · simp [setActor, hmb, proceed_box, charge_box, List.mem_append, List.mem_singleton] at hm
-            rcases hm with hm | hm
-            · exact Or.inl (by rw [← hmb] at hm; exact hm)
-            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
-          · simp [setActor, hmb] at hm
-            exact Or.inl hm
-        · rw [← hsame] at hm
-          rw [enqueue_room_self_call w D sender msg k hliveS hparkS hcapS] at hm
-          by_cases hmb : mb = sender
-          · simp [setActor, hmb, charge_box, List.mem_append, List.mem_singleton] at hm
-            rcases hm with hm | hm
-            · exact Or.inl (by rw [← hmb] at hm; exact hm)
-            · exact Or.inr ⟨hmb.trans hsame, hm, hlive⟩
-          · simp [setActor, hmb] at hm
-            exact Or.inl hm
-      · have hflip : ¬ dst = sender := fun h => hsame h.symm
-        cases isCall
-        · rw [enqueue_room_other_send w D sender dst msg k hlive hsame hroom.1 hroom.2] at hm
-          by_cases hmb : mb = dst
-          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
-            simp [setActor, hmb, hne, hflip, List.mem_append, List.mem_singleton] at hm
-            rcases hm with hm | hm
-            · exact Or.inl (by rw [← hmb] at hm; exact hm)
-            · exact Or.inr ⟨hmb, hm, hlive⟩
-          · by_cases hsender : mb = sender
-            · simp [setActor, hmb, hsender, hflip, proceed_box, charge_box] at hm
-              exact Or.inl (by rw [← hsender] at hm; exact hm)
-            · simp [setActor, hmb, hsender, hflip] at hm
-              exact Or.inl hm
-        · rw [enqueue_room_other_call w D sender dst msg k hlive hsame hroom.1 hroom.2] at hm
-          by_cases hmb : mb = dst
-          · have hne : ¬ mb = sender := fun h => hsame (h.symm.trans hmb)
-            simp [setActor, hmb, hne, hflip, List.mem_append, List.mem_singleton] at hm
-            rcases hm with hm | hm
-            · exact Or.inl (by rw [← hmb] at hm; exact hm)
-            · exact Or.inr ⟨hmb, hm, hlive⟩
-          · by_cases hsender : mb = sender
-            · simp [setActor, hmb, hsender, hflip, charge_box] at hm
-              exact Or.inl (by rw [← hsender] at hm; exact hm)
-            · simp [setActor, hmb, hsender, hflip] at hm
-              exact Or.inl hm
-    · by_cases hsame : sender = dst
-      · have hliveS : (w.st sender).life = .alive := by rw [hsame]; exact hlive
-        have hroomS : ¬ ((w.st sender).parked = [] ∧ (w.st sender).box.length < capBulk D w.N sender) := by
-          rw [hsame]; exact hroom
-        rw [← hsame] at hm
-        rw [enqueue_park_self w D sender msg isCall k hliveS hroomS] at hm
-        by_cases hmb : mb = sender
-        · simp [setActor, hmb, charge_box] at hm
-          exact Or.inl (by rw [← hmb] at hm; exact hm)
-        · simp [setActor, hmb] at hm
-          exact Or.inl hm
-      · rw [enqueue_park_other w D sender dst msg isCall k hlive hsame hroom] at hm
-        by_cases hmb : mb = dst
-        · have hflip : ¬ dst = sender := fun h => hsame h.symm
-          simp [setActor, hmb, hflip] at hm
-          exact Or.inl (by rw [← hmb] at hm; exact hm)
-        · by_cases hsender : mb = sender
-          · simp [setActor, hmb, hsender, charge_box] at hm
-            exact Or.inl (by rw [← hsender] at hm; exact hm)
-          · simp [setActor, hmb, hsender] at hm
-            exact Or.inl hm
-  · rw [enqueue_dead w D sender dst msg isCall k hlive] at hm
-    by_cases hmb : mb = sender
-    · simp [setActor, hmb, proceed_box] at hm
-      exact Or.inl (by rw [← hmb] at hm; exact hm)
-    · simp [setActor, hmb] at hm
-      exact Or.inl hm
 
 /-- Some bulk mailbox holds a message naming `c`. -/
 def anyCall (w : World) (c : InstId) : Prop :=

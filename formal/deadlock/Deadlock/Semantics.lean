@@ -594,6 +594,44 @@ theorem ingress_ty_eq (I : Impl) (w w' : World) (dst : InstId) (label : String) 
             · simp [setActor, hi, chargeSender, bumpToken]
             · simp [setActor, hi]
 
+/-- A successful ingress is the charged, appended world, and the guards that
+make the charge safe have already held. -/
+theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
+    (h : receiveIngress I w dst label = some w') :
+    (w.st dst).life = .alive ∧ (w.st dst).phase = .idle ∧
+      terminableB I.desc (tname dst) = false ∧
+      budget I.desc (tname dst) (tname dst) - debt I.desc (tname dst) (w.st dst).typestate (tname dst) + 1 ≤
+        (w.st dst).tokens (tname dst) ∧
+      w' = setActor w dst { chargeSender (w.st dst) (tname dst) with
+        box := (w.st dst).box ++ [{ label := label, sender := dst, callFrom := none }] } := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · next hguard =>
+    split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · next hterm =>
+          split at h
+          · simp at h
+          · next htok =>
+            cases h
+            have hnot : ¬((w.st dst).life ≠ .alive ∨ (w.st dst).phase ≠ .idle) := by simpa using hguard
+            refine ⟨?_, ?_, ?_, ?_, rfl⟩
+            · by_cases hl : (w.st dst).life = .alive
+              · exact hl
+              · exact False.elim (hnot (Or.inl hl))
+            · by_cases hp : (w.st dst).phase = .idle
+              · exact hp
+              · exact False.elim (hnot (Or.inr hp))
+            · cases hb : terminableB I.desc (tname dst) with
+              | true => simp [hb] at hterm
+              | false => rfl
+            · simpa [Nat.not_lt] using htok
+
 /-- A delivered ingress names a live idle actor. -/
 theorem ingress_ready (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
