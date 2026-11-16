@@ -11746,6 +11746,85 @@ theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA :
   obtain ⟨s, i, _, hS, _⟩ := deadlock_kind ρ hA hF hD
   exact never_stuck I hL hG hA ρ hF s i hS
 
+/-- A finite execution starts at the initial world and stops only when no
+action applies. A `Run` cannot end this way: every index has a successor. -/
+structure FinExec (I : Impl) (N : Nat) where
+  cfg : Nat → World
+  act : Nat → Action
+  len : Nat
+  start : cfg 0 = initWorld I N
+  valid : ∀ i, i < len → apply I (act i) (cfg i) = some (cfg (i + 1))
+  maximal : ∀ a, apply I a (cfg len) = none
+
+theorem fin_exec_reachable (I : Impl) {N : Nat} (e : FinExec I N) (n : Nat) (hn : n ≤ e.len) :
+    Reachable I N (e.cfg n) := by
+  induction n with
+  | zero =>
+    rw [e.start]
+    exact Reachable.init
+  | succ n ih =>
+    have hprev : n ≤ e.len := Nat.le_of_lt hn
+    exact Reachable.step (e.cfg n) (e.cfg (n + 1)) (e.act n) (ih hprev) (e.valid n hn)
+
+theorem noncall_deliver (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (hl : a.life = .alive) (hc : m.callFrom = none) : ∃ r, deliver I w id a m = some r := by
+  unfold deliver
+  simp [hl]
+  cases findTr I (tname id) a.typestate m.label with
+  | none => simp [hc]
+  | some _ => simp [hc]
+
+/-- An idle live mailbox whose next message is not a call can take `recvBulk`,
+including when that message is only parked. -/
+theorem parked_idle_enabled (I : Impl) (w : World) (dst : InstId)
+    (hl : (w.st dst).life = .alive) (hph : (w.st dst).phase = .idle)
+    (q : Parked) (qs : List Parked) (hp : (w.st dst).parked = q :: qs)
+    (hc : q.msg.callFrom = none)
+    (hbox : (w.st dst).box = [] ∨ ∃ m ms, (w.st dst).box = m :: ms ∧ m.callFrom = none) :
+    Enabled I w (.recvBulk dst) := by
+  unfold Enabled apply receiveBulk
+  simp [hl, hph, hp]
+  rcases hbox with hnil | ⟨m, ms, hm, hmc⟩
+  · simp [hnil]
+    obtain ⟨r, hr⟩ := noncall_deliver I w dst
+      { life := .alive, typestate := (w.st dst).typestate, phase := .idle, box := [],
+        prio := (w.st dst).prio, parked := qs, tokens := (w.st dst).tokens } q.msg rfl hc
+    rw [hr]
+    simp
+  · simp [hm]
+    obtain ⟨r, hr⟩ := noncall_deliver I w dst
+      { life := .alive, typestate := (w.st dst).typestate, phase := .idle, box := ms,
+        prio := (w.st dst).prio, parked := q :: qs, tokens := (w.st dst).tokens } m rfl hmc
+    rw [hr]
+    simp
+
+/-- A blocking park onto an idle live mailbox is not a terminal world. The
+target can receive. A mutual full-mailbox pair is a different graph: both
+targets are parked, and `mutual_full_rejected` says that graph does not pass. -/
+theorem blocking_park_not_terminal (I : Impl) (w : World) (hM : MailInv w) (id dst : InstId)
+    (k : Cont) (hph : (w.st id).phase = .parked dst false k)
+    (hl : (w.st dst).life = .alive) (hidle : (w.st dst).phase = .idle)
+    (hc : ∀ p, p ∈ (w.st dst).parked → p.msg.callFrom = none)
+    (hbox : (w.st dst).box = [] ∨ ∃ m ms, (w.st dst).box = m :: ms ∧ m.callFrom = none) :
+    ∃ a, Enabled I w a := by
+  obtain ⟨p, hmem, _, _⟩ := hM.bwd id dst false k hph
+  cases hpark : (w.st dst).parked with
+  | nil =>
+    simp [hpark] at hmem
+  | cons q qs =>
+    exact ⟨.recvBulk dst, parked_idle_enabled I w dst hl hidle q qs hpark (hc q (by simp [hpark])) hbox⟩
+
+theorem fin_exec_not_blocked_on_idle (I : Impl) {N : Nat} (e : FinExec I N)
+    (hM : MailInv (e.cfg e.len)) (id dst : InstId) (k : Cont)
+    (hph : ((e.cfg e.len).st id).phase = .parked dst false k)
+    (hl : ((e.cfg e.len).st dst).life = .alive)
+    (hidle : ((e.cfg e.len).st dst).phase = .idle)
+    (hc : ∀ p, p ∈ ((e.cfg e.len).st dst).parked → p.msg.callFrom = none)
+    (hbox : ((e.cfg e.len).st dst).box = [] ∨
+      ∃ m ms, ((e.cfg e.len).st dst).box = m :: ms ∧ m.callFrom = none) : False := by
+  obtain ⟨a, ha⟩ := blocking_park_not_terminal I (e.cfg e.len) hM id dst k hph hl hidle hc hbox
+  exact ha (e.maximal a)
+
 /-- A priority message whose label is `l`. -/
 def hasLabel (ms : List Msg) (l : String) : Prop :=
   ∃ m, m ∈ ms ∧ m.label = l

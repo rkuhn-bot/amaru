@@ -200,4 +200,35 @@ theorem token_relation_coarse : render tokenCoarseDesc =
     "fail: residual cycle\n  (select_chain, holding) -> (fetch_blocks, busy) -> (select_chain, holding)" := by
   native_decide
 
+/-- Two blocking sends into mailboxes of capacity 1, with occupancy 2 and
+`mustFit` false. Lemma 1 does not discharge either edge, and overflow is not
+reported, so the residual graph keeps the 2-cycle. -/
+def mutualFullDesc : Description where
+  name := "mutual-full"
+  freshNames := true
+  templates := [tpl "left" 1 ["idle"] "idle" false, tpl "right" 1 ["idle"] "idle" false]
+  edges := [sendEdge "left" "idle" "right" "Ping" 2, sendEdge "right" "idle" "left" "Pong" 2]
+  compatibility := .all
+  steps := []
+
+/-- A reliable `trySend` that is neither ingress nor superseding. The receive
+path drops it when the mailbox is full. -/
+def reliableTryDesc : Description where
+  name := "reliable-try"
+  freshNames := true
+  templates := [tpl "source" 10 ["idle"] "idle" true, tpl "sink" 10 ["idle"] "idle" true]
+  edges :=
+    [{ (sendEdge "source" "idle" "sink" "Ping" 1) with
+        effect := .trySend, kind := .nonBlocking, reliability := .reliable, ingress := false }]
+  compatibility := .all
+  steps := []
+
+theorem mutual_full_rejected : render mutualFullDesc =
+    "fail: residual cycle\n  (right, idle) -> (left, idle) -> (right, idle)" := by
+  native_decide
+
+theorem reliable_try_fails : render reliableTryDesc =
+    "fail: reliable trySend Ping may be dropped; mark it ingress or superseding" := by
+  native_decide
+
 end Deadlock

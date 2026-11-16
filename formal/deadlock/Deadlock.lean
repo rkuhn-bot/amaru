@@ -1,6 +1,8 @@
 import Deadlock.Basic
 import Deadlock.Graph
 import Deadlock.Examples
+import Deadlock.Failures
+import Deadlock.Witness
 import Deadlock.Semantics
 import Deadlock.Proof
 import Deadlock.Local
