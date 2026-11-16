@@ -9357,4 +9357,127 @@ theorem await_reply_head_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
     hstay (j + 1) (Nat.le_trans hj (Nat.le_succ j))
   simp [waitKind, hstill] at hleft
 
+/-- An actor that is not running keeps its phase across someone else's execution,
+and a dead idle actor is not resumed or parked on. -/
+theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
+    (hne : i ≠ id) (hidle : (w.st i).phase = .idle) (hdead : (w.st i).life ≠ .alive) :
+    ((execRun I w id (w.st id) k).st i).phase = .idle := by
+  cases k with
+  | mk rest toState replyTo =>
+    cases rest with
+    | nil => simp [execRun, setActor, hne, hidle]
+    | cons e tail =>
+      cases e with
+      | send dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none => simp [hr, setActor, hne, proceed, hidle]
+        | some dstId =>
+          simpa [hr, hidle] using enqueue_phase_other w I.desc id dstId
+            { label := label, sender := id, callFrom := none } false
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hne
+      | call dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none => simp [hr, setActor, hne, proceed, hidle]
+        | some dstId =>
+          simpa [hr, hidle] using enqueue_phase_other w I.desc id dstId
+            { label := label, sender := id, callFrom := some id } true
+            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hne
+      | trySend dst label hint =>
+        simp only [execRun]
+        cases hr : route w I.desc dst hint with
+        | none => simp [hr, setActor, hne, proceed, hidle]
+        | some dstId =>
+          simp only [hr]
+          split
+          · next hgo =>
+            by_cases hid : i = dstId
+            · have hnd : ¬ dstId = id := fun h => hne (hid.trans h)
+              rw [← hid]
+              simp [hgo, setActor, hne, hnd, proceed, hidle]
+            · simp [hgo, setActor, hid, hne, proceed, hidle]
+          · simp [setActor, hne, proceed, hidle]
+      | reply =>
+        simp only [execRun, performReply]
+        cases hto : replyTo with
+        | none => simp [hto, setActor, hne, proceed, hidle]
+        | some caller =>
+          cases hcall : (w.st caller).phase with
+          | awaitReply dst ck =>
+            by_cases hd : dst = id
+            · have hnc : caller ≠ i := by
+                intro hc
+                rw [hc] at hcall
+                simp [hidle] at hcall
+              have hflip : ¬ i = caller := fun h => hnc h.symm
+              simp [hto, hcall, hd, setActor, hne, hflip, proceed, hidle]
+            · simp [hto, hcall, hd, setActor, hne, proceed, hidle]
+          | idle => simp [hto, hcall, setActor, hne, proceed, hidle]
+          | run _ => simp [hto, hcall, setActor, hne, proceed, hidle]
+          | parked _ _ _ => simp [hto, hcall, setActor, hne, proceed, hidle]
+          | awaitEffect _ => simp [hto, hcall, setActor, hne, proceed, hidle]
+          | awaitPeer _ => simp [hto, hcall, setActor, hne, proceed, hidle]
+          | crashed => simp [hto, hcall, setActor, hne, proceed, hidle]
+      | selfSchedule _ =>
+        simp only [execRun]
+        split <;> try split
+        · simp [setActor, hne, proceed, hidle]
+        · simp [setActor, hne, proceed, hidle]
+        · simp [setActor, hne, hidle]
+      | cell dst label value =>
+        simp only [execRun]
+        have hwake : ∀ (ids : List InstId) (w0 : World),
+            ((ids.foldl (fun w r => tryWake I.desc w r label id) w0).st i).phase =
+              (w0.st i).phase := by
+          intro ids w0
+          induction ids generalizing w0 with
+          | nil => simp
+          | cons j js ih =>
+            simp only [List.foldl_cons]
+            have hstep : ((tryWake I.desc w0 j label id).st i).phase = (w0.st i).phase := by
+              by_cases hif : ((w0.st j).life == .alive &&
+                  decide ((w0.st j).prio.length < capPrio I.desc w0.N j) &&
+                  !((w0.st j).prio.any fun p => p.label == label)) = true
+              · simp [tryWake, hif, setActor]
+                by_cases hi : i = j <;> simp [hi]
+              · simp [tryWake, hif]
+            exact (ih _).trans hstep
+        cases hdirty : (w.cell dst label).dirty
+        · simp [hdirty, setCell, setActor, hne, proceed, wakeReaders, hwake, hidle]
+        · simp [hdirty, setCell, setActor, hne, proceed, hidle]
+      | internal => simp [execRun, setActor, hne, hidle]
+      | peer => simp [execRun, setActor, hne, hidle]
+      | terminate =>
+        simp only [execRun]
+        have hrel : ∀ (ps : List Parked) (w0 : World), (w0.st i).phase = .idle →
+            ((releaseParked w0 id ps).st i).phase = .idle := by
+          intro ps w0 h0
+          induction ps generalizing w0 with
+          | nil => simpa [releaseParked] using h0
+          | cons p ps ih =>
+            simp only [releaseParked, List.foldl_cons]
+            by_cases hskip : (p.isCall || decide (p.sender = id)) = true
+            · rw [if_pos hskip]
+              exact ih w0 h0
+            · rw [if_neg hskip]
+              have hph : ((setActor w0 p.sender (resumeSender (w0.st p.sender) false id)).st i).phase =
+                  .idle := by
+                by_cases hi : i = p.sender
+                · have hI : (w0.st p.sender).phase = .idle := by rw [← hi]; exact h0
+                  simp [setActor, hi, resumeSender, hI]
+                · simp [setActor, hi, h0]
+              exact ih _ hph
+        cases htpl : templateOf I.desc (tname id) with
+        | none => simp [htpl, hidle]
+        | some t =>
+          by_cases hkill : (t.terminable && !hasParkedCall (w.st id).parked) = true
+          · have hpre : ((refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+                (tname id) (w.st id).parked).st i).phase = .idle := by
+              rw [(refundP_life _ _ _ i).2.2.1, (refund_life _ _ _ i).2.2.1, readCells_st]
+              exact hidle
+            simp [htpl, hkill, readCells_st]
+            exact hrel _ _ (by simp [setActor, hne, hpre])
+          · simp [htpl, hkill, hidle]
+
 end Deadlock
