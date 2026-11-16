@@ -369,9 +369,12 @@ for a send the actor did not itself perform.
   and the message stays until delivery. While the callee stays alive and can
   receive infinitely often, some later bulk receive installs the handler.
   If that handler's next effect is already the reply, it runs the reply and the
-  caller leaves `awaitReply`. A handler that still has work before the reply,
-  `never_stuck`, `deadlock_freedom`, `CellFresh`, and the dead-instance lift are
-  not done.
+  caller leaves `awaitReply`. A handler that still has work before the reply
+  is not walked step by step: while the caller stays in `awaitReply` it cannot
+  mint a new `callFrom`, so the callee keeps the reply obligation and is never
+  idle. `below_idle` is strong induction on residual height. `never_stuck` and
+  `deadlock_freedom` say a fair run has no actor blocked forever.
+  `CellFresh` and the dead-instance lift are not done.
 - **Theorem B / timing.** No Δ, no per-hop budget. Deadlock freedom is not
   timeliness.
 - **Receive-side and obligation liveness.** Token leaks, "this request

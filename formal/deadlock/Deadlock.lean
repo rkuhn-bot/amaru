@@ -153,3 +153,6 @@ import Deadlock.Rank
 #print axioms Deadlock.recvBulk_tag
 #print axioms Deadlock.exec_tag
 #print axioms Deadlock.call_tag_reachable
+#print axioms Deadlock.below_idle
+#print axioms Deadlock.never_stuck
+#print axioms Deadlock.deadlock_freedom
