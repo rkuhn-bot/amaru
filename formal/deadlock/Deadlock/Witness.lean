@@ -329,7 +329,7 @@ def muxImpl : Impl where
 
 def openerId : InstId := .peer "opener" 0
 def timerId : InstId := .peer "timer" 0
-def readerId : InstId := .peer "reader" 0
+def muxReaderId : InstId := .peer "reader" 0
 
 def muxActs : List Action :=
   [.spawn "opener", .spawn "timer", .spawn "reader",
@@ -348,7 +348,7 @@ def lifeTag (w : Option World) (i : InstId) : Nat :=
   | none => 9
 
 theorem mux_kill :
-    lifeTag (muxAt muxActs) timerId = 2 ∧ lifeTag (muxAt muxActs) readerId = 2 ∧
+    lifeTag (muxAt muxActs) timerId = 2 ∧ lifeTag (muxAt muxActs) muxReaderId = 2 ∧
       lifeTag (muxAt muxActs) openerId = 1 ∧
       (muxAt muxActs).map (·.tombstone) = some (some 0) := by
   decide
