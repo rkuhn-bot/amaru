@@ -281,5 +281,160 @@ theorem targetsAll_edge (I : Impl) (h : LocalOk I) (e : Edge) (he : e ∈ I.desc
       simp [ht] at hbad
     | inr hok => exact hok ds hs
 
+/-! Reasons a wiring fails `localOkB`. The boolean stays the decision; these
+lines are what `check` prints. Each line names the obligation that failed. -/
+
+def floorGap (D : Description) (template srcState dstState label : String) (prog : List Eff) : List String :=
+  D.templates.filterMap fun dst =>
+    let sent := sendsTo dst.name prog
+    let held := floorState D template srcState dst.name
+    let need := sent + floorState D template dstState dst.name
+    if need ≤ held then none
+    else some s!"fail: transition {template} {srcState} -> {dstState} [{label}] needs {need} slot(s) toward {dst.name} and {srcState} holds {held}"
+
+def programGap (D : Description) (template toState label : String) : List Eff → List String
+  | [] => []
+  | .send d l _ :: es =>
+    if hasEdge D template toState d .send .blocking l then programGap D template toState label es
+    else [s!"fail: transition {template} [{label}] sends {l} to {d} from {toState}, which is not a blocking send edge"]
+  | .trySend d l _ :: es =>
+    if hasEdge D template toState d .trySend .nonBlocking l then
+      if D.edges.any fun e => e.ingress && e.src == template && e.dst == d && e.label == l then
+        [s!"fail: transition {template} [{label}] try-sends {l}, which is an ingress label delivered by the environment"]
+      else programGap D template toState label es
+    else [s!"fail: transition {template} [{label}] try-sends {l} to {d} from {toState}, which is not a non-blocking trySend edge"]
+  | .call d l _ :: es =>
+    if hasEdge D template toState d .call .blocking l then programGap D template toState label es
+    else [s!"fail: transition {template} [{label}] calls {l} on {d} from {toState}, which is not a blocking call edge"]
+  | .cell d l _ :: es =>
+    if hasEdge D template toState d .cell .nonBlocking l then programGap D template toState label es
+    else [s!"fail: transition {template} [{label}] writes cell {l} on {d} from {toState}, which is not a non-blocking cell edge"]
+  | _ :: es => programGap D template toState label es
+
+def replyGap (tr : Transition) : List String :=
+  if tr.acceptsCall then
+    (if replyCount tr.program == 1 then []
+     else [s!"fail: transition {tr.template} [{tr.label}] accepts a call but does not reply once"]) ++
+    (if terminateBeforeReply tr.program then
+      [s!"fail: transition {tr.template} [{tr.label}] terminates before its reply"]
+     else [])
+  else if replyCount tr.program == 0 then []
+  else [s!"fail: transition {tr.template} [{tr.label}] replies without accepting a call"]
+
+/-- One transition's local failures. Empty when `transitionOk` holds. -/
+def transitionIssues (I : Impl) (tr : Transition) : List String :=
+  match templateOf I.desc tr.template with
+  | none => [s!"fail: transition {tr.label} names unknown template {tr.template}"]
+  | some t =>
+    (if t.states.elem tr.fromState then []
+     else [s!"fail: transition {tr.template} [{tr.label}] leaves undeclared state {tr.fromState}"]) ++
+    (if t.states.elem tr.toState then []
+     else [s!"fail: transition {tr.template} [{tr.label}] enters undeclared state {tr.toState}"]) ++
+    (if tr.release == 1 then []
+     else [s!"fail: transition {tr.template} [{tr.label}] releases {tr.release} slot(s); a bulk receive releases 1"]) ++
+    floorGap I.desc tr.template tr.fromState tr.toState tr.label tr.program ++
+    programGap I.desc tr.template tr.toState tr.label tr.program ++
+    replyGap tr ++
+    (if hasTerminate tr.program && !t.terminable then
+      [s!"fail: transition {tr.template} [{tr.label}] terminates, and {tr.template} is not terminable"]
+     else []) ++
+    (if t.terminable && !(noBulkSend tr.program) then
+      [s!"fail: transition {tr.template} [{tr.label}] sends from terminable role {tr.template}"]
+     else [])
+
+def callIssues (I : Impl) : List String :=
+  (callSites I.transitions).filterMap fun p =>
+    match templateOf I.desc p.1 with
+    | none => some s!"fail: call {p.2} targets unknown template {p.1}"
+    | some t =>
+      let missing := t.states.filter fun st =>
+        !(I.transitions.any fun tr =>
+          tr.template == p.1 && tr.fromState == st && tr.label == p.2 && tr.acceptsCall)
+      match missing.head? with
+      | none => none
+      | some st => some s!"fail: call {p.2} is not accepted by {p.1} in state {st}"
+
+def targetIssues (D : Description) : List String :=
+  match D.compatibility with
+  | .groups _ => []
+  | _ =>
+    D.edges.flatMap fun e =>
+      if e.kind == .blocking then
+        (statesOf D e.dst).filterMap fun ds =>
+          if pairAllowed D e.src e.srcState e.dst ds then none
+          else some s!"fail: blocking edge {e.label} does not allow {e.dst} in {ds} while {e.src} is in {e.srcState}"
+      else []
+
+def shapeIssues (D : Description) : List String :=
+  D.edges.filterMap fun e =>
+    match templateOf D e.src with
+    | none => some s!"fail: edge {e.label} leaves unknown template {e.src}"
+    | some t =>
+      match t.multiplicity with
+      | .one =>
+        if e.occupancy.a == 0 then none
+        else some s!"fail: edge {e.label} from core {e.src} carries a per-peer occupancy coefficient"
+      | .perPeer =>
+        if e.occupancy.b == 0 then none
+        else some s!"fail: edge {e.label} from per-peer {e.src} carries a constant occupancy term"
+
+def coverIssues (I : Impl) : List String :=
+  I.transitions.filterMap fun tr =>
+    if I.desc.steps.any fun s =>
+        s.template == tr.template && s.fromState == tr.fromState &&
+          s.toState == tr.toState && s.label == tr.label then none
+    else some s!"fail: transition {tr.template} {tr.fromState} -> {tr.toState} [{tr.label}] is not a compatibility step"
+
+def keyIssues (I : Impl) : List String :=
+  if uniqueKeys I then []
+  else ["fail: two transitions share a template, a source state, and a label; only the first one runs"]
+
+def handledIssues (I : Impl) : List String :=
+  I.desc.edges.flatMap fun e =>
+    if e.effect == .send || e.effect == .call || e.effect == .trySend then
+      (targetStates I.desc e).filterMap fun st =>
+        if I.transitions.any fun tr =>
+            tr.template == e.dst && tr.fromState == st && tr.label == e.label &&
+              (e.effect != .call || tr.acceptsCall) then none
+        else some s!"fail: {e.label} into {e.dst} is not handled in state {st}"
+    else []
+
+def permanentIssues (I : Impl) : List String :=
+  I.desc.edges.filterMap fun e =>
+    if (e.effect == .send || e.effect == .call) && e.reliability == .reliable then
+      match templateOf I.desc e.dst with
+      | none => some s!"fail: reliable {e.label} targets unknown template {e.dst}"
+      | some t =>
+        if (t.multiplicity == .one && t.terminable == false) || sameSubtree I.desc e.src e.dst then none
+        else some s!"fail: reliable {e.label} from {e.src} to {e.dst} is neither a permanent core nor inside the subtree"
+    else none
+
+def schedIssues (I : Impl) : List String :=
+  I.transitions.filterMap fun tr =>
+    if templatePure I.desc tr.template && !(noSelfSchedule tr.program) then
+      some s!"fail: pure untimed template {tr.template} self-schedules in [{tr.label}], and that wait never finishes"
+    else none
+
+def prioIssues (I : Impl) : List String :=
+  I.desc.templates.filterMap fun t =>
+    let labels := prioLabels I t.name
+    if labels.length ≤ t.priorityBound.b && t.priorityBound.a == 0 then none
+    else some s!"fail: priority lane {t.name} lists {labels.length} label(s) and the bound is {t.priorityBound.a}*N+{t.priorityBound.b}"
+
+def closedIssues (I : Impl) : List String :=
+  match I.desc.compatibility with
+  | .explicit ps =>
+    I.transitions.flatMap fun tr =>
+      ps.filterMap fun a =>
+        if a.dst == tr.template && a.dstState == tr.fromState &&
+            !(pairAllowed I.desc a.src a.srcState tr.template tr.toState) then
+          some s!"fail: transition {tr.template} {tr.fromState} -> {tr.toState} [{tr.label}] leaves allowed pair {a.src}/{a.srcState}"
+        else none
+  | _ => []
+
+def localIssues (I : Impl) : List String :=
+  (I.transitions.flatMap (transitionIssues I)) ++ callIssues I ++ targetIssues I.desc ++
+    shapeIssues I.desc ++ closedIssues I ++ prioIssues I ++ coverIssues I ++ keyIssues I ++
+    handledIssues I ++ permanentIssues I ++ schedIssues I
 
 end Deadlock

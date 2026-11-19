@@ -1,4 +1,4 @@
-import Deadlock.Semantics
+import Deadlock.Local
 
 set_option autoImplicit false
 
@@ -449,6 +449,15 @@ def replayFrom (I : Impl) (w : World) (i : Nat) : List Action → Except String 
 
 def replayTrace (I : Impl) (t : Trace) : Except String Unit :=
   replayFrom I (initWorld I t.n) 0 t.steps
+
+/-- Graph check first, then the local check. `pass` is `checkBool` and `localOkB`. -/
+def acceptReport (w : Wiring) : String :=
+  let graph := render w.desc
+  if graph != "pass" then graph
+  else if localOkB (wiringImpl w) then "pass"
+  else
+    let msg := String.intercalate "\n" (localIssues (wiringImpl w))
+    if msg.isEmpty then "fail: local check failed" else msg
 
 def parseDescription (s : String) : Except String Description := do
   decodeDescription (← parseJson s)

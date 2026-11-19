@@ -16,9 +16,12 @@ lake exe check examples/height-two.json examples/height-two-trace.json
 ```
 
 Exit status is 0 on `pass`, 1 when the checks fail, 2 on usage or parse errors.
-One argument checks the graph. Two arguments replay the trace against the
-wiring: every step must be one `apply` allows, and the first refusal is
-`step <i> disallowed: <action>`.
+`pass` means the parsed wiring satisfies both `checkBool` and `localOkB`.
+A graph failure is printed as before. A graph that passes and a local check
+that fails names the obligation, for example a transition that needs more
+slots than its source state holds. Two arguments replay a trace only after
+that combined check passes: every step must be one `apply` allows, and the
+first refusal is `step <i> disallowed: <action>`.
 
 ## Compatibility relation
 
@@ -479,14 +482,20 @@ An id is `{"core": "<role>"}` or `{"peer": "<role>", "index": <n>}`.
 | `examples/lost-reply.json` | `fail: call source -[Ping]-> sink is not answered in the dequeue transition` |
 | `examples/lost-wake.json` | `fail: superseding edge Wake misses cell conditions readPoints, dirtyBit` |
 | `examples/undeclared-cell.json` | `fail: cell effect writer/idle -[Ghost]-> reader is not a declared cell edge` |
-| `examples/token-relation.json` | `pass` — 3-role fetch token, closed under its transitions and under restart |
+| `examples/token-relation.json` | local failure: `Release` and `Return` leave a state that holds 0 slots toward a debt of 11, and `NewBestTip` / `ReturnToken` have no handler |
 | `examples/token-relation-gap.json` | `fail: compatibility broken by transition fetch_blocks idle -> busy [OnTip]` with the pre/post tuple |
 | `examples/token-relation-coarse.json` | `fail: residual cycle` — the extra `(holding, busy)` tuple is closed, and it restores the cycle |
 | `examples/height-two.json` + `height-two-trace.json` | `pass` — the height-2 chain, replayed |
 | `examples/height-two.json` + `height-two-bad.json` | `step 0 disallowed: exec peer P#0` |
 | `examples/safe.json` + `safe-trace.json` | `pass` — one stutter on an idle roster |
+| `examples/unlocal.json` | local failure: `Go` sends 6 times toward `B` from a state that holds 3, sends undeclared `Undeclared`, and terminates a role that is not terminable |
 
-The same strings are `native_decide`d in `Deadlock/Examples.lean`.
+`safe.json` and `credit.json` handle each delivered label and stay in the
+state the edge already reserved. A same-state program cannot also perform
+that send: the edge's occupancy has already spent the slot. `token-relation.json`
+still passes `render` (the compatibility relation is closed, and the residual
+cycle stays cut). It does not pass `localOkB`, and `check` rejects it. The
+graph-only rows above are `decide`d as `render` in `Deadlock/Examples.lean`.
 
 ## Layout
 

@@ -43,5 +43,8 @@
       "repliesInDequeue": false,
       "ingress": false
     }
+  ],
+  "transitions": [
+    {"template": "sink", "from": "idle", "to": "idle", "label": "Ping", "program": []}
   ]
 }

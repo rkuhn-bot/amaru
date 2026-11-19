@@ -21,6 +21,7 @@ import Deadlock.Chain
 import Deadlock.Counter
 import Deadlock.FairRun
 import Deadlock.Deliver
+import Deadlock.Json
 
 #print axioms Deadlock.not_stuck_effect_assumed
 #print axioms Deadlock.not_stuck_peer_assumed

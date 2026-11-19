@@ -4,12 +4,12 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | [path] =>
     let text ← IO.FS.readFile path
-    match Deadlock.parseDescription text with
+    match Deadlock.parseWiring text with
     | .error e =>
       IO.eprintln e
       return 2
-    | .ok d =>
-      let report := Deadlock.render d
+    | .ok w =>
+      let report := Deadlock.acceptReport w
       IO.println report
       return if report == "pass" then 0 else 1
   | [graph, tracePath] =>
@@ -20,18 +20,23 @@ def main (args : List String) : IO UInt32 := do
       IO.eprintln e
       return 2
     | .ok w =>
-      match Deadlock.parseTrace traceText with
-      | .error e =>
-        IO.eprintln e
-        return 2
-      | .ok trace =>
-        match Deadlock.replayTrace (Deadlock.wiringImpl w) trace with
-        | .ok () =>
-          IO.println "pass"
-          return 0
+      let report := Deadlock.acceptReport w
+      if report != "pass" then
+        IO.println report
+        return 1
+      else
+        match Deadlock.parseTrace traceText with
         | .error e =>
           IO.eprintln e
-          return 1
+          return 2
+        | .ok trace =>
+          match Deadlock.replayTrace (Deadlock.wiringImpl w) trace with
+          | .ok () =>
+            IO.println "pass"
+            return 0
+          | .error e =>
+            IO.eprintln e
+            return 1
   | _ =>
     IO.eprintln "usage: check graph.json [trace.json]"
     return 2

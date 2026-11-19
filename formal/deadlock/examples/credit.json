@@ -56,5 +56,9 @@
       "repliesInDequeue": false,
       "ingress": false
     }
+  ],
+  "transitions": [
+    {"template": "server", "from": "idle", "to": "idle", "label": "Request", "program": []},
+    {"template": "client", "from": "idle", "to": "idle", "label": "Response", "program": []}
   ]
 }
