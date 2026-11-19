@@ -134,3 +134,19 @@ the box is not free; `noteStale` records a route miss and stores nothing;
 not charge. A stored reliable message is not dropped by a later send. Mail
 inside a member is refunded or deleted by `killOne`, not left for a later
 receive.
+
+## Later
+
+Not the step relation above. Cells are not a pure-stage primitive, so `cell`
+and `tryWake` deviate from current pure-stage. The planned runtime encoding
+is an effect whose resource holds a map keyed by reader stage name, one cell
+per reader. Each cell holds a `(counter, value)` pair, ordered by the
+counter, which removes the max-only limit, plus a wake-pending flag. A write
+atomically stores the value and, if no wake is pending, sets the flag and
+enqueues one regular wake message. The reader's handler atomically reads and
+clears the flag. That atomicity is the runtime's.
+
+The model change that goes with it: replace the uncharged `prio` wake with a
+regular message that uses one reserved mailbox slot per cell label and
+reader. Count that slot in the occupancy bound. The wake enqueue stays
+non-blocking because the slot is reserved.

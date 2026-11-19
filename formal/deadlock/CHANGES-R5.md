@@ -76,3 +76,23 @@ outcomes are unchanged. No proof may assume which one is taken.
 which stays alive and not shutting down eventually handles the message is
 the handled half above. It is not stated by allowing loss in every case, and
 it is not a second theorem with its own machinery.
+
+## Later
+
+Not this round. Cells are not a pure-stage primitive today, so the model
+deviates from current pure-stage. The planned runtime encoding:
+
+- A cell write is an effect whose resource holds a map keyed by reader stage
+  name, one cell per reader. Each cell holds a `(counter, value)` pair,
+  ordered by the counter, which removes the max-only limit, plus a
+  wake-pending flag.
+- A write atomically stores the value and, if no wake is pending, sets the
+  flag and enqueues one regular wake message.
+- The reader's handler atomically reads and clears the flag. Atomicity is
+  guaranteed by the runtime.
+
+The model change to make then: replace the uncharged priority wake with a
+regular message that uses one reserved mailbox slot per cell label and
+reader. Count that slot in the occupancy bound, and keep the wake enqueue
+non-blocking because the slot is reserved. `cell`, `tryWake`, and `CellFresh`
+stay as they are until that change.
