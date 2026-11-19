@@ -39,6 +39,8 @@ structure SemInv (I : Impl) (w : World) : Prop where
   idleOff : ∀ id, (w.st id).life ≠ .alive → (w.st id).phase = .idle
   /-- A live actor is on the roster. A kill folds that roster to fail waiters. -/
   rostered : ∀ id, (w.st id).life = .alive → id ∈ w.roster
+  /-- A parked entry lives on a roster actor. A kill folds that roster to drop the dead sender. -/
+  offEmpty : ∀ id, id ∉ w.roster → (w.st id).parked = []
 
 theorem effectsOk_tail (D : Description) (template state : String) (e : Eff) (es : List Eff)
     (h : effectsOk D template state (e :: es) = true) : effectsOk D template state es = true := by

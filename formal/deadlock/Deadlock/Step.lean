@@ -42,6 +42,9 @@ theorem sem_note (I : Impl) (w : World) (sender : InstId) (dst : String) (id : I
   · intro i h
     simp only [setActor, noteStale] at h ⊢
     exact hS.rostered i h
+  · intro i h
+    simp only [setActor, noteStale] at h ⊢
+    exact hS.offEmpty i h
 
 theorem mail_note (w : World) (sender : InstId) (dst : String) (id : InstId) (a : Actor)
     (hM : MailInv (setActor w id a)) : MailInv (setActor (noteStale w sender dst) id a) := by
@@ -95,6 +98,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
     · simp [programOk, afterHead, htail]
     · simp [waitEdge]
     · exact idleOff_busy I w hS id _ rfl (by simp [hphase])
+    · exact Or.inl rfl
   · subst he
     simp [execRun]
     apply sem_set I w id { (w.st id) with phase := .awaitPeer (afterHead { k with rest := .peer :: es }) } hS
@@ -104,6 +108,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
     · simp [programOk, afterHead, htail]
     · simp [waitEdge]
     · exact idleOff_busy I w hS id _ rfl (by simp [hphase])
+    · exact Or.inl rfl
   · obtain ⟨d, l, n, he⟩ := he
     subst he
     have hhead := head_send _ _ _ d l n es hprog
@@ -113,7 +118,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .send d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       exact sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])))
+        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)))
     | some dstId =>
       simp [execRun, hr]
       apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := none } false
@@ -132,7 +137,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .call d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       exact sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])))
+        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)))
     | some dstId =>
       simp [execRun, hr]
       apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := some id } true
@@ -195,6 +200,7 @@ theorem exec_done_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemI
   · simp [programOk]
   · simp [waitEdge]
   · exact idleOff_now _ rfl
+  · exact Or.inl rfl
 
 theorem exec_done_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemInv I w) (hM : MailInv w)
     (hphase : (w.st id).phase = .run { k with rest := [] }) :
@@ -225,7 +231,7 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
     have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
       (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
     refine ⟨sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase]))), ?_⟩
+      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _))), ?_⟩
     exact mail_note w id d id _ (mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _))
   | some dstId =>
     simp [hr]
@@ -240,7 +246,7 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
     · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])), ?_⟩
+        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)), ?_⟩
       exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
 
 theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : String) (es : List Eff)
@@ -257,7 +263,7 @@ theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : 
   · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .selfSchedule label :: es })
       (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
     refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])),
+      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)),
       mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)⟩
   · split
     · let bumped : Actor :=
@@ -269,12 +275,13 @@ theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : 
       have hp := proceed_ok I.desc id bumped (afterHead { k with rest := .selfSchedule label :: es })
         (by simp [bumped, afterHead, hty]) (by simpa [bumped, afterHead] using htail)
       refine ⟨sem_set I w id (proceed bumped _) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_alive hp.2.1 (alive_if_busy I w hS id (by simp [hphase]))),
+        (idleOff_alive hp.2.1 (alive_if_busy I w hS id (by simp [hphase])))
+        (Or.inl (proceed_parked bumped _)),
         mail_set_free w id (proceed bumped _) hM hfree (proceed_not_parked _ _)
           (by simp [proceed_parked, bumped])⟩
     · refine ⟨sem_set I w id { (w.st id) with phase := .crashed } hS rfl rfl
         (by simp [contTy]) (by simp [programOk]) (by simp [waitEdge])
-        (idleOff_busy I w hS id _ rfl (by simp [hphase])),
+        (idleOff_busy I w hS id _ rfl (by simp [hphase])) (Or.inl rfl),
         mail_set_free w id { (w.st id) with phase := .crashed } hM hfree (by simp [notParked]) rfl⟩
 
 theorem proceed_sender (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
@@ -287,7 +294,7 @@ theorem proceed_sender (I : Impl) (w : World) (id : InstId) (k : Cont) (es : Lis
   intro k'
   have hp := proceed_ok I.desc id (w.st id) k' (by simp [k', hty]) (by simpa [k'] using htail)
   exact ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 hbusy),
+      (idleOff_busy I w hS id _ hp.2.1 hbusy) (Or.inl (proceed_parked _ _)),
     mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)⟩
 
 theorem exec_reply_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
@@ -318,7 +325,7 @@ theorem exec_reply_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : Lis
           have hfreeC : notParked (w.st caller).phase := by simp [notParked, hph]
           let resumed := proceed (w.st caller) ck
           have hS1 := sem_set I w caller resumed hS hpC.1 hpC.2.1 hpC.2.2.1 hpC.2.2.2.1 hpC.2.2.2.2
-            (idleOff_busy I w hS caller _ hpC.2.1 (by simp [hph]))
+            (idleOff_busy I w hS caller _ hpC.2.1 (by simp [hph])) (Or.inl (proceed_parked _ _))
           have hM1 := mail_set_free w caller resumed hM hfreeC (proceed_not_parked _ _) (proceed_parked _ _)
           have hother : (setActor w caller resumed).st id = w.st id :=
             setActor_other _ _ _ _ (Ne.symm hc)
@@ -364,6 +371,7 @@ theorem tryWake_inv (I : Impl) (w : World) (dstId : InstId) (label : String) (wr
       · simpa [programOk] using hS.prog dstId
       · simpa [waitEdge] using hS.waited dstId
       · exact idleOff_same I w hS dstId _ rfl rfl
+      · exact Or.inl rfl
     · apply mail_set_same
       · exact hM
       · rfl
@@ -413,12 +421,15 @@ theorem exec_cell_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label
     · intro i h
       rw [hst] at h
       exact hS.rostered i h
+    · intro i hmiss
+      rw [hst]
+      exact hS.offEmpty i hmiss
   have hMcell : MailInv w1 := mail_copy w w1 hM hst
   let stepped := proceed (w1.st id) { rest := es, toState := k.toState, replyTo := k.replyTo }
   have hp := proceed_ok I.desc id (w1.st id) { rest := es, toState := k.toState, replyTo := k.replyTo }
     (by simpa [hst, hty]) (by rw [hst]; simpa [hty] using htail)
   have hS1 := sem_set I w1 id stepped hScell hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-    (idleOff_busy I w1 hScell id _ hp.2.1 (by simpa [hst, hphase]))
+    (idleOff_busy I w1 hScell id _ hp.2.1 (by simpa [hst, hphase])) (Or.inl (proceed_parked _ _))
   have hM1 := mail_set_free w1 id stepped hMcell (by simpa [hst] using hfree)
     (proceed_not_parked _ _) (proceed_parked _ _)
   split
@@ -503,7 +514,8 @@ theorem fold_release (I : Impl) (id : InstId) (ps : List Parked) (w : World) (hS
         simp [hf]
       have hr := resume_false_ok I.desc p.sender (w.st p.sender) id (hS.cont _) (hS.prog _) (hS.waited _)
       exact ih _ (sem_set I w p.sender (resumeSender (w.st p.sender) false id) hS hr.1 hr.2.1
-        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1 (idleOff_resume I w hS p.sender false id))
+        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1 (idleOff_resume I w hS p.sender false id)
+        (Or.inl hr.2.2.2.2.2.2))
 
 theorem release_sem (I : Impl) (w : World) (id : InstId) (ps : List Parked) (hS : SemInv I w) :
     SemInv I (releaseParked w id ps) := by
@@ -825,6 +837,12 @@ theorem exec_term_die_sem (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) 
       · simp [h, wD, setActor_self, dead] at hlive
       · rw [setActor_other wP id i dead h] at hlive
         exact hRP.1.rostered i hlive
+    · intro i hmiss
+      by_cases h : i = id
+      · simp [h, wD, setActor_self, dead]
+      · simp only [wD, setActor] at hmiss
+        rw [setActor_other wP id i dead h]
+        exact hRP.1.offEmpty i hmiss
   have hSF : SemInv I wF := release_sem I wD id ps hSD
   have hphaseP : (wP.st id).phase = (w.st id).phase := by
     rw [(refund_park_phase wM (tname id) ps id).1, (refund_msgs_phase wR (tname id) (w.st id).box id).1,
@@ -932,6 +950,8 @@ theorem deliver_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : A
         · simp [programOk]
         · simp [waitEdge]
         · exact idleOff_now _ rfl
+        · exact Or.inr ((cells_sem I w id hS).rostered id
+            (by rw [readCells_st]; exact hlife.symm.trans halive))
       · rw [← h.2, ← halive]
       · rw [← h.2]
       · rw [← h.2]
@@ -963,6 +983,8 @@ theorem deliver_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : A
           · cases tr.program <;> simp [waitEdge]
           · intro hbad
             cases hp : tr.program <;> simp [hp] at hbad
+          · exact Or.inr ((cells_sem I w (.core r) hS).rostered (.core r)
+              (by rw [readCells_st]; exact hlife.symm.trans halive))
         | peer name ix =>
           apply sem_stable I _ _ (cells_sem I w _ hS)
           · intro _ _ role _
@@ -999,6 +1021,15 @@ theorem deliver_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : A
                 (by rw [readCells_st]; exact hlife.symm.trans halive)
             · rw [setActor_other _ _ i _ hi] at hlive
               exact (cells_sem I w (.peer name ix) hS).rostered i hlive
+          · intro i hmiss
+            by_cases hi : i = .peer name ix
+            · rw [hi] at hmiss
+              simp only [setActor] at hmiss
+              exact False.elim (hmiss ((cells_sem I w (.peer name ix) hS).rostered (.peer name ix)
+                (by rw [readCells_st]; exact hlife.symm.trans halive)))
+            · simp only [setActor] at hmiss
+              rw [setActor_other _ _ i _ hi]
+              exact (cells_sem I w (.peer name ix) hS).offEmpty i hmiss
       · cases tr.program <;> simp [halive]
       · cases tr.program <;> rfl
       · cases tr.program <;> rfl
@@ -1092,13 +1123,15 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
     | false =>
       have hr := resume_false_ok I.desc p.sender (credited.st p.sender) id hcont hprog hwait
       refine ⟨sem_set I credited p.sender (resumeSender (credited.st p.sender) false id) hS1 hr.1 hr.2.1
-        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1 (idleOff_resume I credited hS1 p.sender false id), ?_, ?_⟩
+        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1 (idleOff_resume I credited hS1 p.sender false id)
+        (Or.inl hr.2.2.2.2.2.2), ?_, ?_⟩
       · rw [setActor_self]; exact hr.2.2.2.2.2.1
       · rw [setActor_self, hr.2.2.2.2.2.2, hpkS]
     | true =>
       have hr := resume_call_ok I.desc p.sender (credited.st p.sender) id k hcont hprog hwait (by rw [hph, hc])
       refine ⟨sem_set I credited p.sender (resumeSender (credited.st p.sender) true id) hS1 hr.1 hr.2.1
-        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1 (idleOff_resume I credited hS1 p.sender true id), ?_, ?_⟩
+        hr.2.2.1 hr.2.2.2.1 hr.2.2.2.2.1 (idleOff_resume I credited hS1 p.sender true id)
+        (Or.inl hr.2.2.2.2.2.2), ?_, ?_⟩
       · rw [setActor_self]; exact hr.2.2.2.2.2.1
       · rw [setActor_self, hr.2.2.2.2.2.2, hpkS]
   have hidPh : notParked (wOut.st id).phase := by
@@ -1202,6 +1235,9 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (
           (idleOff_life (by
             simp [admitted, setActor_self]
             exact hdI.life.trans (by simp [a0])))
+          (Or.inr (hdI.sem.rostered id (by
+            rw [setActor_self]
+            exact hdI.life.trans (by simp [a0]))))
         have hsame : setActor (setActor w1 id a1) id admitted = setActor w1 id admitted := by
           simp [setActor]
           funext i

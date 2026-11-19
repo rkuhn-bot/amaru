@@ -127,7 +127,7 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
   | explicit _ =>
     simp [compatFails, hc] at hempty
   | all =>
-    refine ⟨?_, ?_, hcont, hprog, hwait, ?_, ?_⟩
+    refine ⟨?_, ?_, hcont, hprog, hwait, ?_, ?_, ?_⟩
     · intro g hg
       simp [compatGroups, hc] at hg
     · intro g hg
@@ -143,8 +143,14 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
         · rename_i hmem'
           exact False.elim (hmem hmem')
         · simp [absentActor] at hlive
+    · intro id _
+      rw [init_base_st]
+      split
+      · simp [initActor, absentActor, withTokens]
+        split <;> simp [withTokens, absentActor]
+      · simp [absentActor]
   | groups gs =>
-    refine ⟨?_, ?_, hcont, hprog, hwait, ?_, ?_⟩
+    refine ⟨?_, ?_, hcont, hprog, hwait, ?_, ?_, ?_⟩
     · intro g hg _hlive
       have hw := (compat_group_closed I.desc g hempty hg).1
       have htup : roleTuple (initWorld I N) g = initialTuple I.desc g := by
@@ -173,6 +179,12 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
         · rename_i hmem'
           exact False.elim (hmem hmem')
         · simp [absentActor] at hlive
+    · intro id _
+      rw [init_base_st]
+      split
+      · simp [initActor, absentActor, withTokens]
+        split <;> simp [withTokens, absentActor]
+      · simp [absentActor]
 
 theorem roleTuple_stable (w w' : World) (g : CompatGroup)
     (h : ∀ r ∈ g.roles, (w'.st (.core r)).typestate = (w.st (.core r)).typestate) :
@@ -199,8 +211,9 @@ theorem sem_stable (I : Impl) (w w' : World) (hS : SemInv I w)
     (hprog : ∀ id, programOk I.desc id (w'.st id))
     (hwait : ∀ id, waitEdge I.desc id (w'.st id))
     (hoff : ∀ id, (w'.st id).life ≠ .alive → (w'.st id).phase = .idle)
-    (hroster : ∀ id, (w'.st id).life = .alive → id ∈ w'.roster) : SemInv I w' := by
-  refine ⟨?_, ?_, hcont, hprog, hwait, hoff, hroster⟩
+    (hroster : ∀ id, (w'.st id).life = .alive → id ∈ w'.roster)
+    (hempty : ∀ id, id ∉ w'.roster → (w'.st id).parked = []) : SemInv I w' := by
+  refine ⟨?_, ?_, hcont, hprog, hwait, hoff, hroster, hempty⟩
   · intro g hg hlive
     have hold : groupLive w g := by
       intro r hr
@@ -213,8 +226,9 @@ theorem sem_stable (I : Impl) (w w' : World) (hS : SemInv I w)
 
 theorem sem_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I w)
     (hty : a.typestate = (w.st id).typestate) (hlife : a.life = (w.st id).life)
-    (hcont : contTy a) (hprog : programOk I.desc id a) (hwait : waitEdge I.desc id a)
-    (hoff : a.life ≠ .alive → a.phase = .idle) :
+    (hcont : contTy a) (hprog : programOk I.desc id a)     (hwait : waitEdge I.desc id a)
+    (hoff : a.life ≠ .alive → a.phase = .idle)
+    (hown : a.parked = (w.st id).parked ∨ id ∈ w.roster) :
     SemInv I (setActor w id a) := by
   apply sem_stable I w (setActor w id a) hS
   · intro g _ r hr
@@ -250,6 +264,18 @@ theorem sem_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I 
       exact hS.rostered id (hlife.symm.trans hlive)
     · simp only [setActor, h] at hlive ⊢
       exact hS.rostered i hlive
+  · intro i hmiss
+    by_cases h : i = id
+    · rw [h] at hmiss ⊢
+      simp only [setActor] at hmiss
+      rw [setActor_self]
+      rcases hown with hp | hin
+      · rw [hp]
+        exact hS.offEmpty id hmiss
+      · exact False.elim (hmiss hin)
+    · simp only [setActor] at hmiss
+      rw [setActor_other w id i a h]
+      exact hS.offEmpty i hmiss
 
 /-- A non-idle actor is alive: an actor that is not alive is idle. -/
 theorem alive_if_busy (I : Impl) (w : World) (hS : SemInv I w) (id : InstId)
@@ -334,6 +360,7 @@ theorem credit_sem (I : Impl) (w : World) (tmpl : String) (sender : InstId) (hS 
   · exact Eq.mp ((ok_tokens I.desc sender (w.st sender) tmpl (.ofNat 1)).2.1).symm (hS.prog sender)
   · exact Eq.mp ((ok_tokens I.desc sender (w.st sender) tmpl (.ofNat 1)).2.2).symm (hS.waited sender)
   · exact idleOff_same I w hS sender _ (bump_keeps _ _ _).2.1 (bump_keeps _ _ _).2.2
+  · exact Or.inl rfl
 
 theorem cells_sem (I : Impl) (w : World) (id : InstId) (hS : SemInv I w) :
     SemInv I (readCells I.desc w id) := by
@@ -355,6 +382,10 @@ theorem cells_sem (I : Impl) (w : World) (id : InstId) (hS : SemInv I w) :
     rw [readCells_st] at h
     rw [cellsRoster]
     exact hS.rostered i h
+  · intro i hmiss
+    rw [cellsRoster] at hmiss
+    rw [readCells_st]
+    exact hS.offEmpty i hmiss
 
 /-- One group role moves along a transition the relation was closed under. -/
 theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transition)
@@ -363,10 +394,12 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
     (hlife : a.life = (w.st (.core r)).life) (htm : tr.template = r)
     (hmem : tr ∈ I.transitions) (hcont : contTy a) (hprog : programOk I.desc (.core r) a)
     (hwait : waitEdge I.desc (.core r) a)
-    (hoff : a.life ≠ .alive → a.phase = .idle) : SemInv I (setActor w (.core r) a) := by
+    (hoff : a.life ≠ .alive → a.phase = .idle)
+    (hown : a.parked = (w.st (.core r)).parked ∨ InstId.core r ∈ w.roster) :
+    SemInv I (setActor w (.core r) a) := by
   obtain ⟨step, hstep, htmpl, hfroms, htos, _hlab⟩ := stepsCover_of_local I hL tr hmem
   have hempty := compat_empty_of_local I hL
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro g hg hlive
     by_cases hin : r ∈ g.roles
     · rw [roleTuple_update w r a g, hto]
@@ -444,6 +477,18 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
       exact hS.rostered (.core r) (hlife.symm.trans hlive)
     · simp only [setActor, h] at hlive ⊢
       exact hS.rostered i hlive
+  · intro i hmiss
+    by_cases h : i = .core r
+    · rw [h] at hmiss ⊢
+      simp only [setActor] at hmiss
+      rw [setActor_self]
+      rcases hown with hp | hin
+      · rw [hp]
+        exact hS.offEmpty (.core r) hmiss
+      · exact False.elim (hmiss hin)
+    · simp only [setActor] at hmiss
+      rw [setActor_other w (.core r) i a h]
+      exact hS.offEmpty i hmiss
 
 theorem proceed_ok (D : Description) (id : InstId) (a : Actor) (k : Cont)
     (hty : a.typestate = k.toState) (hprog : effectsOk D (tname id) a.typestate k.rest = true) :
@@ -489,6 +534,7 @@ theorem ingress_sem (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
               simpa [waitEdge, a', charged, chargeSender, bumpToken] using hS.waited dst
             simpa [a', msg, charged, a0] using sem_set I w dst a' hS hty hlife hcont hprog hwait
               (idleOff_same I w hS dst a' hlife (by simp [a', charged, chargeSender, bumpToken, a0]))
+              (Or.inl (by simp [a', charged, chargeSender, bumpToken, a0]))
 
 theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
     (h : finishWait I w id = some w') : SemInv I w' := by
@@ -502,6 +548,7 @@ theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
     have hp := proceed_ok I.desc id (w.st id) k hty hprog
     exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
       (idleOff_busy I w hS id _ hp.2.1 (by simp [hph]))
+      (Or.inr (hS.rostered id (alive_if_busy I w hS id (by simp [hph]))))
   | awaitPeer k =>
     simp [finishWait, hph] at h
     rcases h with ⟨_, hw⟩
@@ -512,6 +559,7 @@ theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
     have hp := proceed_ok I.desc id (w.st id) k hty hprog
     exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
       (idleOff_busy I w hS id _ hp.2.1 (by simp [hph]))
+      (Or.inr (hS.rostered id (alive_if_busy I w hS id (by simp [hph]))))
   | idle => simp [finishWait, hph] at h
   | run _ => simp [finishWait, hph] at h
   | parked _ _ _ => simp [finishWait, hph] at h
@@ -566,6 +614,11 @@ theorem spawn_sem (I : Impl) (w w' : World) (template : String) (hS : SemInv I w
         · simp [hi, setActor]
         · simp [setActor, hi] at hlive
           exact List.mem_append_left _ (hS.rostered i hlive)
+      · intro i hmiss
+        by_cases hi : i = InstId.peer template (w.nextIx template)
+        · simp [hi, setActor] at hmiss
+        · simp [setActor, hi] at hmiss ⊢
+          exact hS.offEmpty i hmiss
     · simp [hif] at h
 
 theorem charge_ok (a : Actor) (d : String) :
@@ -608,6 +661,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
             rw [hcharge.1]
             simpa [hcall] using hedge
           · exact idleOff_life hsender
+          · exact Or.inr (hS.rostered sender hsender)
         else
           have hcf : isCall = false := by cases hbb : isCall <;> simp_all
           simp [hcf]
@@ -624,6 +678,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           · exact hp.2.2.2.1
           · exact hp.2.2.2.2
           · exact idleOff_alive hp.2.1 hsender
+          · exact Or.inr (hS.rostered sender hsender)
       · simp [hsame]
         rw [← halive, ← hroom.1]
         -- Destination first, then the sender.
@@ -637,6 +692,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           · simpa [programOk] using hS.prog dst
           · simpa [waitEdge] using hS.waited dst
           · exact idleOff_life halive
+          · exact Or.inr (hS.rostered dst halive)
         have hty' : (chargeSender (w.st sender) (tname dst)).typestate = k.toState := by
           rw [hcharge.1, hty]
         if hcall : isCall = true then
@@ -655,6 +711,8 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
             rw [hcharge.1]
             simpa [hcall] using hedge
           · exact idleOff_life hsender
+          · exact Or.inr (hdst.rostered sender
+              (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
         else
           have hcf : isCall = false := by cases hbb : isCall <;> simp_all
           simp [hcf]
@@ -669,6 +727,8 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.1
           · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.2
           · exact idleOff_alive (hp.2.1.trans (charge_ok _ _).2.1) hsender
+          · exact Or.inr (hdst.rostered sender
+              (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
     · simp [hroom]
       by_cases hsame : sender = dst
       · subst hsame
@@ -686,6 +746,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           rw [hcharge.1]
           exact hedge
         · exact idleOff_life hsender
+        · exact Or.inr (hS.rostered sender hsender)
       · simp [hsame]
         rw [← halive]
         have hdst : SemInv I (setActor w dst { (w.st dst) with
@@ -699,6 +760,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           · simpa [programOk] using hS.prog dst
           · simpa [waitEdge] using hS.waited dst
           · exact idleOff_life halive
+          · exact Or.inr (hS.rostered dst halive)
         apply sem_set I _ sender _ hdst
         · rw [setActor_other _ dst sender _ (hsame)]
           exact hcharge.1
@@ -714,10 +776,12 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           rw [hcharge.1]
           exact hedge
         · exact idleOff_life hsender
+        · exact Or.inr (hdst.rostered sender
+            (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
   · simp [halive]
     have hp := proceed_ok I.desc sender (w.st sender) k hty htail
     exact sem_set I w sender (proceed (w.st sender) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_alive hp.2.1 hsender)
+      (idleOff_alive hp.2.1 hsender) (Or.inr (hS.rostered sender hsender))
 
 /-- A fitting `trySend` is an enqueue of an unreliable message, so it needs no blocking edge. -/
 theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)
@@ -746,6 +810,7 @@ theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k
     · exact hp.2.2.2.1
     · exact hp.2.2.2.2
     · exact idleOff_alive hp.2.1 hsender
+    · exact Or.inr (hS.rostered sender hsender)
   · simp [hsame]
     rw [← hlive, ← hpark]
     have hdst : SemInv I (setActor w dst { (w.st dst) with
@@ -758,6 +823,7 @@ theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k
       · simpa [programOk] using hS.prog dst
       · simpa [waitEdge] using hS.waited dst
       · exact idleOff_life hlive
+      · exact Or.inr (hS.rostered dst hlive)
     have hp := proceed_ok I.desc sender (chargeSender (w.st sender) (tname dst)) k
       (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
     apply sem_set I _ sender _ hdst
@@ -769,5 +835,7 @@ theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k
     · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.1
     · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.2
     · exact idleOff_alive (hp.2.1.trans (charge_ok _ _).2.1) hsender
+    · exact Or.inr (hdst.rostered sender
+        (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
 
 end Deadlock
