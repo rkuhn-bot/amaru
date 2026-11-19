@@ -171,3 +171,8 @@ and so do `World.tombstone` and `plantTombstone`. Peer selection stays in
 the application typegraph. A send that has been dropped stays dropped
 because death is permanent, shutting-down is monotone, and an id is not
 reused. On that step relation, `route` reads life and shutting-down.
+
+Mailbox sizing is a separate decision, not a change to this step relation.
+Slots are sized for a duplex connection, and the model may include every
+peer direction. Occupancy for nested supervision is a product along the
+supervision tree. The record is `DECISIONS.md` (2026-11-19).

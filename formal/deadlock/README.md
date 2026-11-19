@@ -503,6 +503,7 @@ graph-only rows above are `decide`d as `render` in `Deadlock/Examples.lean`.
 - `Deadlock/Graph.lean` — residual graph, checker, `checkBool_sound`
 - `Deadlock/Semantics.lean` — configurations, step, fairness, `Deadlock`, cells, churn
 - `SEMANTICS.md` — one-page reading of that step relation
+- `DECISIONS.md` — design decisions that are not, by themselves, a change to that step relation
 - `Deadlock/Local.lean` — `LocalOk`, `Assumptions`, `CellFresh`
 - `Deadlock/Occupy.lean` — in-flight message accounting
 - `Deadlock/Proof.lean` — effect/peer progress, phase stability of a running actor
