@@ -400,6 +400,10 @@ theorem loss_fair : Fair lossRun := by
     exact False.elim (quiet_no_forced lossImpl (lossRun.cfg j)
       (fun id hid => And.intro (hoff id hid).2 (hoff id hid).1) hb (.recvPrio s) rfl hen)
 
+/-- The loss run is not a checked implementation: the reliable send targets a
+terminable core, which `permanentTarget` rejects. -/
+theorem loss_not_local : localOkB lossImpl = false := by decide
+
 theorem loss_not_delivered : ¬ Delivered lossRun := by
   intro hD
   have hheld := loss_held

@@ -623,14 +623,15 @@ def sendsTo (dst : String) : List Eff → Nat
 /-- Bulk sends still in the continuation, counted toward the token floor. -/
 def pending (a : Actor) (dst : String) : Nat := sendsTo dst (contRest a.phase)
 
-/-- Idle, parked, or waiting. A running or crashed actor does not take ingress. -/
+/-- Idle, parked, waiting, or running. A message for a running actor waits in
+the box until the continuation finishes. A crashed actor does not take ingress. -/
 def ingressOpen : Phase → Bool
   | .idle => true
   | .parked _ _ _ => true
   | .awaitReply _ _ => true
   | .awaitEffect _ => true
   | .awaitPeer _ => true
-  | .run _ => false
+  | .run _ => true
   | .crashed => false
 
 /-- How many self-tokens an ingress may consume, from `ingressLegal` at this `N`. -/
@@ -648,7 +649,7 @@ def terminableB (D : Description) (name : String) : Bool :=
   | none => false
 
 /-- Environment delivery into a live ingress stage. The actor may be idle, parked,
-or waiting; a running or crashed actor is refused. It charges one self-slot and
+waiting, or running; a crashed actor is refused. It charges one self-slot and
 appends a bulk message when the mailbox is under capacity and the target still
 has a token above the typestate floor plus the sends still in its continuation.
 A full mailbox, a dead target, a terminable target, or a spent budget makes the
@@ -758,8 +759,8 @@ theorem ingress_ty_eq (I : Impl) (w w' : World) (dst : InstId) (label : String) 
             · simp [setActor, hi]
 
 /-- A successful ingress is the charged, appended world, and the guards that
-make the charge safe have already held. The actor may be parked or waiting;
-the token floor includes the sends still in that continuation. -/
+make the charge safe have already held. The actor may be parked, waiting, or
+running; the token floor includes the sends still in that continuation. -/
 theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
     (w.st dst).life = .alive ∧ ingressOpen (w.st dst).phase = true ∧
