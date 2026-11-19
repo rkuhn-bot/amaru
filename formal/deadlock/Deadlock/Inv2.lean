@@ -37,7 +37,8 @@ theorem inv2_init (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) :
   ⟨inv_init I N hL, occ_init I hG N, ty_init I hG N, bulk_init I N⟩
 
 theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
-    (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hT : TyOk I.desc w) (hB : BulkFree I w)
+    (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hSlots : OpenSlots w)
+    (hT : TyOk I.desc w) (hB : BulkFree I w)
     (h : apply I a w = some w') : OccInv I w' := by
   cases a with
   | recvBulk id =>
@@ -53,7 +54,9 @@ theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
     simpa [apply] using occ_spawn I w w' template hO h
   | ingress dst label =>
     simpa [apply] using occ_ingress I w w' dst label hO h
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    exact occ_kill I hG w sub key hO hS hM hSlots
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hO
@@ -749,7 +752,7 @@ theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   | init => exact inv2_init I hL hG N
   | step w w' a hw happly ih =>
     rcases ih with ⟨hI, hO, hT, hB⟩
-    exact ⟨step_inv I hL w w' ⟨a, happly⟩ hI, occ_apply I hL hG a w w' hO hI.1 hI.2.1 hT hB happly,
+    exact ⟨step_inv I hL w w' ⟨a, happly⟩ hI, occ_apply I hL hG a w w' hO hI.1 hI.2.1 hI.2.2 hT hB happly,
       ty_step I hL hG N w w' a hw happly hT,     bulk_apply I hL a w w' hB happly⟩
 
 theorem residual_of_edge (D : Description) (e : Edge) (st : String) (he : e ∈ D.edges)

@@ -5792,5 +5792,433 @@ theorem occ_head (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     | crashed => simp [hphase] at h
   · simp [execHead, hlive] at h
 
+/-! A subtree kill refunds the member's mailbox and fails whoever waited on it.
+The two writes commute, so the account is the drain already proved for one
+terminable actor, after the waiters have resumed. -/
+
+theorem setActor_shadow (w : World) (id : InstId) (a b : Actor) :
+    setActor (setActor w id a) id b = setActor w id b := by
+  apply world_eq <;> simp [setActor]
+  · funext x
+    by_cases hx : x = id
+    · simp [hx]
+    · simp [setActor, hx]
+
+theorem setActor_comm (w : World) (i j : InstId) (a b : Actor) (hne : i ≠ j) :
+    setActor (setActor w i a) j b = setActor (setActor w j b) i a := by
+  apply world_eq
+  · rfl
+  · rfl
+  · rfl
+  · funext x
+    by_cases hxi : x = i
+    · rw [hxi]
+      rw [setActor_other (setActor w i a) j i b hne, setActor_self, setActor_self]
+    · by_cases hxj : x = j
+      · rw [hxj] at hxi ⊢
+        rw [setActor_self, setActor_other (setActor w j b) i j a hxi, setActor_self]
+      · rw [setActor_other (setActor w i a) j x b hxj, setActor_other w i x a hxi,
+          setActor_other (setActor w j b) i x a hxi, setActor_other w j x b hxj]
+  · rfl
+  · rfl
+  · rfl
+  · rfl
+
+theorem proceed_bump (a : Actor) (k : Cont) (dst : String) :
+    proceed (bumpToken a dst (.ofNat 1)) k = bumpToken (proceed a k) dst (.ofNat 1) := by
+  cases hk : k.rest with
+  | nil => apply actor_fields <;> simp [proceed, bumpToken, hk]
+  | cons _ _ => apply actor_fields <;> simp [proceed, bumpToken, hk]
+
+theorem idlePhase_bump (a : Actor) (dst : String) :
+    { bumpToken a dst (.ofNat 1) with phase := .idle } =
+      bumpToken { a with phase := .idle } dst (.ofNat 1) := by
+  apply actor_fields <;> simp [bumpToken]
+
+/-- Updating `i` by `f` commutes with crediting `cred` when `f` commutes with the token bump. -/
+theorem credit_update_comm (w : World) (i cred : InstId) (name : String) (f : Actor → Actor)
+    (hf : ∀ a, f (bumpToken a name (.ofNat 1)) = bumpToken (f a) name (.ofNat 1)) :
+    setActor (creditSender w name cred) i (f ((creditSender w name cred).st i)) =
+      creditSender (setActor w i (f (w.st i))) name cred := by
+  by_cases h : i = cred
+  · subst h
+    rw [creditSender, setActor_self, hf, setActor_shadow, creditSender, setActor_self, setActor_shadow]
+  · apply world_eq
+    · simp [creditSender, setActor]
+    · simp [creditSender, setActor]
+    · simp [creditSender, setActor]
+    · funext x
+      by_cases hxi : x = i
+      · subst hxi
+        simp [creditSender, setActor, h]
+      · by_cases hxc : x = cred
+        · subst hxc
+          simp [creditSender, setActor, hxi]
+        · simp [creditSender, setActor, hxi, hxc]
+    · simp [creditSender, setActor]
+    · simp [creditSender, setActor]
+    · simp [creditSender, setActor]
+    · simp [creditSender, setActor]
+
+theorem failWaiter_credit_comm (w : World) (dead cred : InstId) (name : String) (i : InstId) :
+    failWaiter (creditSender w name cred) dead i =
+      creditSender (failWaiter w dead i) name cred := by
+  have hL := credit_life w name cred i
+  cases hlive : (w.st i).life with
+  | absent =>
+    have hskip : ((w.st i).life != .alive) = true := by simp [hlive]
+    have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
+    simp [failWaiter, hskip, hskipc]
+  | dead =>
+    have hskip : ((w.st i).life != .alive) = true := by simp [hlive]
+    have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
+    simp [failWaiter, hskip, hskipc]
+  | alive =>
+    have hgo : ((w.st i).life != .alive) = false := by simp [hlive]
+    have hgo' : (((creditSender w name cred).st i).life != .alive) = false := by rw [hL.1, hgo]
+    cases hph : (w.st i).phase with
+    | parked d b k =>
+      have hphc : ((creditSender w name cred).st i).phase = .parked d b k := by
+        simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+      split
+      · exact credit_update_comm w i cred name (fun a => proceed a k) fun a => proceed_bump a k name
+      · rfl
+    | awaitReply d k =>
+      have hphc : ((creditSender w name cred).st i).phase = .awaitReply d k := by
+        simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+      split
+      · exact credit_update_comm w i cred name (fun a => { a with phase := .idle }) fun a =>
+          idlePhase_bump a name
+      · rfl
+    | idle =>
+      have hphc : ((creditSender w name cred).st i).phase = .idle := by simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+    | run k =>
+      have hphc : ((creditSender w name cred).st i).phase = .run k := by simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+    | awaitEffect k =>
+      have hphc : ((creditSender w name cred).st i).phase = .awaitEffect k := by
+        simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+    | awaitPeer k =>
+      have hphc : ((creditSender w name cred).st i).phase = .awaitPeer k := by
+        simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+    | crashed =>
+      have hphc : ((creditSender w name cred).st i).phase = .crashed := by simpa [hph] using hL.2.2.1
+      simp [failWaiter, hgo, hgo', hph, hphc]
+
+theorem failFold_credit (w : World) (dead : InstId) (ids : List InstId) (name : String) (s : InstId) :
+    ids.foldl (fun w i => failWaiter w dead i) (creditSender w name s) =
+      creditSender (ids.foldl (fun w i => failWaiter w dead i) w) name s := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    rw [failWaiter_credit_comm]
+    exact ih (failWaiter w dead i)
+
+theorem failFold_refundMsgs (w : World) (dead : InstId) (ids : List InstId) (name : String)
+    (ms : List Msg) :
+    ids.foldl (fun w i => failWaiter w dead i) (refundMsgs w name ms) =
+      refundMsgs (ids.foldl (fun w i => failWaiter w dead i) w) name ms := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    have hfold : refundMsgs w name (m :: ms) = refundMsgs (creditSender w name m.sender) name ms := by
+      simp [refundMsgs, List.foldl_cons]
+    rw [hfold, ih, failFold_credit]
+    simp [refundMsgs, List.foldl_cons]
+
+theorem failFold_refundParked (w : World) (dead : InstId) (ids : List InstId) (name : String)
+    (ps : List Parked) :
+    ids.foldl (fun w i => failWaiter w dead i) (refundParked w name ps) =
+      refundParked (ids.foldl (fun w i => failWaiter w dead i) w) name ps := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    have hfold : refundParked w name (p :: ps) =
+        refundParked (creditSender w name p.msg.sender) name ps := by
+      simp [refundParked, List.foldl_cons]
+    rw [hfold, ih, failFold_credit]
+    simp [refundParked, List.foldl_cons]
+
+theorem failWaiters_refund (w : World) (dead : InstId) (name : String) (ms : List Msg) (ps : List Parked) :
+    failWaiters (refundParked (refundMsgs w name ms) name ps) dead =
+      refundParked (refundMsgs (failWaiters w dead) name ms) name ps := by
+  have hr : (refundParked (refundMsgs w name ms) name ps).roster = w.roster := by
+    simpa [(frame_refund w name ms).2.1] using (frame_refundP (refundMsgs w name ms) name ps).2.1
+  unfold failWaiters
+  rw [hr]
+  rw [failFold_refundParked (refundMsgs w name ms) dead w.roster name ps]
+  rw [failFold_refundMsgs w dead w.roster name ms]
+
+theorem filter_sender_keep (ps : List Parked) (dead : InstId)
+    (h : ∀ p ∈ ps, p.sender ≠ dead) :
+    ps.filter (fun p => p.sender != dead) = ps := by
+  induction ps with
+  | nil => simp
+  | cons p ps ih =>
+    have hp := h p (List.Mem.head _)
+    have hbit : (p.sender != dead) = true := by
+      cases hbb : p.sender == dead
+      · simp [bne, hbb]
+      · exact absurd (beq_iff_eq.mp hbb) hp
+    simp [hbit, ih fun q hq => h q (List.Mem.tail _ hq)]
+
+theorem forgetStep_noop (w : World) (dead id : InstId)
+    (h : ∀ p ∈ (w.st id).parked, p.sender ≠ dead) :
+    (let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) = w := by
+  simp only
+  have hfilt := filter_sender_keep (w.st id).parked dead h
+  simp [hfilt]
+
+theorem forgetFold_noop (w : World) (dead : InstId) (ids : List InstId)
+    (h : ∀ i ∈ ids, ∀ p ∈ (w.st i).parked, p.sender ≠ dead) :
+    ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w = w := by
+  induction ids generalizing w with
+  | nil => simp
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have hstep := forgetStep_noop w dead i (h i (List.Mem.head _))
+    rw [hstep]
+    exact ih _ fun j hj p hp => h j (List.Mem.tail _ hj) p hp
+
+theorem forget_noop (w : World) (dead : InstId)
+    (h : ∀ i ∈ w.roster, ∀ p ∈ (w.st i).parked, p.sender ≠ dead) :
+    forgetSender w dead = w := by
+  simpa [forgetSender] using forgetFold_noop w dead w.roster h
+
+/-- Failing a waiter only changes its phase. The mailbox and the token account stay. -/
+theorem occ_failWaiter (I : Impl) (w : World) (dead i : InstId) (hO : OccInv I w)
+    (hC : ∀ j, contTy (w.st j)) :
+    OccInv I (failWaiter w dead i) ∧ ∀ j, contTy ((failWaiter w dead i).st j) := by
+  unfold failWaiter
+  split
+  · exact ⟨hO, hC⟩
+  · next hlive =>
+    cases hph : (w.st i).phase with
+    | parked d _ k =>
+      simp
+      split
+      · have hty : (w.st i).typestate = k.toState := by simpa [contTy, hph] using hC i
+        have hO' := occ_keep I w i (proceed (w.st i) k) hO (proceed_life _ _)
+          (by cases hk : k.rest <;> simp [proceed, hk])
+          (by cases hk : k.rest <;> simp [proceed, hk])
+          (by intro d; cases hk : k.rest <;> simp [proceed, hk])
+          (by cases hk : k.rest <;> simp [proceed, hk, hty])
+          (by intro d; cases hk : k.rest <;> simp [pending, contRest, proceed, hph, hk, sendsTo])
+        have hnew : contTy (proceed (w.st i) k) := by
+          cases hk : k.rest <;> simp [proceed, contTy, hk, hty]
+        exact ⟨hO', cont_after w i _ hC hnew⟩
+      · exact ⟨hO, hC⟩
+    | awaitReply d k =>
+      simp
+      split
+      · have hO' := occ_keep I w i { (w.st i) with phase := .idle } hO rfl rfl rfl (fun _ => rfl) rfl
+          (by
+            intro dst
+            simp [pending, contRest, hph, sendsTo])
+        exact ⟨hO', cont_after w i _ hC (by simp [contTy])⟩
+      · exact ⟨hO, hC⟩
+    | idle => simp; exact ⟨hO, hC⟩
+    | run _ => simp; exact ⟨hO, hC⟩
+    | awaitEffect _ => simp; exact ⟨hO, hC⟩
+    | awaitPeer _ => simp; exact ⟨hO, hC⟩
+    | crashed => simp; exact ⟨hO, hC⟩
+
+theorem occ_failFold (I : Impl) (w : World) (dead : InstId) (ids : List InstId) (hO : OccInv I w)
+    (hC : ∀ j, contTy (w.st j)) :
+    OccInv I (ids.foldl (fun w i => failWaiter w dead i) w) ∧
+      ∀ j, contTy ((ids.foldl (fun w i => failWaiter w dead i) w).st j) := by
+  induction ids generalizing w with
+  | nil => simpa using ⟨hO, hC⟩
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have hstep := occ_failWaiter I w dead i hO hC
+    exact ih _ hstep.1 hstep.2
+
+/-- No roster mailbox holds a message from a terminable actor: its outstanding count is zero. -/
+theorem terminable_unsent (I : Impl) (w : World) (hO : OccInv I w) (id : InstId)
+    (hmem : id ∈ w.roster) (hterm : terminableName I.desc (tname id)) :
+    ∀ i ∈ w.roster, ∀ p ∈ (w.st i).parked, p.sender ≠ id := by
+  intro i hi p hp
+  have hz := hO.still id (tname i) hmem hterm
+  have hle := owed_ge_here w.st (tname i) id i w.roster hO.nodup hi rfl
+  have hzero : countParked id (w.st i).parked = 0 := by
+    have hle' : countFrom id (w.st i).box + countParked id (w.st i).parked ≤ 0 := by
+      simpa [hz] using hle
+    omega
+  exact countParked_zero_sender id _ hzero p hp
+
+theorem killOne_eq_account (w : World) (D : Description) (id : InstId)
+    (hunsent : ∀ i ∈ (readCells D w id).roster,
+      ∀ p ∈ ((readCells D w id).st i).parked, p.sender ≠ id) :
+    killOne w D id =
+      let base := readCells D w id
+      let wF := failWaiters base id
+      let name := tname id
+      let refunded := refundParked (refundMsgs wF name (wF.st id).box) name (wF.st id).parked
+      setActor refunded id
+        { (refunded.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] } := by
+  let w1 := readCells D w id
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  let w4 := failWaiters w3 id
+  let w5 := forgetSender w4 id
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  have hpark4 : ∀ i, (w4.st i).parked = (w1.st i).parked := by
+    intro i
+    have hf := (failFold_mail w3 id i w3.roster).2.2
+    have hp := refundP_park w2 (tname id) (w.st id).parked i
+    have hm := refund_park w1 (tname id) (w.st id).box i
+    simpa [w4, w3, w2, failWaiters] using hf.trans (hp.trans hm)
+  have hr3 : w3.roster = w1.roster := by
+    simpa [w3, w2] using
+      ((frame_refundP w2 (tname id) (w.st id).parked).2.1).trans
+        (frame_refund w1 (tname id) (w.st id).box).2.1
+  have hr4 : w4.roster = w1.roster := by
+    simpa [w4, failWaiters, hr3] using failWaiters_roster w3 id w3.roster
+  have hforget : w5 = w4 := by
+    simpa [w5, forgetSender] using
+      forget_noop w4 id fun i hi p hp =>
+        hunsent i (by simpa [hr4] using hi) p (by simpa [hpark4] using hp)
+  have hcomm : w4 =
+      refundParked (refundMsgs (failWaiters w1 id) (tname id) (w.st id).box) (tname id) (w.st id).parked := by
+    simpa [w4, w3, w2, failWaiters] using
+      failWaiters_refund w1 id (tname id) (w.st id).box (w.st id).parked
+  have hboxF : ((failWaiters w1 id).st id).box = (w.st id).box := by
+    have hb := (failFold_mail w1 id id w1.roster).1
+    have hs := congrArg (·.box) (readCells_st D w id id)
+    simpa [w1, failWaiters] using hb.trans hs
+  have hparkF : ((failWaiters w1 id).st id).parked = (w.st id).parked := by
+    have hp := (failFold_mail w1 id id w1.roster).2.2
+    have hs := congrArg (·.parked) (readCells_st D w id id)
+    simpa [w1, failWaiters] using hp.trans hs
+  rw [hbody, hforget, hcomm, ← hboxF, ← hparkF]
+
+/-- Killing one terminable member preserves outstanding credit. -/
+theorem occ_killOne (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
+    (id : InstId) (hO : OccInv I w) (hS : SemInv I w)
+    (hmem : isMember I.desc id sub key = true) (halive : (w.st id).life = .alive) :
+    OccInv I (killOne w I.desc id) := by
+  have htermB := member_terminable I.desc hG.subtrees id sub key hmem
+  have hterm : terminableName I.desc (tname id) := by
+    cases ht : templateOf I.desc (tname id) with
+    | none => simp [terminableB, ht] at htermB
+    | some t => exact ⟨t, ht, by simpa [terminableB, ht] using htermB⟩
+  have hroster := hO.aliveIn id halive
+  let D := I.desc
+  let base := readCells D w id
+  have hObase := occ_same I w base hO (fun i => readCells_st D w id i) (read_roster D w id).1
+    (read_roster D w id).2 fun n => readCells_nextIx D w id n
+  have hCbase : ∀ i, contTy (base.st i) := by
+    intro i
+    exact (contTy_match _ _ (congrArg Actor.phase (readCells_st D w id i))
+      (congrArg Actor.typestate (readCells_st D w id i))).mpr (hS.cont i)
+  have hmemB : id ∈ base.roster := by simpa [base, (read_roster D w id).1] using hroster
+  have hunsent := terminable_unsent I base hObase id hmemB hterm
+  let wF := failWaiters base id
+  have hFail := occ_failFold I base id base.roster hObase hCbase
+  have hOF : OccInv I wF := by simpa [wF, failWaiters] using hFail.1
+  have hrF : wF.roster = base.roster := by
+    simpa [wF, failWaiters] using failWaiters_roster base id base.roster
+  have hmemF : id ∈ wF.roster := by simpa [hrF] using hmemB
+  let name := tname id
+  let ms := (wF.st id).box
+  let ps := (wF.st id).parked
+  have hparkEq : (wF.st id).parked = (base.st id).parked := by
+    simpa [wF, failWaiters] using (failFold_mail base id id base.roster).2.2
+  have hmsg : ∀ p ∈ ps, p.sender = p.msg.sender := by
+    intro p hp
+    exact hObase.parkMsg id p (by simpa [ps, ← hparkEq] using hp)
+  have hDb := occ_drain_box I wF id ms hOF hmemF rfl
+  have hparkB : ((drainBox wF id name ms).st id).parked = ps := by
+    simpa [ps] using drain_park wF id name ms id
+  have hmemD : id ∈ (drainBox wF id name ms).roster := by
+    simpa [(frame_drain wF id name ms).2.1] using hmemF
+  have hDp := occ_drain_park I (drainBox wF id name ms) id ps hDb hmemD hparkB hmsg
+  let drained := drainPark (drainBox wF id name ms) id name ps
+  have hmemDr : id ∈ drained.roster := by
+    simpa [drained, (frame_drainP (drainBox wF id name ms) id name ps).2.1] using hmemD
+  have hboxDr : (drained.st id).box = [] := by
+    have hkeep := drainP_box (drainBox wF id name ms) id name ps id
+    have hclear := drain_box wF id name ms id
+    rw [ite_eq_left rfl] at hclear
+    simpa [drained] using hkeep.trans hclear
+  have hparkDr : (drained.st id).parked = [] := by
+    simpa [drained] using drainP_park (drainBox wF id name ms) id name ps id
+  have hquiet : ∀ d, owed drained.st d id drained.roster = 0 := fun d => hDp.still id d hmemDr hterm
+  have hOd := occ_die I drained id hDp hmemDr hboxDr hparkDr hquiet
+  let died := setActor drained id
+    { (drained.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+  have heq := killOne_eq_account w D id hunsent
+  have hst : ∀ i, (killOne w D id).st i = (died.st i) := by
+    intro i
+    have htermA := term_actor wF id i
+    have hkill : (killOne w D id).st i =
+        (setActor (refundParked (refundMsgs wF name ms) name ps) id
+          { ((refundParked (refundMsgs wF name ms) name ps).st id) with
+            life := .dead, phase := .idle, prio := [], box := [], parked := [] }).st i := by
+      simpa [D, base, wF, name, ms, ps] using congrArg (fun z : World => z.st i) heq
+    simpa [died] using hkill.trans htermA.symm
+  have hr : (killOne w D id).roster = died.roster := by
+    rw [killOne_roster]
+    have hdie : died.roster = drained.roster := by simp [died, setActor]
+    rw [hdie, (frame_drainP (drainBox wF id name ms) id name ps).2.1,
+      (frame_drain wF id name ms).2.1, hrF, (read_roster D w id).1]
+  have hN : (killOne w D id).N = died.N := by
+    rw [killOne_N]
+    have hdie : died.N = drained.N := by simp [died, setActor]
+    have hF : wF.N = base.N := by simpa [wF, failWaiters] using failWaiters_N base id base.roster
+    rw [hdie, (frame_drainP (drainBox wF id name ms) id name ps).1,
+      (frame_drain wF id name ms).1, hF, (read_roster D w id).2]
+  have hix : ∀ n, (killOne w D id).nextIx n = died.nextIx n := by
+    intro n
+    rw [killOne_nextIx]
+    have hdie : died.nextIx n = drained.nextIx n := by simp [died, setActor]
+    have hF : wF.nextIx n = base.nextIx n :=
+      congrFun (by simpa [wF, failWaiters] using failWaiters_nextIx base id base.roster) n
+    rw [hdie, congrFun (frame_drainP (drainBox wF id name ms) id name ps).2.2.1 n,
+      congrFun (frame_drain wF id name ms).2.2.1 n, hF, readCells_nextIx]
+  exact occ_same I died (killOne w D id) hOd hst hr hN hix
+
+theorem occ_killFold (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
+    (ids : List InstId) (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hSlots : OpenSlots w) :
+    OccInv I (ids.foldl (fun w id =>
+      if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id else w) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hO
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · next hcond =>
+      have hparts := (Bool.and_eq_true _ _).mp hcond
+      have halive : (w.st id).life = .alive := by simpa [beq_iff_eq] using hparts.2
+      have hInv := killOne_inv I w sub key id hS hM hSlots hparts.1 halive
+      have hOcc := occ_killOne I hG w sub key id hO hS hparts.1 halive
+      exact ih _ hOcc hInv.1 hInv.2.1 hInv.2.2
+    · exact ih _ hO hS hM hSlots
+
+theorem occ_kill (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
+    (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hSlots : OpenSlots w) :
+    OccInv I (killSubtree w I.desc sub key) := by
+  have hFold := occ_killFold I hG w sub key w.roster hO hS hM hSlots
+  have hMembers : OccInv I (killMembers w I.desc sub key) := by simpa [killMembers] using hFold
+  exact occ_same I (killMembers w I.desc sub key) (killSubtree w I.desc sub key) hMembers
+    (fun i => by simp [killSubtree, plant_st])
+    (by simp [killSubtree, plant_roster, killMembers_roster])
+    (by simp [killSubtree, plant_N, killMembers_N])
+    (fun n => by simp [killSubtree, plant_nextIx, killMembers_nextIx])
+
 end Deadlock
 
