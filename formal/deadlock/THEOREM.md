@@ -15,8 +15,26 @@ actor not `Blocked`.
 implementation. `Delivered` says every reliable message in the bulk box, the
 parked list, or the priority lane is later the head consumed by `recvBulk` or
 `recvPrio`, matched by the id the storing actor assigned when it accepted the
-message. A try-drop send and a superseding cell wake are not obligations. An
-admitted call leaves `awaitReply`. `Assumptions` is only `rust_refines`.
+message, or a subtree kill credits it. A try-drop send and a superseding
+cell wake are not obligations. An admitted call leaves `awaitReply`.
+`Assumptions` is only `rust_refines`.
+
+The handled half is not a separate obligation. Once a stage has returned its
+next state, the runtime gives it the next message and the stage cannot refuse.
+A world in which the actor is alive and idle with a non-empty mailbox enables
+`recvBulk` or `recvPrio`, and `deliver` returns `some` for mail the checker
+accepted (`enabled_of_can`, `deliver_msg`, `noncall_deliver`). That receive
+consumes the head. So a reliable message whose target stays alive is delivered
+once deadlock freedom has brought the target back to receiving
+(`idle_when_free`) and the stage's own step has terminated. `Fair.bulk` and
+`Fair.prio` are what take the enabled receive. Nothing here is an axiom.
+The loss half stays: mail still queued when the target shuts down or
+terminates may be dropped, and the sender still does not block. The definition
+in `Deliver.lean` still writes that loss as a subtree kill. The per-message
+wording, a target that began shutting down or terminated before handling the
+message, replaces that disjunct when the shutting-down phase exists. It does
+not delete the loss case, and it does not promise delivery for every target
+that was not shutting down at the moment of enqueue.
 
 `loss_fair` and `loss_not_delivered` are the run without that check. A
 terminable actor accepts a reliable message and then executes `terminate`,
@@ -345,6 +363,20 @@ In this development the transition list is the model, so the field is the
 identity on that list. An internal effect and a timed peer wait complete as
 `finish` steps. An untimed peer wait completes the same way when
 `timedCohortEnds` holds. A pure untimed peer wait does not.
+
+**Step termination.** A stage step terminates. A computation inside a stage
+that does not return is excluded, because it cannot be proved of the Rust
+program, and the model already treats every effect as one completing step.
+`Eff.internal` moves the actor to `awaitEffect` in that step. `finishWait` on
+`awaitEffect` is `some` and does not read `Env.effectDone`
+(`effect_finish_enabled`). `Env.effectDone` is unused. Fairness then takes
+`finish` (`not_stuck_effect`, `effect_resumes`), and the continuation runs.
+`deadlock_freedom` is what says the actor is not stuck there, so it returns
+to receiving. This is not a field of `Assumptions` and not an axiom. Delivery
+to a target that does not terminate is the runtime's, from this assumption
+plus that return to receiving. The small lemma is the runtime rule above:
+returning to receiving with mail handles the head next, and the stage cannot
+refuse it.
 
 ## Restrictions that are still in force
 
