@@ -70,6 +70,55 @@ down after admission does not owe `Reply`. The same reduction applies: the
 callee returns to the handler, and the runtime delivers. The three call
 outcomes are unchanged. No proof may assume which one is taken.
 
+## Supervision
+
+This replaces the plan that a connection manager emits peer loss, and it
+replaces `World.tombstone`.
+
+A tombstone is the pure-stage supervision message. It is not an Ouroboros
+peer event.
+
+- A parent declares the message when it spawns a supervised child.
+- The parent receives it on `prio` once the child has terminated, by `kill`
+  or by the child's own `terminate`.
+- One message per child is the whole obligation.
+- The slot is reserved on the parent's priority lane. The enqueue does not
+  block and spends no bulk credit. The slot counts in `capPrio`.
+- The kill climbs because each parent answers that message with its own
+  typestate transition. A parent may itself terminate.
+- Peer selection stays in the application typegraph and uses the same check.
+- A dropped send stays dropped because death is permanent, shutting-down is
+  monotone, and an id is not reused. `route` reads life and shutting-down.
+  The drop rule does not add a second tombstone.
+- `World.tombstone` and `plantTombstone` are removed. The field is not this
+  message.
+
+## Work plan
+
+The round, in order. This note does not change the step relation. `Delivered`
+stays as it is until the kill step changes.
+
+A. Members of one subtree may send and call each other, and may call a
+permanent core. A lone terminable still may not. Ingress into a member is
+allowed. Disjointness of that mail is a proof obligation. The mux, handler,
+and connection witness passes, and so does the round's send and call pair.
+
+B. A call carries a duration. `awaitReply` resumes with a reply, not
+admitted, or timed out. The caller's continuation is checked on every
+branch, and no proof assumes which branch runs. The timeout stays enabled
+from `awaitReply`, including a call that is still parked. A call id stops a
+late reply from resuming a newer wait. `call_answered` promises a reply only
+while the callee stays live and not shutting down.
+
+C. The kill is no longer one step. Follow Supervision: one declared priority
+tombstone per child, parents climb by their own transition, and peer
+selection stays out of the model. `World.tombstone` and `plantTombstone` are
+removed here. `route` reads life and shutting-down.
+
+D. An untimed peer wait needs a live, armed timeout killer at its key. A
+static role test is not enough. `finish` on the success path does not resume
+an untimed wait.
+
 ## Not a weakening
 
 `fair_delivered` keeps a loss disjunct. The companion fact that a target

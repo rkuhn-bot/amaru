@@ -38,8 +38,8 @@ a reader has recorded. `readCells` clears the bits it copies.
 
 `failures` records a `route` that did not resolve (`noteStale`). That is a
 miss, not a stored message. `tombstone : Option Nat` is the key of the last
-`plantTombstone`. It is not a message and it spends no credit. A later kill
-overwrites it. `route` does not read it.
+`plantTombstone`. Nothing reads it, including `route`. A later kill
+overwrites it. It is not a supervision message. That message is under Later.
 
 `initWorld` puts every multiplicity-one template on `coreRoster`, alive and
 idle. Everyone else is `absentActor`.
@@ -124,9 +124,9 @@ wait is the external peer. Nothing in the model ends it.
 `killOne`: refund what its `box` and `parked` held, `failWaiters` (a sender
 parked on the member proceeds; a caller in `awaitReply` becomes `idle`),
 `forgetSender` (delete that member's entries from other actors' `parked`
-lists), then `dead`, `idle`, and an empty mailbox. The tombstone stores the
-key. No member emits peer loss. The supervisor's reaction is not a step of
-`kill`.
+lists), then `dead`, `idle`, and an empty mailbox. `plantTombstone` stores
+the key. Peer selection belongs to the application typegraph.
+The parent's reaction is not a step of `kill`.
 
 A drop that is not a kill: `trySend` discards when the target is missing or
 the box is not free; `noteStale` records a route miss and stores nothing;
@@ -150,3 +150,15 @@ The model change that goes with it: replace the uncharged `prio` wake with a
 regular message that uses one reserved mailbox slot per cell label and
 reader. Count that slot in the occupancy bound. The wake enqueue stays
 non-blocking because the slot is reserved.
+
+Supervision is not this step relation either. `World.tombstone` and
+`plantTombstone` are dropped. A parent declares one tombstone message when
+it spawns a supervised child, and receives that message on `prio` once the
+child has terminated, by `kill` or by the child's own `terminate`. The slot
+is reserved per child, so the enqueue does not block and spends no bulk
+credit, and it counts in `capPrio`. The parent answers with its own typestate
+transition and may itself terminate, so failure climbs the chain. Peer
+selection stays in the application typegraph. A send that has been dropped
+stays dropped because death is permanent, shutting-down is monotone, and an
+id is not reused. On that step relation, `route` reads life and
+shutting-down.
