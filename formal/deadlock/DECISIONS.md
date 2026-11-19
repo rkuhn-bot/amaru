@@ -16,3 +16,13 @@ what production already commits to. Full-duplex support is needed anyway, so
 this adds no scope. For the later multi-template and nested-supervisor work,
 occupancy bounds become a parameterized product along the supervision tree,
 not a flat N per template.
+
+## 2026-11-19 — Every external wait carries a timeout
+
+Every external wait carries a timeout. "External" means anything untrusted
+outside the modelled system, including what is now `awaitPeer`. A timeout is
+not a failure. It is a normal result that tells the waiting actor the
+external peer has not responded, or the external effect has not completed.
+The actor's typestate handles that result like any other, and may choose to
+terminate. This matches the earlier ruling that a timeout is the actor's own
+typestate choice, not an environment kill action.

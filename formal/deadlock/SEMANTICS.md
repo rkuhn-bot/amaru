@@ -176,3 +176,9 @@ Mailbox sizing is a separate decision, not a change to this step relation.
 Slots are sized for a duplex connection, and the model may include every
 peer direction. Occupancy for nested supervision is a product along the
 supervision tree. The record is `DECISIONS.md` (2026-11-19).
+
+Every external wait carries a timeout. That is also recorded in
+`DECISIONS.md` (2026-11-19), and it is not this step relation. The
+implication, flagged for step D (R4-1): untimed external waits leave the
+model. `untimedPeer`, `PurePeerEnd`, `timedCohortEnds`, and the untimed side
+of `peerFinishable` go away. R4-1 then reduces to removing them.
