@@ -1940,6 +1940,445 @@ theorem open_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (
   have hold := hO template i hi
   exact ⟨hst.2.2.trans hold.1, hst.2.1.trans hold.2.1, hst.1.trans hold.2.2⟩
 
+/-- Failing one waiter keeps the semantic invariant. A waiter who is not alive is
+left alone; a live waiter parked on the member runs its continuation, and a live
+call returns to idle. -/
+theorem failWaiter_sem (I : Impl) (w : World) (dead i : InstId) (hS : SemInv I w) :
+    SemInv I (failWaiter w dead i) := by
+  unfold failWaiter
+  split
+  · exact hS
+  · next hlive =>
+    have halive : (w.st i).life = .alive := by
+      cases hlife : (w.st i).life with
+      | alive => rfl
+      | absent => simp [hlife, bne] at hlive
+      | dead => simp [hlife, bne] at hlive
+    cases hph : (w.st i).phase with
+    | parked d b k =>
+      simp
+      split
+      · have hty : (w.st i).typestate = k.toState := by simpa [contTy, hph] using hS.cont i
+        have hprog : effectsOk I.desc (tname i) (w.st i).typestate k.rest = true := by
+          simpa [programOk, hph] using hS.prog i
+        have hp := proceed_ok I.desc i (w.st i) k hty hprog
+        apply sem_set I w i (proceed (w.st i) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+        · exact idleOff_alive hp.2.1 halive
+        · exact Or.inr (hS.rostered i halive)
+      · exact hS
+    | awaitReply d k =>
+      simp
+      split
+      · apply sem_set I w i { (w.st i) with phase := .idle } hS rfl rfl
+        · simp [contTy]
+        · simp [programOk]
+        · simp [waitEdge]
+        · exact idleOff_now _ rfl
+        · exact Or.inr (hS.rostered i halive)
+      · exact hS
+    | idle => simp; exact hS
+    | run _ => simp; exact hS
+    | awaitEffect _ => simp; exact hS
+    | awaitPeer _ => simp; exact hS
+    | crashed => simp; exact hS
+
+theorem failFold_sem (I : Impl) (w : World) (dead : InstId) (ids : List InstId) (hS : SemInv I w) :
+    SemInv I (ids.foldl (fun w i => failWaiter w dead i) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hS
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    exact ih _ (failWaiter_sem I w dead i hS)
+
+theorem open_failWaiter (I : Impl) (w : World) (dead i : InstId) (_hS : SemInv I w) (hO : OpenSlots w) :
+    OpenSlots (failWaiter w dead i) := by
+  unfold failWaiter
+  split
+  · exact hO
+  · next hlive =>
+    have halive : (w.st i).life = .alive := by
+      cases hlife : (w.st i).life with
+      | alive => rfl
+      | absent => simp [hlife, bne] at hlive
+      | dead => simp [hlife, bne] at hlive
+    cases hph : (w.st i).phase with
+    | parked d _ _ =>
+      simp
+      split
+      · exact open_alive w i _ hO halive
+      · exact hO
+    | awaitReply d _ =>
+      simp
+      split
+      · exact open_alive w i _ hO halive
+      · exact hO
+    | idle => simp; exact hO
+    | run _ => simp; exact hO
+    | awaitEffect _ => simp; exact hO
+    | awaitPeer _ => simp; exact hO
+    | crashed => simp; exact hO
+
+theorem open_failFold (I : Impl) (w : World) (dead : InstId) (ids : List InstId)
+    (hS : SemInv I w) (hO : OpenSlots w) :
+    OpenSlots (ids.foldl (fun w i => failWaiter w dead i) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hO
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    exact ih _ (failWaiter_sem I w dead i hS) (open_failWaiter I w dead i hS hO)
+
+/-- Dropping the dead sender from one parked list keeps the semantic invariant. -/
+theorem forgetAt_sem (I : Impl) (w : World) (dead id : InstId) (hS : SemInv I w)
+    (hmem : id ∈ w.roster) :
+    SemInv I (let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) := by
+  simp only
+  split
+  · exact hS
+  · apply sem_set I w id _ hS
+    · rfl
+    · rfl
+    · simpa [contTy] using hS.cont id
+    · simpa [programOk] using hS.prog id
+    · simpa [waitEdge] using hS.waited id
+    · exact idleOff_same I w hS id _ rfl rfl
+    · exact Or.inr hmem
+
+theorem open_forgetAt (w : World) (dead id : InstId) (hO : OpenSlots w) :
+    OpenSlots (let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) := by
+  simp only
+  split
+  · exact hO
+  · next hdiff =>
+    refine open_set w id _ hO ?_
+    intro template ix hi hid
+    have hempty := (hO template ix hi).2.2
+    have hsame : ((w.st id).parked.filter fun p => p.sender != dead) == (w.st id).parked := by
+      simp [hid, hempty]
+    exact False.elim (hdiff hsame)
+
+theorem forgetFold_sem (I : Impl) (w : World) (dead : InstId) (ids : List InstId) (hS : SemInv I w)
+    (hids : ∀ i ∈ ids, i ∈ w.roster) :
+    SemInv I (ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hS
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    have hstep := forgetAt_sem I w dead id hS (hids id (List.Mem.head _))
+    have hmem : ∀ i ∈ ids, i ∈ (let a := w.st id
+        let ps := a.parked.filter fun p => p.sender != dead
+        if ps == a.parked then w else setActor w id { a with parked := ps }).roster := by
+      intro i hi
+      have hrost : (let a := w.st id
+          let ps := a.parked.filter fun p => p.sender != dead
+          if ps == a.parked then w else setActor w id { a with parked := ps }).roster = w.roster := by
+        simp only
+        split <;> simp [setActor]
+      rw [hrost]
+      exact hids i (List.Mem.tail _ hi)
+    exact ih _ hstep hmem
+
+theorem open_forgetFold (w : World) (dead : InstId) (ids : List InstId) (hO : OpenSlots w) :
+    OpenSlots (ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hO
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    exact ih _ (open_forgetAt w dead id hO)
+
+theorem member_not_core (D : Description) (id : InstId) (sub : String) (key : Nat) (r : String)
+    (h : isMember D id sub key = true) : id ≠ .core r := by
+  intro heq
+  cases id with
+  | core _ => simp [isMember] at h
+  | peer _ _ => cases heq
+
+/-- The last write of a kill: the member is dead, idle, and its mailbox is empty.
+Cores are untouched because a member is a peer. -/
+theorem kill_dead_sem (I : Impl) (w : World) (id : InstId) (hS : SemInv I w)
+    (hpeer : ∀ r, id ≠ .core r) :
+    SemInv I (setActor w id
+      { (w.st id) with life := .dead, phase := .idle, box := [], prio := [], parked := [] }) := by
+  apply sem_stable I w _ hS
+  · intro _ _ r _
+    exact congrArg (·.typestate) (setActor_other w id (.core r) _ (Ne.symm (hpeer r)))
+  · intro _ _ r _
+    exact congrArg (·.life) (setActor_other w id (.core r) _ (Ne.symm (hpeer r)))
+  · intro i
+    by_cases h : i = id
+    · simp [h, setActor, contTy]
+    · rw [setActor_other w id i _ h]; exact hS.cont i
+  · intro i
+    by_cases h : i = id
+    · simp [h, setActor, programOk]
+    · rw [setActor_other w id i _ h]; exact hS.prog i
+  · intro i
+    by_cases h : i = id
+    · simp [h, setActor, waitEdge]
+    · rw [setActor_other w id i _ h]; exact hS.waited i
+  · intro i hdead
+    by_cases h : i = id
+    · simp [h, setActor]
+    · rw [setActor_other w id i _ h] at hdead ⊢
+      exact hS.idleOff i hdead
+  · intro i hlive
+    by_cases h : i = id
+    · simp [h, setActor] at hlive
+    · simp [setActor, h] at hlive ⊢
+      exact hS.rostered i hlive
+  · intro i hmiss
+    by_cases h : i = id
+    · simp [h, setActor]
+    · simp [setActor] at hmiss
+      rw [setActor_other w id i _ h]
+      exact hS.offEmpty i hmiss
+
+theorem open_kill_dead (w : World) (id : InstId) (hO : OpenSlots w)
+    (halive : (w.st id).life = .alive) :
+    OpenSlots (setActor w id
+      { (w.st id) with life := .dead, phase := .idle, box := [], prio := [], parked := [] }) :=
+  open_alive w id _ hO halive
+
+theorem sem_plant (I : Impl) (w : World) (D : Description) (sub : String) (key : Nat)
+    (hS : SemInv I w) : SemInv I (plantTombstone w D sub key) := by
+  apply sem_stable I w _ hS
+  · intro _ _ _ _; simp [plant_st]
+  · intro _ _ _ _; simp [plant_st]
+  · intro i; simpa [plant_st] using hS.cont i
+  · intro i; simpa [plant_st] using hS.prog i
+  · intro i; simpa [plant_st] using hS.waited i
+  · intro i h; simpa [plant_st] using hS.idleOff i h
+  · intro i h; simpa [plant_st, plant_roster] using hS.rostered i h
+  · intro i h; simpa [plant_st, plant_roster] using hS.offEmpty i h
+
+/-- A failure does not invent a parked phase. -/
+theorem failWaiter_park_src (w : World) (dead i s dst : InstId) (c : Bool) (k : Cont)
+    (h : ((failWaiter w dead i).st s).phase = .parked dst c k) :
+    (w.st s).phase = .parked dst c k := by
+  by_cases hs : s = i
+  · subst hs
+    unfold failWaiter at h
+    split at h
+    · exact h
+    · cases hph : (w.st s).phase with
+      | parked d b ck =>
+        simp [hph] at h
+        split at h
+        · cases hk : ck.rest <;> simp [setActor, proceed, hk] at h
+        · exact hph.symm.trans h
+      | awaitReply d ck =>
+        simp [hph] at h
+        split at h
+        · simp [setActor] at h
+        · exact hph.symm.trans h
+      | idle => simp [hph] at h
+      | run _ => simp [hph] at h
+      | awaitEffect _ => simp [hph] at h
+      | awaitPeer _ => simp [hph] at h
+      | crashed => simp [hph] at h
+  · rw [failWaiter_other w dead i s hs] at h
+    exact h
+
+theorem failFold_park_src (w : World) (dead s dst : InstId) (c : Bool) (k : Cont)
+    (ids : List InstId)
+    (h : ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .parked dst c k) :
+    (w.st s).phase = .parked dst c k := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons i ids ih =>
+    simp only [List.foldl_cons] at h
+    exact failWaiter_park_src w dead i s dst c k (ih (failWaiter w dead i) h)
+
+/-- `s` is parked, so it is alive. -/
+theorem alive_of_parked (I : Impl) (w : World) (hS : SemInv I w) (s dst : InstId) (c : Bool)
+    (k : Cont) (hph : (w.st s).phase = .parked dst c k) : (w.st s).life = .alive := by
+  cases hlife : (w.st s).life with
+  | alive => rfl
+  | absent =>
+    exact False.elim ((by
+      have hidle := hS.idleOff s (by rw [hlife]; intro h; cases h)
+      simp [hidle] at hph) )
+  | dead =>
+    exact False.elim ((by
+      have hidle := hS.idleOff s (by rw [hlife]; intro h; cases h)
+      simp [hidle] at hph) )
+
+/-- After waiters are failed and the dead sender is forgotten, clearing the member
+restores the mailbox invariant. -/
+theorem kill_clear_mail (I : Impl) (w : World) (id : InstId) (hS : SemInv I w) (hM : MailInv w) :
+    let failed := failWaiters w id
+    let forgotten := forgetSender failed id
+    let cleared := setActor forgotten id
+      { (forgotten.st id) with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+    MailInv cleared := by
+  intro failed forgotten cleared
+  have hSfail : SemInv I failed := by
+    simpa [failed, failWaiters] using failFold_sem I w id w.roster hS
+  have hparkF : ∀ s, (failed.st s).parked = (w.st s).parked := by
+    intro s
+    simpa [failed, failWaiters] using (failFold_mail w id s w.roster).2.2
+  have hrostF : failed.roster = w.roster := by
+    simpa [failed, failWaiters] using failWaiters_roster w id w.roster
+  have hphaseG : ∀ s, (forgotten.st s).phase = (failed.st s).phase := by
+    intro s
+    simpa [forgotten, forgetSender] using (forgetFold_mail failed id s failed.roster).2.2.1
+  have hfinalPhase (s : InstId) (hs : s ≠ id) :
+      (cleared.st s).phase = (failed.st s).phase := by
+    rw [show cleared = setActor forgotten id _ from rfl, setActor_other _ id s _ hs, hphaseG]
+  have hfinalPark (mb : InstId) (hmb : mb ≠ id) :
+      (cleared.st mb).parked = (w.st mb).parked.filter fun p => p.sender != id := by
+    rw [show cleared = setActor forgotten id _ from rfl, setActor_other _ id mb _ hmb]
+    by_cases hin : mb ∈ failed.roster
+    · have heq := forgetFold_parked_eq failed id mb failed.roster hin
+      have hfilt : (forgotten.st mb).parked =
+          (failed.st mb).parked.filter fun p => p.sender != id := by
+        simpa [forgotten, forgetSender] using heq
+      rw [hfilt, hparkF]
+    · have hskip := forgetFold_off failed id mb failed.roster hin
+      have hempty := hSfail.offEmpty mb hin
+      have hemptyW : (w.st mb).parked = [] := by simpa [hparkF] using hempty
+      have hst : (forgotten.st mb).parked = (failed.st mb).parked := by
+        simpa [forgotten, forgetSender] using congrArg (·.parked) hskip
+      rw [hst, hempty, hemptyW]
+      simp
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro mb p hp
+    by_cases hmb : mb = id
+    · simp [hmb, cleared, setActor] at hp
+    · rw [hfinalPark mb hmb] at hp
+      have hmem := List.mem_filter.mp hp
+      obtain ⟨k, hk⟩ := hM.fwd mb p hmem.1
+      have hsender : p.sender ≠ id := by
+        intro heq
+        simp [heq, bne] at hmem
+      have hphF : (failed.st p.sender).phase = (w.st p.sender).phase := by
+        simpa [failed, failWaiters] using
+          failFold_spares w id p.sender mb w.roster p.isCall k hmb hk
+      exact ⟨k, (hfinalPhase p.sender hsender).trans (hphF.trans hk)⟩
+  · intro s dst c k hk
+    have hs : s ≠ id := by
+      intro heq
+      simp [heq, cleared, setActor] at hk
+    have hphF : (failed.st s).phase = .parked dst c k := (hfinalPhase s hs).symm.trans hk
+    have hliveF : (failed.st s).life = .alive :=
+      alive_of_parked I failed hSfail s dst c k hphF
+    have hmemS : s ∈ failed.roster := hSfail.rostered s hliveF
+    have hphW : (w.st s).phase = .parked dst c k :=
+      failFold_park_src w id s dst c k w.roster (by simpa [failed, failWaiters] using hphF)
+    have hdst : dst ≠ id := by
+      intro hdead
+      have hgone := failFold_clears w id s w.roster c k (by simpa [hdead] using hphW)
+        (by simpa [failed, failWaiters] using
+          (failFold_life w id s w.roster).symm.trans hliveF)
+        (by simpa [hrostF] using hmemS) k
+      exact hgone (by simpa [failed, failWaiters, hdead] using hphF)
+    obtain ⟨p, hp, hsender, hc⟩ := hM.bwd s dst c k hphW
+    have hkeep : (p.sender != id) = true := by
+      have hne : p.sender ≠ id := by rw [hsender]; exact hs
+      cases hbb : p.sender == id
+      · simp [bne, hbb]
+      · exact absurd (beq_iff_eq.mp hbb) hne
+    refine ⟨p, ?_, hsender, hc⟩
+    rw [hfinalPark dst hdst]
+    exact List.mem_filter.mpr ⟨hp, hkeep⟩
+  · intro mb1 mb2 p1 p2 hp1 hp2 hs
+    by_cases h1 : mb1 = id
+    · simp [h1, cleared, setActor] at hp1
+    · by_cases h2 : mb2 = id
+      · simp [h2, cleared, setActor] at hp2
+      · rw [hfinalPark mb1 h1] at hp1
+        rw [hfinalPark mb2 h2] at hp2
+        exact hM.uniq mb1 mb2 p1 p2 (List.mem_filter.mp hp1).1 (List.mem_filter.mp hp2).1 hs
+  · intro mb
+    by_cases hmb : mb = id
+    · simp [hmb, cleared, setActor]
+    · rw [hfinalPark mb hmb]
+      exact List.Sublist.nodup (filter_sublist (fun p : Parked => p.sender != id) _) (hM.once mb)
+
+/-- One member dies: its credits return, its waiters resume, and it is left idle. -/
+theorem killOne_inv (I : Impl) (w : World) (sub : String) (key : Nat) (id : InstId)
+    (hS : SemInv I w) (hM : MailInv w) (hO : OpenSlots w)
+    (hmem : isMember I.desc id sub key = true) (halive : (w.st id).life = .alive) :
+    SemInv I (killOne w I.desc id) ∧ MailInv (killOne w I.desc id) ∧
+      OpenSlots (killOne w I.desc id) := by
+  rw [killOne_body]
+  let D := I.desc
+  let w1 := readCells D w id
+  have hS1 : SemInv I w1 := cells_sem I w id hS
+  have hM1 : MailInv w1 := mail_copy w w1 hM fun i => readCells_st D w id i
+  have hO1 : OpenSlots w1 := open_read D w id hO
+  let a0 := w.st id
+  let w2 := refundMsgs w1 (tname id) a0.box
+  have h2 := refund_msgs_inv I w1 (tname id) a0.box hS1 hM1
+  have hO2 : OpenSlots w2 := open_msgs w1 (tname id) a0.box hO1
+  let w3 := refundParked w2 (tname id) a0.parked
+  have h3 := refund_park_inv I w2 (tname id) a0.parked h2.1 h2.2
+  have hO3 : OpenSlots w3 := open_parks w2 (tname id) a0.parked hO2
+  let w4 := failWaiters w3 id
+  have hS4 : SemInv I w4 := by simpa [w4, failWaiters] using failFold_sem I w3 id w3.roster h3.1
+  have hO4 : OpenSlots w4 := by
+    simpa [w4, failWaiters] using open_failFold I w3 id w3.roster h3.1 hO3
+  let w5 := forgetSender w4 id
+  have hS5 : SemInv I w5 := by
+    simpa [w5, forgetSender] using forgetFold_sem I w4 id w4.roster hS4 fun i hi => hi
+  have hO5 : OpenSlots w5 := by simpa [w5, forgetSender] using open_forgetFold w4 id w4.roster hO4
+  have hlife : (w5.st id).life = .alive := by
+    have hG : (w5.st id).life = (w4.st id).life := by
+      simpa [w5, forgetSender] using (forgetFold_mail w4 id id w4.roster).2.2.2.1
+    have hF : (w4.st id).life = (w3.st id).life := by
+      simpa [w4, failWaiters] using failFold_life w3 id id w3.roster
+    have hP : (w3.st id).life = (w2.st id).life := (refundParked_rest w2 (tname id) a0.parked id).2.1
+    have hR : (w2.st id).life = (w1.st id).life := (refundMsgs_rest w1 (tname id) a0.box id).2.1
+    have hC : (w1.st id).life = (w.st id).life := congrArg (·.life) (readCells_st D w id id)
+    exact hG.trans (hF.trans (hP.trans (hR.trans (hC.trans halive))))
+  refine ⟨?_, ?_, ?_⟩
+  · exact kill_dead_sem I w5 id hS5 fun r => member_not_core D id sub key r hmem
+  · exact kill_clear_mail I w3 id h3.1 h3.2
+  · exact open_kill_dead w5 id hO5 hlife
+
+theorem killFold_inv (I : Impl) (w : World) (sub : String) (key : Nat) (ids : List InstId)
+    (hS : SemInv I w) (hM : MailInv w) (hO : OpenSlots w) :
+    SemInv I (ids.foldl (fun w id =>
+      if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id else w) w) ∧
+      MailInv (ids.foldl (fun w id =>
+        if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id else w) w) ∧
+      OpenSlots (ids.foldl (fun w id =>
+        if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id else w) w) := by
+  induction ids generalizing w with
+  | nil => simpa using ⟨hS, hM, hO⟩
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · next hcond =>
+      have hparts := (Bool.and_eq_true _ _).mp hcond
+      have halive : (w.st id).life = .alive := by simpa [beq_iff_eq] using hparts.2
+      have h1 := killOne_inv I w sub key id hS hM hO hparts.1 halive
+      exact ih _ h1.1 h1.2.1 h1.2.2
+    · exact ih _ hS hM hO
+
+/-- A subtree kill preserves the semantic, mailbox, and open-slot invariants. -/
+theorem killSubtree_inv (I : Impl) (w : World) (sub : String) (key : Nat)
+    (hS : SemInv I w) (hM : MailInv w) (hO : OpenSlots w) :
+    SemInv I (killSubtree w I.desc sub key) ∧ MailInv (killSubtree w I.desc sub key) ∧
+      OpenSlots (killSubtree w I.desc sub key) := by
+  have hK := killFold_inv I w sub key w.roster hS hM hO
+  have hS0 : SemInv I (killMembers w I.desc sub key) := by simpa [killMembers] using hK.1
+  have hM0 : MailInv (killMembers w I.desc sub key) := by simpa [killMembers] using hK.2.1
+  have hO0 : OpenSlots (killMembers w I.desc sub key) := by simpa [killMembers] using hK.2.2
+  let killed := killMembers w I.desc sub key
+  refine ⟨sem_plant I killed I.desc sub key hS0,
+    mail_copy killed (plantTombstone killed I.desc sub key) hM0 fun _ => rfl,
+    open_same killed (plantTombstone killed I.desc sub key) hO0 (fun _ => rfl) (fun _ => rfl)⟩
+
 def Inv (I : Impl) (w : World) : Prop :=
   SemInv I w ∧ MailInv w ∧ OpenSlots w
 
@@ -1967,7 +2406,12 @@ theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w'
   | ingress dst label =>
     exact ⟨ingress_sem I w w' dst label hS ha, ingress_mail I w w' dst label hM ha,
       open_ingress I w w' dst label hO ha⟩
-  | kill sub key => sorry
+  | kill sub key =>
+    simp only [apply] at ha
+    split at ha
+    · cases ha
+      exact killSubtree_inv I w sub key hS hM hO
+    · simp at ha
   | stutter =>
     cases stutter_unchanged I w w' ha
     exact ⟨hS, hM, hO⟩
