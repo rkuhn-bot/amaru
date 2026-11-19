@@ -5792,5 +5792,133 @@ theorem occ_head (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     | crashed => simp [hphase] at h
   · simp [execHead, hlive] at h
 
+/-! ## A per-peer subtree kill
+
+`killOne` refunds what the dying member's queues held, fails whoever waited on it,
+forgets the parked entries it had sent, and leaves it dead with empty queues. A
+subtree member is terminable, so Lemma 1 (`OccInv.still`) already says it has nothing
+parked anywhere: forgetting is a no-op, and the only accounts that move are the
+refunds and the emptied queues of the member itself. -/
+
+/-- Failing a waiter leaves the actor alone, resumes a blocking send, or idles a caller. -/
+theorem failWaiter_fate (w : World) (dead i j : InstId) :
+    (failWaiter w dead i).st j = w.st j ∨
+      (failWaiter w dead i).st j = resumeSender (w.st j) false dead ∨
+      (failWaiter w dead i).st j = { (w.st j) with phase := .idle } := by
+  by_cases hj : j = i
+  · rw [hj]
+    unfold failWaiter
+    split
+    · exact Or.inl rfl
+    · cases hph : (w.st i).phase with
+      | parked d b k =>
+        simp only [hph]
+        split
+        · exact Or.inr (Or.inl (by simp [setActor, resumeSender, hph]))
+        · exact Or.inl rfl
+      | awaitReply d k =>
+        simp only [hph]
+        split
+        · exact Or.inr (Or.inr (by simp [setActor]))
+        · exact Or.inl rfl
+      | idle => simp [hph]
+      | run _ => simp [hph]
+      | awaitEffect _ => simp [hph]
+      | awaitPeer _ => simp [hph]
+      | crashed => simp [hph]
+  · exact Or.inl (failWaiter_other w dead i j hj)
+
+/-- Failing a waiter keeps its tokens, its life, and its typestate, and can only
+shorten the sends it still owes. -/
+theorem fail_account (w : World) (dead i j : InstId) (hc : contTy (w.st j)) :
+    (∀ d, ((failWaiter w dead i).st j).tokens d = (w.st j).tokens d) ∧
+      ((failWaiter w dead i).st j).typestate = (w.st j).typestate ∧
+      ((failWaiter w dead i).st j).life = (w.st j).life ∧
+      (∀ d, pending ((failWaiter w dead i).st j) d ≤ pending (w.st j) d) ∧
+      contTy ((failWaiter w dead i).st j) := by
+  rcases failWaiter_fate w dead i j with h | h | h
+  · rw [h]
+    exact ⟨fun _ => rfl, rfl, rfl, fun _ => Nat.le_refl _, hc⟩
+  · rw [h]
+    exact ⟨fun d => resume_tokens _ false dead d, (resume_keeps _ false dead hc).1,
+      (resume_keeps _ false dead hc).2, fun d => resume_pending _ false dead d hc,
+      resume_cont _ false dead hc⟩
+  · rw [h]
+    refine ⟨fun _ => rfl, rfl, rfl, fun d => ?_, ?_⟩
+    · simp [pending, contRest, sendsTo]
+    · simp [contTy]
+
+theorem failFold_account (w : World) (dead j : InstId) (ids : List InstId) (hc : contTy (w.st j)) :
+    (∀ d, ((ids.foldl (fun w i => failWaiter w dead i) w).st j).tokens d = (w.st j).tokens d) ∧
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st j).typestate = (w.st j).typestate ∧
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st j).life = (w.st j).life ∧
+      (∀ d, pending ((ids.foldl (fun w i => failWaiter w dead i) w).st j) d ≤
+        pending (w.st j) d) ∧
+      contTy ((ids.foldl (fun w i => failWaiter w dead i) w).st j) := by
+  induction ids generalizing w with
+  | nil => exact ⟨fun _ => rfl, rfl, rfl, fun _ => Nat.le_refl _, hc⟩
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have h1 := fail_account w dead i j hc
+    have h2 := ih (failWaiter w dead i) h1.2.2.2.2
+    exact ⟨fun d => (h2.1 d).trans (h1.1 d), h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
+      fun d => Nat.le_trans (h2.2.2.2.1 d) (h1.2.2.2.1 d), h2.2.2.2.2⟩
+
+/-- A sender with nothing parked anywhere is already forgotten. -/
+theorem forgetFold_id (w : World) (dead : InstId) (ids : List InstId)
+    (h : ∀ j, ∀ p ∈ (w.st j).parked, p.sender ≠ dead) :
+    ids.foldl (fun w id =>
+      let a := w.st id
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w id { a with parked := ps }) w = w := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    have hkeep : ((w.st id).parked.filter (fun p => p.sender != dead) == (w.st id).parked) = true := by
+      simpa [beq_iff_eq] using filter_ne_sender _ dead (h id)
+    simp only [hkeep, ite_true]
+    exact ih w h
+
+theorem forget_id (w : World) (dead : InstId)
+    (h : ∀ j, ∀ p ∈ (w.st j).parked, p.sender ≠ dead) : forgetSender w dead = w :=
+  forgetFold_id w dead w.roster h
+
+/-- A parked entry is credited to the sender that is stored with it. -/
+theorem countCredited_eq (sender : InstId) (ps : List Parked)
+    (h : ∀ p ∈ ps, p.sender = p.msg.sender) :
+    countCredited sender ps = countParked sender ps := by
+  induction ps with
+  | nil => rfl
+  | cons p ps ih =>
+    have hp := h p (List.Mem.head _)
+    simp [countCredited, countParked, hp, ih fun q hq => h q (List.Mem.tail _ hq)]
+
+/-- Lemma 1 for a terminable actor: nothing it sent is parked on anyone. -/
+theorem still_free (I : Impl) (w : World) (hO : OccInv I w) (id : InstId) (hmem : id ∈ w.roster)
+    (hterm : terminableName I.desc (tname id)) :
+    ∀ j, ∀ p ∈ (w.st j).parked, p.sender ≠ id := by
+  intro j p hp
+  by_cases hj : j ∈ w.roster
+  · have hz := hO.still id (tname j) hmem hterm
+    have hle := owed_ge_here w.st (tname j) id j w.roster hO.nodup hj rfl
+    have hcount : countParked id (w.st j).parked = 0 := by
+      have hle' : countFrom id (w.st j).box + countParked id (w.st j).parked ≤ 0 := by
+        simpa [hz] using hle
+      omega
+    exact countParked_zero_sender id (w.st j).parked hcount p hp
+  · have hempty := (hO.offEmpty j hj).2
+    rw [hempty] at hp
+    cases hp
+
+/-- A subtree role is terminable, so Lemma 1 applies to every member of a kill. -/
+theorem member_terminableName (D : Description) (hsub : subtreeFails D = []) (id : InstId)
+    (sub : String) (key : Nat) (hm : isMember D id sub key = true) :
+    terminableName D (tname id) := by
+  have hB := member_terminable D hsub id sub key hm
+  cases ht : templateOf D (tname id) with
+  | none => simp [terminableB, ht] at hB
+  | some t => exact ⟨t, ht, by simpa [terminableB, ht] using hB⟩
+
 end Deadlock
 
