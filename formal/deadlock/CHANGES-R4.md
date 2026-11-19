@@ -53,3 +53,37 @@ state whose floor is 11, so `sendsOk` rejects them. `NewBestTip` and
 `ReturnToken` have no handler. `render` of that description is still `pass`.
 `check` is not, and that is the honest result: the compatibility relation is
 closed, and the programs are not a checked implementation.
+
+## Blocker, not committed: untimed waits
+
+`blocked_unblocks` and `blocked_chain` are headlines. For a blocked actor that
+is not a `PurePeerEnd`, they claim an `OnChain` chain to a world where that
+actor is not `Blocked`. `PurePeerEnd` is an untimed `awaitPeer` whose template
+has no `timeoutKills` cohort peer. An untimed wait whose subtree merely
+declares such a peer is `peerFinishable`, so the theorem applies, and the
+proof discharges it by `finish`, which runs `proceed` on the success
+continuation.
+
+`kill` is not `OnChain` (`actionSubject` is `none`). The only `OnChain` exit
+from `awaitPeer` is `finish`.
+
+Ending that wait only by a subtree kill, and only when a live armed
+`timeoutKills` member exists at the key, makes the existing claim false for
+`silentImpl`: it is `GraphOk` and `LocalOk`, the reader reaches `awaitPeer`,
+`peerFinishable` is true, and no timer is alive. There is then no `OnChain`
+step to `¬ Blocked`.
+
+Closing the gap requires one of these, and each is a headline change:
+
+- `PurePeerEnd` covers every untimed wait, so `¬ PurePeerEnd` is a stronger
+  hypothesis of `blocked_unblocks`.
+- `LocalOk` or `GraphOk` rejects a cohort that can wait with no armed killer,
+  so those hypotheses get stronger. `silentImpl` is the witness that the
+  current hypotheses accept it.
+- `OnChain` treats the kill as a chain step, so the `ChainRun` in the
+  conclusion of `blocked_unblocks` and `blocked_chain` admits a step it used
+  to exclude.
+
+A `finish` that kills the subtree without a live killer would keep the
+statements and would fabricate the timeout. That is the case the review
+rejects. No semantic patch is on this commit.
