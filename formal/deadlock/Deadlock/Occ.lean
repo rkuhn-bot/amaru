@@ -6171,5 +6171,35 @@ theorem occ_killOne (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
     · rw [show ((killOne w I.desc id).st j).parked = (w.st j).parked by simpa [hj] using hpark j]
       exact hO.clear j hl1
 
+theorem occ_killFold (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
+    (ids : List InstId) (hO : OccInv I w) (hc : ∀ j, contTy (w.st j)) :
+    OccInv I (ids.foldl (fun w id =>
+        if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id
+        else w) w) ∧
+      ∀ j, contTy ((ids.foldl (fun w id =>
+        if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id
+        else w) w).st j) := by
+  induction ids generalizing w with
+  | nil => exact ⟨hO, hc⟩
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember I.desc j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true]
+      have hand := (Bool.and_eq_true _ _).mp hcond
+      have hlive : (w.st j).life = .alive := by simpa using hand.2
+      have hstep := occ_killOne I w j hO hc (hO.aliveIn j hlive)
+        (member_terminableName I.desc hG.subtrees j sub key hand.1)
+      exact ih _ hstep.1 hstep.2
+    · simp only [hcond]
+      exact ih w hO hc
+
+/-- A subtree kill keeps the occupancy invariant: it is a sequence of single kills,
+and the tombstone it plants touches no actor. -/
+theorem occ_kill (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
+    (hO : OccInv I w) (hc : ∀ j, contTy (w.st j)) : OccInv I (killSubtree w I.desc sub key) :=
+  occ_same I (killMembers w I.desc sub key) (killSubtree w I.desc sub key)
+    (by simpa [killMembers] using (occ_killFold I hG w sub key w.roster hO hc).1)
+    (fun _ => rfl) rfl rfl (fun _ => rfl)
+
 end Deadlock
 

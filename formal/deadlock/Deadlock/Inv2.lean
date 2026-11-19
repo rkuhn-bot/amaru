@@ -53,7 +53,9 @@ theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
     simpa [apply] using occ_spawn I w w' template hO h
   | ingress dst label =>
     simpa [apply] using occ_ingress I w w' dst label hO h
-  | kill sub key => sorry
+  | kill sub key =>
+    rw [kill_apply_world I w w' sub key h]
+    exact occ_kill I hG w sub key hO hS.cont
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hO
