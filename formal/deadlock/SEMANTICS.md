@@ -151,14 +151,23 @@ regular message that uses one reserved mailbox slot per cell label and
 reader. Count that slot in the occupancy bound. The wake enqueue stays
 non-blocking because the slot is reserved.
 
-Supervision is not this step relation either. `World.tombstone` and
-`plantTombstone` are dropped. A parent declares one tombstone message when
-it spawns a supervised child, and receives that message on `prio` once the
-child has terminated, by `kill` or by the child's own `terminate`. The slot
-is reserved per child, so the enqueue does not block and spends no bulk
-credit, and it counts in `capPrio`. The parent answers with its own typestate
-transition and may itself terminate, so failure climbs the chain. Peer
-selection stays in the application typegraph. A send that has been dropped
-stays dropped because death is permanent, shutting-down is monotone, and an
-id is not reused. On that step relation, `route` reads life and
-shutting-down.
+Supervision is not this step relation either. Termination there is the
+pure-stage mechanisms plus one. A stage terminates on its own `terminate`.
+An `awaitPeer` timeout is only a typestate choice that may do so:
+`peerTimeout`'s built-in atomic `killSubtree` is removed. The tombstone is
+the message the parent supplies when it creates the child. The parent
+receives it on `prio` once the child has terminated, then answers in its own
+typestate transition and may itself terminate. The slot is reserved per
+child, so the enqueue does not block and spends no bulk credit, and it
+counts in `capPrio`. When a stage terminates, its descendants terminate in
+that same step, as pure-stage `terminate_stage` does
+(`crates/amaru-pure-stage/src/simulation/running/mod.rs`): parked non-call
+senders resume, and parked calls finish via their deadline. `crashed` stays
+a fourth outcome that kills every actor at once. It is a terminal state the
+theorems need not say more about, where the proofs already treat it that
+way. It gets no extra proof burden. If keeping it costs significant proof
+work, stop and report. The environment `.kill sub key` action goes away with `killWait`,
+and so do `World.tombstone` and `plantTombstone`. Peer selection stays in
+the application typegraph. A send that has been dropped stays dropped
+because death is permanent, shutting-down is monotone, and an id is not
+reused. On that step relation, `route` reads life and shutting-down.

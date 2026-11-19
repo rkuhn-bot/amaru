@@ -73,35 +73,50 @@ outcomes are unchanged. No proof may assume which one is taken.
 ## Supervision
 
 This replaces the plan that a connection manager emits peer loss, and it
-replaces `World.tombstone`.
+replaces `World.tombstone`. It is step C. The step relation above it is
+unchanged until that step lands.
 
-A tombstone is the pure-stage supervision message. It is not an Ouroboros
-peer event.
+Termination is the pure-stage mechanisms, plus one.
 
-- A parent declares the message when it spawns a supervised child.
-- The parent receives it on `prio` once the child has terminated, by `kill`
-  or by the child's own `terminate`.
-- One message per child is the whole obligation.
-- The slot is reserved on the parent's priority lane. The enqueue does not
-  block and spends no bulk credit. The slot counts in `capPrio`.
-- The kill climbs because each parent answers that message with its own
-  typestate transition. A parent may itself terminate.
+- Voluntary. The stage's own `terminate`. The `awaitPeer` timeout is a
+  typestate choice: the member's transition may terminate. Remove
+  `peerTimeout`'s built-in atomic `killSubtree`.
+- Supervision, upward and asynchronous. The tombstone is the message the
+  parent supplies when it creates the child. When that child terminates, the
+  parent receives it on `prio` and reacts in its own typestate transition,
+  possibly terminating itself, so failure climbs. The slot is reserved on the
+  parent's priority lane. The enqueue does not block and spends no bulk
+  credit. The slot counts in `capPrio`. One message per child is the whole
+  obligation.
+- Aborted, downward and atomic. When a stage terminates, every descendant
+  terminates in that same step, as pure-stage `terminate_stage` does
+  (`crates/amaru-pure-stage/src/simulation/running/mod.rs`). Parked non-call
+  senders are resumed. Parked calls finish via their deadline.
+- `crashed` stays a fourth outcome. A crash instantly kills every actor. It
+  is a terminal state the theorems need not say more about, where the proofs
+  already treat it that way. Do not add proof burden for it. If keeping it
+  costs significant proof work, stop and report.
+- Remove the environment `.kill sub key` action, and `killWait` if nothing
+  else uses it.
 - Peer selection stays in the application typegraph and uses the same check.
 - A dropped send stays dropped because death is permanent, shutting-down is
   monotone, and an id is not reused. `route` reads life and shutting-down.
   The drop rule does not add a second tombstone.
-- `World.tombstone` and `plantTombstone` are removed. The field is not this
-  message.
+- `World.tombstone` and `plantTombstone` are removed. The field is not the
+  per-child message.
 
 ## Work plan
 
 The round, in order. This note does not change the step relation. `Delivered`
 stays as it is until the kill step changes.
 
-A. Members of one subtree may send and call each other, and may call a
-permanent core. A lone terminable still may not. Ingress into a member is
-allowed. Disjointness of that mail is a proof obligation. The mux, handler,
-and connection witness passes, and so does the round's send and call pair.
+A. Members of one subtree may send and call each other. A call to a permanent
+core stays disabled: `Delivered` loses a message when its target shuts down
+or terminates, and a permanent core does not, so a dropped call to it would
+not be a delivery. A lone terminable still may not send or call. Ingress
+into a member is allowed. Disjointness of that mail is a proof obligation.
+The mux, handler, and connection witness passes, and so does the round's
+send and call pair.
 
 B. A call carries a duration. `awaitReply` resumes with a reply, not
 admitted, or timed out. The caller's continuation is checked on every
@@ -110,10 +125,16 @@ from `awaitReply`, including a call that is still parked. A call id stops a
 late reply from resuming a newer wait. `call_answered` promises a reply only
 while the callee stays live and not shutting down.
 
-C. The kill is no longer one step. Follow Supervision: one declared priority
-tombstone per child, parents climb by their own transition, and peer
-selection stays out of the model. `World.tombstone` and `plantTombstone` are
-removed here. `route` reads life and shutting-down.
+C. Termination follows Supervision, and not before. Voluntary `terminate`
+replaces `peerTimeout`'s built-in `killSubtree`. The upward message is the
+per-child tombstone the parent supplied at spawn, delivered on `prio`, and
+answered in the parent's own transition. The downward abort ends descendants
+in that same step. `crashed` stays a whole-system terminal state; add no
+proof burden, and stop if keeping it costs a significant proof. The
+environment `.kill sub key` action and `killWait` go away. `World.tombstone`
+and `plantTombstone` are removed here. `route` reads life and shutting-down.
+No theorem is weakened. A statement change is justified in the commit body
+and in this note. A weakening is a blocker and is not committed.
 
 D. An untimed peer wait needs a live, armed timeout killer at its key. A
 static role test is not enough. `finish` on the success path does not resume
