@@ -5994,5 +5994,182 @@ theorem killOne_account (w : World) (D : Description) (id i : InstId)
     have heq : pending (w3.st i) d = pending (w.st i) d := by simp [pending, hph3 i]
     omega
 
+/-- Killing one terminable member keeps every account. What the member's queues held
+is refunded to the senders that hold the credit, and the member itself owes nothing,
+so no account is left short. -/
+theorem occ_killOne (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
+    (hc : ∀ j, contTy (w.st j)) (hmem : id ∈ w.roster)
+    (hterm : terminableName I.desc (tname id)) :
+    OccInv I (killOne w I.desc id) ∧ ∀ j, contTy ((killOne w I.desc id).st j) := by
+  have hfree := still_free I w hO id hmem hterm
+  have hacc := fun j => killOne_account w I.desc id j hfree hc
+  have hbox := fun j => (hacc j).1
+  have hpark := fun j => (hacc j).2.1
+  have hlife := fun j => (hacc j).2.2.1
+  have htok := fun j => (hacc j).2.2.2.1
+  have hty := fun j => (hacc j).2.2.2.2.1
+  have hpend := fun j => (hacc j).2.2.2.2.2.1
+  have hcont := fun j => (hacc j).2.2.2.2.2.2
+  have hroster : (killOne w I.desc id).roster = w.roster := killOne_roster w I.desc id
+  have hdead : ((killOne w I.desc id).st id).life = .dead := by simpa using hlife id
+  have hother : ∀ j, j ≠ id → ((killOne w I.desc id).st j).life = (w.st j).life := by
+    intro j hj
+    simpa [hj] using hlife j
+  have howed : ∀ d s, owed (killOne w I.desc id).st d s w.roster + slot w.st d s id =
+      owed w.st d s w.roster := by
+    intro d s
+    have hmaileq : owed (killOne w I.desc id).st d s w.roster =
+        owed (fun j => if j = id then ({ (w.st id) with box := [], parked := [] } : Actor) else w.st j)
+          d s w.roster := by
+      refine owed_mail_eq _ _ _ _ w.roster ?_
+      intro j _
+      by_cases hj : j = id
+      · rw [hj]
+        exact ⟨by simpa using hbox id, by simpa using hpark id⟩
+      · exact ⟨by simpa [hj] using hbox j, by simpa [hj] using hpark j⟩
+    have hrep := owed_replace w.st d s id ({ (w.st id) with box := [], parked := [] }) w.roster
+      hO.nodup hmem
+    have hzero : slot (fun j => if j = id then ({ (w.st id) with box := [], parked := [] } : Actor)
+        else w.st j) d s id = 0 := by
+      simp [slot, countFrom, countParked]
+    rw [hzero] at hrep
+    rw [hmaileq]
+    omega
+  have hslot : ∀ d s, slot w.st d s id =
+      if d = tname id then countFrom s (w.st id).box + countParked s (w.st id).parked else 0 := by
+    intro d s
+    by_cases hd : d = tname id
+    · simp [slot, hd]
+    · have hb : (tname id == d) = false := by
+        cases hbb : tname id == d with
+        | false => rfl
+        | true => exact absurd ((beq_iff_eq).mp hbb).symm hd
+      simp [slot, hb, hd]
+  have hcred : ∀ s, countCredited s (w.st id).parked = countParked s (w.st id).parked :=
+    fun s => countCredited_eq s _ fun p hp => hO.parkMsg id p hp
+  refine ⟨⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩, hcont⟩
+  · rw [hroster]
+    exact hO.nodup
+  · intro j hl
+    rw [hroster]
+    have hj : j ≠ id := by
+      intro heq
+      rw [heq, hdead] at hl
+      exact absurd hl (by decide)
+    exact hO.aliveIn j ((hother j hj).symm.trans hl)
+  · intro t n hn
+    rw [killOne_nextIx]
+    exact hO.indexed t n (by rwa [hroster] at hn)
+  · intro t ht
+    refine Nat.le_trans ?_ (hO.liveOne t ht)
+    rw [aliveCount_sum, aliveCount_sum, hroster]
+    refine sum_le _ _ w.roster ?_
+    intro j _
+    by_cases hj : j = id
+    · rw [hj]
+      simp [aliveBit, hdead]
+    · simp [aliveBit, hother j hj]
+  · intro t ht
+    rw [killOne_N]
+    refine Nat.le_trans ?_ (hO.livePeer t ht)
+    rw [aliveCount_sum, aliveCount_sum, hroster]
+    refine sum_le _ _ w.roster ?_
+    intro j _
+    by_cases hj : j = id
+    · rw [hj]
+      simp [aliveBit, hdead]
+    · simp [aliveBit, hother j hj]
+  · intro j hnin
+    rw [hroster] at hnin
+    have hj : j ≠ id := fun heq => hnin (heq ▸ hmem)
+    have hold := hO.offEmpty j hnin
+    exact ⟨by simpa [hj, hold.1] using hbox j, by simpa [hj, hold.2] using hpark j⟩
+  · intro j m hm
+    rw [hroster]
+    by_cases hj : j = id
+    · rw [hj] at hm
+      rw [show ((killOne w I.desc id).st id).box = [] by simpa using hbox id] at hm
+      cases hm
+    · rw [show ((killOne w I.desc id).st j).box = (w.st j).box by simpa [hj] using hbox j] at hm
+      exact hO.sentFrom j m hm
+  · intro j p hp
+    rw [hroster]
+    by_cases hj : j = id
+    · rw [hj] at hp
+      rw [show ((killOne w I.desc id).st id).parked = [] by simpa using hpark id] at hp
+      cases hp
+    · rw [show ((killOne w I.desc id).st j).parked = (w.st j).parked by simpa [hj] using hpark j] at hp
+      exact hO.parkFrom j p hp
+  · intro j p hp
+    by_cases hj : j = id
+    · rw [hj] at hp
+      rw [show ((killOne w I.desc id).st id).parked = [] by simpa using hpark id] at hp
+      cases hp
+    · rw [show ((killOne w I.desc id).st j).parked = (w.st j).parked by simpa [hj] using hpark j] at hp
+      exact hO.parkMsg j p hp
+  · intro s d hs
+    rw [hroster] at hs ⊢
+    have hbal := hO.balance s d hs
+    have h1 := howed d s
+    have h2 := htok s d
+    have h3 := hslot d s
+    have h4 := hcred s
+    by_cases hd : d = tname id
+    · subst hd
+      have h2' : ((killOne w I.desc id).st s).tokens (tname id) = (w.st s).tokens (tname id) +
+          (countFrom s (w.st id).box + countParked s (w.st id).parked) := by
+        rw [h2, h4]
+        simp
+      have h3' : slot w.st (tname id) s id =
+          countFrom s (w.st id).box + countParked s (w.st id).parked := by
+        rw [h3]
+        simp
+      omega
+    · have h2' : ((killOne w I.desc id).st s).tokens d = (w.st s).tokens d := by
+        rw [h2]
+        simp [hd]
+      have h3' : slot w.st d s id = 0 := by
+        rw [h3]
+        simp [hd]
+      omega
+  · intro s d hs hl
+    rw [hroster] at hs
+    have hsi : s ≠ id := by
+      intro heq
+      rw [heq, hdead] at hl
+      exact absurd hl (by decide)
+    have hl0 : (w.st s).life = .alive := (hother s hsi).symm.trans hl
+    have hold := hO.slack s d hs hl0
+    have h2 := htok s d
+    have h3 := hpend s d
+    have hup : (w.st s).tokens d ≤ ((killOne w I.desc id).st s).tokens d := by
+      rw [h2]
+      omega
+    rw [hty s]
+    omega
+  · intro s d hs hts
+    rw [hroster] at hs ⊢
+    have hz := hO.still s d hs hts
+    have h1 := howed d s
+    omega
+  · intro s d hs hdd
+    rw [hroster] at hs ⊢
+    have h1 := howed d s
+    by_cases hsi : s = id
+    · rw [hsi] at h1 ⊢
+      have hz := hO.still id d hmem hterm
+      omega
+    · have hdead0 : (w.st s).life ≠ .alive := by
+        rw [hother s hsi] at hdd
+        exact hdd
+      have hz := hO.quiet s d hs hdead0
+      omega
+  · intro j hl1
+    by_cases hj : j = id
+    · rw [hj]
+      simpa using hpark id
+    · rw [show ((killOne w I.desc id).st j).parked = (w.st j).parked by simpa [hj] using hpark j]
+      exact hO.clear j hl1
+
 end Deadlock
 
