@@ -33,3 +33,15 @@ The `terminate` effect is currently allowed only for terminable templates. A
 permanent pure stage, which is a multiplicity-one core, may also execute
 `terminate`, and its effect is the same as `crashed`: the whole system
 terminates.
+
+## 2026-11-19 — Priority versus bulk
+
+Priority versus bulk: keep the model as it is. The hypothesis is `Fair`:
+weak fairness for forced actions, plus strong fairness per actor and per
+lane for both `recvBulk` and `recvPrio`. The proofs hold for every
+interleaving, including a strictly prio-first runtime. Proving the larger
+model is stronger than narrowing it with a runtime assumption. So do not
+add a prio-first runtime assumption to `SEMANTICS.md`, and do not change
+`Fair`. The known gap is accepted for now: a prio-first runtime satisfies
+`Fair.bulk` only if the priority lane eventually drains, and nothing in the
+model guarantees that.
