@@ -36,6 +36,68 @@ theorem inv2_init (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) :
     Inv2 I (initWorld I N) :=
   ⟨inv_init I N hL, occ_init I hG N, ty_init I hG N, bulk_init I N⟩
 
+theorem occ_failWaiter (I : Impl) (w : World) (dead i : InstId) (hO : OccInv I w)
+    (hc : contTy (w.st i)) : OccInv I (failWaiter w dead i) := by
+  unfold failWaiter
+  split
+  · exact hO
+  · cases hph : (w.st i).phase with
+    | parked dst isCall k =>
+      simp only [hph]
+      split
+      · simpa [resumeSender, hph] using occ_resume I w i false dead hO hc
+      · exact hO
+    | awaitReply dst k =>
+      simp only [hph]
+      split
+      · apply occ_set I w i { (w.st i) with phase := .idle } hO rfl rfl rfl (fun _ => rfl)
+        intro d hlive
+        have hold := hO.slack i d (hO.aliveIn i hlive) hlive
+        have hfloor : floorState I.desc (tname i) (w.st i).typestate d ≤
+            floorState I.desc (tname i) (w.st i).typestate d + pending (w.st i) d :=
+          Nat.le_add_right _ _
+        simpa [pending, contRest, sendsTo] using Nat.le_trans hfloor hold
+      · exact hO
+    | idle => exact hO
+    | run _ => exact hO
+    | awaitEffect _ => exact hO
+    | awaitPeer _ => exact hO
+    | crashed => exact hO
+
+theorem occ_failFold (I : Impl) (w : World) (dead : InstId) (ids : List InstId) (hO : OccInv I w)
+    (hcont : ∀ i, contTy (w.st i)) :
+    OccInv I (ids.foldl (fun w i => failWaiter w dead i) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hO
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have hstep := occ_failWaiter I w dead i hO (hcont i)
+    have hcont' : ∀ s, contTy ((failWaiter w dead i).st s) :=
+      fun s => (failWaiter_ty w dead i s (hcont s)).2
+    exact ih (failWaiter w dead i) hstep hcont'
+
+theorem forgetFold_eq (w : World) (dead : InstId) (ids : List InstId)
+    (h : ∀ i ∈ ids, ∀ p ∈ (w.st i).parked, p.sender ≠ dead) :
+    ids.foldl (fun w i =>
+      let a := w.st i
+      let ps := a.parked.filter fun p => p.sender != dead
+      if ps == a.parked then w else setActor w i { a with parked := ps }) w = w := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons i ids ih =>
+    have hfilter : (w.st i).parked.filter (fun p => p.sender != dead) = (w.st i).parked :=
+      filter_ne_sender (w.st i).parked dead (h i (List.Mem.head _))
+    have hkeep :
+        ((w.st i).parked.filter (fun p => p.sender != dead) == (w.st i).parked) = true := by
+      simpa [beq_iff_eq] using hfilter
+    simp only [List.foldl_cons, hkeep, ite_true]
+    exact ih w (fun j hj => h j (List.Mem.tail i hj))
+
+theorem forgetSender_eq (w : World) (dead : InstId)
+    (h : ∀ i ∈ w.roster, ∀ p ∈ (w.st i).parked, p.sender ≠ dead) :
+    forgetSender w dead = w := by
+  simpa [forgetSender] using forgetFold_eq w dead w.roster h
+
 theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hT : TyOk I.desc w) (hB : BulkFree I w)
     (h : apply I a w = some w') : OccInv I w' := by

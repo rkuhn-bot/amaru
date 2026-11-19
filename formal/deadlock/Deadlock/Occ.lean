@@ -5588,6 +5588,47 @@ theorem term_actor (w : World) (id i : InstId) :
           ((refund_mid w name ms i).symm.trans
             (refundP_mid (refundMsgs w name ms) name ps i).symm))
 
+/-- Draining and refunding an actor's queues produce the same world once that
+actor is replaced by the same dead, empty shell. -/
+theorem term_world (w : World) (id : InstId) :
+    let name := tname id
+    let ms := (w.st id).box
+    let ps := (w.st id).parked
+    let drained := drainPark (drainBox w id name ms) id name ps
+    let refunded := refundParked (refundMsgs w name ms) name ps
+    let died := setActor drained id
+      { (drained.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+    let killed := setActor refunded id
+      { (refunded.st id) with life := .dead, phase := .idle, prio := [], box := [], parked := [] }
+    died = killed := by
+  intro name ms ps drained refunded died killed
+  have hst : ∀ i, died.st i = killed.st i := fun i => by
+    simpa [died, killed, drained, refunded, name, ms, ps] using term_actor w id i
+  apply world_eq
+  · simp [died, killed, setActor, drained, refunded, (frame_drainP (drainBox w id name ms) id name ps).1,
+      (frame_drain w id name ms).1, (frame_refundP (refundMsgs w name ms) name ps).1,
+      (frame_refund w name ms).1]
+  · simp [died, killed, setActor, drained, refunded, (frame_drainP (drainBox w id name ms) id name ps).2.1,
+      (frame_drain w id name ms).2.1, (frame_refundP (refundMsgs w name ms) name ps).2.1,
+      (frame_refund w name ms).2.1]
+  · simp [died, killed, setActor, drained, refunded, (frame_drainP (drainBox w id name ms) id name ps).2.2.1,
+      (frame_drain w id name ms).2.2.1, (frame_refundP (refundMsgs w name ms) name ps).2.2.1,
+      (frame_refund w name ms).2.2.1]
+  · funext i
+    exact hst i
+  · simp [died, killed, setActor, drained, refunded, (frame_drainP (drainBox w id name ms) id name ps).2.2.2.1,
+      (frame_drain w id name ms).2.2.2.1, (frame_refundP (refundMsgs w name ms) name ps).2.2.2.1,
+      (frame_refund w name ms).2.2.2.1]
+  · simp [died, killed, setActor, drained, refunded, (frame_drainP (drainBox w id name ms) id name ps).2.2.2.2,
+      (frame_drain w id name ms).2.2.2.2, (frame_refundP (refundMsgs w name ms) name ps).2.2.2.2,
+      (frame_refund w name ms).2.2.2.2]
+  · simp [died, killed, setActor, drained, refunded, (meta_drainP (drainBox w id name ms) id name ps).1,
+      (meta_drain w id name ms).1, (meta_refundP (refundMsgs w name ms) name ps).1,
+      (meta_refund w name ms).1]
+  · simp [died, killed, setActor, drained, refunded, (meta_drainP (drainBox w id name ms) id name ps).2,
+      (meta_drain w id name ms).2, (meta_refundP (refundMsgs w name ms) name ps).2,
+      (meta_refund w name ms).2]
+
 theorem occ_term_kill (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
     (hcont : ∀ i, contTy (w.st i)) (hmem : id ∈ w.roster)
     (hterm : terminableName I.desc (tname id)) (hnocall : hasParkedCall (w.st id).parked = false)
