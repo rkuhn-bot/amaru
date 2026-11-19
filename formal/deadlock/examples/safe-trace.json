@@ -1,0 +1,7 @@
+{
+  "schema": "amaru-deadlock-trace/v1",
+  "n": 0,
+  "steps": [
+    {"op": "stutter"}
+  ]
+}

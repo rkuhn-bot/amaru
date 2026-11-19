@@ -1,0 +1,7 @@
+{
+  "schema": "amaru-deadlock-trace/v1",
+  "n": 1,
+  "steps": [
+    {"op": "exec", "id": {"peer": "P", "index": 0}}
+  ]
+}

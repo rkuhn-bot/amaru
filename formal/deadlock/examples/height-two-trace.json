@@ -1,0 +1,15 @@
+{
+  "schema": "amaru-deadlock-trace/v1",
+  "n": 1,
+  "steps": [
+    {"op": "spawn", "template": "P"},
+    {"op": "ingress", "id": {"peer": "P", "index": 0}, "label": "Go"},
+    {"op": "recvBulk", "id": {"peer": "P", "index": 0}},
+    {"op": "exec", "id": {"peer": "P", "index": 0}},
+    {"op": "recvBulk", "id": {"core": "B"}},
+    {"op": "exec", "id": {"core": "B"}},
+    {"op": "exec", "id": {"core": "B"}},
+    {"op": "exec", "id": {"peer": "P", "index": 0}},
+    {"op": "exec", "id": {"peer": "P", "index": 0}}
+  ]
+}

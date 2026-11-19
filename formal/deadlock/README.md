@@ -12,9 +12,13 @@ Lean's prelude, not Mathlib.
 cd formal/deadlock
 lake build
 lake exe check examples/safe.json
+lake exe check examples/height-two.json examples/height-two-trace.json
 ```
 
 Exit status is 0 on `pass`, 1 when the checks fail, 2 on usage or parse errors.
+One argument checks the graph. Two arguments replay the trace against the
+wiring: every step must be one `apply` allows, and the first refusal is
+`step <i> disallowed: <action>`.
 
 ## Compatibility relation
 
@@ -424,6 +428,44 @@ by the semantic rework, and the old examples keep their verdicts.
 
 `a*N+b` may be a bare number or `{"a": …, "b": …}`.
 
+## Exporter input
+
+`amaru-deadlock-graph/v1` is the wiring a Rust exporter would write. This
+repository does not contain that exporter.
+
+- `templates` — one role. `capacity` and `priorityCapacity` are mailbox
+  sizes; `priorityBound` is how many distinct priority labels the role may
+  hold. Each is `a*N+b`. `states` and `initial` are the typestate. `subtree`
+  and `timeoutKills` name a per-peer cohort that dies in one kill.
+- `edges` — the wiring. `occupancy` is the credit that edge contributes.
+  `ingressLegal`, when present, is the same affine form, evaluated at the
+  world's `N` by the step relation.
+- `compatibility` — `"all"`, or `{"groups": [...]}` with an explicit list of
+  `(role, state)` tuples. `"explicit"` is parsed and rejected by the check.
+- `transitions` — the typestate steps the compatibility check closes under.
+  An optional `program` is the effect list the step relation runs: `send`,
+  `trySend`, `call` (each with `dst`, `label`, `hint`), `reply`,
+  `selfSchedule`, `cell` (`dst`, `label`, `value`), `internal`, `peer`,
+  `terminate`. A missing program is empty. `acceptsCall` defaults to false
+  and `release` to 1.
+- `cellEffects` — cell writes that must each be a declared cell edge.
+
+`amaru-deadlock-trace/v1` is a simulation trace beside that wiring.
+`n` is the per-peer bound (`World.N`; default 0). `steps` are concrete
+actions, in order:
+
+| `op` | fields |
+|---|---|
+| `spawn` | `template` |
+| `ingress` | `id`, `label` |
+| `recvBulk`, `recvPrio`, `exec`, `finish` | `id` |
+| `kill` | `subtree`, `key` |
+| `stutter` | none |
+
+An id is `{"core": "<role>"}` or `{"peer": "<role>", "index": <n>}`.
+`examples/height-two-trace.json` is the height-2 chain and is accepted.
+`examples/height-two-bad.json` is refused at step 0.
+
 ## Examples
 
 | file | expected |
@@ -440,6 +482,9 @@ by the semantic rework, and the old examples keep their verdicts.
 | `examples/token-relation.json` | `pass` — 3-role fetch token, closed under its transitions and under restart |
 | `examples/token-relation-gap.json` | `fail: compatibility broken by transition fetch_blocks idle -> busy [OnTip]` with the pre/post tuple |
 | `examples/token-relation-coarse.json` | `fail: residual cycle` — the extra `(holding, busy)` tuple is closed, and it restores the cycle |
+| `examples/height-two.json` + `height-two-trace.json` | `pass` — the height-2 chain, replayed |
+| `examples/height-two.json` + `height-two-bad.json` | `step 0 disallowed: exec peer P#0` |
+| `examples/safe.json` + `safe-trace.json` | `pass` — one stutter on an idle roster |
 
 The same strings are `native_decide`d in `Deadlock/Examples.lean`.
 
@@ -455,7 +500,7 @@ The same strings are `native_decide`d in `Deadlock/Examples.lean`.
 - `Deadlock/Occ.lean` — `OccInv`, and the Lemma-1 bound assuming it
 - `Deadlock/Compat.lean` — `compat_group_closed`
 - `Deadlock/Theorem.lean` — effect and peer non-stuckness **from `Assumptions`**
-- `Deadlock/Json.lean`, `Main.lean` — `lake exe check`
+- `Deadlock/Json.lean`, `Main.lean` — `lake exe check`, including trace replay
 
 ## Axioms
 

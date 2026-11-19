@@ -1,0 +1,126 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "height-two",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "P",
+      "multiplicity": "perPeer",
+      "capacity": {"a": 2, "b": 2},
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle", "busy"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    },
+    {
+      "name": "B",
+      "multiplicity": "one",
+      "capacity": 1,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle", "busy"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": false
+    },
+    {
+      "name": "C",
+      "multiplicity": "one",
+      "capacity": 1,
+      "priorityCapacity": 4,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": false
+    }
+  ],
+  "edges": [
+    {
+      "src": "P",
+      "srcState": "idle",
+      "dst": "P",
+      "kind": "nonBlocking",
+      "reliability": "reliable",
+      "effect": "trySend",
+      "label": "Go",
+      "scope": "intra",
+      "occupancy": {"a": 1, "b": 0},
+      "repliesInDequeue": false,
+      "ingress": true,
+      "ingressLegal": {"a": 1, "b": 0}
+    },
+    {
+      "src": "P",
+      "srcState": "busy",
+      "dst": "P",
+      "kind": "nonBlocking",
+      "reliability": "reliable",
+      "effect": "trySend",
+      "label": "Go",
+      "scope": "intra",
+      "occupancy": {"a": 1, "b": 0},
+      "repliesInDequeue": false,
+      "ingress": true,
+      "ingressLegal": {"a": 1, "b": 0}
+    },
+    {
+      "src": "P",
+      "srcState": "busy",
+      "dst": "B",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "M",
+      "scope": "coreInst",
+      "occupancy": {"a": 3, "b": 0},
+      "repliesInDequeue": false,
+      "ingress": false
+    },
+    {
+      "src": "B",
+      "srcState": "busy",
+      "dst": "C",
+      "kind": "blocking",
+      "reliability": "reliable",
+      "effect": "send",
+      "label": "N",
+      "scope": "intra",
+      "occupancy": 2,
+      "repliesInDequeue": false,
+      "ingress": false
+    }
+  ],
+  "transitions": [
+    {
+      "template": "P",
+      "from": "idle",
+      "to": "busy",
+      "label": "Go",
+      "program": [
+        {"op": "send", "dst": "B", "label": "M", "hint": 0},
+        {"op": "send", "dst": "B", "label": "M", "hint": 0},
+        {"op": "send", "dst": "B", "label": "M", "hint": 0}
+      ]
+    },
+    {"template": "P", "from": "busy", "to": "busy", "label": "Go", "program": []},
+    {
+      "template": "B",
+      "from": "idle",
+      "to": "busy",
+      "label": "M",
+      "program": [
+        {"op": "send", "dst": "C", "label": "N", "hint": 0},
+        {"op": "send", "dst": "C", "label": "N", "hint": 0}
+      ]
+    },
+    {"template": "B", "from": "busy", "to": "busy", "label": "M", "program": []},
+    {"template": "C", "from": "idle", "to": "idle", "label": "N", "program": []}
+  ]
+}

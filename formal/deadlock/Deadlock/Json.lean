@@ -1,4 +1,4 @@
-import Deadlock.Graph
+import Deadlock.Semantics
 
 set_option autoImplicit false
 
@@ -293,15 +293,59 @@ private def decodeCellEffect (v : JVal) : Except String CellEffect := do
     label := ← asString (← field v "label") "cellEffect.label"
   }
 
-private def decodeStep (v : JVal) : Except String CompatStep := do
-  return {
-    template := ← asString (← field v "template") "transition.template"
-    fromState := ← asString (← field v "from") "transition.from"
-    toState := ← asString (← field v "to") "transition.to"
-    label := ← asString (← field v "label") "transition.label"
-  }
+private def decodeNatField (v : JVal) (k : String) (default : Nat) : Except String Nat :=
+  match jget v k with
+  | none => pure default
+  | some (.num n) => pure n
+  | some _ => throw s!"{k} must be a number"
 
-def decodeDescription (v : JVal) : Except String Description := do
+/-- One effect of a transition program. `hint` defaults to 0. -/
+private def decodeEff (v : JVal) : Except String Eff := do
+  let op ← asString (← field v "op") "effect.op"
+  match op with
+  | "send" =>
+    return .send (← asString (← field v "dst") "effect.dst")
+      (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
+  | "trySend" =>
+    return .trySend (← asString (← field v "dst") "effect.dst")
+      (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
+  | "call" =>
+    return .call (← asString (← field v "dst") "effect.dst")
+      (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
+  | "reply" => return .reply
+  | "selfSchedule" => return .selfSchedule (← asString (← field v "label") "effect.label")
+  | "cell" =>
+    match jget v "value" with
+    | some (.num n) =>
+      return .cell (← asString (← field v "dst") "effect.dst")
+        (← asString (← field v "label") "effect.label") n
+    | _ => throw "cell.value must be a number"
+  | "internal" => return .internal
+  | "peer" => return .peer
+  | "terminate" => return .terminate
+  | _ => throw s!"unknown effect {op}"
+
+/-- The graph check sees the typestate step. Replay sees the same step plus its program. -/
+private def decodeTransition (v : JVal) : Except String (CompatStep × Transition) := do
+  let template ← asString (← field v "template") "transition.template"
+  let fromState ← asString (← field v "from") "transition.from"
+  let toState ← asString (← field v "to") "transition.to"
+  let label ← asString (← field v "label") "transition.label"
+  let program ← match jget v "program" with
+    | none => pure []
+    | some xs => (← asArr xs "program").mapM decodeEff
+  let acceptsCall ← decodeBoolField v "acceptsCall" false
+  let release ← decodeNatField v "release" 1
+  let step : CompatStep := { template, fromState, toState, label }
+  let tr : Transition := { template, fromState, label, program, toState, acceptsCall, release }
+  return (step, tr)
+
+/-- A description plus the programs the step relation runs. -/
+structure Wiring where
+  desc : Description
+  transitions : List Transition
+
+def decodeWiring (v : JVal) : Except String Wiring := do
   match jget v "schema" with
   | some (.str "amaru-deadlock-graph/v1") => pure ()
   | _ => throw "schema must be \"amaru-deadlock-graph/v1\""
@@ -317,15 +361,102 @@ def decodeDescription (v : JVal) : Except String Description := do
       pure (.explicit pairs)
     | some (.obj fs) => decodeGroups (.obj fs)
     | _ => throw "compatibility must be \"all\", \"explicit\", or {\"groups\": ...}"
-  let steps ← match jget v "transitions" with
+  let decoded ← match jget v "transitions" with
     | none => pure []
-    | some xs => (← asArr xs "transitions").mapM decodeStep
+    | some xs => (← asArr xs "transitions").mapM decodeTransition
   let cellEffects ← match jget v "cellEffects" with
     | none => pure []
     | some xs => (← asArr xs "cellEffects").mapM decodeCellEffect
-  return { name, freshNames, templates, edges, compatibility, steps, cellEffects }
+  let desc : Description := {
+    name, freshNames, templates, edges, compatibility,
+    steps := decoded.map (·.1), cellEffects
+  }
+  return { desc, transitions := decoded.map (·.2) }
+
+def decodeDescription (v : JVal) : Except String Description := do
+  return (← decodeWiring v).desc
+
+/-- The implementation the step relation is checked against. `env` stays the default. -/
+def wiringImpl (w : Wiring) : Impl where
+  desc := w.desc
+  transitions := w.transitions
+
+private def instText : InstId → String
+  | .core n => s!"core {n}"
+  | .peer n k => s!"peer {n}#{k}"
+
+def actionText : Action → String
+  | .recvBulk id => s!"recvBulk {instText id}"
+  | .recvPrio id => s!"recvPrio {instText id}"
+  | .exec id => s!"exec {instText id}"
+  | .finish id => s!"finish {instText id}"
+  | .spawn template => s!"spawn {template}"
+  | .ingress id label => s!"ingress {instText id} {label}"
+  | .kill sub key => s!"kill {sub} {key}"
+  | .stutter => "stutter"
+
+private def decodeId (v : JVal) : Except String InstId := do
+  match jget v "core" with
+  | some (.str n) =>
+    if (jget v "peer").isSome then throw "id names both core and peer" else return .core n
+  | some _ => throw "id.core must be a string"
+  | none =>
+    match jget v "peer" with
+    | some (.str n) =>
+      match jget v "index" with
+      | some (.num k) => return .peer n k
+      | _ => throw "id.index must be a number"
+    | some _ => throw "id.peer must be a string"
+    | none => throw "id needs core or peer"
+
+private def decodeAction (v : JVal) : Except String Action := do
+  let op ← asString (← field v "op") "op"
+  match op with
+  | "recvBulk" => return .recvBulk (← decodeId (← field v "id"))
+  | "recvPrio" => return .recvPrio (← decodeId (← field v "id"))
+  | "exec" => return .exec (← decodeId (← field v "id"))
+  | "finish" => return .finish (← decodeId (← field v "id"))
+  | "spawn" => return .spawn (← asString (← field v "template") "template")
+  | "ingress" =>
+    return .ingress (← decodeId (← field v "id")) (← asString (← field v "label") "label")
+  | "kill" =>
+    match jget v "key" with
+    | some (.num n) => return .kill (← asString (← field v "subtree") "subtree") n
+    | _ => throw "kill.key must be a number"
+  | "stutter" => return .stutter
+  | _ => throw s!"unknown step op {op}"
+
+/-- A concrete run. `n` is `World.N`, the per-peer bound the world starts with. -/
+structure Trace where
+  n : Nat
+  steps : List Action
+
+def decodeTrace (v : JVal) : Except String Trace := do
+  match jget v "schema" with
+  | some (.str "amaru-deadlock-trace/v1") => pure ()
+  | _ => throw "schema must be \"amaru-deadlock-trace/v1\""
+  let n ← decodeNatField v "n" 0
+  let steps ← (← asArr (← field v "steps") "steps").mapM decodeAction
+  return { n, steps }
+
+/-- Fold `apply` from `initWorld`. The error names the first action `apply` refuses. -/
+def replayFrom (I : Impl) (w : World) (i : Nat) : List Action → Except String Unit
+  | [] => .ok ()
+  | a :: rest =>
+    match apply I a w with
+    | some w' => replayFrom I w' (i + 1) rest
+    | none => .error s!"step {i} disallowed: {actionText a}"
+
+def replayTrace (I : Impl) (t : Trace) : Except String Unit :=
+  replayFrom I (initWorld I t.n) 0 t.steps
 
 def parseDescription (s : String) : Except String Description := do
   decodeDescription (← parseJson s)
+
+def parseWiring (s : String) : Except String Wiring := do
+  decodeWiring (← parseJson s)
+
+def parseTrace (s : String) : Except String Trace := do
+  decodeTrace (← parseJson s)
 
 end Deadlock
