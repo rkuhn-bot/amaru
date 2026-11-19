@@ -47,6 +47,16 @@ theorem running_call_not_terminable (I : Impl) (hG : GraphOk I.desc) (w : World)
       have hbad := hB id ⟨ts, htpl, htm⟩
       simp [contRest, hph, noBulkSend] at hbad
 
+/-- A terminable actor never runs a `call` head. That continuation is a bulk send,
+whatever the target is. -/
+theorem terminable_no_call_head (I : Impl) (w : World) (hB : BulkFree I w) (id : InstId)
+    (t : Template) (ht : templateOf I.desc (tname id) = some t) (hterm : t.terminable = true)
+    (dst label : String) (hint : Nat) (tail : List Eff) (toState : String)
+    (replyTo : Option InstId)
+    (hph : (w.st id).phase = .run ⟨.call dst label hint :: tail, toState, replyTo⟩) : False := by
+  have hbad := hB id ⟨t, ht, hterm⟩
+  simp [contRest, hph, noBulkSend] at hbad
+
 theorem failWaiter_call (w : World) (dead i caller callee : InstId) (k : Cont)
     (h : CallWait ((failWaiter w dead i).st caller).phase callee k) :
     CallWait (w.st caller).phase callee k := by
@@ -6570,6 +6580,64 @@ theorem release_keeps_call (w : World) (id caller callee : InstId) (k : Cont) (p
         | crashed => simp [resumeSender, hph, CallWait] at hmid
       · simpa [setActor, hcaller] using hmid
 
+/-- Failing one waiter of `dead` keeps call tags when nobody is in a call wait on
+`dead`. A blocking send is resumed; a call wait on `dead` cannot be there. -/
+theorem failWaiter_plain_tag (w : World) (dead i : InstId) (hT : CallTagInv w)
+    (hno : ∀ c k, ¬ CallWait (w.st c).phase dead k) : CallTagInv (failWaiter w dead i) := by
+  unfold failWaiter
+  split
+  · exact hT
+  · next hlive =>
+    cases hph : (w.st i).phase with
+    | parked d b k =>
+      simp
+      split
+      · next hd =>
+        cases b with
+        | false =>
+          have hph' : (w.st i).phase = .parked dead false k := by simp [hph, hd]
+          have htag := resume_send_tag w i dead k hT hph'
+          rw [show resumeSender (w.st i) false dead = proceed (w.st i) k by
+            simp [resumeSender, hph']] at htag
+          exact htag
+        | true =>
+          exact False.elim (hno i k (Or.inl (by simp [hph, hd])))
+      · exact hT
+    | awaitReply d k =>
+      simp
+      split
+      · next hd =>
+        exact False.elim (hno i k (Or.inr (by simp [hph, hd])))
+      · exact hT
+    | idle =>
+      simp
+      exact hT
+    | run _ =>
+      simp
+      exact hT
+    | awaitEffect _ =>
+      simp
+      exact hT
+    | awaitPeer _ =>
+      simp
+      exact hT
+    | crashed =>
+      simp
+      exact hT
+
+theorem fail_plain_tag (w : World) (dead : InstId) (ids : List InstId) (hT : CallTagInv w)
+    (hno : ∀ c k, ¬ CallWait (w.st c).phase dead k) :
+    CallTagInv (ids.foldl (fun w i => failWaiter w dead i) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hT
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have hstep := failWaiter_plain_tag w dead i hT hno
+    have hno' : ∀ c k, ¬ CallWait ((failWaiter w dead i).st c).phase dead k := by
+      intro c k hc
+      exact hno c k (failWaiter_call w dead i c dead k hc)
+    exact ih _ hstep hno'
+
 theorem execRun_keeps_call (I : Impl) (hG : GraphOk I.desc) (w : World) (id : InstId) (krun : Cont)
     (hS : SemInv I w) (hB : BulkFree I w) (hph : (w.st id).phase = .run krun)
     (caller callee : InstId) (k : Cont) (t : Template) (ht : templateOf I.desc (tname callee) = some t)
@@ -6684,6 +6752,122 @@ theorem execRun_keeps_call (I : Impl) (hG : GraphOk I.desc) (w : World) (id : In
         · rw [if_neg hkill] at hc
           exact hc
 
+/-- Executing one head does not put a terminable actor into a call wait. The only
+head that creates one is `call`, and a terminable continuation cannot start with it. -/
+theorem execRun_keeps_terminable_caller (I : Impl) (w : World) (hB : BulkFree I w) (id : InstId)
+    (krun : Cont) (hph : (w.st id).phase = .run krun) (caller callee : InstId) (k : Cont)
+    (t : Template) (ht : templateOf I.desc (tname caller) = some t) (hterm : t.terminable = true)
+    (hc : CallWait ((execRun I w id (w.st id) krun).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  cases hrest : krun.rest with
+  | nil =>
+    simp [execRun, hrest] at hc
+    exact not_call_runner w id _ caller callee k (idle_not_call callee k) hc
+  | cons e tail =>
+    cases e with
+    | send dst label hint =>
+      simp [execRun, hrest] at hc
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp [hr] at hc
+        exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | some dstId =>
+        simp [hr] at hc
+        exact enqueue_plain_call w I.desc id dstId { label := label, sender := id, callFrom := none }
+          (afterHead krun) caller callee k hc
+    | trySend dst label hint =>
+      simp [execRun, hrest] at hc
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp [hr] at hc
+        exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | some dstId =>
+        simp [hr] at hc
+        split at hc
+        · exact enqueue_plain_call w I.desc id dstId
+            { label := label, sender := id, callFrom := none, reliable := false }
+            (afterHead krun) caller callee k hc
+        · exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+    | call dst label hint =>
+      simp [execRun, hrest] at hc
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp [hr] at hc
+        exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | some dstId =>
+        simp [hr] at hc
+        rcases enqueue_true_sender w I.desc id dstId
+            { label := label, sender := id, callFrom := some id } (afterHead krun) caller callee k hc
+            with ⟨hcaller, _, _⟩ | ⟨_, hprev⟩
+        · have hrun : (w.st id).phase =
+              .run ⟨.call dst label hint :: tail, krun.toState, krun.replyTo⟩ := by
+            cases krun with
+            | mk rest toState replyTo =>
+              have hrest' : rest = .call dst label hint :: tail := hrest
+              rw [hrest'] at hph
+              exact hph
+          have htId : templateOf I.desc (tname id) = some t := by simpa [hcaller] using ht
+          exact False.elim (terminable_no_call_head I w hB id t htId hterm dst label hint tail
+            krun.toState krun.replyTo hrun)
+        · exact hprev
+    | reply =>
+      simp [execRun, hrest] at hc
+      exact reply_keeps_call w id caller callee k krun hc
+    | selfSchedule label =>
+      simp [execRun, hrest] at hc
+      split at hc
+      · exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      · split at hc
+        · exact not_call_runner w id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+        · exact not_call_runner w id _ caller callee k (crash_not_call callee k) hc
+    | cell dst label value =>
+      simp only [execRun, hrest] at hc
+      cases hdirty : (w.cell dst label).dirty with
+      | false =>
+        rw [ite_eq_right (show ¬ ((w.cell dst label).dirty = true) from by simp [hdirty])] at hc
+        rw [wakeReaders, wakes_phase (readersOf _ dst) I.desc _ dst label id caller] at hc
+        exact not_call_runner _ id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+      | true =>
+        simp [hdirty] at hc
+        exact not_call_runner _ id _ caller callee k (proceed_not_callwait _ _ _ _) hc
+    | internal =>
+      simp [execRun, hrest] at hc
+      exact not_call_runner w id _ caller callee k (await_not_call (afterHead krun) callee k) hc
+    | peer =>
+      simp [execRun, hrest] at hc
+      exact not_call_runner w id _ caller callee k (peer_not_call (afterHead krun) callee k) hc
+    | terminate =>
+      simp only [execRun, hrest] at hc
+      cases htpl : templateOf I.desc (tname id) with
+      | none =>
+        simp [htpl] at hc
+        exact hc
+      | some ts =>
+        simp only [htpl] at hc
+        by_cases hkill : (ts.terminable && !hasParkedCall (w.st id).parked) = true
+        · rw [ite_eq_left hkill] at hc
+          let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
+            (tname id) (w.st id).parked
+          let dead : Actor :=
+            { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+          have hrel := release_keeps_call (setActor base id dead) id caller callee k (w.st id).parked
+            (by simpa [base, dead] using hc)
+          by_cases hcaller : caller = id
+          · rw [hcaller] at hrel
+            simp [setActor, dead, CallWait] at hrel
+          · rw [setActor_other base id caller dead hcaller] at hrel
+            have hpark := (refundParked_phase_life
+              (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box) (tname id)
+              (w.st id).parked caller).1
+            have hmsg := (refundMsgs_phase_life (readCells I.desc w id) (tname id) (w.st id).box
+              caller).1
+            have hcell := congrArg (·.phase) (cellsSt I.desc w id caller)
+            simp only [base] at hrel
+            rw [hpark, hmsg, hcell] at hrel
+            exact hrel
+        · rw [ite_eq_right (by simpa using hkill)] at hc
+          exact hc
+
 theorem exec_keeps_call (I : Impl) (hG : GraphOk I.desc) (w w' : World) (id : InstId)
     (hS : SemInv I w) (hB : BulkFree I w) (caller callee : InstId) (k : Cont) (t : Template)
     (ht : templateOf I.desc (tname callee) = some t) (hterm : t.terminable = true)
@@ -6698,6 +6882,28 @@ theorem exec_keeps_call (I : Impl) (hG : GraphOk I.desc) (w w' : World) (id : In
       simp [hph] at h
       cases h
       exact execRun_keeps_call I hG w id krun hS hB hph caller callee k t ht hterm hc
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
+
+theorem exec_keeps_terminable_caller (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w)
+    (caller callee : InstId) (k : Cont) (t : Template)
+    (ht : templateOf I.desc (tname caller) = some t) (hterm : t.terminable = true)
+    (hc : CallWait (w'.st caller).phase callee k) (h : apply I (.exec id) w = some w') :
+    CallWait (w.st caller).phase callee k := by
+  simp only [apply] at h
+  unfold execHead at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run krun =>
+      simp [hph] at h
+      cases h
+      exact execRun_keeps_terminable_caller I w hB id krun hph caller callee k t ht hterm hc
     | idle => simp [hph] at h
     | parked _ _ _ => simp [hph] at h
     | awaitReply _ _ => simp [hph] at h
@@ -6744,6 +6950,46 @@ theorem no_terminable_call_target (I : Impl) (hL : LocalOk I) (hG : GraphOk I.de
       | true =>
         have hnot := ih caller callee k
           (exec_keeps_call I hG w w' id hS hB caller callee k t ht hterm hph happ) ht
+        rwa [hterm] at hnot
+
+/-- A reachable terminable actor is not blocked on a call. Starting one would run
+a `call` head, and that head is a bulk send. -/
+theorem terminable_not_caller (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (caller callee : InstId) (k : Cont)
+    (hph : CallWait (w.st caller).phase callee k) (t : Template)
+    (ht : templateOf I.desc (tname caller) = some t) : t.terminable = false := by
+  induction hR generalizing caller callee k with
+  | init => simp [init_phase, CallWait] at hph
+  | step w w' a prev happ ih =>
+    have hInv := inv2_reachable I hL hG N w prev
+    have hM : MailInv w := hInv.1.2.1
+    have hB : BulkFree I w := hInv.2.2.2
+    cases a with
+    | stutter =>
+      cases stutter_unchanged I w w' happ
+      exact ih caller callee k hph ht
+    | ingress dst label =>
+      have hkeep := (ingress_phase I w w' dst label caller (by simpa [apply] using happ)).1
+      exact ih caller callee k (by simpa [hkeep] using hph) ht
+    | kill sub key =>
+      have hw := kill_apply_world I w w' sub key happ
+      rw [hw] at hph
+      exact ih caller callee k (killSubtree_call w I.desc sub key caller callee k hph) ht
+    | spawn template =>
+      exact ih caller callee k (spawn_keeps_call I w w' template caller callee k happ hph) ht
+    | finish id =>
+      exact ih caller callee k (finish_keeps_call I w w' id caller callee k happ hph) ht
+    | recvPrio id =>
+      exact ih caller callee k (recvPrio_keeps_call I w w' id caller callee k happ hph) ht
+    | recvBulk id =>
+      exact ih caller callee k (recvBulk_keeps_call I w w' id hM caller callee k happ hph) ht
+    | exec id =>
+      cases hterm : t.terminable with
+      | false => rfl
+      | true =>
+        have hprev :=
+          exec_keeps_terminable_caller I w w' id hB caller callee k t ht hterm hph happ
+        have hnot := ih caller callee k hprev ht
         rwa [hterm] at hnot
 
 end Deadlock

@@ -27,12 +27,6 @@ theorem parked_call_unterminable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.des
   have hsub := call_edge_unterminable I.desc hG e he heff t (by simpa [hdst] using ht)
   simpa [hsrc, hdst] using hsub
 
-theorem resume_life (a : Actor) (b : Bool) (dst : InstId) : (resumeSender a b dst).life = a.life := by
-  cases hph : a.phase with
-  | parked _ _ k =>
-    cases b <;> simp [resumeSender, hph, proceed_life]
-  | _ => simp [resumeSender, hph]
-
 theorem proceed_phase_same (a b : Actor) (k : Cont) : (proceed a k).phase = (proceed b k).phase := by
   cases hk : k.rest <;> simp [proceed, hk]
 
@@ -10366,13 +10360,249 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
         | terminate =>
           exact terminate_tag I hL hG N w hR hT hM hS hTerm id k es hph hrest
 
+/-- A member that a kill may select: it is not in a call, nobody is in a call on it,
+and its mailbox holds no call. -/
+structure MemberQuiet (w : World) (id : InstId) : Prop where
+  notCaller : ∀ callee k, ¬ CallWait (w.st id).phase callee k
+  notTarget : ∀ caller k, ¬ CallWait (w.st caller).phase id k
+  noBox : ∀ m, m ∈ (w.st id).box → m.callFrom = none
+  noPark : ∀ p, p ∈ (w.st id).parked → p.msg.callFrom = none
+
+/-- A reachable terminable actor is quiet: it never started a call, and no call names it. -/
+theorem reachable_member_quiet (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hT : CallTagInv w) (hM : MailInv w) (id : InstId)
+    (hterm : terminableName I.desc (tname id)) : MemberQuiet w id := by
+  obtain ⟨t, ht, htm⟩ := hterm
+  have hparkF := terminable_no_parked_call I hL hG N w hR id ⟨t, ht, htm⟩
+  have hplain : ∀ p, p ∈ (w.st id).parked → p.isCall = false := by
+    simpa [hasParkedCall, List.any_eq_false] using hparkF
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro callee k h
+    have hnot := terminable_not_caller I hL hG N w hR id callee k h t ht
+    simp [htm] at hnot
+  · intro caller k h
+    have hnot := no_terminable_call_target I hL hG N w hR caller id k h t ht
+    simp [htm] at hnot
+  · intro m hm
+    exact terminable_no_call_box I hL hG N w hR hT id t ht htm m hm
+  · intro p hp
+    exact parked_callfrom_none w hT hM id p hp (hplain p hp)
+
+/-- Killing one quiet terminable member preserves call tags, and every quiet id stays quiet. -/
+theorem killOne_tag (I : Impl) (hG : GraphOk I.desc) (w : World) (hT : CallTagInv w)
+    (hO : OccInv I w) (sub : String) (key : Nat) (id : InstId)
+    (hmem : isMember I.desc id sub key = true) (halive : (w.st id).life = .alive)
+    (hQ : MemberQuiet w id) :
+    CallTagInv (killOne w I.desc id) ∧
+      (∀ j, MemberQuiet w j → MemberQuiet (killOne w I.desc id) j) ∧
+      ((killOne w I.desc id).st id).life = .dead ∧
+      (∀ j, j ≠ id → ((killOne w I.desc id).st j).life = (w.st j).life) := by
+  let D := I.desc
+  have htermB := member_terminable D hG.subtrees id sub key hmem
+  have hterm : terminableName D (tname id) := by
+    cases ht : templateOf D (tname id) with
+    | none => simp [terminableB, ht] at htermB
+    | some t => exact ⟨t, ht, by simpa [terminableB, ht] using htermB⟩
+  let w1 := readCells D w id
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  let w4 := failWaiters w3 id
+  let w5 := forgetSender w4 id
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  have hph3 (i : InstId) : (w3.st i).phase = (w.st i).phase := by
+    have hp := (refundParked_phase_life w2 (tname id) (w.st id).parked i).1
+    have hm := (refundMsgs_phase_life w1 (tname id) (w.st id).box i).1
+    have hc := congrArg (·.phase) (readCells_st D w id i)
+    simpa [w3, w2, w1] using hp.trans (hm.trans hc)
+  have hbox3 (i : InstId) : (w3.st i).box = (w.st i).box := by
+    have hp := refundP_box w2 (tname id) (w.st id).parked i
+    have hm := refund_box w1 (tname id) (w.st id).box i
+    have hc := congrArg (·.box) (readCells_st D w id i)
+    simpa [w3, w2, w1] using hp.trans (hm.trans hc)
+  have hpark3 (i : InstId) : (w3.st i).parked = (w.st i).parked := by
+    have hp := refundP_park w2 (tname id) (w.st id).parked i
+    have hm := refund_park w1 (tname id) (w.st id).box i
+    have hc := congrArg (·.parked) (readCells_st D w id i)
+    simpa [w3, w2, w1] using hp.trans (hm.trans hc)
+  have hQ3 : MemberQuiet w3 id := by
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro callee k h
+      exact hQ.notCaller callee k (by simpa [hph3 id] using h)
+    · intro caller k h
+      exact hQ.notTarget caller k (by simpa [hph3 caller] using h)
+    · intro m hm
+      exact hQ.noBox m (by simpa [hbox3 id] using hm)
+    · intro p hp
+      exact hQ.noPark p (by simpa [hpark3 id] using hp)
+  have hT3 : CallTagInv w3 := by
+    simpa [w3, w2, w1] using
+      tag_of_refundP w2 (tname id) (w.st id).parked
+        (tag_of_refund w1 (tname id) (w.st id).box (tag_of_read D w id hT))
+  have hTF : CallTagInv w4 := by
+    simpa [w4, failWaiters] using fail_plain_tag w3 id w3.roster hT3 hQ3.notTarget
+  have hno4 : ∀ c k, ¬ CallWait (w4.st c).phase id k := by
+    intro c k h
+    exact hQ3.notTarget c k
+      (failFold_call w3 id c id k w3.roster (by simpa [w4, failWaiters] using h))
+  have hnotCaller4 : ∀ callee k, ¬ CallWait (w4.st id).phase callee k := by
+    intro callee k h
+    exact hQ3.notCaller callee k
+      (failFold_call w3 id id callee k w3.roster (by simpa [w4, failWaiters] using h))
+  have hObase := occ_same I w w1 hO (fun i => readCells_st D w id i) (read_roster D w id).1
+    (read_roster D w id).2 fun n => readCells_nextIx D w id n
+  have hmemB : id ∈ w1.roster := by
+    simpa [w1, (read_roster D w id).1] using hO.aliveIn id halive
+  have hunsent := terminable_unsent I w1 hObase id hmemB hterm
+  have hpark4 : ∀ i, (w4.st i).parked = (w1.st i).parked := by
+    intro i
+    have hf := (failFold_mail w3 id i w3.roster).2.2
+    have hp := refundP_park w2 (tname id) (w.st id).parked i
+    have hm := refund_park w1 (tname id) (w.st id).box i
+    simpa [w4, w3, w2, failWaiters] using hf.trans (hp.trans hm)
+  have hr3 : w3.roster = w1.roster := by
+    simpa [w3, w2] using
+      ((frame_refundP w2 (tname id) (w.st id).parked).2.1).trans
+        (frame_refund w1 (tname id) (w.st id).box).2.1
+  have hr4 : w4.roster = w1.roster := by
+    simpa [w4, failWaiters, hr3] using failWaiters_roster w3 id w3.roster
+  have hforget : w5 = w4 := by
+    simpa [w5, forgetSender] using
+      forget_noop w4 id fun i hi p hp =>
+        hunsent i (by simpa [hr4] using hi) p (by simpa [hpark4] using hp)
+  have hmail4 (i : InstId) : (w4.st i).box = (w3.st i).box ∧ (w4.st i).parked = (w3.st i).parked := by
+    have hm := failFold_mail w3 id i w3.roster
+    exact ⟨by simpa [w4, failWaiters] using hm.1, by simpa [w4, failWaiters] using hm.2.2⟩
+  have hnotA : ∀ d k, (w4.st id).phase ≠ .awaitReply d k := by
+    intro d k hbad
+    exact hnotCaller4 d k (Or.inr hbad)
+  have hnotP : ∀ d k, (w4.st id).phase ≠ .parked d true k := by
+    intro d k hbad
+    exact hnotCaller4 d k (Or.inl hbad)
+  have hquiet : ∀ c, ¬handlerOwes c (w4.st id).phase ∧ ¬replyPending c (w4.st id).phase := by
+    intro c
+    constructor
+    · intro h
+      obtain ⟨k, hk⟩ := hTF.oweOwner id c (Or.inl h)
+      exact hno4 c k (Or.inr hk)
+    · intro h
+      obtain ⟨k, hk⟩ := hTF.oweOwner id c (Or.inr h)
+      exact hno4 c k (Or.inr hk)
+  have hcallB : ∀ m, m ∈ (w4.st id).box → m.callFrom = none := by
+    intro m hm
+    exact hQ3.noBox m (by simpa [(hmail4 id).1] using hm)
+  have hcallP : ∀ p, p ∈ (w4.st id).parked → p.msg.callFrom = none := by
+    intro p hp
+    exact hQ3.noPark p (by simpa [(hmail4 id).2] using hp)
+  have hClear := idle_clear_tag w4 id hTF hnotA hnotP hquiet hcallB hcallP
+  let cleared := setActor w4 id { (w4.st id) with phase := .idle, box := [], prio := [], parked := [] }
+  let dead : Actor :=
+    { (w4.st id) with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+  have hDead : CallTagInv (setActor w4 id dead) := by
+    apply call_tag_copy cleared (setActor w4 id dead) hClear
+    intro i
+    by_cases hi : i = id <;> simp [cleared, dead, setActor, hi]
+  have htag : CallTagInv (killOne w D id) := by
+    have hbody' := hbody
+    rw [hforget] at hbody'
+    simpa [dead, hbody'] using hDead
+  refine ⟨htag, ?_, ?_, ?_⟩
+  · intro j hQj
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · intro callee k h
+      exact hQj.notCaller callee k (killOne_call w D id j callee k h)
+    · intro caller k h
+      exact hQj.notTarget caller k (killOne_call w D id caller j k h)
+    · intro m hm
+      by_cases hj : j = id
+      · rw [hj, hbody] at hm
+        simp [setActor, List.mem_nil_iff] at hm
+      · rw [hbody] at hm
+        have hset : m ∈ (w5.st j).box := by simpa [setActor, hj] using hm
+        have hm4 : m ∈ (w4.st j).box := by simpa [hforget] using hset
+        exact hQj.noBox m (by simpa [hbox3 j, (hmail4 j).1] using hm4)
+    · intro p hp
+      by_cases hj : j = id
+      · rw [hj, hbody] at hp
+        simp [setActor, List.mem_nil_iff] at hp
+      · rw [hbody] at hp
+        have hset : p ∈ (w5.st j).parked := by simpa [setActor, hj] using hp
+        have hp4 : p ∈ (w4.st j).parked := by simpa [hforget] using hset
+        exact hQj.noPark p (by simpa [hpark3 j, (hmail4 j).2] using hp4)
+  · rw [hbody]
+    simp [setActor]
+  · intro j hj
+    rw [hbody]
+    have hset : ((setActor w5 id
+        { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }).st j).life =
+        (w5.st j).life := by simp [setActor, hj]
+    rw [hset, hforget]
+    have hf := failFold_life w3 id j w3.roster
+    have hp := (refundParked_phase_life w2 (tname id) (w.st id).parked j).2
+    have hm := (refundMsgs_phase_life w1 (tname id) (w.st id).box j).2
+    have hc := congrArg (·.life) (readCells_st D w id j)
+    simpa [w4, w3, w2, w1, failWaiters] using hf.trans (hp.trans (hm.trans hc))
+
+theorem kill_fold_tag (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
+    (ids : List InstId) (hT : CallTagInv w) (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w)
+    (hSlots : OpenSlots w)
+    (hQ : ∀ j, isMember I.desc j sub key = true → (w.st j).life = .alive → MemberQuiet w j) :
+    CallTagInv (ids.foldl (fun w id =>
+      if isMember I.desc id sub key && (w.st id).life == .alive then killOne w I.desc id else w) w) := by
+  induction ids generalizing w with
+  | nil => simpa using hT
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    split
+    · next hcond =>
+      have hparts := (Bool.and_eq_true _ _).mp hcond
+      have halive : (w.st id).life = .alive := by simpa [beq_iff_eq] using hparts.2
+      have hStep := killOne_tag I hG w hT hO sub key id hparts.1 halive (hQ id hparts.1 halive)
+      have hOcc := occ_killOne I hG w sub key id hO hS hparts.1 halive
+      have hInv := killOne_inv I w sub key id hS hM hSlots hparts.1 halive
+      have hQ' : ∀ j, isMember I.desc j sub key = true →
+          ((killOne w I.desc id).st j).life = .alive → MemberQuiet (killOne w I.desc id) j := by
+        intro j hm hl
+        by_cases hj : j = id
+        · simp [hj, hStep.2.2.1] at hl
+        · exact hStep.2.1 j (hQ j hm (by simpa [hStep.2.2.2 j hj] using hl))
+      exact ih _ hStep.1 hOcc hInv.1 hInv.2.1 hInv.2.2 hQ'
+    · exact ih _ hT hO hS hM hSlots hQ
+
+/-- A subtree kill preserves call tags. Each member is terminable, so the kill only
+resumes plain waits and clears mailboxes that hold no call. -/
+theorem kill_subtree_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hT : CallTagInv w) (sub : String) (key : Nat) :
+    CallTagInv (killSubtree w I.desc sub key) := by
+  have hInv := inv2_reachable I hL hG N w hR
+  have hS : SemInv I w := hInv.1.1
+  have hM : MailInv w := hInv.1.2.1
+  have hSlots : OpenSlots w := hInv.1.2.2
+  have hO : OccInv I w := hInv.2.1
+  have hQ : ∀ j, isMember I.desc j sub key = true → (w.st j).life = .alive → MemberQuiet w j := by
+    intro j hm hl
+    have hB := member_terminable I.desc hG.subtrees j sub key hm
+    have hname : terminableName I.desc (tname j) := by
+      cases ht : templateOf I.desc (tname j) with
+      | none => simp [terminableB, ht] at hB
+      | some t => exact ⟨t, ht, by simpa [terminableB, ht] using hB⟩
+    exact reachable_member_quiet I hL hG N w hR hT hM j hname
+  have hFold := kill_fold_tag I hG w sub key w.roster hT hO hS hM hSlots hQ
+  apply callTag_st (w := killMembers w I.desc sub key) (w' := killSubtree w I.desc sub key)
+  · intro i
+    simp [killSubtree, plant_st]
+  · simpa [killMembers] using hFold
+
 theorem call_tag_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : CallTagInv w := by
   induction hR with
   | init => exact call_tag_init I N
   | step w w' a prev happ ih =>
     cases a with
-    | kill sub key => sorry
+    | kill sub key =>
+      rw [kill_apply_world I w w' sub key happ]
+      exact kill_subtree_tag I hL hG N w prev ih sub key
     | stutter =>
       cases stutter_unchanged I w w' happ
       exact ih
