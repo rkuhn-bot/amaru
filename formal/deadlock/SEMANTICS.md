@@ -182,3 +182,10 @@ Every external wait carries a timeout. That is also recorded in
 implication, flagged for step D (R4-1): untimed external waits leave the
 model. `untimedPeer`, `PurePeerEnd`, `timedCohortEnds`, and the untimed side
 of `peerFinishable` go away. R4-1 then reduces to removing them.
+
+A permanent pure stage, a multiplicity-one core, may also execute
+`terminate`. That is recorded in `DECISIONS.md` (2026-11-19), and it is not
+this step relation. A core's `terminate` will map to the existing
+whole-system `crashed` outcome. That outcome is terminal and adds no proof
+burden, as already ruled. If keeping that mapping free of proof burden is
+not possible, report it at step C.

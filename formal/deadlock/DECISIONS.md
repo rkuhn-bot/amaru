@@ -26,3 +26,10 @@ external peer has not responded, or the external effect has not completed.
 The actor's typestate handles that result like any other, and may choose to
 terminate. This matches the earlier ruling that a timeout is the actor's own
 typestate choice, not an environment kill action.
+
+## 2026-11-19 — A permanent core may terminate the system
+
+The `terminate` effect is currently allowed only for terminable templates. A
+permanent pure stage, which is a multiplicity-one core, may also execute
+`terminate`, and its effect is the same as `crashed`: the whole system
+terminates.
