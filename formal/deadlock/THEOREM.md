@@ -373,8 +373,13 @@ this development.
 
 ## Still open
 
-- **N4/N5.** Per-peer subtree kill, calls inside a subtree, and routing by a
-  subtree key. Waiting on Roland's `SUBTREE.md` decision. Not implemented.
+- **N4/N5.** A per-peer subtree is killed in one step, and that step preserves
+  the step, occupancy, and call-tag invariants. A call may name a terminable
+  role inside the subtree and is rejected outside it. `route` uses the sender's
+  index. `mux_kill` is a run from the initial world; `mux_cross_fails` is the
+  rejected call. The tombstone is a world field. `spawn` still allocates one
+  role at a time, so a shared key is the index those roles hold, not one
+  allocation of the whole tree.
 - **F7.** Peer waits are not given their own timeout. A timed peer ends by the
   `finish` step; there is no clock beside that step.
 - **F10.** Under `LocalOk` and `GraphOk`, `fair_delivered` shows each reliable

@@ -232,4 +232,58 @@ theorem reliable_try_fails : render reliableTryDesc =
     "fail: reliable trySend Ping may be dropped; mark a self-edge ingress or use superseding" := by
   decide
 
+/-- A connection subtree. `reader` waits, untimed, on the leading edge of a
+segment header. `timer` is the mini-protocol timeout: its peer wait is timed
+and `timeoutKills`, so one kill ends both roles. `opener` is outside the
+subtree and only arms the timer. -/
+def connRole (name : String) (untimed timeout : Bool) : Template :=
+  { tpl name 2 ["idle"] "idle" false with
+      multiplicity := .perPeer, terminable := true, untimedPeer := untimed,
+      subtree := "conn", timeoutKills := timeout }
+
+def openerTpl : Template :=
+  { tpl "opener" 2 ["idle"] "idle" true with
+      multiplicity := .perPeer, capacity := { a := 2, b := 2 } }
+
+def muxIngress : Edge :=
+  { src := "opener", srcState := "idle", dst := "opener", kind := .nonBlocking,
+    reliability := .reliable, effect := .trySend, label := "Go", scope := .intra,
+    occupancy := { a := 1, b := 0 }, repliesInDequeue := false, ingress := true,
+    ingressLegal := some { a := 1, b := 0 }, cell := .none }
+
+def armEdge : Edge :=
+  { (sendEdge "opener" "idle" "timer" "Arm" 0) with
+      occupancy := { a := 1, b := 0 }, scope := .cross }
+
+def selfPeer (src label : String) : Edge :=
+  { (sendEdge src "idle" src label 0) with kind := .nonBlocking, effect := .peer }
+
+def muxDesc : Description where
+  name := "mux-conn"
+  freshNames := true
+  templates := [openerTpl, connRole "timer" false true, connRole "reader" true false]
+  edges := [muxIngress, armEdge, selfPeer "timer" "Timeout", selfPeer "reader" "Header"]
+  compatibility := .all
+  steps := []
+
+theorem mux_pass : render muxDesc = "pass" := by decide
+
+/-- A call from a permanent core into the connection names a terminable role
+outside the caller's subtree. The checker rejects it. -/
+def muxCrossDesc : Description where
+  name := "mux-cross"
+  freshNames := true
+  templates :=
+    [openerTpl, connRole "timer" false true, connRole "reader" true false,
+     tpl "node" 2 ["idle"] "idle" true]
+  edges :=
+    [muxIngress, armEdge, selfPeer "timer" "Timeout", selfPeer "reader" "Header",
+     { (sendEdge "node" "idle" "reader" "Open" 1) with
+         effect := .call, scope := .coreInst, repliesInDequeue := true }]
+  compatibility := .all
+  steps := []
+
+theorem mux_cross_fails : render muxCrossDesc =
+    "fail: call Open targets terminable template reader" := by decide
+
 end Deadlock

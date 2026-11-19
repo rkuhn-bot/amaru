@@ -317,4 +317,40 @@ theorem chain_witness : ∃ w w', Reachable chainImpl 1 w ∧ Blocked w P0 ∧
           rw [tag_idle w2 P0 hfin] at hb
           exact hb
 
+/-! A mux-like connection. The timer's peer wait is the mini-protocol timeout.
+Killing the subtree at that key leaves the timer and the untimed reader dead
+together, and records one tombstone. The opener, outside the subtree, stays. -/
+
+def muxImpl : Impl where
+  desc := muxDesc
+  transitions :=
+    [tr2 "opener" "idle" "Go" "idle" [.send "timer" "Arm" 0],
+     tr2 "timer" "idle" "Arm" "idle" [.peer]]
+
+def openerId : InstId := .peer "opener" 0
+def timerId : InstId := .peer "timer" 0
+def readerId : InstId := .peer "reader" 0
+
+def muxActs : List Action :=
+  [.spawn "opener", .spawn "timer", .spawn "reader",
+   .ingress openerId "Go", .recvBulk openerId, .exec openerId,
+   .recvBulk timerId, .exec timerId, .kill "conn" 0]
+
+def muxAt (acts : List Action) : Option World :=
+  runFrom muxImpl (some (initWorld muxImpl 1)) acts
+
+def lifeTag (w : Option World) (i : InstId) : Nat :=
+  match w with
+  | some w => match (w.st i).life with
+    | .alive => 1
+    | .dead => 2
+    | .absent => 0
+  | none => 9
+
+theorem mux_kill :
+    lifeTag (muxAt muxActs) timerId = 2 ∧ lifeTag (muxAt muxActs) readerId = 2 ∧
+      lifeTag (muxAt muxActs) openerId = 1 ∧
+      (muxAt muxActs).map (·.tombstone) = some (some 0) := by
+  decide
+
 end Deadlock
