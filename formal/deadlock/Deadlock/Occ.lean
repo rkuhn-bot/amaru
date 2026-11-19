@@ -5920,5 +5920,79 @@ theorem member_terminableName (D : Description) (hsub : subtreeFails D = []) (id
   | none => simp [terminableB, ht] at hB
   | some t => exact ⟨t, ht, by simpa [terminableB, ht] using hB⟩
 
+/-- What one kill does to one account. The member's queues go empty and every other
+queue stays as it was, the refunds land as tokens, the typestate is untouched, and a
+resumed waiter only has fewer sends left to make. -/
+theorem killOne_account (w : World) (D : Description) (id i : InstId)
+    (hfree : ∀ j, ∀ p ∈ (w.st j).parked, p.sender ≠ id) (hc : ∀ j, contTy (w.st j)) :
+    ((killOne w D id).st i).box = (if i = id then [] else (w.st i).box) ∧
+      ((killOne w D id).st i).parked = (if i = id then [] else (w.st i).parked) ∧
+      ((killOne w D id).st i).life = (if i = id then Life.dead else (w.st i).life) ∧
+      (∀ d, ((killOne w D id).st i).tokens d = (w.st i).tokens d +
+        (if d = tname id then countFrom i (w.st id).box + countCredited i (w.st id).parked
+          else 0)) ∧
+      ((killOne w D id).st i).typestate = (w.st i).typestate ∧
+      (∀ d, pending ((killOne w D id).st i) d ≤ pending (w.st i) d) ∧
+      contTy ((killOne w D id).st i) := by
+  let w1 := readCells D w id
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  let w4 := failWaiters w3 id
+  have hst1 := fun j => cellsSt D w id j
+  have h2 := fun j => refundMsgs_rest w1 (tname id) (w.st id).box j
+  have h3 := fun j => refundParked_rest w2 (tname id) (w.st id).parked j
+  have hbox3 : ∀ j, (w3.st j).box = (w.st j).box := fun j =>
+    (h3 j).2.2.1.trans ((h2 j).2.2.1.trans (congrArg (·.box) (hst1 j)))
+  have hpark3 : ∀ j, (w3.st j).parked = (w.st j).parked := fun j =>
+    (h3 j).2.2.2.2.1.trans ((h2 j).2.2.2.2.1.trans (congrArg (·.parked) (hst1 j)))
+  have hlife3 : ∀ j, (w3.st j).life = (w.st j).life := fun j =>
+    (h3 j).2.1.trans ((h2 j).2.1.trans (congrArg (·.life) (hst1 j)))
+  have hph3 : ∀ j, (w3.st j).phase = (w.st j).phase := fun j =>
+    (h3 j).1.trans ((h2 j).1.trans (congrArg (·.phase) (hst1 j)))
+  have hty3 : ∀ j, (w3.st j).typestate = (w.st j).typestate := fun j =>
+    (h3 j).2.2.2.2.2.trans ((h2 j).2.2.2.2.2.trans (congrArg (·.typestate) (hst1 j)))
+  have htok3 : ∀ j d, (w3.st j).tokens d = (w.st j).tokens d +
+      (if d = tname id then countFrom j (w.st id).box + countCredited j (w.st id).parked
+        else 0) := by
+    intro j d
+    rw [refundP_tok w2 (tname id) (w.st id).parked j d,
+      refund_tok w1 (tname id) (w.st id).box j d, hst1 j]
+    by_cases hd : d = tname id
+    · simp [hd, Nat.add_assoc]
+    · simp [hd]
+  have hcont3 : ∀ j, contTy (w3.st j) := fun j => (contTy_match _ _ (hph3 j) (hty3 j)).mpr (hc j)
+  have h4 := fun j => failFold_account w3 id j w3.roster (hcont3 j)
+  have hmail4 := fun j => failFold_mail w3 id j w3.roster
+  have hpark4 : ∀ j, (w4.st j).parked = (w.st j).parked := fun j =>
+    (hmail4 j).2.2.trans (hpark3 j)
+  have hfree4 : ∀ j, ∀ p ∈ (w4.st j).parked, p.sender ≠ id := by
+    intro j p hp
+    rw [hpark4 j] at hp
+    exact hfree j p hp
+  have hbody : killOne w D id =
+      setActor w4 id { w4.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    have hraw : killOne w D id =
+        setActor (forgetSender w4 id) id { (forgetSender w4 id).st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+      simp [killOne, w1, w2, w3, w4, failWaiters, forgetSender]
+    rw [hraw, forget_id w4 id hfree4]
+  rw [hbody]
+  by_cases hi : i = id
+  · rw [hi, setActor_self]
+    refine ⟨by simp, by simp, by simp, ?_, ?_, ?_, ?_⟩
+    · intro d
+      exact ((h4 id).1 d).trans (htok3 id d)
+    · exact ((h4 id).2.1).trans (hty3 id)
+    · intro d
+      simp [pending, contRest, sendsTo]
+    · simp [contTy]
+  · rw [setActor_other _ _ _ _ hi]
+    simp only [hi, ite_false]
+    refine ⟨(hmail4 i).1.trans (hbox3 i), hpark4 i,
+      (failFold_life w3 id i w3.roster).trans (hlife3 i), fun d => ((h4 i).1 d).trans (htok3 i d),
+      ((h4 i).2.1).trans (hty3 i), fun d => ?_, (h4 i).2.2.2.2⟩
+    have hpend : pending (w4.st i) d ≤ pending (w3.st i) d := (h4 i).2.2.2.1 d
+    have heq : pending (w3.st i) d = pending (w.st i) d := by simp [pending, hph3 i]
+    omega
+
 end Deadlock
 
