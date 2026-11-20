@@ -2,8 +2,11 @@
 Finite descriptions of actor-network wait graphs.
 
 Affine forms `a * N + b` are the occupancy and capacity language. `N` is the
-number of instances of every per-peer template. A comparison of coefficients is
-exactly the comparison of the evaluated forms for every `N`.
+root population. A per-peer template with no supervisor, or whose supervisor is
+a core, has `N` instances. A per-peer child of a per-peer supervisor has that
+supervisor's population, so a nested bound is the chain `population` computes,
+not a fresh `N` at every template. A comparison of coefficients is exactly the
+comparison of the evaluated forms for every root population.
 -/
 
 namespace Deadlock

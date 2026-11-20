@@ -13,9 +13,12 @@ is fixed is the instance structure. So setting up every peer direction in
 the model is acceptable. That is more than runs in practice, but given the
 pessimistic sizing the extra edges are not an over-approximation: they match
 what production already commits to. Full-duplex support is needed anyway, so
-this adds no scope. For the later multi-template and nested-supervisor work,
-occupancy bounds become a parameterized product along the supervision tree,
-not a flat N per template.
+this adds no scope. Nested depth is unbounded. Occupancy is the chain
+`population` walks: a root per-peer template has population `N`, and a
+per-peer child has the population of its per-peer supervisor. That is the
+parameterized product along the supervision tree, not a flat `N` per template.
+A child is spawned by its per-peer parent, one instance per parent, so the
+child's count is the parent's count and is not capped by a second `N`.
 
 ## 2026-11-19 — Every external wait carries a timeout
 

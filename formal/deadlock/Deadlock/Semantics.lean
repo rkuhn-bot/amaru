@@ -91,6 +91,9 @@ inductive Eff where
   shutting down. Siblings are not children of each other. -/
   | abort
   | terminate
+  /-- A per-peer stage spawns one child of `template` at its own subtree key.
+  Cores do not run this effect: a supervision tree is built by its own members. -/
+  | spawn (template : String)
 
 mutual
 private def decEff : DecidableEq Eff
@@ -110,6 +113,7 @@ private def decEff : DecidableEq Eff
   | .send _ _ _, .peer _ => isFalse (by intro h; cases h)
   | .send _ _ _, .abort => isFalse (by intro h; cases h)
   | .send _ _ _, .terminate => isFalse (by intro h; cases h)
+  | .send _ _ _, .spawn _ => isFalse (by intro h; cases h)
   | .trySend d l n f g, .trySend d' l' n' f' g' =>
     if hd : d = d' then
       if hl : l = l' then
@@ -132,6 +136,7 @@ private def decEff : DecidableEq Eff
   | .trySend _ _ _ _ _, .peer _ => isFalse (by intro h; cases h)
   | .trySend _ _ _ _ _, .abort => isFalse (by intro h; cases h)
   | .trySend _ _ _ _ _, .terminate => isFalse (by intro h; cases h)
+  | .trySend _ _ _ _ _, .spawn _ => isFalse (by intro h; cases h)
   | .call d l n na to, .call d' l' n' na' to' =>
     if hd : d = d' then
       if hl : l = l' then
@@ -154,6 +159,7 @@ private def decEff : DecidableEq Eff
   | .call _ _ _ _ _, .peer _ => isFalse (by intro h; cases h)
   | .call _ _ _ _ _, .abort => isFalse (by intro h; cases h)
   | .call _ _ _ _ _, .terminate => isFalse (by intro h; cases h)
+  | .call _ _ _ _ _, .spawn _ => isFalse (by intro h; cases h)
   | .reply, .reply => isTrue rfl
   | .reply, .send _ _ _ => isFalse (by intro h; cases h)
   | .reply, .trySend _ _ _ _ _ => isFalse (by intro h; cases h)
@@ -164,6 +170,7 @@ private def decEff : DecidableEq Eff
   | .reply, .peer _ => isFalse (by intro h; cases h)
   | .reply, .abort => isFalse (by intro h; cases h)
   | .reply, .terminate => isFalse (by intro h; cases h)
+  | .reply, .spawn _ => isFalse (by intro h; cases h)
   | .selfSchedule l, .selfSchedule l' =>
     if hl : l = l' then isTrue (by simp [hl]) else isFalse (by intro h; cases h; exact hl rfl)
   | .selfSchedule _, .send _ _ _ => isFalse (by intro h; cases h)
@@ -175,6 +182,7 @@ private def decEff : DecidableEq Eff
   | .selfSchedule _, .peer _ => isFalse (by intro h; cases h)
   | .selfSchedule _, .abort => isFalse (by intro h; cases h)
   | .selfSchedule _, .terminate => isFalse (by intro h; cases h)
+  | .selfSchedule _, .spawn _ => isFalse (by intro h; cases h)
   | .cell d l n, .cell d' l' n' =>
     if hd : d = d' then
       if hl : l = l' then
@@ -191,6 +199,7 @@ private def decEff : DecidableEq Eff
   | .cell _ _ _, .peer _ => isFalse (by intro h; cases h)
   | .cell _ _ _, .abort => isFalse (by intro h; cases h)
   | .cell _ _ _, .terminate => isFalse (by intro h; cases h)
+  | .cell _ _ _, .spawn _ => isFalse (by intro h; cases h)
   | .internal, .internal => isTrue rfl
   | .internal, .send _ _ _ => isFalse (by intro h; cases h)
   | .internal, .trySend _ _ _ _ _ => isFalse (by intro h; cases h)
@@ -201,6 +210,7 @@ private def decEff : DecidableEq Eff
   | .internal, .peer _ => isFalse (by intro h; cases h)
   | .internal, .abort => isFalse (by intro h; cases h)
   | .internal, .terminate => isFalse (by intro h; cases h)
+  | .internal, .spawn _ => isFalse (by intro h; cases h)
   | .peer t, .peer t' =>
     match decEffs t t' with
     | isTrue h => isTrue (by simp [h])
@@ -214,6 +224,7 @@ private def decEff : DecidableEq Eff
   | .peer _, .internal => isFalse (by intro h; cases h)
   | .peer _, .abort => isFalse (by intro h; cases h)
   | .peer _, .terminate => isFalse (by intro h; cases h)
+  | .peer _, .spawn _ => isFalse (by intro h; cases h)
   | .abort, .abort => isTrue rfl
   | .abort, .send _ _ _ => isFalse (by intro h; cases h)
   | .abort, .trySend _ _ _ _ _ => isFalse (by intro h; cases h)
@@ -224,6 +235,7 @@ private def decEff : DecidableEq Eff
   | .abort, .internal => isFalse (by intro h; cases h)
   | .abort, .peer _ => isFalse (by intro h; cases h)
   | .abort, .terminate => isFalse (by intro h; cases h)
+  | .abort, .spawn _ => isFalse (by intro h; cases h)
   | .terminate, .terminate => isTrue rfl
   | .terminate, .send _ _ _ => isFalse (by intro h; cases h)
   | .terminate, .trySend _ _ _ _ _ => isFalse (by intro h; cases h)
@@ -234,6 +246,19 @@ private def decEff : DecidableEq Eff
   | .terminate, .internal => isFalse (by intro h; cases h)
   | .terminate, .peer _ => isFalse (by intro h; cases h)
   | .terminate, .abort => isFalse (by intro h; cases h)
+  | .terminate, .spawn _ => isFalse (by intro h; cases h)
+  | .spawn l, .spawn l' =>
+    if hl : l = l' then isTrue (by simp [hl]) else isFalse (by intro h; cases h; exact hl rfl)
+  | .spawn _, .send _ _ _ => isFalse (by intro h; cases h)
+  | .spawn _, .trySend _ _ _ _ _ => isFalse (by intro h; cases h)
+  | .spawn _, .call _ _ _ _ _ => isFalse (by intro h; cases h)
+  | .spawn _, .reply => isFalse (by intro h; cases h)
+  | .spawn _, .selfSchedule _ => isFalse (by intro h; cases h)
+  | .spawn _, .cell _ _ _ => isFalse (by intro h; cases h)
+  | .spawn _, .internal => isFalse (by intro h; cases h)
+  | .spawn _, .peer _ => isFalse (by intro h; cases h)
+  | .spawn _, .abort => isFalse (by intro h; cases h)
+  | .spawn _, .terminate => isFalse (by intro h; cases h)
 
 private def decEffs : DecidableEq (List Eff)
   | [], [] => isTrue rfl
@@ -464,6 +489,30 @@ def findTr (I : Impl) (template state label : String) : Option Transition :=
 def aliveCount (w : World) (template : String) : Nat :=
   w.roster.foldl (fun n id =>
     if tname id == template && (w.st id).life == .alive then n + 1 else n) 0
+
+/-- Population of `name` at root population `N`. A core is one instance. A
+per-peer root — no supervisor, or a core supervisor — has `N` instances. A
+per-peer child of a per-peer supervisor has that supervisor's population, one
+child per parent, not a fresh `N`. `fuel` is the template count, so a cycle
+stops. The chain is the product of those factors. -/
+def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
+  match fuel with
+  | 0 => 0
+  | fuel + 1 =>
+    match templateOf D name with
+    | none => 0
+    | some t =>
+      match t.multiplicity with
+      | .one => 1
+      | .perPeer =>
+        if t.supervisor == "" then N
+        else
+          match templateOf D t.supervisor with
+          | none => 0
+          | some sup =>
+            match sup.multiplicity with
+            | .one => N
+            | .perPeer => population D t.supervisor N fuel
 
 /-- The instance a name denotes, whether or not it is alive. A missing template,
 or a core addressing a per-peer role, does not resolve. -/
@@ -846,6 +895,24 @@ def isChild (D : Description) (parent child : InstId) : Bool :=
   | some p => p == parent && child != parent
   | none => false
 
+/-- A per-peer stage supervises the per-peer child that names it, at the same
+subtree key. The child is not required to be on the roster yet: the wiring is
+what makes the parent the supervisor. -/
+theorem isChild_peer (D : Description) (supName childName : String) (k : Nat)
+    (sup child : Template) (hsup : templateOf D supName = some sup)
+    (hchild : templateOf D childName = some child) (hm : sup.multiplicity = .perPeer)
+    (hsub : child.subtree ≠ "") (hsame : child.subtree = sup.subtree)
+    (hname : child.supervisor = supName) (hdiff : childName ≠ supName)
+    (hnamed : supName ≠ "") :
+    isChild D (.peer supName k) (.peer childName k) = true := by
+  unfold isChild supervisorOf supervisorInst
+  simp [tname, hchild, hsup, hm, hname, hsame, hsub, hdiff, hnamed, bne, beq_iff_eq]
+  have hsupSub : sup.subtree ≠ "" := by simpa [hsame] using hsub
+  by_cases hempty : sup.subtree = ""
+  · exact absurd hempty hsupSub
+  · rw [if_neg hempty]
+    simp [hdiff, beq_iff_eq]
+
 /-- Some live actor names `id` as its supervisor. -/
 def hasChild (D : Description) (w : World) (id : InstId) : Bool :=
   w.roster.any fun c => isChild D id c && (w.st c).life == .alive
@@ -988,13 +1055,6 @@ def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : 
         shutdownActor D w child
       else w) w
 
-/-- Voluntary termination. Every descendant begins shutting down in this step.
-Siblings do not. The parent is told on its priority lane and reacts later. -/
-def terminateStage (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
-  let _committed := a
-  let w := shutdownDesc w.roster.length D w id
-  shutdownActor D w id
-
 /-- A permanent core has crashed the roster. The world is terminal. Invariants
 about live actors are not required of it. A priority-lane overflow, which
 leaves the actor alive, is not this state. -/
@@ -1012,6 +1072,17 @@ def markTree (fuel : Nat) (D : Description) (w : World) (id : InstId) : World :=
     w.roster.foldl (fun w child =>
       if isChild D id child then markTree fuel D w child else w) w
 
+/-- A stage in the supervision tree terminates. Every descendant, terminable or
+not, begins shutting down, and one tombstone is placed on the immediate
+supervisor's priority lane. The supervisor may itself be per-peer. This step
+does not terminate it: its own transition decides whether to terminate, which
+is how the failure bubbles up. A sibling is not a descendant, and nothing here
+clears a sibling's mail. -/
+def terminateStage (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
+  let _committed := a
+  let w := markTree w.roster.length D w id
+  enqueueTombstone D w id
+
 /-- The parent's abort. Every live child, terminable or not, and that child's
 descendants begin shutting down. Each direct child leaves one tombstone on the
 parent. A sibling is not a child, and this step does not touch a sibling's mail. -/
@@ -1021,6 +1092,26 @@ def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
       let w := markTree w.roster.length D w child
       enqueueTombstone D w child
     else w) w
+
+/-- A per-peer parent births one absent child at its own key. The child template
+must name this parent, so `isChild` holds for the peer parent. A core has no
+such effect. A dead id is not reused, and a second copy of a live child is not
+created. There is no flat `N` cap: the child's population is the parent's. -/
+def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
+  match parent with
+  | .core _ => none
+  | .peer _ k =>
+    match templateOf I.desc child with
+    | none => none
+    | some t =>
+      let id := InstId.peer child k
+      if t.multiplicity == .perPeer && isChild I.desc parent id && (w.st id).life == .absent then
+        let born := withTokens I.desc child
+          { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
+            tokens := fun _ => 0 }
+        let w := { w with roster := w.roster ++ [id] }
+        some (readCells I.desc (setActor w id born) id)
+      else none
 
 /-- Run one effect. An actor that is not alive does not run: while it is shutting
 down the only enabled step is the seal in `execHead`. -/
@@ -1086,20 +1177,28 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
       | .peer onTimeout =>
         setActor w id { a with phase := .awaitPeer { k' with onTimeout := onTimeout } }
       | .abort => abortChildren I.desc w id
+      | .spawn child =>
+        match spawnChild I w id child with
+        | some w' => setActor w' id (proceed (w'.st id) k')
+        | none => crashWorld w
       | .terminate =>
-        -- A permanent core crashes the whole roster. A terminable actor begins
-        -- shutting down. Anything else, including a lone actor that still has a
-        -- parked call and a template that is not there, crashes the roster too.
-        -- Siblings are left alone.
+        -- A permanent core crashes the whole roster. Any stage in a supervision
+        -- tree may terminate, terminable or not: every descendant shuts down and
+        -- the immediate supervisor receives one tombstone. A lone terminable with
+        -- no child and no parked call shuts only itself down. Anything else,
+        -- including a missing template, crashes the roster. Siblings are left alone.
         match templateOf I.desc (tname id) with
         | some t =>
           if t.multiplicity == .one && !t.terminable then
             crashWorld w
-          else if t.terminable && (t.subtree != "" || !hasParkedCall a.parked) then
-            if t.subtree == "" && !(hasChild I.desc w id) then
-              shutdownActor I.desc w id
-            else
-              terminateStage I.desc w id a
+          else if t.multiplicity == .perPeer && t.subtree != "" then
+            terminateStage I.desc w id a
+          else if t.terminable && t.subtree == "" && !hasParkedCall a.parked &&
+              !(hasChild I.desc w id) then
+            shutdownActor I.desc w id
+          else if t.terminable && t.subtree == "" && !hasParkedCall a.parked &&
+              hasChild I.desc w id then
+            terminateStage I.desc w id a
           else crashWorld w
         | none => crashWorld w
   else w
@@ -1123,11 +1222,17 @@ inductive TermStep (I : Impl) (w : World) (id : InstId) (a : Actor) : World → 
       hasParkedCall a.parked = false →
       hasChild I.desc w id = false →
       TermStep I w id a (shutdownActor I.desc w id)
+  | tree (t : Template) :
+      templateOf I.desc (tname id) = some t →
+      t.multiplicity = .perPeer →
+      t.subtree ≠ "" →
+      TermStep I w id a (terminateStage I.desc w id a)
   | cascade (t : Template) :
       templateOf I.desc (tname id) = some t →
+      t.subtree = "" →
       t.terminable = true →
-      (t.subtree ≠ "" ∨ hasChild I.desc w id = true) →
-      (t.subtree = "" → hasParkedCall a.parked = false) →
+      hasParkedCall a.parked = false →
+      hasChild I.desc w id = true →
       TermStep I w id a (terminateStage I.desc w id a)
 
 /-- Classify `terminate`. A member commits even when a call is parked.
@@ -1158,38 +1263,62 @@ theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Con
         | true => simp [htm] at hn
       exact TermStep.crash t ht hone hnt
     · rw [ite_eq_right hcrash]
-      by_cases hgo2 : (t.terminable && (t.subtree != "" || !hasParkedCall a.parked)) = true
-      · simp [hgo2]
-        have hparts := (Bool.and_eq_true _ _).mp hgo2
-        have hor := (Bool.or_eq_true _ _).mp hparts.2
-        by_cases hsub : t.subtree = ""
-        · simp [hsub]
+      by_cases htree : (t.multiplicity == .perPeer && t.subtree != "") = true
+      · simp only [htree, ite_true]
+        have hparts := (Bool.and_eq_true _ _).mp htree
+        have hper : t.multiplicity = .perPeer := by
+          cases hm : t.multiplicity with
+          | perPeer => rfl
+          | one =>
+            simp [hm, show (Multiplicity.one == Multiplicity.perPeer) = false from rfl] at hparts
+        have hsub : t.subtree ≠ "" := by
+          have hb : (t.subtree != "") = true := hparts.2
+          simpa [bne, beq_iff_eq] using hb
+        exact TermStep.tree t ht hper hsub
+      · rw [ite_eq_right htree]
+        by_cases hlone : (t.terminable && t.subtree == "" && !hasParkedCall a.parked &&
+            !(hasChild I.desc w id)) = true
+        · simp only [hlone, ite_true]
+          simp [Bool.and_eq_true] at hlone
+          rcases hlone with ⟨⟨⟨htm, hsubB⟩, hpkB⟩, hchB⟩
+          have hsub : t.subtree = "" := by simpa [beq_iff_eq] using hsubB
           have hpk : hasParkedCall a.parked = false := by
-            have hne : (t.subtree != "") = false := by simp [bne, hsub]
-            simpa [hne] using hor
-          by_cases hch : hasChild I.desc w id = true
-          · simp [hch]
-            exact TermStep.cascade t ht hparts.1 (Or.inr hch) (fun _ => hpk)
-          · have hcf : hasChild I.desc w id = false := by
-              cases hc : hasChild I.desc w id <;> simp_all
-            simp [hch]
-            exact TermStep.lone t ht hsub hparts.1 hpk hcf
-        · simp [hsub]
-          exact TermStep.cascade t ht hparts.1 (Or.inl hsub) (fun h => absurd h hsub)
-      · rw [ite_eq_right hgo2]
-        exact TermStep.fall
+            cases hp : hasParkedCall a.parked with
+            | false => rfl
+            | true => simp [hp] at hpkB
+          have hch : hasChild I.desc w id = false := by
+            cases hc : hasChild I.desc w id with
+            | false => rfl
+            | true => simp [hc] at hchB
+          exact TermStep.lone t ht hsub htm hpk hch
+        · rw [ite_eq_right hlone]
+          by_cases hkids : (t.terminable && t.subtree == "" && !hasParkedCall a.parked &&
+              hasChild I.desc w id) = true
+          · simp only [hkids, ite_true]
+            simp [Bool.and_eq_true] at hkids
+            rcases hkids with ⟨⟨⟨htm, hsubB⟩, hpkB⟩, hch⟩
+            have hsub : t.subtree = "" := by simpa [beq_iff_eq] using hsubB
+            have hpk : hasParkedCall a.parked = false := by
+              cases hp : hasParkedCall a.parked with
+              | false => rfl
+              | true => simp [hp] at hpkB
+            exact TermStep.cascade t ht hsub htm hpk hch
+          · rw [ite_eq_right hkids]
+            exact TermStep.fall
 
-/-- An alive `terminate` crashes the roster, marks one childless actor shutting
-down, or marks its descendants shutting down. -/
+/-- An alive `terminate` crashes the roster, shuts one childless actor down, or
+aborts every descendant and notifies the immediate supervisor. A stage in a
+supervision tree does not have to be marked terminable. -/
 theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (hlive : a.life = .alive) (hk : ∃ tail, k.rest = .terminate :: tail) :
     execRun I w id a k = crashWorld w ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
         hasParkedCall a.parked = false ∧ hasChild I.desc w id = false ∧
         execRun I w id a k = shutdownActor I.desc w id) ∨
-      (∃ t, templateOf I.desc (tname id) = some t ∧ t.terminable = true ∧
-        (t.subtree ≠ "" ∨ hasChild I.desc w id = true) ∧
-        (t.subtree = "" → hasParkedCall a.parked = false) ∧
+      (∃ t, templateOf I.desc (tname id) = some t ∧ t.multiplicity = .perPeer ∧ t.subtree ≠ "" ∧
+        execRun I w id a k = terminateStage I.desc w id a) ∨
+      (∃ t, templateOf I.desc (tname id) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
+        hasParkedCall a.parked = false ∧ hasChild I.desc w id = true ∧
         execRun I w id a k = terminateStage I.desc w id a) := by
   have hstep := exec_term_step I w id a k hlive hk
   generalize hw : execRun I w id a k = wR at hstep
@@ -1198,8 +1327,10 @@ theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor) (k : 
   | crash _ _ _ _ => exact Or.inl rfl
   | lone t ht hsub htm hpk hch =>
     exact Or.inr (Or.inl ⟨t, ht, hsub, htm, hpk, hch, rfl⟩)
-  | cascade t ht htm hdesc hpk =>
-    exact Or.inr (Or.inr ⟨t, ht, htm, hdesc, hpk, rfl⟩)
+  | tree t ht hm hsub =>
+    exact Or.inr (Or.inr (Or.inl ⟨t, ht, hm, hsub, rfl⟩))
+  | cascade t ht hsub htm hpk hch =>
+    exact Or.inr (Or.inr (Or.inr ⟨t, ht, hsub, htm, hpk, hch, rfl⟩))
 
 /-- An actor that is shutting down seals on `exec`: the mailbox is cleared and
 the life becomes `dead`. A live actor runs. Anyone else has no `exec`. -/
@@ -1505,6 +1636,7 @@ def memberEffectOk (D : Description) (src : String) : Eff → Bool
   | .peer onTimeout => memberProgramOk D src onTimeout
   | .selfSchedule _ => true
   | .abort => true
+  | .spawn child => sameSubtree D src child && perPeerB D src && perPeerB D child
   | _ => true
 
 /-- Every effect of a subtree member's program, and every outcome continuation
@@ -1724,11 +1856,23 @@ def openSubtreeKey (D : Description) (w : World) (sub template : String) : Optio
       else go (k + 1) n
   go 0 (w.nextKey sub)
 
+/-- A scheduler spawn opens a new subtree root. A child of a per-peer stage is
+not a root: that stage births it with `Eff.spawn`, at its own key. -/
+def rootOf (D : Description) (t : Template) : Bool :=
+  if t.supervisor == "" then true
+  else
+    match templateOf D t.supervisor with
+    | some sup => sup.multiplicity == .one
+    | none => false
+
+def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
+  t.multiplicity == .perPeer && rootOf D t && decide (aliveCount w template < w.N)
+
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
   | none => none
   | some t =>
-    if t.multiplicity == .perPeer && aliveCount w template < w.N then
+    if maySpawnRoot I.desc w template t then
       let a := withTokens I.desc template
         { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
           tokens := fun _ => 0 }
@@ -6247,7 +6391,7 @@ theorem spawn_core_life (I : Impl) (w : World) (template : String) (w' : World) 
   | none => simp [ht] at h
   | some t =>
     simp only [ht] at h
-    by_cases hgo : (t.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
+    by_cases hgo : maySpawnRoot I.desc w template t = true
     · simp only [hgo, ite_true] at h
       by_cases hsub : (t.subtree == "") = true
       · simp only [hsub, ite_true] at h
@@ -6577,16 +6721,6 @@ theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (paren
           exact ihids w0 h0
     exact hfold w.roster w h
 
-/-- Beginning to shut down does not bring a core to life. -/
-theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
-    (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
-    (w.st (InstId.core name)).life = .alive := by
-  let wDesc := shutdownDesc w.roster.length D w id
-  have hActAlive : ((shutdownActor D wDesc id).st (InstId.core name)).life = .alive := by
-    simpa [terminateStage, wDesc] using h
-  have hDesc := shutdownActor_prev D wDesc id (InstId.core name) hActAlive
-  exact shutdownDesc_core_prev w.roster.length D w id name hDesc
-
 theorem crashWorld_prev (w : World) (i : InstId)
     (h : ((crashWorld w).st i).life = .alive) : (w.st i).life = .alive := by
   simp only [crashWorld] at h
@@ -6626,6 +6760,15 @@ theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
           exact ihids w0 h0
     exact markShutdown_prev w id i (hfold (markShutdown w id).roster (markShutdown w id) h)
 
+/-- Beginning to shut down does not bring a core to life. -/
+theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
+    (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
+    (w.st (InstId.core name)).life = .alive := by
+  have hmark : ((markTree w.roster.length D w id).st (InstId.core name)).life = .alive :=
+    enqueueTombstone_life D (markTree w.roster.length D w id) id (InstId.core name)
+      (by simpa [terminateStage] using h)
+  exact markTree_prev _ D w id (InstId.core name) hmark
+
 theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
     (h : ((abortChildren D w parent).st i).life = .alive) : (w.st i).life = .alive := by
   unfold abortChildren at h
@@ -6654,6 +6797,27 @@ theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
         simp only [hf, ite_false] at h0
         exact ihids w0 h0
   exact hfold w.roster w h
+
+theorem spawnChild_core_life (I : Impl) (w w' : World) (parent : InstId) (child name : String)
+    (h : spawnChild I w parent child = some w') :
+    (w'.st (InstId.core name)).life = (w.st (InstId.core name)).life := by
+  unfold spawnChild at h
+  cases parent with
+  | core _ => simp at h
+  | peer parentName k =>
+    cases ht : templateOf I.desc child with
+    | none => simp [ht] at h
+    | some t =>
+      simp only [ht] at h
+      by_cases hgo : (t.multiplicity == .perPeer &&
+          isChild I.desc (InstId.peer parentName k) (InstId.peer child k) &&
+          (w.st (InstId.peer child k)).life == .absent) = true
+      · simp only [hgo, ite_true] at h
+        cases h
+        have hpeer : InstId.core name ≠ InstId.peer child k := by
+          intro h; cases h
+        simp [setActor, cellsSt, hpeer]
+      · simp [hgo] at h
 
 theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (name : String) (ha : a.life = (w.st id).life)
@@ -6751,6 +6915,18 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
     | abort =>
       simp [execRun, hliveB, hk] at hl
       exact abortChildren_prev I.desc w id (InstId.core name) hl
+    | spawn child =>
+      simp [execRun, hliveB, hk] at hl
+      cases hs : spawnChild I w id child with
+      | none =>
+        simp [hs] at hl
+        exact crashWorld_prev w (InstId.core name) hl
+      | some w' =>
+        simp [hs] at hl
+        have hborn := spawnChild_core_life I w w' id child name hs
+        have hset := set_core_life w' id (proceed (w'.st id) (afterHead k)) name
+          (by simp [proceed_keeps_life])
+        exact hborn.symm.trans (hset.symm.trans hl)
     | terminate =>
       have hprop : a.life = .alive := by simpa [beq_iff_eq] using hliveB
       have hstep := exec_term_step I w id a k hprop ⟨es, hk⟩
@@ -6766,7 +6942,10 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
         | lone _ _ _ _ _ _ =>
           intro h
           exact shutdownActor_prev I.desc w id (InstId.core name) h
-        | cascade _ _ _ _ _ =>
+        | tree _ _ _ _ =>
+          intro h
+          exact terminateStage_core_prev I.desc w id a name h
+        | cascade _ _ _ _ _ _ =>
           intro h
           exact terminateStage_core_prev I.desc w id a name h
       exact H hl
