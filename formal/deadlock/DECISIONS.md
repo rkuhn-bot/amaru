@@ -122,7 +122,9 @@ is occupied: the tombstone is not queued until the seal.
 The tombstone is queued when the child seals, after it is dead. Pure-stage's
 `terminate_stage` finishes the child before the parent is notified, and the
 model follows that. A consumed tombstone therefore means the predecessor has
-sealed. Refunds still go to the live generation of the sender's key.
+sealed. Refunds still go to the live generation of the sender's key. A peer
+whose template tombstone is empty keeps an empty label, so the enqueue
+crashes before `offerPrio` and that slot is not in the affine count.
 
 `LocalOk` rejects a program that spawns the child from a state which can run
 while the tombstone is still queued, so a checked design cannot rely on the
@@ -134,8 +136,7 @@ cell-wake senders. A path contributes the sends on one outcome; the two
 branches are not added. The lane also keeps a label from a later transition,
 and it keeps each label once, so the sender term is the larger of the
 single-path count and the number of distinct labels. `prioSizeFails` is part
-of `LocalOk`. Under `GraphOk`, `LocalOk`, and that bound, `offerPrio` does
-not take its crash branch for a tombstone (`no_tombstone_overflow`). A
+of `LocalOk`. That bound does not keep a tombstone inside the lane. A
 self-schedule or a cell wake that does not fit still crashes. That is
 pure-stage's panic.
 
@@ -143,3 +144,25 @@ Pure-stage will be changed to match this bound. Its tombstone queue is an
 unbounded `VecDeque` (`supervisor.tombstones.push_back` in
 `crates/amaru-pure-stage/src/simulation/running/mod.rs:1323` at `34a45300`).
 That is an implementation change to make, not a defect in the model.
+
+## 2026-11-20 — Two live generations overflow one lane
+
+`no_tombstone_overflow` is false, and the semantics are left as they are.
+`Deadlock/Counterexample.lean` is a `GraphOk`, `LocalOk` design whose
+`prioSized` check passes. It runs at population 8.
+
+An empty-named root at key 5 spawns `R` generation 0. Later scheduler births
+of `R` fill keys 0–4 and then take key 5 again, because `openSubtreeKey`
+only searches below `nextKey`. Generation 1 is born while generation 0 is
+still alive. `findLive` returns generation 0.
+
+Generation 0 spawns `C`. The seal queues `dead/C#0` on generation 0, whose
+priority capacity is 1, so the lane is full. Generation 1 is still in
+`boot`. `restartOk` treats the spawn from `boot` as a first birth, and the
+spawn looks at generation 1's own empty lane, so the second `C` is born.
+Its seal offers another tombstone to generation 0, and `offerPrio` crashes.
+The same actions do not crash when that capacity is 2.
+
+`restartOk` and `prioSized` both account for one parent instance. They do
+not count a second live generation of that instance. Refunds still go to
+the live generation, and the tombstone is still queued at the seal.

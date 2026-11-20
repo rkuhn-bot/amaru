@@ -50,10 +50,11 @@ is still queued. The semantics makes the same spawn a no-op, for a core pool
 and for a per-peer parent, and a root spawn into such a slot is not enabled.
 A slot that is still shutting down is occupied too. The tombstone is queued
 at the seal, so the predecessor is dead before the parent is notified.
-`no_tombstone_overflow` says that under `GraphOk`, `LocalOk`, and
-`prioSized`, `offerPrio` does not take its crash branch for that tombstone.
-Tombstone overflow is not a crash source under the checks. A self-schedule
-or a cell wake that does not fit still crashes, matching pure-stage's panic.
+`no_tombstone_overflow` does not hold. `Deadlock/Counterexample.lean` is a
+`GraphOk` and `LocalOk` run, with `prioSized` true, in which the second seal
+of one slot finds the older generation's lane already full and `offerPrio`
+crashes. Tombstone overflow stays a crash source. A self-schedule or a cell
+wake that does not fit still crashes, matching pure-stage's panic.
 `LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head

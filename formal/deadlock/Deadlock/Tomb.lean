@@ -1,10 +1,12 @@
 /-
-One tombstone per child slot.
+One tombstone per child slot, for a world that already satisfies `Hold`.
 
-Under `GraphOk` and `LocalOk`, a reachable seal does not crash `offerPrio`
-when it hands the parent that child's tombstone. The lane's other priority
-messages are the declared self-schedules and cell wakes, each label once.
-The tombstones are one per live, shutting-down, or still-queued child slot.
+`tmb_seal_room` is that numeric fact: a pending seal has room on the live
+parent's lane when the slot account is inside `prioSized`. It is not true of
+every world `GraphOk` and `LocalOk` can reach. Two live generations of one
+supervisor can each spawn the same slot, and both seals offer their
+tombstone to the older generation. `Deadlock/Counterexample.lean` is that
+run; `offerPrio` crashes. The reachable wrapper stays unproved.
 -/
 
 import Deadlock.Local
