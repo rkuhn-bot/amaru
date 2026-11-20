@@ -151,8 +151,12 @@ structure Template where
   subtree : String := ""
   /-- An `awaitPeer` on this role is the timeout that kills `subtree`. -/
   timeoutKills : Bool := false
-  /-- Permanent core that receives the one tombstone when `subtree` is killed. -/
+  /-- Permanent core that receives the one tombstone when `subtree` is killed.
+  A per-peer template may name another member of its own subtree. -/
   supervisor : String := ""
+  /-- Label the supervisor handles when this child terminates. One label per
+  child template, chosen when the parent is wired. Empty means no tombstone. -/
+  tombstone : String := ""
   deriving DecidableEq, Repr, Inhabited, BEq
 
 structure Edge where

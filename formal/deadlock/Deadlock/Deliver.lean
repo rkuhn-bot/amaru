@@ -573,23 +573,26 @@ def lostHost (w : World) (id : InstId) : Prop := Halted (w.st id).life
 
 /-- A reliable message is later consumed by `recvBulk` or `recvPrio`, matched by
 the id the storing actor assigned, or its target had begun shutting down or
-had terminated before handling it. The loss is per message. A route that does
-not resolve is failed by `noteStale` before the message is stored, so it is
-not an obligation here. A try-drop send and a superseding cell wake are not
-obligations. -/
+had terminated while the message was still queued. The loss is per message and
+is witnessed at a state that still holds the message: the host enters
+`shuttingDown` or `dead` before the message is dequeued. `callTimeout` detaches
+a call by clearing `callFrom` and does not dequeue, so it is not a taking step.
+Only `recvBulk` and `recvPrio` take a message. A route that does not resolve is
+failed by `noteStale` before the message is stored, so it is not an obligation
+here. A try-drop send and a superseding cell wake are not obligations. -/
 def Delivered {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   (∀ i id m, m ∈ ((ρ.cfg i).st id).box → m.reliable = true →
     ∃ j, i ≤ j ∧
       ((ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) m.mid) ∨
-        lostHost (ρ.cfg j) id)) ∧
+        (lostHost (ρ.cfg j) id ∧ m ∈ ((ρ.cfg j).st id).box))) ∧
   (∀ i id p, p ∈ ((ρ.cfg i).st id).parked → p.msg.reliable = true →
     ∃ j, i ≤ j ∧
       ((ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) p.msg.mid) ∨
-        lostHost (ρ.cfg j) id)) ∧
+        (lostHost (ρ.cfg j) id ∧ p ∈ ((ρ.cfg j).st id).parked))) ∧
   (∀ i id m, m ∈ ((ρ.cfg i).st id).prio → m.reliable = true →
     ∃ j, i ≤ j ∧
       ((ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) m.mid) ∨
-        lostHost (ρ.cfg j) id))
+        (lostHost (ρ.cfg j) id ∧ m ∈ ((ρ.cfg j).st id).prio)))
 
 theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (hG : GraphOk I.desc) (id : InstId)
     (i : Nat) (h0 : ((ρ.cfg i).st id).life = .alive)

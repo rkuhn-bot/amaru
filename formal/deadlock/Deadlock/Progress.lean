@@ -664,7 +664,7 @@ theorem runtimeBusy_roster (I : Impl) (w : World) (hb : runtimeBusy I w = false)
     | some _ => simp [h, Option.isSome] at hf
 
 theorem quiet_no_forced (I : Impl) (w : World)
-    (hoff : ∀ id, id ∉ w.roster → (w.st id).life ≠ .alive ∧ (w.st id).phase = .idle)
+    (hoff : ∀ id, id ∉ w.roster → (w.st id).life = .absent ∧ (w.st id).phase = .idle)
     (hb : runtimeBusy I w = false) (a : Action) (hf : forced a = true) : ¬ Enabled I w a := by
   cases a with
   | spawn _ => simp [forced] at hf
@@ -702,9 +702,13 @@ theorem quiet_no_forced (I : Impl) (w : World)
       simp [Enabled, apply, finishWait, hidle] at hen
 
 
+theorem absent_ne_alive {l : Life} (h : l = .absent) : l ≠ .alive := by
+  intro h'
+  cases h.symm.trans h'
+
 /-- An id that the initial roster does not name is the absent actor. -/
 theorem off_idle_init (I : Impl) (N : Nat) (id : InstId) (h : id ∉ (initWorld I N).roster) :
-    ((initWorld I N).st id).phase = .idle ∧ ((initWorld I N).st id).life ≠ .alive := by
+    ((initWorld I N).st id).phase = .idle ∧ ((initWorld I N).st id).life = .absent := by
   refine ⟨init_phase I N id, ?_⟩
   rw [init_roster] at h
   rw [init_base_st]
@@ -715,9 +719,9 @@ theorem off_idle_init (I : Impl) (N : Nat) (id : InstId) (h : id ∉ (initWorld 
 /-- A step does not wake an actor that is off the roster. Spawn puts the new id
 on the roster, and every other step leaves that actor idle and not alive. -/
 theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
-    (hoff : ∀ id, id ∉ w.roster → (w.st id).phase = .idle ∧ (w.st id).life ≠ .alive)
+    (hoff : ∀ id, id ∉ w.roster → (w.st id).phase = .idle ∧ (w.st id).life = .absent)
     (h : apply I a w = some w') (s : InstId) (hs : s ∉ w'.roster) :
-    (w'.st s).phase = .idle ∧ (w'.st s).life ≠ .alive := by
+    (w'.st s).phase = .idle ∧ (w'.st s).life = .absent := by
   cases a with
   | stutter =>
     have heq := stutter_unchanged I w w' h
@@ -775,7 +779,7 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
             · exact False.elim (hready (Or.inl hl))
           have hne : s ≠ id := by
             intro heq
-            exact hdead (by simpa [heq] using hlid)
+            exact absent_ne_alive hdead (by simpa [heq] using hlid)
           have hst := deliver_st I w id ({ (w.st id) with prio := ms }) m w1 a1 s hdel
           refine ⟨?_, ?_⟩
           · simp [setActor, hne, hst, hidle]
@@ -797,7 +801,7 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
         · exact False.elim (hready (Or.inl hl))
     have hne : s ≠ id := by
       intro heq
-      exact hdead (by simpa [heq] using hlid)
+      exact absent_ne_alive hdead (by simpa [heq] using hlid)
     have hnpark : ∀ d c k, (w.st s).phase ≠ .parked d c k := by
       intro d c k hbad
       rw [hidle] at hbad
@@ -822,7 +826,7 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
         cases h
         have hne : s ≠ id := by
           intro heq
-          exact hdead (by simpa [heq] using hlid)
+          exact absent_ne_alive hdead (by simpa [heq] using hlid)
         have hnpark : ∀ d c ck, (w.st s).phase ≠ .parked d c ck := by
           intro d c ck hbad
           rw [hidle] at hbad
@@ -875,7 +879,7 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
 
 theorem off_idle_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
     (id : InstId) (h : id ∉ w.roster) :
-    (w.st id).phase = .idle ∧ (w.st id).life ≠ .alive := by
+    (w.st id).phase = .idle ∧ (w.st id).life = .absent := by
   induction hR generalizing id with
   | init => exact off_idle_init I N id h
   | step w w' a _ ha ih =>
@@ -978,7 +982,8 @@ theorem fin_exec_not_blocked_on_idle (I : Impl) {N : Nat} (e : FinExec I N)
   have hmem : dst ∈ (e.cfg e.len).roster := by
     by_cases hin : dst ∈ (e.cfg e.len).roster
     · exact hin
-    · exact False.elim ((off_idle_reachable I N (e.cfg e.len) hR dst hin).2 hl)
+    · have hlife := (off_idle_reachable I N (e.cfg e.len) hR dst hin).2
+      exact False.elim (by cases hlife.symm.trans hl)
   have hnone := (runtimeBusy_roster I (e.cfg e.len) e.maximal dst hmem).1
   simp [Enabled, apply, hnone] at hen
 

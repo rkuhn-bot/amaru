@@ -34,6 +34,15 @@ permanent pure stage, which is a multiplicity-one core, may also execute
 `terminate`, and its effect is the same as `crashed`: the whole system
 terminates.
 
+## 2026-11-20 — What deadlock freedom is about
+
+`deadlock_freedom` is about parked sends. A run is deadlocked when a send sits
+parked and nothing that actor can do makes the send progress. `Fair` on its
+own already excludes being stuck on an effect wait, a peer wait, or a call
+wait: each of those has a step the runtime is obliged to take, and fairness
+says that step is eventually taken. The theorem's content, past fairness, is
+the parked send.
+
 ## 2026-11-19 — Priority versus bulk
 
 Priority versus bulk: keep the model as it is. The hypothesis is `Fair`:

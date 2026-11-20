@@ -237,7 +237,7 @@ theorem demo_fair : Fair demoRun := by
   have hquiet (j : Nat) (hj : demoActs.length ≤ j) :
       runtimeBusy demoImpl (demoRun.cfg j) = false ∧
         (∀ id, id ∉ (demoRun.cfg j).roster →
-          ((demoRun.cfg j).st id).phase = .idle ∧ ((demoRun.cfg j).st id).life ≠ .alive) := by
+          ((demoRun.cfg j).st id).phase = .idle ∧ ((demoRun.cfg j).st id).life = .absent) := by
     obtain ⟨heq, hb⟩ := demo_tail j hj
     refine ⟨hb, ?_⟩
     intro id hid
@@ -373,7 +373,7 @@ theorem loss_fair : Fair lossRun := by
   have hquiet (j : Nat) (hj : lossActs.length ≤ j) :
       runtimeBusy lossImpl (lossRun.cfg j) = false ∧
         (∀ id, id ∉ (lossRun.cfg j).roster →
-          ((lossRun.cfg j).st id).phase = .idle ∧ ((lossRun.cfg j).st id).life ≠ .alive) := by
+          ((lossRun.cfg j).st id).phase = .idle ∧ ((lossRun.cfg j).st id).life = .absent) := by
     obtain ⟨heq, hb⟩ := loss_tail j hj
     refine ⟨hb, ?_⟩
     intro id hid
