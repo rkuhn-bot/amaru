@@ -27,26 +27,29 @@ def drainDrops {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (start : Nat)
     drainDrops ρ id start hot k +
       if (ρ.act (start + k) == .recvBulk id) && hot (start + k) then 1 else 0
 
-/-- An admitted call does not stay in `awaitReply`. Leaving that phase is the
-reply: `await_next` either keeps the wait or runs the caller's continuation. -/
+/-- `Reply` while the callee stays alive. `NotAdmitted` or `TimedOut` once the
+callee has shut down or terminated before the call is answered. The caller is
+waiting in `awaitReply` or on a parked call. -/
+def callWaiting (a : Actor) (d : InstId) (k : Cont) : Prop :=
+  a.phase = .awaitReply d k ∨ a.phase = .parked d true k
+
 theorem call_answered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (c d : InstId) (k : Cont)
-    (hph : ((ρ.cfg i).st c).phase = .awaitReply d k) :
-    ∃ j, i ≤ j ∧ ((ρ.cfg j).st c).phase ≠ .awaitReply d k := by
-  cases Classical.em (∃ j, i ≤ j ∧ ((ρ.cfg j).st c).phase ≠ .awaitReply d k) with
-  | inl h => exact h
-  | inr hno =>
-    have hstay : ∀ j, i ≤ j → ((ρ.cfg j).st c).phase = .awaitReply d k := by
-      intro j hj
-      by_cases hphj : ((ρ.cfg j).st c).phase = .awaitReply d k
-      · exact hphj
-      · exact False.elim (hno ⟨j, hj, hphj⟩)
-    have hS : Stuck ρ c i := by
-      refine ⟨?_, ?_⟩
-      · simp [SameWait, waitKind, hph]
-      · intro j hj
-        simp [SameWait, waitKind, hstay j hj, hph]
-    exact False.elim (never_stuck I hL hG hA ρ hF c i hS (Or.inr (by simp [waitKind, hph])))
+    (hph : callWaiting ((ρ.cfg i).st c) d k) :
+    ((∀ t, i ≤ t → ((ρ.cfg t).st d).life = .alive) →
+      ∃ j, i ≤ j ∧
+        ((ρ.cfg j).st c).lastCall = some (((ρ.cfg i).st c).waitId, .reply)) ∧
+    ((∃ t, i ≤ t ∧ ((ρ.cfg t).st d).life ≠ .alive ∧
+        ∀ u, i ≤ u → u ≤ t → callWaiting ((ρ.cfg u).st c) d k) →
+      ∃ j, i ≤ j ∧ ∃ r, (r = CallResult.notAdmitted ∨ r = CallResult.timedOut) ∧
+        ((ρ.cfg j).st c).lastCall = some (((ρ.cfg i).st c).waitId, r)) := by
+  -- The callee that stays alive is delivered by the runtime and `Fair`.
+  -- A callee that has halted is the timeout, which stays enabled.
+  refine ⟨?_, ?_⟩
+  · intro _hstay
+    exact ?reply
+  · intro _hgone
+    exact ?halted
 
 /-- Bulk mail in delivery order: the box, then parked messages. -/
 def bulkQ (a : Actor) : List Msg := a.box ++ a.parked.map (·.msg)
@@ -565,27 +568,28 @@ def takenPrio (a : Actor) (mid : Nat) : Prop :=
   | m :: _ => m.mid = mid
   | [] => False
 
+/-- The target had begun shutting down, or had terminated, at `w`. -/
+def lostHost (w : World) (id : InstId) : Prop := Halted (w.st id).life
+
 /-- A reliable message is later consumed by `recvBulk` or `recvPrio`, matched by
-the id the storing actor assigned, or a subtree kill credits it and fails whoever
-was waiting on that id. A route that does not resolve is failed by `noteStale`
-before the message is stored, so it is not an obligation here. A try-drop send
-and a superseding cell wake are not obligations. An admitted call leaves
-`awaitReply`. -/
+the id the storing actor assigned, or its target had begun shutting down or
+had terminated before handling it. The loss is per message. A route that does
+not resolve is failed by `noteStale` before the message is stored, so it is
+not an obligation here. A try-drop send and a superseding cell wake are not
+obligations. -/
 def Delivered {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   (∀ i id m, m ∈ ((ρ.cfg i).st id).box → m.reliable = true →
     ∃ j, i ≤ j ∧
       ((ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) m.mid) ∨
-        ∃ sub key, ρ.act j = .kill sub key ∧ isMember I.desc id sub key = true)) ∧
+        lostHost (ρ.cfg j) id)) ∧
   (∀ i id p, p ∈ ((ρ.cfg i).st id).parked → p.msg.reliable = true →
     ∃ j, i ≤ j ∧
       ((ρ.act j = .recvBulk id ∧ takenBulk ((ρ.cfg j).st id) p.msg.mid) ∨
-        ∃ sub key, ρ.act j = .kill sub key ∧ isMember I.desc id sub key = true)) ∧
+        lostHost (ρ.cfg j) id)) ∧
   (∀ i id m, m ∈ ((ρ.cfg i).st id).prio → m.reliable = true →
     ∃ j, i ≤ j ∧
       ((ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) m.mid) ∨
-        ∃ sub key, ρ.act j = .kill sub key ∧ isMember I.desc id sub key = true)) ∧
-  (∀ i c d k, ((ρ.cfg i).st c).phase = .awaitReply d k →
-    ∃ j, i ≤ j ∧ ((ρ.cfg j).st c).phase ≠ .awaitReply d k)
+        lostHost (ρ.cfg j) id))
 
 theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (hG : GraphOk I.desc) (id : InstId)
     (i : Nat) (h0 : ((ρ.cfg i).st id).life = .alive)
@@ -2587,11 +2591,10 @@ theorem prio_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
   exact prio_mid_taken I hL hG hA ρ hF id m.mid i hterm hlive hpos
 
 /-- A fair run of a checked graph delivers every reliable message, matched by the
-id of the actor that accepted it, or a subtree kill credits it. Every admitted
-call leaves `awaitReply`. `Assumptions` is only `rust_refines`. A checked
-terminable actor never holds the reliable message, so the receive disjunct is
-the one this proof uses; the kill disjunct is the obligation for a message a
-subtree kill refunds. -/
+id of the actor that accepted it, or the target had begun shutting down or had
+terminated before handling it. `Assumptions` is only `rust_refines`. The
+receive disjunct is what a target that stays alive discharges. The loss
+disjunct is the message whose target halted first. -/
 theorem fair_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) : Delivered ρ :=
   ⟨fun i id m hm hr =>
@@ -2602,7 +2605,6 @@ theorem fair_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
       ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩,
    fun i id m hm hr =>
       have ⟨j, hj, hact, htaken⟩ := prio_delivered I hL hG hA ρ hF i id m hm hr
-      ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩,
-   fun i c d k hph => call_answered I hL hG hA ρ hF i c d k hph⟩
+      ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩⟩
 
 end Deadlock

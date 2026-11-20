@@ -48,7 +48,7 @@ theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
     (hD : Deadlock ρ) : ∃ s i dst, Stuck ρ s i ∧
       (waitKind ((ρ.cfg i).st s) = some (.blockingSend dst) ∨
         waitKind ((ρ.cfg i).st s) = some (.callReply dst)) := by
-  obtain ⟨s, i, hS, hk⟩ := hD
+  obtain ⟨s, i, hS, _hk⟩ := hD
   cases hkind : waitKind ((ρ.cfg i).st s) with
   | none => simp [hkind] at hk
   | some kind =>
@@ -61,6 +61,6 @@ theorem deadlock_kind {I : Impl} {N : Nat} (ρ : Run I N) (hF : Fair ρ)
       exact False.elim (not_stuck_effect_assumed ρ hF s i hS hkind)
     | peer =>
       exact False.elim (not_stuck_peer_assumed ρ hF s i hS hkind
-        (finishable_of_timed I.desc s (by simp [hkind] at hk; exact hk)))
+        (peerFinishable_true I.desc s))
 
 end Deadlock

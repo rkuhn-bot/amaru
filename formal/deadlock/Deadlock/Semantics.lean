@@ -55,8 +55,21 @@ def timeoutKillsB (D : Description) (name : String) : Bool :=
 inductive Life where
   | absent
   | alive
+  /-- Has begun to terminate. It accepts nothing. A later `exec` seals it to `dead`. -/
+  | shuttingDown
   | dead
   deriving DecidableEq, Repr, Inhabited
+
+/-- How a life may change. Shutting down and death are permanent. An id is not reused. -/
+def LifeStep (old new : Life) : Prop :=
+  new = old ∨
+    (old = .absent ∧ new = .alive) ∨
+    (old = .alive ∧ new = .shuttingDown) ∨
+    (old = .alive ∧ new = .dead) ∨
+    (old = .shuttingDown ∧ new = .dead)
+
+/-- The target will not handle mail: it has begun shutting down, or it has terminated. -/
+def Halted (l : Life) : Prop := l = .shuttingDown ∨ l = .dead
 
 /-- Effects carry the real message label. `hint` is a per-peer index; cores ignore it. -/
 inductive Eff where
@@ -285,7 +298,8 @@ def resolveId (D : Description) (sender : InstId) (dst : String) : Option InstId
       | some k => some (.peer dst k)
 
 /-- A live target only. A per-peer role is addressed by the sender's subtree key,
-not by a literal hint. A dead or never-spawned key does not resolve. -/
+not by a literal hint. Shutting-down, dead, and never-spawned keys do not
+resolve, so the send is dropped and stays dropped. -/
 def route (w : World) (D : Description) (sender : InstId) (dst : String) : Option InstId :=
   match templateOf D dst with
   | none => none
@@ -446,16 +460,13 @@ def enqueueOrPark (w : World) (D : Description) (sender dst : InstId) (msg : Msg
   let target := w.st dst
   let cap := capBulk D w.N dst
   if target.life ≠ .alive then
-    -- The message is not stored and the sender is not charged.
-    -- A dead name can be the target of a parked call: that id is never spawned
-    -- again, and the deadline takes `NotAdmitted`. An absent name can still be
-    -- spawned, so the call takes `NotAdmitted` now rather than sitting on an id
-    -- that may become a live actor with no mailbox entry. A send proceeds.
+    -- Shutting-down, dead, and absent targets store nothing and are not charged.
+    -- The drop is permanent: those lives do not return to alive, and a dead or
+    -- shutting-down id is not spawned again. A call ends as `NotAdmitted`. A
+    -- send proceeds. An absent id can still be spawned later, but this call
+    -- does not sit on it.
     if isCall then
-      if target.life == .dead then
-        setActor w sender { issueCall (w.st sender) with phase := .parked dst true k }
-      else
-        setActor w sender (finishCall (issueCall (w.st sender)) k .notAdmitted)
+      setActor w sender (finishCall (issueCall (w.st sender)) k .notAdmitted)
     else
       setActor w sender (proceed (w.st sender) k)
   else
@@ -709,15 +720,48 @@ def abortDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : Wor
         abortActor D w child (w.st child)
       else w) w
 
-/-- Voluntary termination. Descendants die in this step. Siblings do not.
-The parent is told on its priority lane. -/
+/-- Enter shutting-down. Mail stays until `releaseWorld` seals the actor.
+A life that is not alive is left alone. -/
+def markShutdown (w : World) (id : InstId) : World :=
+  if (w.st id).life == .alive then
+    setActor w id { (w.st id) with life := .shuttingDown }
+  else w
+
+/-- Mark `id` shutting down and hand its parent the tombstone. The parent
+answers later, in its own step. -/
+def shutdownActor (D : Description) (w : World) (id : InstId) : World :=
+  enqueueTombstone D (markShutdown w id) id
+
+/-- Mark the live terminable descendants of `parent` shutting down, children
+before grandchildren. They stop accepting mail in this step. Each seals
+itself on a later `exec`. -/
+def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : World :=
+  match fuel with
+  | 0 => w
+  | fuel + 1 =>
+    w.roster.foldl (fun w child =>
+      if isChild D parent child && (w.st child).life == .alive &&
+          childTerminable D child then
+        let w := shutdownDesc fuel D w child
+        shutdownActor D w child
+      else w) w
+
+/-- Voluntary termination. Every descendant begins shutting down in this step.
+Siblings do not. The parent is told on its priority lane and reacts later. -/
 def terminateStage (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
-  -- `a` is the actor that committed. Descendants are aborted first, and the
-  -- stage then dies from the actor those aborts left behind.
   let _committed := a
-  let w := abortDesc w.roster.length D w id
-  let w := abortActor D w id (w.st id)
-  enqueueTombstone D w id
+  let w := shutdownDesc w.roster.length D w id
+  shutdownActor D w id
+
+/-- A permanent core's `terminate`. Every live or shutting-down actor on the
+roster dies in this step, in the crashed phase. -/
+def crashActor (a : Actor) : Actor :=
+  if a.life == .alive || a.life == .shuttingDown then
+    { a with life := .dead, phase := .crashed, box := [], prio := [], parked := [] }
+  else a
+
+def crashWorld (w : World) : World :=
+  { w with st := fun i => if decide (i ∈ w.roster) then crashActor (w.st i) else w.st i }
 
 /-- A peer supervises nobody, so aborting its descendants is the identity. -/
 theorem abortDesc_peer (fuel : Nat) (D : Description) (w : World) (name : String) (ix : Nat) :
@@ -801,31 +845,40 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
     | .internal => setActor w id { a with phase := .awaitEffect k' }
     | .peer => setActor w id { a with phase := .awaitPeer k' }
     | .terminate =>
-      -- Terminable templates only. A lone actor with no children is refused
-      -- while a call is parked. Anyone else who commits aborts its own
-      -- descendants and tells its parent. Siblings are left alone.
+      -- A permanent core crashes the whole roster. A terminable actor begins
+      -- shutting down. A lone actor with no children is refused while a call
+      -- is parked. Anyone else who commits marks its own descendants shutting
+      -- down and tells its parent. Siblings are left alone.
       match templateOf I.desc (tname id) with
       | some t =>
-        if t.terminable && (t.subtree != "" || !hasParkedCall a.parked) then
+        if t.multiplicity == .one && !t.terminable then
+          crashWorld w
+        else if t.terminable && (t.subtree != "" || !hasParkedCall a.parked) then
           if t.subtree == "" && !(hasChild I.desc w id) then
-            releaseWorld I.desc w id a
+            shutdownActor I.desc w id
           else
             terminateStage I.desc w id a
         else w
       | none => w
 
 /-- What one `terminate` effect does.
-`kept` leaves the world. `lone` refunds one actor that has no children.
-`cascade` aborts that actor's descendants and notifies its parent. -/
+`kept` leaves the world. `crash` is a permanent core: the roster dies.
+`lone` marks one childless actor shutting down. `cascade` marks that actor's
+descendants shutting down and notifies its parent. -/
 inductive TermStep (I : Impl) (w : World) (id : InstId) (a : Actor) : World → Prop where
   | kept : TermStep I w id a w
+  | crash (t : Template) :
+      templateOf I.desc (tname id) = some t →
+      t.multiplicity = .one →
+      t.terminable = false →
+      TermStep I w id a (crashWorld w)
   | lone (t : Template) :
       templateOf I.desc (tname id) = some t →
       t.subtree = "" →
       t.terminable = true →
       hasParkedCall a.parked = false →
       hasChild I.desc w id = false →
-      TermStep I w id a (releaseWorld I.desc w id a)
+      TermStep I w id a (shutdownActor I.desc w id)
   | cascade (t : Template) :
       templateOf I.desc (tname id) = some t →
       t.terminable = true →
@@ -833,7 +886,8 @@ inductive TermStep (I : Impl) (w : World) (id : InstId) (a : Actor) : World → 
       (t.subtree = "" → hasParkedCall a.parked = false) →
       TermStep I w id a (terminateStage I.desc w id a)
 
-/-- Classify `terminate`. A member commits even when a call is parked. -/
+/-- Classify `terminate`. A member commits even when a call is parked.
+A permanent core crashes the roster. -/
 theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor)
     (tail : List Eff) (toState : String) (replyTo : Option InstId) :
     TermStep I w id a (execRun I w id a ⟨.terminate :: tail, toState, replyTo⟩) := by
@@ -843,33 +897,53 @@ theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor)
     exact TermStep.kept
   | some t =>
     simp only [execRun, ht]
-    split
-    · next hgo =>
-      have hparts := (Bool.and_eq_true _ _).mp hgo
-      have hor := (Bool.or_eq_true _ _).mp hparts.2
-      by_cases hsub : t.subtree = ""
-      · simp [hsub]
-        have hpk : hasParkedCall a.parked = false := by
-          have hne : (t.subtree != "") = false := by simp [bne, hsub]
-          simpa [hne] using hor
-        by_cases hch : hasChild I.desc w id = true
-        · simp [hch]
-          exact TermStep.cascade t ht hparts.1 (Or.inr hch) (fun _ => hpk)
-        · have hcf : hasChild I.desc w id = false := by
-            cases hc : hasChild I.desc w id <;> simp_all
-          simp [hch]
-          exact TermStep.lone t ht hsub hparts.1 hpk hcf
-      · simp [hsub]
-        exact TermStep.cascade t ht hparts.1 (Or.inl hsub) (fun h => absurd h hsub)
-    · exact TermStep.kept
+    by_cases hcrash : (t.multiplicity == .one && !t.terminable) = true
+    · simp [hcrash]
+      have hparts := (Bool.and_eq_true _ _).mp hcrash
+      have hone : t.multiplicity = .one := by
+        cases hm : t.multiplicity with
+        | one => rfl
+        | perPeer =>
+          simp [hm, show (Multiplicity.perPeer == Multiplicity.one) = false from rfl] at hparts
+      have hnt : t.terminable = false := by
+        have hn : (!t.terminable) = true := hparts.2
+        cases htm : t.terminable with
+        | false => rfl
+        | true => simp [htm] at hn
+      exact TermStep.crash t ht hone hnt
+    · rw [ite_eq_right (by simpa [Bool.not_eq_true] using hcrash)]
+      by_cases hgo : (t.terminable && (t.subtree != "" || !hasParkedCall a.parked)) = true
+      · simp [hgo]
+        have hparts := (Bool.and_eq_true _ _).mp hgo
+        have hor := (Bool.or_eq_true _ _).mp hparts.2
+        by_cases hsub : t.subtree = ""
+        · simp [hsub]
+          have hpk : hasParkedCall a.parked = false := by
+            have hne : (t.subtree != "") = false := by simp [bne, hsub]
+            simpa [hne] using hor
+          by_cases hch : hasChild I.desc w id = true
+          · simp [hch]
+            exact TermStep.cascade t ht hparts.1 (Or.inr hch) (fun _ => hpk)
+          · have hcf : hasChild I.desc w id = false := by
+              cases hc : hasChild I.desc w id <;> simp_all
+            simp [hch]
+            exact TermStep.lone t ht hsub hparts.1 hpk hcf
+        · simp [hsub]
+          exact TermStep.cascade t ht hparts.1 (Or.inl hsub) (fun h => absurd h hsub)
+      · rw [ite_eq_right (by simpa [Bool.not_eq_true] using hgo)]
+        exact TermStep.kept
 
-/-- `terminate` leaves the world, refunds one childless actor, or aborts descendants. -/
+/-- `terminate` leaves the world, crashes the roster, marks one childless actor
+shutting down, or marks its descendants shutting down. -/
 theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor)
     (tail : List Eff) (toState : String) (replyTo : Option InstId) :
     execRun I w id a ⟨.terminate :: tail, toState, replyTo⟩ = w ∨
+      (∃ t, templateOf I.desc (tname id) = some t ∧ t.multiplicity = .one ∧
+        t.terminable = false ∧
+        execRun I w id a ⟨.terminate :: tail, toState, replyTo⟩ = crashWorld w) ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
         hasParkedCall a.parked = false ∧ hasChild I.desc w id = false ∧
-        execRun I w id a ⟨.terminate :: tail, toState, replyTo⟩ = releaseWorld I.desc w id a) ∨
+        execRun I w id a ⟨.terminate :: tail, toState, replyTo⟩ = shutdownActor I.desc w id) ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧ t.terminable = true ∧
         (t.subtree ≠ "" ∨ hasChild I.desc w id = true) ∧
         (t.subtree = "" → hasParkedCall a.parked = false) ∧
@@ -878,81 +952,65 @@ theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor)
   have hstep := exec_term_step I w id a tail toState replyTo
   generalize hw : execRun I w id a ⟨.terminate :: tail, toState, replyTo⟩ = wR at hstep
   have hgoal : wR = w ∨
+      (∃ t, templateOf I.desc (tname id) = some t ∧ t.multiplicity = .one ∧
+        t.terminable = false ∧ wR = crashWorld w) ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
         hasParkedCall a.parked = false ∧ hasChild I.desc w id = false ∧
-        wR = releaseWorld I.desc w id a) ∨
+        wR = shutdownActor I.desc w id) ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧ t.terminable = true ∧
         (t.subtree ≠ "" ∨ hasChild I.desc w id = true) ∧
         (t.subtree = "" → hasParkedCall a.parked = false) ∧
         wR = terminateStage I.desc w id a) := by
     cases hstep with
     | kept => exact Or.inl rfl
+    | crash t ht hone hnt => exact Or.inr (Or.inl ⟨t, ht, hone, hnt, rfl⟩)
     | lone t ht hsub htm hpk hch =>
-      exact Or.inr (Or.inl ⟨t, ht, hsub, htm, hpk, hch, rfl⟩)
+      exact Or.inr (Or.inr (Or.inl ⟨t, ht, hsub, htm, hpk, hch, rfl⟩))
     | cascade t ht htm hdesc hpk =>
-      exact Or.inr (Or.inr ⟨t, ht, htm, hdesc, hpk, rfl⟩)
-  rcases hgoal with heq | ⟨t, ht, hsub, htm, hpk, hch, heq⟩ | ⟨t, ht, htm, hdesc, hpk, heq⟩
+      exact Or.inr (Or.inr (Or.inr ⟨t, ht, htm, hdesc, hpk, rfl⟩))
+  rcases hgoal with heq | ⟨t, ht, hone, hnt, heq⟩ | ⟨t, ht, hsub, htm, hpk, hch, heq⟩ |
+      ⟨t, ht, htm, hdesc, hpk, heq⟩
   · exact Or.inl heq
-  · exact Or.inr (Or.inl ⟨t, ht, hsub, htm, hpk, hch, heq⟩)
-  · exact Or.inr (Or.inr ⟨t, ht, htm, hdesc, hpk, heq⟩)
+  · exact Or.inr (Or.inl ⟨t, ht, hone, hnt, heq⟩)
+  · exact Or.inr (Or.inr (Or.inl ⟨t, ht, hsub, htm, hpk, hch, heq⟩))
+  · exact Or.inr (Or.inr (Or.inr ⟨t, ht, htm, hdesc, hpk, heq⟩))
 
+/-- An actor that is shutting down seals on `exec`: the mailbox is cleared and
+the life becomes `dead`. A live actor runs. Anyone else has no `exec`. -/
 def execHead (I : Impl) (w : World) (id : InstId) : Option World :=
   let a := w.st id
-  if a.life ≠ .alive then none
+  if a.life == .shuttingDown then some (releaseWorld I.desc w id a)
+  else if a.life ≠ .alive then none
   else
     match a.phase with
     | .run k => some (execRun I w id a k)
     | _ => none
 
-/-- `true` when this actor's template declares its peer waits untimed. An untimed
-peer may stay silent. A timed peer wait ends by timeout, which is the `finish`
-step itself. -/
+/-- The template flag. The step relation does not consult it: every external
+wait ends by `finish`, which is a normal timeout. -/
 def peerUntimed (D : Description) (id : InstId) : Bool :=
   match templateOf D (tname id) with
   | some t => t.untimedPeer
   | none => false
 
-/-- `finish` is enabled for this peer wait. A timed template always is. An
-untimed template is when a timed peer in its subtree can kill that subtree.
-A pure untimed wait (`templatePure`) is not: nothing kills it, so it is an
-external stall. -/
-def peerFinishable (D : Description) (id : InstId) : Bool :=
-  match templateOf D (tname id) with
-  | none => true
-  | some t => !t.untimedPeer || timedCohortEnds D (tname id)
+/-- Every peer wait can `finish`. The timeout is a normal result. -/
+def peerFinishable (_D : Description) (_id : InstId) : Bool := true
 
-/-- The actor is stopped on an untimed peer that no timed cohort peer can end. -/
-def PurePeerEnd (D : Description) (w : World) (id : InstId) : Prop :=
-  ∃ k, (w.st id).phase = .awaitPeer k ∧ peerFinishable D id = false
+/-- No peer wait is an external stall. `finish` is enabled on every `awaitPeer`. -/
+def PurePeerEnd (_D : Description) (_w : World) (_id : InstId) : Prop := False
 
-theorem peerFinishable_eq_not_pure (D : Description) (id : InstId) :
-    peerFinishable D id = !templatePure D (tname id) := by
-  cases ht : templateOf D (tname id) with
-  | none => simp [peerFinishable, templatePure, ht]
-  | some t => simp [peerFinishable, templatePure, ht]
+theorem peerFinishable_true (D : Description) (id : InstId) : peerFinishable D id = true := rfl
 
-theorem finishable_of_timed (D : Description) (id : InstId) (hu : peerUntimed D id = false) :
-    peerFinishable D id = true := by
-  cases ht : templateOf D (tname id) with
-  | none => simp [peerFinishable, ht]
-  | some t =>
-    simp [peerUntimed, peerFinishable, ht] at hu ⊢
-    simp [hu]
+theorem finishable_of_timed (D : Description) (id : InstId) (_hu : peerUntimed D id = false) :
+    peerFinishable D id = true := rfl
 
 theorem untimed_of_silent (D : Description) (id : InstId) (hf : peerFinishable D id = false) :
     peerUntimed D id = true := by
-  cases ht : templateOf D (tname id) with
-  | none => simp [peerFinishable, ht] at hf
-  | some t =>
-    simp [peerUntimed, peerFinishable, ht] at hf ⊢
-    cases hb : t.untimedPeer <;> simp_all
+  simp [peerFinishable] at hf
 
 theorem pure_of_silent (D : Description) (id : InstId) (hf : peerFinishable D id = false) :
     templatePure D (tname id) = true := by
-  have h := peerFinishable_eq_not_pure D id
-  cases hp : templatePure D (tname id) with
-  | true => rfl
-  | false => simp [hp, hf] at h
+  simp [peerFinishable] at hf
 
 /-- Drop `callFrom` on messages from `caller`. The bytes stay queued. -/
 def detachMsg (caller : InstId) (m : Msg) : Msg :=
@@ -1114,14 +1172,12 @@ def callTimeout (w : World) (id : InstId) : Option World :=
       some (setActor w id (finishCall (w.st id) k .notAdmitted))
     | _ => none
 
-/-- Internal effects complete as an ordinary step. A finishable peer wait
-completes the same way: its own timeout, or a timed peer in the cohort. A pure
-untimed peer wait does not. -/
+/-- Internal effects and peer waits complete as an ordinary step. The peer
+result is the timeout: a normal value the typestate handles. -/
 def finishWait (I : Impl) (w : World) (id : InstId) : Option World :=
   match (w.st id).phase with
   | .awaitEffect k => some (setActor w id (proceed (w.st id) k))
-  | .awaitPeer k =>
-    if !peerFinishable I.desc id then none else some (setActor w id (proceed (w.st id) k))
+  | .awaitPeer k => some (setActor w id (proceed (w.st id) k))
   | _ => none
 
 /-- A declared ingress edge: a non-blocking `trySend` the environment may deliver. -/
@@ -1199,15 +1255,18 @@ def perPeerB (D : Description) (name : String) : Bool :=
   | some t => t.multiplicity == .perPeer
   | none => false
 
-/-- One effect of a subtree member. A send, try-send, or call stays on a
-per-peer role of the same subtree, which the subtree kill removes with the
-sender. `selfSchedule` is the same actor. A call to a permanent core is not
-enabled: the core would outlive the caller, and dropping the parked call would
-break delivery. -/
+/-- A per-peer member talks only to a per-peer role of its own subtree.
+A permanent core is not per-peer, so a call to one is not enabled. A lone
+terminable is not a subtree member and is not covered here: it stays mute. -/
+abbrev subtreeTalk (D : Description) (src dst : String) : Bool :=
+  sameSubtree D src dst && perPeerB D dst
+
+/-- One effect of a subtree member. A send, try-send, or call stays inside
+`subtreeTalk`. `selfSchedule` is the same actor. -/
 def memberEffectOk (D : Description) (src : String) : Eff → Bool
-  | .send dst _ _ => sameSubtree D src dst && perPeerB D dst
-  | .trySend dst _ _ => sameSubtree D src dst && perPeerB D dst
-  | .call dst _ _ => sameSubtree D src dst && perPeerB D dst
+  | .send dst _ _ => subtreeTalk D src dst
+  | .trySend dst _ _ => subtreeTalk D src dst
+  | .call dst _ _ => subtreeTalk D src dst
   | .selfSchedule _ => true
   | _ => true
 
@@ -1296,8 +1355,7 @@ theorem finish_proceed (I : Impl) (w w' : World) (id : InstId)
     exact ⟨k, Or.inl rfl, rfl⟩
   | awaitPeer k =>
     simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    cases hw
+    cases h
     exact ⟨k, Or.inr rfl, rfl⟩
   | idle => simp [finishWait, hph] at h
   | run _ => simp [finishWait, hph] at h
@@ -1456,12 +1514,11 @@ def apply (I : Impl) (a : Action) (w : World) : Option World :=
   | .callTimeout s => callTimeout w s
   | .stutter => if runtimeBusy I w then none else some w
 
-/-- Data branch of `awaitPeer`: the segment arrived and the continuation runs.
-This is `finish` when the wait is finishable. -/
+/-- Data branch of `awaitPeer`: the external result arrived and the continuation
+runs. The same step is the timeout. -/
 def peerData (I : Impl) (w : World) (id : InstId) : Option World :=
   match (w.st id).phase with
-  | .awaitPeer k =>
-    if peerFinishable I.desc id then some (setActor w id (proceed (w.st id) k)) else none
+  | .awaitPeer k => some (setActor w id (proceed (w.st id) k))
   | _ => none
 
 theorem stutter_unchanged (I : Impl) (w w' : World) (h : apply I .stutter w = some w') : w' = w := by
@@ -1553,17 +1610,15 @@ def Stuck {I : Impl} {N : Nat} (ρ : Run I N) (s : InstId) (i : Nat) : Prop :=
     ∀ j, i ≤ j → SameWait ((ρ.cfg i).st s) ((ρ.cfg j).st s)
 
 /-- A run is deadlocked when some actor is stuck on a blocking send, a call
-reply, an internal effect, or a timed peer wait. An untimed peer wait is not
-a deadlock. `finish` is still enabled on it when a timed peer in the cohort
-can end the chain (`peerFinishable`). A pure untimed wait leaves `finish`
-disabled, and the actor may stay there. -/
+reply, an internal effect, or a peer wait. Every peer wait has a timeout, so
+fairness taking `finish` is what says it does not stay stuck. -/
 def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
   ∃ s i, Stuck ρ s i ∧
     match waitKind ((ρ.cfg i).st s) with
     | some (.blockingSend _) => True
     | some (.callReply _) => True
     | some .effect => True
-    | some .peer => peerUntimed I.desc s = false
+    | some .peer => True
     | _ => False
 
 /-- Program length, used as the measure that makes a busy actor reach idle. -/
@@ -5726,15 +5781,11 @@ theorem enqueue_core_life (w : World) (D : Description) (sender dst : InstId) (m
              · simp [hid, hlive]
                rw [if_neg hflip]
              · rw [if_neg hi, if_neg hid]
-     · first
-       | simp [hlive, setActor, issueCall, proceed_keeps_life]
-         by_cases hi : id = sender <;> simp [hi, issueCall, proceed_keeps_life]
-       | simp [hlive]
-         by_cases hdead : (w.st dst).life = .dead
-         · simp [hdead, setActor, issueCall]
-           by_cases hi : id = sender <;> simp [hi, issueCall]
-         · simp [hdead, setActor, finishCall, issueCall, proceed_keeps_life]
-           by_cases hi : id = sender <;> simp [hi, finishCall, issueCall, proceed_keeps_life])
+     · simp [hlive, setActor, issueCall, finishCall, proceed]
+       by_cases hi : id = sender
+       · simp [hi, finishCall, proceed, proceed_keeps_life]
+         cases k.rest <;> simp [proceed, proceed_keeps_life]
+       · simp [hi, proceed_keeps_life])
 
 theorem reply_core_life (w : World) (sender : InstId) (k : Cont) (name : String) :
     ((performReply w sender k).st (InstId.core name)).life =
@@ -6091,18 +6142,95 @@ theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent :
           exact ihids w0 h0
     exact hfold w.roster w h
 
-/-- A descendant abort does not bring a core to life. -/
+theorem enqueueTombstone_life (D : Description) (w : World) (child i : InstId) :
+    ((enqueueTombstone D w child).st i).life = (w.st i).life := by
+  unfold enqueueTombstone
+  cases hsup : supervisorOf D child with
+  | none => rfl
+  | some parent =>
+    simp only [hsup]
+    by_cases hl : (w.st parent).life = .alive
+    · have hb : ((w.st parent).life != .alive) = false := by simp [bne, beq_iff_eq, hl]
+      simp only [hb, ite_false]
+      by_cases hi : i = parent <;> simp [setActor, hi]
+    · have hb : ((w.st parent).life != .alive) = true := by simp [bne, beq_iff_eq, hl]
+      simp [hb]
+
+theorem markShutdown_prev (w : World) (id i : InstId)
+    (h : ((markShutdown w id).st i).life = .alive) : (w.st i).life = .alive := by
+  unfold markShutdown at h
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · simp only [hlive, ite_true, setActor] at h
+    by_cases hi : i = id
+    · simp [hi] at h
+    · simpa [hi] using h
+  · simpa [hlive] using h
+
+theorem shutdownActor_prev (D : Description) (w : World) (id i : InstId)
+    (h : ((shutdownActor D w id).st i).life = .alive) : (w.st i).life = .alive := by
+  have hmark : ((markShutdown w id).st i).life = .alive := by
+    have hlife := enqueueTombstone_life D (markShutdown w id) id i
+    simpa [shutdownActor] using hlife.symm.trans h
+  exact markShutdown_prev w id i hmark
+
+theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent : InstId)
+    (name : String) (h : ((shutdownDesc fuel D w parent).st (InstId.core name)).life = .alive) :
+    (w.st (InstId.core name)).life = .alive := by
+  induction fuel generalizing w parent with
+  | zero => simpa [shutdownDesc] using h
+  | succ fuel ih =>
+    simp only [shutdownDesc] at h
+    let step (w : World) (child : InstId) : World :=
+      if isChild D parent child && (w.st child).life == .alive && childTerminable D child then
+        let w := shutdownDesc fuel D w child
+        shutdownActor D w child
+      else w
+    have hfold : ∀ (ids : List InstId) (w0 : World),
+        ((ids.foldl step w0).st (InstId.core name)).life = .alive →
+          (w0.st (InstId.core name)).life = .alive := by
+      intro ids
+      induction ids with
+      | nil => intro _ h0; exact h0
+      | cons child ids ihids =>
+        intro w0 h0
+        simp only [List.foldl_cons, step] at h0
+        by_cases hcond : (isChild D parent child && (w0.st child).life == .alive &&
+            childTerminable D child) = true
+        · simp only [hcond, ite_true] at h0
+          let wDesc := shutdownDesc fuel D w0 child
+          have hActAlive : ((shutdownActor D wDesc child).st (InstId.core name)).life = .alive :=
+            ihids _ h0
+          have hDescAlive := shutdownActor_prev D wDesc child (InstId.core name) hActAlive
+          exact ih w0 child hDescAlive
+        · have hf : (isChild D parent child && (w0.st child).life == .alive &&
+              childTerminable D child) = false := by
+            cases hb : isChild D parent child && (w0.st child).life == .alive &&
+                childTerminable D child with
+            | false => rfl
+            | true => exact absurd hb hcond
+          simp only [hf, ite_false] at h0
+          exact ihids w0 h0
+    exact hfold w.roster w h
+
+/-- Beginning to shut down does not bring a core to life. -/
 theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
     (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
     (w.st (InstId.core name)).life = .alive := by
-  let wDesc := abortDesc w.roster.length D w id
-  let wAct := abortActor D wDesc id (wDesc.st id)
-  have hActAlive : (wAct.st (InstId.core name)).life = .alive := by
-    have hfin : ((enqueueTombstone D wAct id).st (InstId.core name)).life = .alive := by
-      simpa [terminateStage, wDesc, wAct] using h
-    exact (tombstone_core_life D wAct id name).symm.trans hfin
-  have hDesc := abortActor_core_prev D wDesc id (wDesc.st id) name hActAlive
-  exact abortDesc_core_prev w.roster.length D w id name hDesc
+  let wDesc := shutdownDesc w.roster.length D w id
+  have hActAlive : ((shutdownActor D wDesc id).st (InstId.core name)).life = .alive := by
+    simpa [terminateStage, wDesc] using h
+  have hDesc := shutdownActor_prev D wDesc id (InstId.core name) hActAlive
+  exact shutdownDesc_core_prev w.roster.length D w id name hDesc
+
+theorem crashWorld_prev (w : World) (i : InstId)
+    (h : ((crashWorld w).st i).life = .alive) : (w.st i).life = .alive := by
+  simp only [crashWorld] at h
+  by_cases hmem : decide (i ∈ w.roster) = true
+  · simp only [hmem, ite_true, crashActor] at h
+    by_cases hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true
+    · simp [hgo] at h
+    · simpa [hgo] using h
+  · simpa [hmem] using h
 
 /-- If `exec` leaves a core alive, it was already alive. A core's own lone
 `terminate` is the only life change, and that one ends dead. -/
@@ -6201,15 +6329,12 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
         cases hstep with
         | kept =>
           intro h; exact h
+        | crash _ _ _ _ =>
+          intro h
+          exact crashWorld_prev w (InstId.core name) h
         | lone _ _ _ _ _ _ =>
           intro h
-          by_cases hid : id = InstId.core name
-          · rw [hid] at h
-            have hdead := releaseWorld_self_dead I.desc w (InstId.core name) a
-            rw [hdead] at h
-            cases h
-          · have hne : InstId.core name ≠ id := fun hne => hid hne.symm
-            exact (releaseWorld_core_life I.desc w id a name hne).symm.trans h
+          exact shutdownActor_prev I.desc w id (InstId.core name) h
         | cascade _ _ _ _ _ =>
           intro h
           exact terminateStage_core_prev I.desc w id a name h
@@ -6316,20 +6441,32 @@ theorem apply_core_prev (I : Impl) (w w' : World) (a : Action) (name : String)
   | exec id =>
     have hhead : execHead I w id = some w' := by simpa [apply] using h
     unfold execHead at hhead
-    by_cases hlive : (w.st id).life = .alive
-    · simp [hlive] at hhead
-      cases hph : (w.st id).phase with
-      | run k =>
-        simp [hph] at hhead
-        cases hhead
-        exact exec_core_alive_prev I w id (w.st id) k name rfl hl
-      | idle => simp [hph] at hhead
-      | parked _ _ _ => simp [hph] at hhead
-      | awaitReply _ _ => simp [hph] at hhead
-      | awaitEffect _ => simp [hph] at hhead
-      | awaitPeer _ => simp [hph] at hhead
-      | crashed => simp [hph] at hhead
-    · simp [hlive] at hhead
+    by_cases hshut : ((w.st id).life == .shuttingDown) = true
+    · simp only [hshut, ite_true] at hhead
+      cases hhead
+      by_cases hid : id = InstId.core name
+      · rw [hid] at hl
+        rw [releaseWorld_self_dead I.desc w (InstId.core name) (w.st (InstId.core name))] at hl
+        cases hl
+      · have hne : InstId.core name ≠ id := fun h => hid h.symm
+        exact (releaseWorld_core_life I.desc w id (w.st id) name hne).symm.trans hl
+    · have hnot : ((w.st id).life == .shuttingDown) = false := by
+        simpa [Bool.not_eq_true] using hshut
+      simp only [hnot, ite_false] at hhead
+      by_cases hlive : (w.st id).life = .alive
+      · simp [hlive] at hhead
+        cases hph : (w.st id).phase with
+        | run k =>
+          simp [hph] at hhead
+          cases hhead
+          exact exec_core_alive_prev I w id (w.st id) k name rfl hl
+        | idle => simp [hph] at hhead
+        | parked _ _ _ => simp [hph] at hhead
+        | awaitReply _ _ => simp [hph] at hhead
+        | awaitEffect _ => simp [hph] at hhead
+        | awaitPeer _ => simp [hph] at hhead
+        | crashed => simp [hph] at hhead
+      · simp [hlive, bne] at hhead
 
 /-- Reading cells does not change actor state. -/
 theorem reads_keep_st (D : Description) (ids : List InstId) (w : World) (i : InstId) :

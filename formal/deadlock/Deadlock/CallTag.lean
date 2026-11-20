@@ -307,25 +307,25 @@ theorem handlerOwes_not_pending (c : InstId) (ph : Phase) : handlerOwes c ph →
 
 /-- While `c` is in `awaitReply d`, one of: the call is still in `d`'s mailbox,
 `d` is in the handler and the reply is still ahead, that reply is the next
-effect, or `d` is already dead. In the last case `c` is alive, so its deadline
-is enabled, and nobody owes or holds that call. Shutting down will join `dead`
-when that phase exists. A parked entry carries `callFrom = some s` exactly when
-`s` is that entry's sender and `s` is in `.parked d true`. Such a caller’s
-message is in the parked list, not the box. No priority message carries a
-`callFrom`. -/
+effect, or `d` has halted (shutting down or dead). In the last case `c` is
+alive, so its deadline is enabled, and nobody owes or holds that call. A
+parked entry carries `callFrom = some s` exactly when `s` is that entry's
+sender and `s` is in `.parked d true`. Such a caller’s message is in the
+parked list, not the box. No priority message carries a `callFrom`. -/
 structure CallTagInv (w : World) : Prop where
   awaiting : ∀ c d k, (w.st c).phase = .awaitReply d k →
     (mailCall w d c ∧ ¬handlerOwes c (w.st d).phase ∧ ¬replyPending c (w.st d).phase) ∨
     (¬mailCall w d c ∧ handlerOwes c (w.st d).phase ∧ ¬replyPending c (w.st d).phase) ∨
     (¬mailCall w d c ∧ ¬handlerOwes c (w.st d).phase ∧ replyPending c (w.st d).phase) ∨
-    ((w.st d).life = .dead ∧ (w.st c).life = .alive ∧ ¬mailCall w d c ∧
+    (Halted (w.st d).life ∧ (w.st c).life = .alive ∧ ¬mailCall w d c ∧
       ¬handlerOwes c (w.st d).phase ∧ ¬replyPending c (w.st d).phase)
-  /-- A live callee still holds the call. A dead callee has no entry: the caller's
-  deadline takes `NotAdmitted`, and the id is never spawned again. -/
+  /-- A callee that can still hold the call. A halted callee with no entry: the
+  caller's deadline takes `NotAdmitted` or `TimedOut`, and the id is not reused.
+  Shutting down may still be holding the entry, until it is sealed. -/
   parkedCall : ∀ c d k, (w.st c).phase = .parked d true k →
-    ((w.st d).life = .alive ∧ mailCall w d c ∧ ¬handlerOwes c (w.st d).phase ∧
-        ¬replyPending c (w.st d).phase) ∨
-    ((w.st d).life = .dead ∧ ¬mailCall w d c ∧ ¬handlerOwes c (w.st d).phase ∧
+    (((w.st d).life = .alive ∨ (w.st d).life = .shuttingDown) ∧ mailCall w d c ∧
+        ¬handlerOwes c (w.st d).phase ∧ ¬replyPending c (w.st d).phase) ∨
+    (Halted (w.st d).life ∧ ¬mailCall w d c ∧ ¬handlerOwes c (w.st d).phase ∧
         ¬replyPending c (w.st d).phase)
   msgOwner : ∀ d c, mailCall w d c →
     (∃ k, (w.st c).phase = .awaitReply d k) ∨ (∃ k, (w.st c).phase = .parked d true k)
@@ -336,10 +336,10 @@ structure CallTagInv (w : World) : Prop where
   parkFrom : ∀ d p, p ∈ (w.st d).parked → ∀ s,
     p.msg.callFrom = some s ↔ p.sender = s ∧ ∃ k, (w.st s).phase = .parked d true k
   parkedOnly : ∀ c d k, (w.st c).phase = .parked d true k →
-    ((w.st d).life = .alive ∧
+    (((w.st d).life = .alive ∨ (w.st d).life = .shuttingDown) ∧
         (∃ p, p ∈ (w.st d).parked ∧ p.sender = c ∧ p.msg.callFrom = some c) ∧
         ¬∃ m, m ∈ (w.st d).box ∧ m.callFrom = some c) ∨
-    ((w.st d).life = .dead ∧
+    (Halted (w.st d).life ∧
         (¬∃ p, p ∈ (w.st d).parked ∧ p.msg.callFrom = some c) ∧
         ¬∃ m, m ∈ (w.st d).box ∧ m.callFrom = some c)
   /-- A handler that still owes `c` a reply is stamped with `c`'s current wait id.
@@ -413,11 +413,11 @@ theorem awaiting_dead_copy (w w' : World) (c d : InstId)
     (hmail : mailCall w' d c ↔ mailCall w d c)
     (howe : handlerOwes c (w'.st d).phase ↔ handlerOwes c (w.st d).phase)
     (hpend : replyPending c (w'.st d).phase ↔ replyPending c (w.st d).phase)
-    (h : (w.st d).life = .dead ∧ (w.st c).life = .alive ∧ ¬mailCall w d c ∧
+    (h : Halted (w.st d).life ∧ (w.st c).life = .alive ∧ ¬mailCall w d c ∧
         ¬handlerOwes c (w.st d).phase ∧ ¬replyPending c (w.st d).phase) :
-    (w'.st d).life = .dead ∧ (w'.st c).life = .alive ∧ ¬mailCall w' d c ∧
+    Halted (w'.st d).life ∧ (w'.st c).life = .alive ∧ ¬mailCall w' d c ∧
       ¬handlerOwes c (w'.st d).phase ∧ ¬replyPending c (w'.st d).phase :=
-  ⟨hlD.trans h.1, hlC.trans h.2.1, (not_iff hmail).mpr h.2.2.1,
+  ⟨hlD ▸ h.1, hlC.trans h.2.1, (not_iff hmail).mpr h.2.2.1,
     (not_iff howe).mpr h.2.2.2.1, (not_iff hpend).mpr h.2.2.2.2⟩
 
 theorem terminateBefore_ne_reply (e : Eff) (es : List Eff)
@@ -477,15 +477,26 @@ theorem lifeKeep_dead {w w' : World} {i : InstId} (h : LifeKeep w w')
   · rw [habs] at hl
     cases hl
 
+theorem lifeKeep_halted {w w' : World} {i : InstId} (h : LifeKeep w w')
+    (hl : Halted (w.st i).life) : Halted (w'.st i).life := by
+  rcases hl with hshut | hdead
+  · rcases h i with heq | ⟨habs, _⟩
+    · exact Or.inl (heq.trans hshut)
+    · rw [habs] at hshut
+      cases hshut
+  · exact Or.inr (lifeKeep_dead h hdead)
+
+theorem halted_cast {a b : Life} (h : a = b) (hh : Halted b) : Halted a := h ▸ hh
+
 theorem awaiting_dead_keep (w w' : World) (c d : InstId) (hlife : LifeKeep w w')
     (hmail : mailCall w' d c ↔ mailCall w d c)
     (howe : handlerOwes c (w'.st d).phase ↔ handlerOwes c (w.st d).phase)
     (hpend : replyPending c (w'.st d).phase ↔ replyPending c (w.st d).phase)
-    (h : (w.st d).life = .dead ∧ (w.st c).life = .alive ∧ ¬mailCall w d c ∧
+    (h : Halted (w.st d).life ∧ (w.st c).life = .alive ∧ ¬mailCall w d c ∧
         ¬handlerOwes c (w.st d).phase ∧ ¬replyPending c (w.st d).phase) :
-    (w'.st d).life = .dead ∧ (w'.st c).life = .alive ∧ ¬mailCall w' d c ∧
+    Halted (w'.st d).life ∧ (w'.st c).life = .alive ∧ ¬mailCall w' d c ∧
       ¬handlerOwes c (w'.st d).phase ∧ ¬replyPending c (w'.st d).phase :=
-  ⟨lifeKeep_dead hlife h.1, lifeKeep_alive hlife h.2.1, (not_iff hmail).mpr h.2.2.1,
+  ⟨lifeKeep_halted hlife h.1, lifeKeep_alive hlife h.2.1, (not_iff hmail).mpr h.2.2.1,
     (not_iff howe).mpr h.2.2.2.1, (not_iff hpend).mpr h.2.2.2.2⟩
 
 theorem life_setActor (w : World) (id : InstId) (a : Actor) (hl : a.life = (w.st id).life) :
@@ -688,7 +699,7 @@ theorem call_tag_duty (w w' : World) (hT : CallTagInv w)
       · exact Or.inr (Or.inr (Or.inl ⟨hnom, fun ho => hxor ho hp, hp⟩))
     · have hno : ¬(handlerOwes c (w'.st d).phase ∨ replyPending c (w'.st d).phase) :=
         (not_iff (hduty d c)).mpr (fun h => h.elim h4.2.2.2.1 h4.2.2.2.2)
-      exact Or.inr (Or.inr (Or.inr ⟨lifeKeep_dead hlife h4.1, lifeKeep_alive hlife h4.2.1,
+      exact Or.inr (Or.inr (Or.inr ⟨lifeKeep_halted hlife h4.1, lifeKeep_alive hlife h4.2.1,
         (not_iff (hmail d c)).mpr h4.2.2.1, fun ho => hno (Or.inl ho), fun hp => hno (Or.inr hp)⟩))
   · intro c d k hph
     have hpre := hT.parkedCall c d k (hpark c d k hph)
@@ -1917,7 +1928,9 @@ theorem install_call (w w1 : World) (id : InstId) (a1 : Actor) (m : Msg) (ms : L
         · exact absurd (Or.inl h2.2.1) holdD
         · exact absurd (Or.inr h3.2.2) holdD
         · rw [hlive] at h4
-          cases h4.1
+          rcases h4.1 with hshut | hdead
+          · cases hshut
+          · cases hdead
       by_cases hsame : c0 = c
       · rw [hsame, hd]
         have hnom : ¬mailCall w' id c := by
@@ -1986,10 +1999,16 @@ theorem install_call (w w1 : World) (id : InstId) (a1 : Actor) (m : Msg) (ms : L
       rcases hpre with ⟨_, _, _, _⟩ | ⟨hl, _, _, _⟩
       · rcases hT.parkedOnly c0 id k0 (by simpa [heq] using hold) with ⟨_, ⟨_, hp, _, _⟩, _⟩ | ⟨hdead, _, _⟩
         · simp [hpark0] at hp
+        · rcases hdead with hshut | hdead
+          · rw [hshut] at hlive
+            cases hlive
+          · rw [hdead] at hlive
+            cases hlive
+      · rcases hl with hshut | hdead
+        · rw [hshut] at hlive
+          cases hlive
         · rw [hdead] at hlive
           cases hlive
-      · rw [hl] at hlive
-        cases hlive
     exact (by
       rcases hpre with ⟨hl, hm, ho, hp⟩ | ⟨hl, hm, ho, hp⟩
       · refine Or.inl ⟨by simpa [w', setActor, hd0, hst] using hl, ?_, ?_, ?_⟩
@@ -2735,9 +2754,12 @@ theorem deliver_parked_tag (I : Impl) (hL : LocalOk I) (w w1 : World) (id : Inst
             · exact absurd (Or.inl h2.2.1) holdD
             · exact absurd (Or.inr h3.2.2) holdD
             · have hne : (w.st id).life ≠ .alive := by
-                rw [h4.1]
-                intro h
-                cases h
+                intro hl
+                rcases h4.1 with hshut | hdead
+                · rw [hshut] at hl
+                  cases hl
+                · rw [hdead] at hl
+                  cases hl
               simp [deliver, hne] at hdel
           have hmem : ∃ q, q ∈ ps ∧ q.msg.callFrom = some c0 := by
             rcases hmail0 with ⟨x, hx, _⟩ | ⟨q, hq, hcf⟩
@@ -3449,7 +3471,7 @@ theorem install_call_kept (w w1 : World) (id : InstId) (a1 : Actor) (m : Msg) (m
         · exact absurd (Or.inl h2.2.1) holdD
         · exact absurd (Or.inr h3.2.2) holdD
         · refine Or.inr (Or.inr (Or.inr ⟨?_, ?_, ?_, ?_, ?_⟩))
-          · simp [w', setActor, hd, hlifeA, h4.1]
+          · exact halted_cast (by simp [w', setActor, hd, hlifeA]) h4.1
           · simpa [w', setActor, hc0, hst] using h4.2.1
           · intro hm
             apply h4.2.2.1
@@ -5323,7 +5345,7 @@ theorem fresh_call_tag (w w' : World) (sender dst : InstId) (msg : Msg) (k kRun 
         · exact Or.inr (Or.inr (Or.inl ⟨hnom, fun ho => hxor ho hp, hp⟩))
       · have hno : ¬(handlerOwes c (w'.st d).phase ∨ replyPending c (w'.st d).phase) :=
           (not_iff hduty).mpr (fun h => h.elim h4.2.2.2.1 h4.2.2.2.2)
-        exact Or.inr (Or.inr (Or.inr ⟨(hlife d).trans h4.1, (hlife c).trans h4.2.1,
+        exact Or.inr (Or.inr (Or.inr ⟨halted_cast (hlife d) h4.1, (hlife c).trans h4.2.1,
           (not_iff hmail).mpr h4.2.2.1, fun ho => hno (Or.inl ho), fun hp => hno (Or.inr hp)⟩))
   · intro c d kA hph'
     by_cases hc : c = sender
@@ -5814,7 +5836,7 @@ theorem dead_park_tag (w : World) (sender dst : InstId) (kRun : Cont) (e : Eff) 
               fun ho => handlerOwes_not_pending c _ ho hp, hp⟩))
         · have hno : ¬(handlerOwes c (w'.st sender).phase ∨ replyPending c (w'.st sender).phase) :=
             (not_iff hnew).mpr (fun h => h.elim h4.2.2.2.1 h4.2.2.2.2)
-          exact Or.inr (Or.inr (Or.inr ⟨(hlife sender).trans h4.1, (hlife c).trans h4.2.1,
+          exact Or.inr (Or.inr (Or.inr ⟨halted_cast (hlife sender) h4.1, (hlife c).trans h4.2.1,
             (not_iff (hmail sender c)).mpr h4.2.2.1,
             fun ho => hno (Or.inl ho), fun hp => hno (Or.inr hp)⟩))
       · have hpe : (w'.st d).phase = (w.st d).phase := by simp [w', setActor, hd]

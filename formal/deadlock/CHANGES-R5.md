@@ -5,8 +5,10 @@ Running notes for the delivery statement. A headline theorem is
 `fair_delivered`, `cell_fresh`, and the other results printed from
 `Deadlock.lean`.
 
-The Lean definition of `Delivered` is unchanged. These are the constraints on
-the edit, not the edit.
+The Lean definition of `Delivered` is the loss statement below. `Action.kill`
+is gone, so the old `∃ sub key, act = .kill` disjunct is not a step. The loss
+disjunct is `lostHost`: the target's life is `shuttingDown` or `dead`. It is
+not deleted.
 
 ## What `Delivered` will say
 
@@ -140,20 +142,45 @@ D. An untimed peer wait needs a live, armed timeout killer at its key. A
 static role test is not enough. `finish` on the success path does not resume
 an untimed wait.
 
+## Step relation
+
+`Life` is `absent`, `alive`, `shuttingDown`, `dead`. A send or call aimed at
+a shutting-down or dead target is not stored and is not charged. A call ends
+as `NotAdmitted`. A send proceeds. The drop stays dropped: `LifeStep` does
+not return a shutting-down or dead id to alive, and spawn does not reuse the
+id. `route` resolves only `alive`.
+
+A terminable `terminate` marks that actor and its terminable descendants
+`shuttingDown` in the one step, and enqueues one tombstone on the parent's
+priority lane. Each shutting-down actor seals on its next `exec`
+(`releaseWorld`): the mailbox is cleared, plain parked senders resume, and
+the life is `dead`. Parked calls finish on their deadline. A permanent
+multiplicity-one core's `terminate` is `crashWorld`: every alive or
+shutting-down actor on the roster becomes `dead` in phase `crashed`.
+
+Every `awaitPeer` enables `finish`. The result is a normal timeout.
+`peerFinishable` is true. `PurePeerEnd` is false. `Deadlock` counts a peer
+wait.
+
+`subtreeTalk` is the member send, try-send, and call: same subtree, per-peer
+target. A permanent core is not a per-peer target. A lone terminable is not
+a subtree member.
+
 ## `CallTagInv.awaiting`
 
 A caller in `awaitReply` is in one of four states. The first three are the
-live callee: the call is in its mailbox, the handler owes the reply, or the
-reply is the next effect. The fourth is the callee already dead, the caller
-still alive, and nobody owing or holding that call id. There is no
-shutting-down life yet; when that phase exists it joins this disjunct.
+callee that still holds the call: the call is in its mailbox, the handler
+owes the reply, or the reply is the next effect. The fourth is the callee
+halted (`shuttingDown` or `dead`), the caller still alive, and nobody owing
+or holding that call id.
 
 This is the pure-stage timeout. A caller waiting on a dead callee is not a
 stuck call: the deadline stays enabled and fairness ends it as `TimedOut`,
 or as `NotAdmitted` when the call was never admitted. `call_answered` is
-unchanged. It is `Reply` while the callee stays alive and is not shutting
-down, and `NotAdmitted` or `TimedOut` otherwise. The fourth disjunct is how
-the dead case is proved: the timeout is enabled, and fairness fires it.
+the statement in `Deliver.lean`. It is `Reply` while the callee stays alive,
+and `NotAdmitted` or `TimedOut` once the callee has halted before the answer.
+The fourth disjunct is how the halted case is proved: the timeout is enabled,
+and fairness fires it.
 `abort_await_not_tag` stays as a regression against the old three-disjunct
 formula, which does not hold after the abort. Deadlock freedom, `Delivered`,
 and `call_answered` are not weakened. The invariant covers one more
