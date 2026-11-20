@@ -223,12 +223,47 @@ def prioOk (I : Impl) : Bool :=
     let labels := prioLabels I t.name
     labels.length ≤ t.priorityBound.b && t.priorityBound.a == 0
 
+mutual
+/-- Self-schedules and cell wakes one program path can place on a lane.
+`own` is true when the program belongs to that lane: only then a self-schedule
+lands here. A cell wake lands when the write names the reader. One outcome of
+a branch runs, so the count is the maximum, and a replacing branch does not
+also run the tail. -/
+def pathPrio (own : Bool) (reader : String) : List Eff → Nat
+  | [] => 0
+  | e :: es => pathPrioEff own reader e (pathPrio own reader es)
+
+def pathPrioEff (own : Bool) (reader : String) (e : Eff) (tail : Nat) : Nat :=
+  match e with
+  | .selfSchedule _ => (if own then 1 else 0) + tail
+  | .cell d _ _ => (if d == reader then 1 else 0) + tail
+  | .trySend _ _ _ onFull onGone =>
+    max tail (max (pathPrio own reader onFull) (pathPrio own reader onGone))
+  | .call _ _ _ onNotAdmitted onTimedOut =>
+    max tail (max (pathPrio own reader onNotAdmitted) (pathPrio own reader onTimedOut))
+  | .peer onTimeout => max tail (pathPrio own reader onTimeout)
+  | _ => tail
+end
+
+/-- The most priority sends any one program path can add to `template`'s lane. -/
+def pathPrioMax (I : Impl) (template : String) : Nat :=
+  I.transitions.foldl (fun acc tr =>
+    max acc (pathPrio (tr.template == template) template tr.program)) 0
+
+/-- How many non-tombstone priority messages `template`'s lane can hold.
+Each self-schedule and cell-wake label is queued at most once, and a later
+transition can enqueue a label an earlier path did not send, so the ceiling
+is the number of those labels. A single path is also counted, and a path that
+repeats a label is counted per send; the bound is the larger of the two. -/
+def prioSenderBound (I : Impl) (template : String) : Nat :=
+  max (pathPrioMax I template) (prioLabels I template).length
+
 /-- The static size under which a priority lane does not overflow. Capacity
-covers one tombstone per child slot, for every root population, plus the other
-priority senders. Part of `LocalOk`. -/
+covers one tombstone per child slot, for every root population, plus this
+parent's self-schedule and cell-wake senders. Part of `LocalOk`. -/
 def prioSizeFails (I : Impl) : List String :=
   I.desc.templates.filterMap fun t =>
-    if prioSized I.desc t.name (prioLabels I t.name).length then none
+    if prioSized I.desc t.name (prioSenderBound I t.name) then none
     else some s!"fail: priority lane {t.name} holds fewer slots than the tombstones and other priority senders it can receive at once"
 
 /-- Every program the semantics can fire is one of the steps the relation was closed under. -/
@@ -436,6 +471,16 @@ theorem pure_sched_local (I : Impl) (h : LocalOk I) : pureSchedOk I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
   exact h.2.1.2
+
+theorem tombstone_handled_local (I : Impl) (h : LocalOk I) : tombstoneHandled I = true := by
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.2.1.1
+
+theorem prio_size_local (I : Impl) (h : LocalOk I) : prioSizeOk I = true := by
+  simp only [LocalOk, localOkB, localTail] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.2.2
 
 theorem transitionOk_of_mem (I : Impl) (h : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions) :
     transitionOk I tr = true := by

@@ -39,19 +39,21 @@ program's `terminate` meets one of the classified shutdown cases; and a
 step looks up a template the description declares. This note does not
 prove those sites unreachable. A design that reaches one of them crashes.
 
-`prioSized` is part of `LocalOk`. It is one tombstone per child slot — `slots`
-times that child's multiplicity, and one slot per root population for a root
-a core spawns — plus the other priority senders. `LocalOk` also rejects a
-re-spawn that can run while that slot's tombstone is still queued. The
-semantics makes the same spawn a no-op, and a root spawn into such a slot is
-not enabled. Each slot therefore has at most one tombstone outstanding.
-`no_tombstone_overflow` is the room fact: under `prioSized`, a tombstone
-enqueue does not crash when the ones already queued are strictly under that
-slot bound and the other priority messages are within the static sender
-count. A death enqueues for a slot whose previous tombstone has been
-consumed, which is that case. Tombstone overflow is not a crash source under
-the checks. A self-schedule or a cell wake that does not fit still crashes,
-matching pure-stage's panic; those enqueues are not given the slot bound.
+`prioSized` is part of `LocalOk`. Per parent it is one tombstone per child
+slot — a pool's `slots`, one key per root population for a root a core
+spawns, one child for a per-peer parent — plus that parent's self-schedule
+and cell-wake senders. The sender term is the larger of the maximum along
+one program path and the number of distinct labels: a branch's outcomes are
+not added, and the lane holds each label once across later transitions.
+`LocalOk` also rejects a re-spawn that can run while that slot's tombstone
+is still queued. The semantics makes the same spawn a no-op, for a core pool
+and for a per-peer parent, and a root spawn into such a slot is not enabled.
+A slot that is still shutting down is occupied too. The tombstone is queued
+at the seal, so the predecessor is dead before the parent is notified.
+`no_tombstone_overflow` says that under `GraphOk`, `LocalOk`, and
+`prioSized`, `offerPrio` does not take its crash branch for that tombstone.
+Tombstone overflow is not a crash source under the checks. A self-schedule
+or a cell wake that does not fit still crashes, matching pure-stage's panic.
 `LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head

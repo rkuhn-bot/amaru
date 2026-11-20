@@ -372,6 +372,9 @@ structure Actor where
   oweId : Option Nat := none
   /-- Outcome of the last call this actor finished, with that call's id. -/
   lastCall : Option (Nat × CallResult) := none
+  /-- The seal of this actor owes its supervisor one tombstone. The message is
+  queued when the actor becomes dead, not when it is marked shutting down. -/
+  pendingTombstone : Bool := false
   deriving Inhabited
 
 def absentActor : Actor where
@@ -1190,9 +1193,11 @@ def tombstoneLabel (D : Description) (child : InstId) : String :=
     match templateOf D (tname child) with
     | some t => t.tombstone
     | none => ""
-  match child with
-  | .peer _ _ g => s!"{base}#{g}"
-  | .core _ => base
+  if base == "" then ""
+  else
+    match child with
+    | .peer _ _ g => base ++ "#" ++ toString g
+    | .core _ => base
 
 /-- One tombstone per child. The label is the child template's wired label, so
 two templates do not share a message and two instances of one template do not
@@ -1218,21 +1223,18 @@ def liveSupervisor (D : Description) (w : World) (child : InstId) : Option InstI
       | none => some parent
 
 /-- Hand the parent the child's tombstone. A missing parent is not a delivery:
-the template named no supervisor. A parent that is not alive, a child with no
-wired label, or a priority lane with no room left crashes the roster. The
-tombstone counts toward that lane's budget. -/
+the template named no supervisor. A parent that is not alive, or a child with
+no wired label, crashes the roster before the lane is touched. A tombstone
+that does not fit is `offerPrio`'s crash: the message is not added and not
+dropped. The tombstone counts toward that lane's budget. -/
 def enqueueTombstone (D : Description) (w : World) (child : InstId) : World :=
   match liveSupervisor D w child with
   | none => w
   | some parent =>
     let p := w.st parent
     let msg := tombstoneMsg D p child
-    if p.life != .alive || msg.label == "" ||
-        decide (prioLoad p.prio >= capPrio D w.N parent) then
-      crashWorld w
-    else
-      setActor w parent
-        { p with prio := p.prio ++ [msg], nextMid := p.nextMid + 1 }
+    if p.life != .alive || msg.label == "" then crashWorld w
+    else offerPrio D w parent msg
 
 /-- A tombstone enqueue does not crash when the parent is alive, the label is
 non-empty, and the lane has room. A full lane, a dead parent, and an empty
@@ -1245,22 +1247,19 @@ theorem enqueueTombstone_fits
     (hroom : prioLoad (w.st parent).prio < capPrio D w.N parent)
     (hcrash : w.crashed = false) :
     (enqueueTombstone D w child).crashed = false := by
-  unfold enqueueTombstone
+  unfold enqueueTombstone offerPrio
   simp only [hsup]
   have hif : ((w.st parent).life != .alive) = false := by simp [hlife]
   have hlab : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
     simpa [beq_iff_eq] using hlabel
   have hdec : decide (prioLoad (w.st parent).prio ≥ capPrio D w.N parent) = false :=
     decide_eq_false (Nat.not_le.mpr hroom)
-  split
-  · next hbad => simp [hif, hlab, hdec] at hbad
-  · simp [setActor, hcrash]
+  simp [hif, hlab, hdec, setActor, hcrash]
 
 /-- Under `prioSized`, a tombstone fits when the queued tombstones are strictly
 under the slot bound and the other priority messages are within the static
-sender count. That is the enqueue a restart leaves: the slot's previous
-tombstone has been consumed, so this death is not a second one for the slot. -/
-theorem no_tombstone_overflow
+sender count. `no_tombstone_overflow` is this fact for a reachable world. -/
+theorem tombstone_offer_room
     (D : Description) (w : World) (child parent : InstId) (parentName : String)
     (other tombs rest : Nat) (t : Template)
     (ht : templateOf D parentName = some t)
@@ -1361,10 +1360,20 @@ def markShutdown (w : World) (id : InstId) : World :=
     releaseOutbound (setActor w id { (w.st id) with life := .shuttingDown, phase := .idle }) id
   else w
 
-/-- Mark `id` shutting down and hand its parent the tombstone. The parent
-answers later, in its own step. -/
+/-- Remember that `id`'s seal owes its supervisor a tombstone. -/
+def armTombstone (w : World) (id : InstId) : World :=
+  setActor w id { (w.st id) with pendingTombstone := true }
+
+/-- Finish `id` and, when the mark armed it, hand the supervisor the tombstone.
+The actor is dead before the parent is notified. -/
+def sealActor (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
+  let sealed := releaseWorld D w id a
+  if a.pendingTombstone then enqueueTombstone D sealed id else sealed
+
+/-- Mark `id` shutting down. The tombstone is armed here and queued at the seal. -/
 def shutdownActor (D : Description) (w : World) (id : InstId) : World :=
-  enqueueTombstone D (markShutdown w id) id
+  let marked := markShutdown w id
+  if (w.st id).life == .alive then armTombstone marked id else marked
 
 /-- Mark the live terminable descendants of `parent` shutting down, children
 before grandchildren. They stop accepting mail in this step. Each seals
@@ -1384,7 +1393,7 @@ def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : 
 roster. `crashWorld` sets `w.crashed` and every later action is disabled, so
 the world is absorbing. The liveness claim is deadlock-free or crashed: a fair
 run of a checked implementation is not stuck, or a step has already crashed
-the roster. `no_tombstone_overflow` is the tombstone half: under `prioSized`,
+the roster. `tombstone_offer_room` is the numeric half: under `prioSized`,
 one more tombstone fits when the ones already queued are strictly under the
 slot bound and the other priority messages are within the static sender count.
 A self-schedule or a cell wake that does not fit still crashes. -/
@@ -1410,8 +1419,8 @@ is how the failure bubbles up. A sibling is not a descendant, and nothing here
 clears a sibling's mail. -/
 def terminateStage (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
   let _committed := a
-  let w := markTree w.roster.length D w id
-  enqueueTombstone D w id
+  let marked := markTree w.roster.length D w id
+  if (w.st id).life == .alive then armTombstone marked id else marked
 
 /-- The parent's abort. Every live child, terminable or not, and that child's
 descendants begin shutting down. Each direct child leaves one tombstone on the
@@ -1419,8 +1428,8 @@ parent. A sibling is not a child, and this step does not touch a sibling's mail.
 def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
   w.roster.foldl (fun w child =>
     if isChild D parent child && (w.st child).life == .alive then
-      let w := markTree w.roster.length D w child
-      enqueueTombstone D w child
+      let marked := markTree w.roster.length D w child
+      armTombstone marked child
     else w) w
 
 /-- A tombstone for `child` at slot `k` is still on `parent`'s priority lane. -/
@@ -1431,29 +1440,42 @@ def slotTombstoneQueued (w : World) (parent : InstId) (child : String) (k : Nat)
       | .peer n key _ => n == child && key == k
       | .core _ => false
 
-/-- Lowest slot in `0 ..< n` with no live `name` and no tombstone of that slot
-still queued on `parent`. Structural in the fuel. A queued tombstone occupies
-the slot until the supervisor consumes it. -/
+/-- `name` at `key` is alive or still shutting down. The seal has not run, so
+the slot is not free yet: its tombstone is queued only at the seal. -/
+def slotOccupied (w : World) (name : String) (k : Nat) : Bool :=
+  w.roster.any fun id =>
+    match id with
+    | .peer n key _ =>
+      n == name && key == k &&
+        ((w.st id).life == .alive || (w.st id).life == .shuttingDown)
+    | .core _ => false
+
+/-- Lowest slot in `0 ..< n` with no live or shutting-down `name` and no
+tombstone of that slot still queued on `parent`. `fuel` counts the indices
+still to try, from `0` upward. A queued tombstone occupies the slot until
+the supervisor consumes it. -/
+def freeGo (w : World) (parent : InstId) (name : String) (n : Nat) : Nat → Option Nat
+  | 0 => none
+  | fuel + 1 =>
+    let k := n - (fuel + 1)
+    if slotOccupied w name k || slotTombstoneQueued w parent name k then freeGo w parent name n fuel
+    else some k
+
+/-- Lowest free slot below `n`. -/
 def freeSlot (w : World) (parent : InstId) (name : String) (n : Nat) : Option Nat :=
-  let rec go (fuel : Nat) : Option Nat :=
-    match fuel with
-    | 0 => none
-    | fuel + 1 =>
-      let k := n - (fuel + 1)
-      if aliveAt w name k || slotTombstoneQueued w parent name k then go fuel else some k
-  go n
+  freeGo w parent name n n
 
 /-- Lowest root key in `0 ..< n` whose tombstone is not still on the core. -/
 def freeRootSlot (w : World) (supervisor name : String) (n : Nat) : Option Nat :=
   freeSlot w (.core supervisor) name n
 
 /-- A per-peer parent births one child at its own key. A core births one pool
-child in a free slot below `slots`. A live child is left as it is. A slot
-whose tombstone is still queued is not free: the spawn is a no-op, the same
-as a full pool, until the supervisor consumes that tombstone. The predecessor
-may still be shutting down when the tombstone is consumed; the new generation
-is then born at the same slot. A parent that is not alive admits nobody. A
-spawn the template does not allow is `none`, and the effect then crashes. -/
+child in a free slot below `slots`. A slot that is alive, still shutting
+down, or whose tombstone is still queued is not free: the spawn is a no-op,
+the same as a full pool. The tombstone is queued at the seal, so the
+predecessor is dead before the parent can consume it and birth the next
+generation. A parent that is not alive admits nobody. A spawn the template
+does not allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
   match templateOf I.desc child with
   | none => none
@@ -1470,13 +1492,10 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
         else none
       | .peer _ k _ =>
         if t.slots == 0 then
-          match findLive w child k with
-          | some _ => some w
-          | none =>
-            if slotTombstoneQueued w parent child k then some w
-            else
-              let id := InstId.peer child k (maxGen w child k)
-              some (admitBorn I w id (bornActor I.desc w child k t.initial))
+          if slotOccupied w child k || slotTombstoneQueued w parent child k then some w
+          else
+            let id := InstId.peer child k (maxGen w child k)
+            some (admitBorn I w id (bornActor I.desc w child k t.initial))
         else none
     else if t.multiplicity == .perPeer && t.supervisor == tname parent then
       some w
@@ -1706,7 +1725,7 @@ theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor) (k : 
 the life becomes `dead`. A live actor runs. Anyone else has no `exec`. -/
 def execHead (I : Impl) (w : World) (id : InstId) : Option World :=
   let a := w.st id
-  if a.life == .shuttingDown then some (releaseWorld I.desc w id a)
+  if a.life == .shuttingDown then some (sealActor I.desc w id a)
   else if a.life ≠ .alive then none
   else
     match a.phase with
@@ -7076,38 +7095,6 @@ theorem abortActor_core_prev (D : Description) (w : World) (id : InstId) (a : Ac
     cases h
   · exact (releaseWorld_core_life D w id a name hid).symm.trans h
 
-/-- A tombstone that leaves a core alive did not create that life. Crashing the
-roster kills every alive core, so the equality of lives does not hold. -/
-theorem tombstone_core_life (D : Description) (w : World) (child : InstId) (name : String)
-    (h : ((enqueueTombstone D w child).st (InstId.core name)).life = .alive) :
-    (w.st (InstId.core name)).life = .alive := by
-  unfold enqueueTombstone at h
-  cases hsup : liveSupervisor D w child with
-  | none => simpa [hsup] using h
-  | some parent =>
-    simp only [hsup] at h
-    by_cases hbad : ((w.st parent).life != .alive ||
-        (tombstoneMsg D (w.st parent) child).label == "" ||
-        decide (prioLoad (w.st parent).prio >= capPrio D w.N parent)) = true
-    · simp only [hbad, ite_true, crashWorld] at h
-      by_cases hmem : decide (InstId.core name ∈ w.roster) = true
-      · simp only [hmem, ite_true, crashActor] at h
-        by_cases hgo : ((w.st (InstId.core name)).life == .alive ||
-            (w.st (InstId.core name)).life == .shuttingDown) = true
-        · simp [hgo] at h
-        · simpa [hgo] using h
-      · simpa [hmem] using h
-    · have hok : ((w.st parent).life != .alive ||
-          (tombstoneMsg D (w.st parent) child).label == "" ||
-          decide (prioLoad (w.st parent).prio >= capPrio D w.N parent)) = false := by
-        simpa [Bool.not_eq_true] using hbad
-      simp only [hok, ite_false] at h
-      by_cases hi : InstId.core name = parent
-      · rw [hi] at h ⊢
-        simp [setActor] at h
-        exact h
-      · simpa [setActor, hi] using h
-
 theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent : InstId)
     (name : String) (h : ((abortDesc fuel D w parent).st (InstId.core name)).life = .alive) :
     (w.st (InstId.core name)).life = .alive := by
@@ -7145,6 +7132,26 @@ theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent :
           exact ihids w0 h0
     exact hfold w.roster w h
 
+theorem crashWorld_prev (w : World) (i : InstId)
+    (h : ((crashWorld w).st i).life = .alive) : (w.st i).life = .alive := by
+  simp only [crashWorld] at h
+  by_cases hmem : decide (i ∈ w.roster) = true
+  · simp only [hmem, ite_true, crashActor] at h
+    by_cases hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true
+    · simp [hgo] at h
+    · simpa [hgo] using h
+  · simpa [hmem] using h
+
+theorem crashWorld_keeps_dead (w : World) (i : InstId) (h : (w.st i).life = .dead) :
+    ((crashWorld w).st i).life = .dead := by
+  simp only [crashWorld]
+  by_cases hmem : decide (i ∈ w.roster) = true
+  · simp only [hmem, ite_true, crashActor]
+    have hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = false := by
+      simp [h]
+    simp [hgo, h]
+  · simpa [hmem] using h
+
 /-- A tombstone step that leaves `i` alive did not create that life. A crash,
 a missing label, or a full lane does not leave an alive actor that was absent. -/
 theorem enqueueTombstone_life (D : Description) (w : World) (child i : InstId)
@@ -7155,25 +7162,76 @@ theorem enqueueTombstone_life (D : Description) (w : World) (child i : InstId)
   | some parent =>
     simp only [hsup] at h
     by_cases hbad : ((w.st parent).life != .alive ||
-        (tombstoneMsg D (w.st parent) child).label == "" ||
-        decide (prioLoad (w.st parent).prio >= capPrio D w.N parent)) = true
-    · simp only [hbad, ite_true, crashWorld] at h
-      by_cases hmem : decide (i ∈ w.roster) = true
-      · simp only [hmem, ite_true, crashActor] at h
-        by_cases hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true
-        · simp [hgo] at h
-        · simpa [hgo] using h
-      · simpa [hmem] using h
+        (tombstoneMsg D (w.st parent) child).label == "") = true
+    · simp only [hbad, ite_true] at h
+      exact crashWorld_prev w i h
     · have hok : ((w.st parent).life != .alive ||
-          (tombstoneMsg D (w.st parent) child).label == "" ||
-          decide (prioLoad (w.st parent).prio >= capPrio D w.N parent)) = false := by
+          (tombstoneMsg D (w.st parent) child).label == "") = false := by
         simpa [Bool.not_eq_true] using hbad
       simp only [hok, ite_false] at h
-      by_cases hi : i = parent
-      · rw [hi] at h ⊢
-        simp [setActor] at h
-        exact h
-      · simpa [setActor, hi] using h
+      unfold offerPrio at h
+      by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+      · simp only [hfull, ite_true] at h
+        exact crashWorld_prev w i h
+      · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+          simpa [Bool.not_eq_true] using hfull
+        simp only [hroom, ite_false] at h
+        by_cases hi : i = parent
+        · rw [hi] at h ⊢
+          simp [setActor] at h
+          exact h
+        · simpa [setActor, hi] using h
+
+theorem enqueueTombstone_keeps_dead (D : Description) (w : World) (child i : InstId)
+    (h : (w.st i).life = .dead) : ((enqueueTombstone D w child).st i).life = .dead := by
+  unfold enqueueTombstone
+  cases hsup : liveSupervisor D w child with
+  | none => simpa [hsup] using h
+  | some parent =>
+    simp only [hsup]
+    by_cases hbad : ((w.st parent).life != .alive ||
+        (tombstoneMsg D (w.st parent) child).label == "") = true
+    · simp only [hbad, ite_true]
+      exact crashWorld_keeps_dead w i h
+    · have hok : ((w.st parent).life != .alive ||
+          (tombstoneMsg D (w.st parent) child).label == "") = false := by
+        simpa [Bool.not_eq_true] using hbad
+      simp only [hok, ite_false]
+      by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+      · simp only [hfull, ite_true, offerPrio]
+        exact crashWorld_keeps_dead w i h
+      · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+          simpa [Bool.not_eq_true] using hfull
+        simp only [hroom, ite_false, offerPrio]
+        by_cases hi : i = parent
+        · rw [hi] at h ⊢
+          simp [setActor, h]
+        · simpa [setActor, hi] using h
+
+/-- A tombstone that leaves a core alive did not create that life. Crashing the
+roster kills every alive core, so the equality of lives does not hold. -/
+theorem tombstone_core_life (D : Description) (w : World) (child : InstId) (name : String)
+    (h : ((enqueueTombstone D w child).st (InstId.core name)).life = .alive) :
+    (w.st (InstId.core name)).life = .alive :=
+  enqueueTombstone_life D w child (InstId.core name) h
+
+theorem armTombstone_prev (w : World) (id i : InstId)
+    (h : ((armTombstone w id).st i).life = .alive) : (w.st i).life = .alive := by
+  unfold armTombstone at h
+  by_cases hi : i = id
+  · rw [hi] at h ⊢
+    simp [setActor] at h
+    exact h
+  · simpa [setActor, hi] using h
+
+theorem sealActor_self_dead (D : Description) (w : World) (id : InstId) (a : Actor) :
+    ((sealActor D w id a).st id).life = .dead := by
+  unfold sealActor
+  by_cases hpend : a.pendingTombstone = true
+  · simp only [hpend, ite_true]
+    exact enqueueTombstone_keeps_dead D (releaseWorld D w id a) id id (releaseWorld_self_dead D w id a)
+  · simp only [hpend, ite_false]
+    exact releaseWorld_self_dead D w id a
 
 theorem markShutdown_prev (w : World) (id i : InstId)
     (h : ((markShutdown w id).st i).life = .alive) : (w.st i).life = .alive := by
@@ -7190,9 +7248,12 @@ theorem markShutdown_prev (w : World) (id i : InstId)
 
 theorem shutdownActor_prev (D : Description) (w : World) (id i : InstId)
     (h : ((shutdownActor D w id).st i).life = .alive) : (w.st i).life = .alive := by
-  have hmark : ((markShutdown w id).st i).life = .alive :=
-    enqueueTombstone_life D (markShutdown w id) id i (by simpa [shutdownActor] using h)
-  exact markShutdown_prev w id i hmark
+  unfold shutdownActor at h
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · simp only [hlive, ite_true] at h
+    exact markShutdown_prev w id i (armTombstone_prev (markShutdown w id) id i h)
+  · simp only [hlive, ite_false] at h
+    exact markShutdown_prev w id i h
 
 theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent : InstId)
     (name : String) (h : ((shutdownDesc fuel D w parent).st (InstId.core name)).life = .alive) :
@@ -7232,16 +7293,6 @@ theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (paren
           simp only [hf, ite_false] at h0
           exact ihids w0 h0
     exact hfold w.roster w h
-
-theorem crashWorld_prev (w : World) (i : InstId)
-    (h : ((crashWorld w).st i).life = .alive) : (w.st i).life = .alive := by
-  simp only [crashWorld] at h
-  by_cases hmem : decide (i ∈ w.roster) = true
-  · simp only [hmem, ite_true, crashActor] at h
-    by_cases hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true
-    · simp [hgo] at h
-    · simpa [hgo] using h
-  · simpa [hmem] using h
 
 /-- A cell wake that leaves a core alive did not create that life. A full lane
 crashes the roster instead of dropping the wake. -/
@@ -7322,18 +7373,21 @@ theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
 theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
     (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
     (w.st (InstId.core name)).life = .alive := by
-  have hmark : ((markTree w.roster.length D w id).st (InstId.core name)).life = .alive :=
-    enqueueTombstone_life D (markTree w.roster.length D w id) id (InstId.core name)
-      (by simpa [terminateStage] using h)
-  exact markTree_prev _ D w id (InstId.core name) hmark
+  unfold terminateStage at h
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · simp only [hlive, ite_true] at h
+    exact markTree_prev _ D w id (InstId.core name)
+      (armTombstone_prev (markTree w.roster.length D w id) id (InstId.core name) h)
+  · simp only [hlive, ite_false] at h
+    exact markTree_prev _ D w id (InstId.core name) h
 
 theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
     (h : ((abortChildren D w parent).st i).life = .alive) : (w.st i).life = .alive := by
   unfold abortChildren at h
   let step (w0 : World) (child : InstId) : World :=
     if isChild D parent child && (w0.st child).life == .alive then
-      let w0 := markTree w0.roster.length D w0 child
-      enqueueTombstone D w0 child
+      let marked := markTree w0.roster.length D w0 child
+      armTombstone marked child
     else w0
   have hfold : ∀ (ids : List InstId) (w0 : World),
       ((ids.foldl step w0).st i).life = .alive → (w0.st i).life = .alive := by
@@ -7345,8 +7399,7 @@ theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
       simp only [List.foldl_cons, step] at h0
       by_cases hc : (isChild D parent child && (w0.st child).life == .alive) = true
       · simp only [hc, ite_true] at h0
-        have hts := enqueueTombstone_life D (markTree w0.roster.length D w0 child) child i
-          (ihids _ h0)
+        have hts := armTombstone_prev (markTree w0.roster.length D w0 child) child i (ihids _ h0)
         exact markTree_prev _ D w0 child i hts
       · have hf : (isChild D parent child && (w0.st child).life == .alive) = false := by
           cases hb : isChild D parent child && (w0.st child).life == .alive with
@@ -7379,13 +7432,10 @@ theorem spawnChild_core_life (I : Impl) (w w' : World) (parent : InstId) (child 
         · split at h
           · cases h
             rfl
-          · split at h
-            · cases h
-              rfl
-            · cases h
-              have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
-                intro h; cases h
-              simp [admitBorn, setActor, cellsSt, hpeer]
+          · cases h
+            have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
+              intro h; cases h
+            simp [admitBorn, setActor, cellsSt, hpeer]
         · simp at h
     · split at h
       · cases h
@@ -7643,10 +7693,18 @@ theorem apply_core_prev (I : Impl) (w w' : World) (a : Action) (name : String)
       cases hhead
       by_cases hid : id = InstId.core name
       · rw [hid] at hl
-        rw [releaseWorld_self_dead I.desc w (InstId.core name) (w.st (InstId.core name))] at hl
+        rw [sealActor_self_dead I.desc w (InstId.core name) (w.st (InstId.core name))] at hl
         cases hl
       · have hne : InstId.core name ≠ id := fun h => hid h.symm
-        exact (releaseWorld_core_life I.desc w id (w.st id) name hne).symm.trans hl
+        have hrel := releaseWorld_core_life I.desc w id (w.st id) name hne
+        unfold sealActor at hl
+        by_cases hpend : (w.st id).pendingTombstone = true
+        · simp only [hpend, ite_true] at hl
+          have hpre := enqueueTombstone_life I.desc (releaseWorld I.desc w id (w.st id)) id
+            (InstId.core name) hl
+          exact hrel.symm.trans hpre
+        · simp only [hpend, ite_false] at hl
+          exact hrel.symm.trans hl
     · have hnot : ((w.st id).life == .shuttingDown) = false := by
         simpa [Bool.not_eq_true] using hshut
       simp only [hnot, ite_false] at hhead

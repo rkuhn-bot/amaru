@@ -112,21 +112,34 @@ model guarantees that.
 ## 2026-11-20 — A slot has one outstanding tombstone
 
 Tombstones count toward `capPrio`. An enqueue that does not fit is
-`crashWorld`. A supervisor may re-spawn a child slot only in the transition
-that consumes that slot's tombstone, or later, once that tombstone is no
-longer queued. Until then the spawn is not enabled: `Eff.spawn` is a no-op,
-the same as a full pool, and a root spawn by a core into that slot returns
-no world. The predecessor may still be shutting down when its tombstone is
-consumed. The successor is born then, and refunds still go to the live
-generation.
+`crashWorld`. A parent, core pool or per-peer, may spawn slot `s` when that
+slot has never been born, or when its tombstone has already been consumed, or
+in the transition that consumes that tombstone. Until then the spawn is not
+enabled: `Eff.spawn` is a no-op, the same as a full pool, and a root spawn by
+a core into that slot returns no world. A slot that is still shutting down
+is occupied: the tombstone is not queued until the seal.
+
+The tombstone is queued when the child seals, after it is dead. Pure-stage's
+`terminate_stage` finishes the child before the parent is notified, and the
+model follows that. A consumed tombstone therefore means the predecessor has
+sealed. Refunds still go to the live generation of the sender's key.
 
 `LocalOk` rejects a program that spawns the child from a state which can run
 while the tombstone is still queued, so a checked design cannot rely on the
-no-op. Each slot then has at most one tombstone outstanding. The static bound
-is `prioSized`: the sum over child templates of slots times multiplicity,
-plus the other priority senders. A root a core spawns is one slot per root
-population, the same shape of bound. `prioSizeFails` is part of `LocalOk`.
-Under that check a tombstone enqueue has room (`no_tombstone_overflow`), so
-tombstone overflow is not a crash source for a checked design. A
+no-op. Each slot then has at most one tombstone outstanding. Per parent,
+`prioSized` says `capPrio` covers the sum over child templates of that
+parent's slots — one per pool slot, one per key of a root the core spawns,
+one for a per-peer parent's child — plus that parent's self-schedule and
+cell-wake senders. A path contributes the sends on one outcome; the two
+branches are not added. The lane also keeps a label from a later transition,
+and it keeps each label once, so the sender term is the larger of the
+single-path count and the number of distinct labels. `prioSizeFails` is part
+of `LocalOk`. Under `GraphOk`, `LocalOk`, and that bound, `offerPrio` does
+not take its crash branch for a tombstone (`no_tombstone_overflow`). A
 self-schedule or a cell wake that does not fit still crashes. That is
-pure-stage's panic, and it is not discharged by the slot bound.
+pure-stage's panic.
+
+Pure-stage will be changed to match this bound. Its tombstone queue is an
+unbounded `VecDeque` (`supervisor.tombstones.push_back` in
+`crates/amaru-pure-stage/src/simulation/running/mod.rs:1323` at `34a45300`).
+That is an implementation change to make, not a defect in the model.
