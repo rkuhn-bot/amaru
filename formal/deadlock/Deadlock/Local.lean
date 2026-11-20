@@ -269,7 +269,8 @@ def permanentTarget (I : Impl) : Bool :=
       match templateOf I.desc e.dst with
       | none => false
       | some t =>
-        (t.multiplicity == .one && t.terminable == false) || sameSubtree I.desc e.src e.dst
+        (t.multiplicity == .one && t.terminable == false) ||
+          sameSubtree I.desc e.src e.dst || coreSupervisedPool I.desc e.src e.dst
     else true
 
 mutual
@@ -475,6 +476,25 @@ def scopeGap (D : Description) (template label : String) : List Eff → List Str
     scopeGap D template label onTimeout ++ scopeGap D template label es
   | _ :: es => scopeGap D template label es
 
+/-- A per-peer parent spawning a pool child. `spawnChild` admits no such child.
+One function, so the recursion stays structural and the reporter reduces. -/
+def peerPoolProgram (D : Description) (src : String) : List Eff → Bool
+  | [] => false
+  | .spawn child :: es =>
+    (match templateOf D src, templateOf D child with
+      | some p, some ct =>
+        p.multiplicity == .perPeer && ct.slots != 0 && ct.supervisor == src
+      | _, _ => false) ||
+      peerPoolProgram D src es
+  | .trySend _ _ _ onFull onGone :: es =>
+    peerPoolProgram D src onFull || peerPoolProgram D src onGone || peerPoolProgram D src es
+  | .call _ _ _ onNotAdmitted onTimedOut :: es =>
+    peerPoolProgram D src onNotAdmitted || peerPoolProgram D src onTimedOut ||
+      peerPoolProgram D src es
+  | .peer onTimeout :: es =>
+    peerPoolProgram D src onTimeout || peerPoolProgram D src es
+  | _ :: es => peerPoolProgram D src es
+
 /-- One transition's local failures. Empty when `transitionOk` holds. -/
 def transitionIssues (I : Impl) (tr : Transition) : List String :=
   match templateOf I.desc tr.template with
@@ -493,6 +513,8 @@ def transitionIssues (I : Impl) (tr : Transition) : List String :=
         stateNamed t tr.toTimeout && stateNamed t tr.toFull && stateNamed t tr.toGone then []
      else [s!"fail: transition {tr.template} [{tr.label}] names an outcome state the template does not declare"]) ++
     (if spawnScope I.desc tr.template tr.program then []
+     else if peerPoolProgram I.desc tr.template tr.program then
+       ["fail: slots must be 0 under a per-peer parent"]
      else [s!"fail: transition {tr.template} [{tr.label}] spawns a stage it does not supervise"]) ++
     (if hasTerminate tr.program && !t.terminable then
       [s!"fail: transition {tr.template} [{tr.label}] terminates, and {tr.template} is not terminable"]
@@ -565,7 +587,8 @@ def permanentIssues (I : Impl) : List String :=
       match templateOf I.desc e.dst with
       | none => some s!"fail: reliable {e.label} targets unknown template {e.dst}"
       | some t =>
-        if (t.multiplicity == .one && t.terminable == false) || sameSubtree I.desc e.src e.dst then none
+        if (t.multiplicity == .one && t.terminable == false) ||
+            sameSubtree I.desc e.src e.dst || coreSupervisedPool I.desc e.src e.dst then none
         else some s!"fail: reliable {e.label} from {e.src} to {e.dst} is neither a permanent core nor inside the subtree"
     else none
 

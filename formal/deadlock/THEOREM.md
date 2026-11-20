@@ -29,6 +29,17 @@ still crash the roster are:
 - a cell wake that does not fit the priority lane
 - a tombstone that does not fit the priority lane: a child restart, and a
   root respawn while predecessors' tombstones are still queued
+- `enqueueTombstone` when the parent is not alive, or when the tombstone
+  label is empty
+- the `terminate` fall-through, a stage the shutdown cases do not classify
+- a missing template at a step that looks the template up and crashes
+
+The last three are obligations, not a proved absence. Under `GraphOk` and
+`LocalOk` a tombstone is enqueued only for a child whose supervisor is
+alive and whose label is the template's non-empty tombstone; a `LocalOk`
+program's `terminate` meets one of the classified shutdown cases; and a
+step looks up a template the description declares. This note does not
+prove those sites unreachable. A design that reaches one of them crashes.
 
 `prioSized` counts one tombstone per child that can be alive at once, and
 `slots` of a pool. It does not bound how often a child is restarted, and
@@ -44,6 +55,14 @@ or had terminated while the message was still queued. A try-drop send and a
 superseding cell wake are not obligations. An admitted call leaves
 `awaitReply`.
 `Assumptions` is only `rust_refines`.
+
+The parked-call reserve is the ingress gate, not `LocalOk`. `tokenHold`
+counts the call's own message once, through the charge taken when the call
+was parked, and counts the `TimedOut` continuation's future sends on top.
+`receiveIngress` refuses a message that would leave `tokens` short of that
+reserve. A Rust ingress adapter that checked only mailbox room would accept
+a self-park the gate refuses. Keeping that gate is an obligation on the
+exporter and the runtime, beside `rust_refines`.
 
 The handled half is not a separate obligation. Once a stage has returned its
 next state, the runtime gives it the next message and the stage cannot refuse.

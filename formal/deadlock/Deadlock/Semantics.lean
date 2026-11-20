@@ -355,8 +355,12 @@ structure Actor where
   box : List Msg
   prio : List Msg
   parked : List Parked
-  /-- Remaining send slots per destination template. `tokens dst + msgsTo dst = budget`. -/
-  tokens : String → Nat
+  /-- Remaining send slots toward template `dst`, as an exact integer.
+  For the live generation of a key, `tokens dst + msgsTo dst = budget`:
+  mail still queued from an older generation is subtracted here, and a refund
+  of that mail is added back. The balance may be negative while more mail is
+  queued than the budget. -/
+  tokens : String → Int
   /-- Next identity this actor stamps on a message it accepts. -/
   nextMid : Nat := 0
   /-- Id of the call this actor is waiting on. Meaningful in `.parked _ true` and `.awaitReply`. -/
@@ -513,8 +517,10 @@ def findTr (I : Impl) (template state label : String) : Option Transition :=
   I.transitions.findSome? fun tr =>
     if tr.template == template && tr.fromState == state && tr.label == label then some tr else none
 
-/-- `findTr` on the message label. A tombstone also matches `baseLabel`,
-so a handler written for the template's `tombstone` accepts every generation. -/
+/-- `findTr` on the message label. A current tombstone also matches `baseLabel`,
+so a handler written for the template's `tombstone` accepts the newest
+generation's label. A stale generation is dropped by `deliver` before this
+lookup, and does not run that handler. -/
 def findDeliver (I : Impl) (template state : String) (m : Msg) : Option Transition :=
   match findTr I template state m.label with
   | some tr => some tr
@@ -613,26 +619,63 @@ def maxGen (w : World) (name : String) (key : Nat) : Nat :=
 def aliveAt (w : World) (name : String) (key : Nat) : Bool :=
   (findLive w name key).isSome
 
-/-- The instance a name denotes, whether or not it is alive. A missing template,
-or a core addressing a per-peer role, does not resolve. -/
-def resolveId (D : Description) (w : World) (sender : InstId) (dst : String) : Option InstId :=
+/-- The generation that holds this key's send budget. A live incarnation
+receives credits and refunds. A core, and a key with nobody alive, keep the
+id that was charged. -/
+abbrev budgetHolder (w : World) (sender : InstId) : InstId :=
+  match sender with
+  | .core _ => sender
+  | .peer name key _ =>
+    match findLive w name key with
+    | some id => id
+    | none => sender
+
+/-- One returned slot goes to the key's live generation when one exists. -/
+abbrev creditLive (w : World) (mailboxTemplate : String) (sender : InstId) : World :=
+  creditSender w mailboxTemplate (budgetHolder w sender)
+
+/-- A tombstone from a generation older than some incarnation already on the
+roster. Delivery drops it, so it never runs the live generation's handler. -/
+def newerGeneration (w : World) (m : Msg) : Bool :=
+  match m.sender with
+  | .peer name key gen =>
+    m.tombstone &&
+      w.roster.any fun id =>
+        match id with
+        | .peer n k g => n == name && k == key && decide (g > gen)
+        | .core _ => false
+  | .core _ => false
+
+/-- The instance a name denotes, whether or not it is alive. A pool
+(`slots` > 0) is addressed by `slot`. Any other per-peer role uses the
+sender's subtree key. A missing template does not resolve. -/
+def resolveId (D : Description) (w : World) (sender : InstId) (dst : String)
+    (slot : Nat := 0) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
     match t.multiplicity with
     | .one => some (.core dst)
     | .perPeer =>
-      match memberKey sender with
-      | none => none
-      | some k =>
-        match findLive w dst k with
-        | some id => some id
-        | none => some (.peer dst k 0)
+      if t.slots != 0 then
+        if slot < t.slots then
+          match findLive w dst slot with
+          | some id => some id
+          | none => some (.peer dst slot 0)
+        else none
+      else
+        match memberKey sender with
+        | none => none
+        | some k =>
+          match findLive w dst k with
+          | some id => some id
+          | none => some (.peer dst k 0)
 
-/-- A live target only. A per-peer role is addressed by the sender's subtree key,
-not by a literal hint. Shutting-down, dead, and never-spawned keys do not
-resolve, so the send is dropped and stays dropped. -/
-def route (w : World) (D : Description) (sender : InstId) (dst : String) : Option InstId :=
+/-- A live target only. A pool is the live occupant of `slot`. Any other
+per-peer role is the live occupant of the sender's subtree key. Shutting-down,
+dead, and never-spawned targets do not resolve. -/
+def route (w : World) (D : Description) (sender : InstId) (dst : String)
+    (slot : Nat := 0) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
@@ -641,9 +684,12 @@ def route (w : World) (D : Description) (sender : InstId) (dst : String) : Optio
       let id := InstId.core dst
       if (w.st id).life == .alive then some id else none
     | .perPeer =>
-      match memberKey sender with
-      | none => none
-      | some k => findLive w dst k
+      if t.slots != 0 then
+        if slot < t.slots then findLive w dst slot else none
+      else
+        match memberKey sender with
+        | none => none
+        | some k => findLive w dst k
 
 /-- Record a route that did not resolve. The sender then leaves the effect. -/
 def noteStale (w : World) (sender : InstId) (dst : String) : World :=
@@ -718,7 +764,7 @@ def afterHead (k : Cont) : Cont :=
   { k with rest := k.rest.tail }
 
 def withTokens (D : Description) (template : String) (a : Actor) : Actor :=
-  { a with tokens := fun dst => budget D template dst }
+  { a with tokens := fun dst => (budget D template dst : Int) }
 
 /-- Messages still queued from any generation of `name` at `key`, on hosts of
 template `dst`. A new generation is charged for them: the key's budget is one
@@ -734,10 +780,14 @@ def queuedFromKey (w : World) (name : String) (key : Nat) (dst : String) : Nat :
       n + ((w.st host).box.filter fromKey).length +
         ((w.st host).parked.filter fun p => fromKey p.msg).length) 0
 
-/-- `budget` minus mail from earlier generations of this key. The first
-generation is charged nothing. -/
+/-- `budget` minus mail from every generation of this key. The subtraction is
+in `Int`, so a queue longer than the budget stays visible as a negative
+balance instead of being truncated. The first generation is charged nothing.
+A later refund of that mail is credited to the live generation, which brings
+the sum back to `budget`. -/
 def withKeyTokens (D : Description) (w : World) (template : String) (key : Nat) (a : Actor) : Actor :=
-  { a with tokens := fun dst => budget D template dst - queuedFromKey w template key dst }
+  { a with tokens := fun dst =>
+      (budget D template dst : Int) - (queuedFromKey w template key dst : Int) }
 
 def bornActor (D : Description) (w : World) (template : String) (key : Nat) (initial : String) : Actor :=
   withKeyTokens D w template key
@@ -761,10 +811,13 @@ queued. Another non-call with no transition is consumed. -/
 def deliver (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) : Option (World × Actor) :=
   let w := readCells I.desc w id
   if a.life ≠ .alive then none
+  else if m.tombstone && newerGeneration w m then
+    -- An older generation's tombstone does not run the live handler.
+    some (w, { a with phase := .idle })
   else
     match findDeliver I (tname id) a.typestate m with
     | none =>
-      -- A call, and a tombstone, stay queued when this state has no transition.
+      -- A call, and a current tombstone, stay queued when this state has no transition.
       -- A non-call that is not a tombstone is consumed.
       if m.callFrom.isSome || m.tombstone then none
       else some (w, { a with phase := .idle })
@@ -805,20 +858,20 @@ def receiveBulk (I : Impl) (w : World) (id : InstId) : Option World :=
       | none => none
       | some (w, a') =>
         -- Credit after installing `a'`, so a self-sent message is not overwritten.
-        some (creditSender (setActor w id a') (tname id) m.sender)
+        some (creditLive (setActor w id a') (tname id) m.sender)
     | m :: ms, p :: ps =>
       match deliver I w id { a with box := ms } m with
       | none => none
       | some (w, a') =>
         let admitted := { a' with box := a'.box ++ [p.msg], parked := ps }
-        let w := creditSender (setActor w id admitted) (tname id) m.sender
+        let w := creditLive (setActor w id admitted) (tname id) m.sender
         let resumed := resumeSender (w.st p.sender) p.isCall id
         some (setActor w p.sender resumed)
     | [], p :: ps =>
       match deliver I w id { a with parked := ps } p.msg with
       | none => none
       | some (w, a') =>
-        let w := creditSender (setActor w id a') (tname id) p.msg.sender
+        let w := creditLive (setActor w id a') (tname id) p.msg.sender
         some (setActor w p.sender (resumeSender (w.st p.sender) p.isCall id))
     | [], [] => none
 
@@ -947,10 +1000,10 @@ def hasParkedCall (ps : List Parked) : Bool :=
   ps.any fun p => p.isCall
 
 def refundMsgs (w : World) (dstName : String) (ms : List Msg) : World :=
-  ms.foldl (fun w m => creditSender w dstName m.sender) w
+  ms.foldl (fun w m => creditLive w dstName m.sender) w
 
 def refundParked (w : World) (dstName : String) (ps : List Parked) : World :=
-  ps.foldl (fun w p => creditSender w dstName p.msg.sender) w
+  ps.foldl (fun w p => creditLive w dstName p.msg.sender) w
 
 def releaseParked (w : World) (id : InstId) (ps : List Parked) : World :=
   ps.foldl (fun w p =>
@@ -1328,7 +1381,7 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
       let k' := afterHead k
       match eff with
       | .send dst label hint =>
-        match route w I.desc id dst with
+        match route w I.desc id dst hint with
         | none => setActor (noteStale w id dst) id (proceed a k')
         | some dstId =>
           let msg : Msg := { label := label, sender := id, callFrom := none }
@@ -1336,7 +1389,7 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
       | .trySend dst label hint onFull onGone =>
         let kFull := { k' with rest := onFull, toState := pickState k'.toState k'.toFull }
         let kGone := { k' with rest := onGone, toState := pickState k'.toState k'.toGone }
-        match route w I.desc id dst with
+        match route w I.desc id dst hint with
         | none => setActor (noteStale w id dst) id (proceed a kGone)
         | some dstId =>
           let target := w.st dstId
@@ -1351,7 +1404,7 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
             setActor w id (proceed a kGone)
       | .call dst label hint onNotAdmitted onTimedOut =>
         let kWait := { k' with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
-        match resolveId I.desc w id dst with
+        match resolveId I.desc w id dst hint with
         | none =>
           -- No such role: the call is not admitted, on its own continuation.
           setActor (noteStale w id dst) id (finishCall (issueCall a) kWait .notAdmitted)
@@ -1881,12 +1934,13 @@ def tokenHold (D : Description) (template dst : String) (a : Actor) : Nat :=
     max (pathReserve D template dst (contAt k) k.rest)
       (pathReserve D template dst (focus (contAt k) k.toTimedOut) k.onTimedOut)
   | .parked _ false k => pathReserve D template dst (contAt k) k.rest
-  | .parked target true k =>
-    let own := if tname target == dst then 1 else 0
+  | .parked _ true k =>
+    -- The call's own message was charged when it was parked, so the reserve
+    -- counts it only through that charge, not again here.
     let at_ := contAt k
     max (pathReserve D template dst at_ k.rest)
       (max (pathReserve D template dst (focus at_ at_.notAdmitted) k.onNotAdmitted)
-        (max (own + pathReserve D template dst (focus at_ at_.timedOut) k.onTimedOut)
+        (max (pathReserve D template dst (focus at_ at_.timedOut) k.onTimedOut)
           (pathReserve D template dst (focus at_ at_.timeout) k.onTimeout)))
 
 /-- Idle, parked, waiting, or running. A message for a running actor waits in
@@ -2008,8 +2062,8 @@ def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Opti
   else if hasIngress I.desc (tname dst) label = false then none
   else if cap ≤ a.box.length then none
   else if loneTerminableB I.desc (tname dst) then none
-  else if a.tokens (tname dst) < need ||
-      a.tokens (tname dst) < Nat.max (ingressAllowance I.desc w.N (tname dst) label) 1 then none
+  else if a.tokens (tname dst) < (need : Int) ||
+      a.tokens (tname dst) < (Nat.max (ingressAllowance I.desc w.N (tname dst) label) 1 : Int) then none
   else
     let msg : Msg :=
       { label := label, sender := dst, callFrom := none, reliable := true, mid := a.nextMid }
@@ -2113,7 +2167,7 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
     (w.st dst).life = .alive ∧ ingressOpen (w.st dst).phase = true ∧
       loneTerminableB I.desc (tname dst) = false ∧
-      tokenHold I.desc (tname dst) (tname dst) (w.st dst) + 1 ≤ (w.st dst).tokens (tname dst) ∧
+      (tokenHold I.desc (tname dst) (tname dst) (w.st dst) : Int) + 1 ≤ (w.st dst).tokens (tname dst) ∧
       w' = setActor w dst { chargeSender (w.st dst) (tname dst) with
         box := (w.st dst).box ++
           [{ label := label, sender := dst, callFrom := none, reliable := true, mid := (w.st dst).nextMid }],
@@ -2147,14 +2201,13 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
             · cases hb : loneTerminableB I.desc (tname dst) with
               | true => simp [hb] at hterm
               | false => rfl
-            · have hlt : ¬((w.st dst).tokens (tname dst) <
-                  tokenHold I.desc (tname dst) (tname dst) (w.st dst) + 1) := by
+            · exact Int.not_lt.mp (by
                 intro hbad
+                apply htok
                 have hdec : decide ((w.st dst).tokens (tname dst) <
-                    tokenHold I.desc (tname dst) (tname dst) (w.st dst) + 1) = true :=
+                    (tokenHold I.desc (tname dst) (tname dst) (w.st dst) : Int) + 1) = true :=
                   decide_eq_true_iff.mpr hbad
-                simp [hdec] at htok
-              simpa [Nat.not_lt] using hlt
+                simp [hdec])
 
 /-- A delivered ingress names a live actor that is idle, parked, or waiting. -/
 theorem ingress_ready (I : Impl) (w w' : World) (dst : InstId) (label : String)
@@ -2541,32 +2594,44 @@ theorem credit_nextIx (w : World) (dst : String) (s : InstId) :
 
 theorem credit_N (w : World) (dst : String) (s : InstId) : (creditSender w dst s).N = w.N := rfl
 
+theorem creditLive_roster (w : World) (dst : String) (s : InstId) :
+    (creditLive w dst s).roster = w.roster :=
+  credit_roster w dst (budgetHolder w s)
+
+theorem creditLive_nextIx (w : World) (dst : String) (s : InstId) :
+    (creditLive w dst s).nextIx = w.nextIx :=
+  credit_nextIx w dst (budgetHolder w s)
+
+theorem creditLive_N (w : World) (dst : String) (s : InstId) :
+    (creditLive w dst s).N = w.N :=
+  credit_N w dst (budgetHolder w s)
+
 theorem refundMsgs_roster (w : World) (dst : String) (ms : List Msg) :
     (refundMsgs w dst ms).roster = w.roster := by
   induction ms generalizing w with
   | nil => simp [refundMsgs]
   | cons m ms ih =>
-    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditLive w dst m.sender) dst ms := by
       simp [refundMsgs, List.foldl_cons]
-    rw [hfold, ih, credit_roster]
+    rw [hfold, ih, creditLive_roster]
 
 theorem refundMsgs_nextIx (w : World) (dst : String) (ms : List Msg) :
     (refundMsgs w dst ms).nextIx = w.nextIx := by
   induction ms generalizing w with
   | nil => simp [refundMsgs]
   | cons m ms ih =>
-    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditLive w dst m.sender) dst ms := by
       simp [refundMsgs, List.foldl_cons]
-    rw [hfold, ih, credit_nextIx]
+    rw [hfold, ih, creditLive_nextIx]
 
 theorem refundMsgs_N (w : World) (dst : String) (ms : List Msg) :
     (refundMsgs w dst ms).N = w.N := by
   induction ms generalizing w with
   | nil => simp [refundMsgs]
   | cons m ms ih =>
-    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditSender w dst m.sender) dst ms := by
+    have hfold : refundMsgs w dst (m :: ms) = refundMsgs (creditLive w dst m.sender) dst ms := by
       simp [refundMsgs, List.foldl_cons]
-    rw [hfold, ih, credit_N]
+    rw [hfold, ih, creditLive_N]
 
 theorem refundParked_roster (w : World) (dst : String) (ps : List Parked) :
     (refundParked w dst ps).roster = w.roster := by
@@ -2574,9 +2639,9 @@ theorem refundParked_roster (w : World) (dst : String) (ps : List Parked) :
   | nil => simp [refundParked]
   | cons p ps ih =>
     have hfold : refundParked w dst (p :: ps) =
-        refundParked (creditSender w dst p.msg.sender) dst ps := by
+        refundParked (creditLive w dst p.msg.sender) dst ps := by
       simp [refundParked, List.foldl_cons]
-    rw [hfold, ih, credit_roster]
+    rw [hfold, ih, creditLive_roster]
 
 theorem refundParked_nextIx (w : World) (dst : String) (ps : List Parked) :
     (refundParked w dst ps).nextIx = w.nextIx := by
@@ -2584,9 +2649,9 @@ theorem refundParked_nextIx (w : World) (dst : String) (ps : List Parked) :
   | nil => simp [refundParked]
   | cons p ps ih =>
     have hfold : refundParked w dst (p :: ps) =
-        refundParked (creditSender w dst p.msg.sender) dst ps := by
+        refundParked (creditLive w dst p.msg.sender) dst ps := by
       simp [refundParked, List.foldl_cons]
-    rw [hfold, ih, credit_nextIx]
+    rw [hfold, ih, creditLive_nextIx]
 
 theorem refundParked_N (w : World) (dst : String) (ps : List Parked) :
     (refundParked w dst ps).N = w.N := by
@@ -2594,9 +2659,9 @@ theorem refundParked_N (w : World) (dst : String) (ps : List Parked) :
   | nil => simp [refundParked]
   | cons p ps ih =>
     have hfold : refundParked w dst (p :: ps) =
-        refundParked (creditSender w dst p.msg.sender) dst ps := by
+        refundParked (creditLive w dst p.msg.sender) dst ps := by
       simp [refundParked, List.foldl_cons]
-    rw [hfold, ih, credit_N]
+    rw [hfold, ih, creditLive_N]
 
 theorem cellsN (D : Description) (w : World) (id : InstId) : (readCells D w id).N = w.N := by
   unfold readCells
@@ -2851,8 +2916,8 @@ theorem refundMsgs_fields (w : World) (name : String) (ms : List Msg) (i : InstI
   | nil => simp [refundMsgs]
   | cons m ms ih =>
     simp only [refundMsgs, List.foldl_cons]
-    have h1 := credit_fields w name m.sender i
-    have h2 := ih (creditSender w name m.sender)
+    have h1 := credit_fields w name (budgetHolder w m.sender) i
+    have h2 := ih (creditLive w name m.sender)
     exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
       h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.trans h1.2.2.2.2⟩
 
@@ -2866,8 +2931,8 @@ theorem refundParked_fields (w : World) (name : String) (ps : List Parked) (i : 
   | nil => simp [refundParked]
   | cons p ps ih =>
     simp only [refundParked, List.foldl_cons]
-    have h1 := credit_fields w name p.msg.sender i
-    have h2 := ih (creditSender w name p.msg.sender)
+    have h1 := credit_fields w name (budgetHolder w p.msg.sender) i
+    have h2 := ih (creditLive w name p.msg.sender)
     exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
       h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.trans h1.2.2.2.2⟩
 
@@ -2878,8 +2943,8 @@ theorem refundMsgs_phase_life (w : World) (name : String) (ms : List Msg) (i : I
   | nil => simp [refundMsgs]
   | cons m ms ih =>
     simp only [refundMsgs, List.foldl_cons]
-    have hcred := credit_phase_life w name m.sender i
-    have hih := ih (creditSender w name m.sender)
+    have hcred := credit_phase_life w name (budgetHolder w m.sender) i
+    have hih := ih (creditLive w name m.sender)
     exact ⟨hih.1.trans hcred.1, hih.2.trans hcred.2⟩
 
 theorem refundParked_phase_life (w : World) (name : String) (ps : List Parked) (i : InstId) :
@@ -2889,8 +2954,8 @@ theorem refundParked_phase_life (w : World) (name : String) (ps : List Parked) (
   | nil => simp [refundParked]
   | cons p ps ih =>
     simp only [refundParked, List.foldl_cons]
-    have hcred := credit_phase_life w name p.msg.sender i
-    have hih := ih (creditSender w name p.msg.sender)
+    have hcred := credit_phase_life w name (budgetHolder w p.msg.sender) i
+    have hih := ih (creditLive w name p.msg.sender)
     exact ⟨hih.1.trans hcred.1, hih.2.trans hcred.2⟩
 
 theorem failFold_off (w : World) (dead s : InstId) (ids : List InstId) (hs : s ∉ ids) :
@@ -3527,8 +3592,8 @@ theorem refundMsgs_rest (w : World) (name : String) (ms : List Msg) (i : InstId)
   | nil => simp [refundMsgs]
   | cons m ms ih =>
     simp only [refundMsgs, List.foldl_cons]
-    have h1 := credit_rest w name m.sender i
-    have h2 := ih (creditSender w name m.sender)
+    have h1 := credit_rest w name (budgetHolder w m.sender) i
+    have h2 := ih (creditLive w name m.sender)
     exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
       h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.1.trans h1.2.2.2.2.1,
       h2.2.2.2.2.2.trans h1.2.2.2.2.2⟩
@@ -3544,8 +3609,8 @@ theorem refundParked_rest (w : World) (name : String) (ps : List Parked) (i : In
   | nil => simp [refundParked]
   | cons p ps ih =>
     simp only [refundParked, List.foldl_cons]
-    have h1 := credit_rest w name p.msg.sender i
-    have h2 := ih (creditSender w name p.msg.sender)
+    have h1 := credit_rest w name (budgetHolder w p.msg.sender) i
+    have h2 := ih (creditLive w name p.msg.sender)
     exact ⟨h2.1.trans h1.1, h2.2.1.trans h1.2.1, h2.2.2.1.trans h1.2.2.1,
       h2.2.2.2.1.trans h1.2.2.2.1, h2.2.2.2.2.1.trans h1.2.2.2.2.1,
       h2.2.2.2.2.2.trans h1.2.2.2.2.2⟩
@@ -4698,7 +4763,7 @@ theorem refundMsgs_cell (w : World) (name : String) (ms : List Msg) (d l : Strin
     unfold refundMsgs
     simp only [List.foldl_cons]
     rw [← refundMsgs, ih]
-    simp [creditSender, setActor]
+    simp [creditLive, creditSender, setActor]
 
 theorem refundParked_cell (w : World) (name : String) (ps : List Parked) (d l : String) :
     ((refundParked w name ps).cell d l) = w.cell d l := by
@@ -4708,7 +4773,7 @@ theorem refundParked_cell (w : World) (name : String) (ps : List Parked) (d l : 
     unfold refundParked
     simp only [List.foldl_cons]
     rw [← refundParked, ih]
-    simp [creditSender, setActor]
+    simp [creditLive, creditSender, setActor]
 
 theorem killOne_cell (w : World) (D : Description) (id : InstId) :
     (killOne w D id).cell = (readCells D w id).cell := by
@@ -6446,7 +6511,7 @@ theorem refundMsgs_core_life (w : World) (dstName : String) (ms : List Msg) (nam
   | nil => rfl
   | cons m ms ih =>
     rw [refundMsgs, List.foldl_cons]
-    exact (ih _).trans (credit_core_life _ _ _ _)
+    exact (ih _).trans (credit_core_life _ _ (budgetHolder _ m.sender) _)
 
 theorem refundParked_core_life (w : World) (dstName : String) (ps : List Parked) (name : String) :
     ((refundParked w dstName ps).st (InstId.core name)).life = (w.st (InstId.core name)).life := by
@@ -6454,7 +6519,7 @@ theorem refundParked_core_life (w : World) (dstName : String) (ps : List Parked)
   | nil => rfl
   | cons p ps ih =>
     rw [refundParked, List.foldl_cons]
-    exact (ih _).trans (credit_core_life _ _ _ _)
+    exact (ih _).trans (credit_core_life _ _ (budgetHolder _ p.msg.sender) _)
 
 /-- Resuming parked senders does not change a core's life. -/
 theorem release_core_life (w : World) (id : InstId) (ps : List Parked) (name : String) :
@@ -6603,20 +6668,25 @@ theorem reply_core_life (w : World) (sender : InstId) (k : Cont) (name : String)
 theorem deliver_life (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
     (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) :
     a1.life = a.life ∧ ∀ i, (w1.st i).life = (w.st i).life := by
-  unfold deliver at h
+  simp only [deliver] at h
   have hcells : ∀ i, ((readCells I.desc w id).st i).life = (w.st i).life :=
     fun i => congrArg Actor.life (cellsSt I.desc w id i)
-  split at h
-  · cases h
-  · split at h
+  revert h
+  split
+  · intro h; cases h
+  · intro h
+    split at h
+    · cases h
+      exact ⟨rfl, hcells⟩
     · split at h
-      · cases h
-      · cases h
-        exact ⟨rfl, hcells⟩
-    · split at h
-      · cases h
-      · cases h
-        split <;> exact ⟨rfl, hcells⟩
+      · split at h
+        · cases h
+        · cases h
+          exact ⟨rfl, hcells⟩
+      · split at h
+        · cases h
+        · cases h
+          split <;> exact ⟨rfl, hcells⟩
 
 /-- `receiveBulk` does not change anyone's life. -/
 theorem receiveBulk_keeps_life (I : Impl) (w w' : World) (id i : InstId)
@@ -6640,7 +6710,7 @@ theorem receiveBulk_keeps_life (I : Impl) (w w' : World) (id i : InstId)
             by_cases hi : i = id
             · rw [hi]; simpa [setActor] using hkeep.1
             · simpa [setActor, hi] using hkeep.2 i
-          have hcred := (credit_phase_life (setActor w1 id a1) (tname id) p.msg.sender i).2
+          have hcred := (credit_phase_life (setActor w1 id a1) (tname id) (budgetHolder (setActor w1 id a1) p.msg.sender) i).2
           by_cases hs : i = p.sender
           · rw [hs] at hcred hset ⊢
             simp only [setActor, ite_true, resume_keeps_life]
@@ -6660,7 +6730,7 @@ theorem receiveBulk_keeps_life (I : Impl) (w w' : World) (id i : InstId)
             by_cases hi : i = id
             · rw [hi]; simpa [setActor] using hkeep.1
             · simpa [setActor, hi] using hkeep.2 i
-          exact ((credit_phase_life (setActor w1 id a1) (tname id) m.sender i).2).trans hset
+          exact ((credit_phase_life (setActor w1 id a1) (tname id) (budgetHolder (setActor w1 id a1) m.sender) i).2).trans hset
       | cons p ps =>
         simp [hbox, hpark] at h
         split at h
@@ -6673,7 +6743,7 @@ theorem receiveBulk_keeps_life (I : Impl) (w w' : World) (id i : InstId)
             by_cases hi : i = id
             · rw [hi]; simpa [setActor, admitted] using hkeep.1
             · simpa [setActor, hi] using hkeep.2 i
-          have hcred := (credit_phase_life (setActor w1 id admitted) (tname id) m.sender i).2
+          have hcred := (credit_phase_life (setActor w1 id admitted) (tname id) (budgetHolder (setActor w1 id admitted) m.sender) i).2
           by_cases hs : i = p.sender
           · rw [hs] at hcred hset ⊢
             simp only [setActor, ite_true, resume_keeps_life]
@@ -7212,7 +7282,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
     cases e with
     | send dst label hint =>
       simp [execRun, hliveB, hk] at hl
-      cases hr : route w I.desc id dst with
+      cases hr : route w I.desc id dst hint with
       | none =>
         simp [hr, noteStale] at hl
         have hset := set_core_life w id (proceed a (afterHead k)) name (by simp [proceed_keeps_life, ha])
@@ -7222,7 +7292,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
         exact (enqueue_core_life w I.desc id dstId _ false (afterHead k) name).symm.trans hl
     | trySend dst label hint onFull onGone =>
       simp [execRun, hliveB, hk] at hl
-      cases hr : route w I.desc id dst with
+      cases hr : route w I.desc id dst hint with
       | none =>
         simp [hr, noteStale] at hl
         let goneK := { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone }
@@ -7241,7 +7311,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
             exact hset.symm.trans hl
     | call dst label hint onNotAdmitted onTimedOut =>
       simp [execRun, hliveB, hk] at hl
-      cases hr : resolveId I.desc w id dst with
+      cases hr : resolveId I.desc w id dst hint with
       | none =>
         simp [hr, noteStale] at hl
         have hset := set_core_life (noteStale w id dst) id

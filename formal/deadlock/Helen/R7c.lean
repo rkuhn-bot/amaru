@@ -268,7 +268,7 @@ def deadActs : List Action :=
    .ingress Y0 "Go", .recvBulk Y0, .exec Y0, .exec Y0,
    .recvPrio Qc, .exec Qc, .exec X0]
 
-def deadSnap (w : Option World) : Option (Nat × Nat × String × Nat × Nat) :=
+def deadSnap (w : Option World) : Option (Nat × Nat × String × Nat × Int) :=
   w.map fun w => (lifeTag (w.st X0).life, lifeTag (w.st Hh).life, (w.st Hh).typestate,
     (w.st Hh).parked.length, (w.st X0).tokens "H")
 

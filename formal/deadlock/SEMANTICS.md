@@ -29,14 +29,18 @@ and `reliable`. `mid` is the id the accepting actor stamps from its
 `nextMid`. `callFrom` is the caller, or `none`. A try-drop send and a cell
 wake are `reliable = false`.
 
-`tokens dst` is the remaining send credit toward template `dst`.
-`enqueueOrPark` spends one with `chargeSender`. A receive gives it back
-with `creditSender`. While idle, the ingress gate reserves the current
-typestate's floor. While a continuation is open, it reserves the maximum
-of `sends + floor(landing)` over the paths still open, and a parked call
-counts its own message on the `TimedOut` path. A new generation's tokens
-are that budget minus mail still queued from any generation of the same
-key. `capBulk` and `capPrio` bound the queues. A priority wake is not charged.
+`tokens dst` is the remaining send credit toward template `dst`, an exact
+integer. For the live generation of a key, `tokens dst + msgsTo dst = budget`.
+`enqueueOrPark` spends one with `chargeSender`. A receive and a shutdown
+refund give it back with `creditLive`, to the live generation of the
+sender's key when one exists, and otherwise to the id that was charged.
+While idle, the ingress gate reserves the current typestate's floor. While
+a continuation is open, it reserves the maximum of `sends + floor(landing)`
+over the paths still open. A parked call's own message is already charged,
+so the reserve does not count it again. A new generation's tokens are that
+budget minus mail still queued from any generation of the same key, and the
+subtraction does not truncate. `capBulk` and `capPrio` bound the queues. A
+priority wake is not charged.
 
 `cell dst label` is a monotonic dirty bit. `observed id label` is the value
 a reader has recorded. `readCells` clears the bits it copies.
@@ -95,15 +99,18 @@ One `exec` step, by the head effect:
   A stage in a supervision tree marks itself and its descendants. A lone
   terminable with no child and no parked call shuts only itself down.
 
-`route` resolves a multiplicity-one name to its live core, and a per-peer
-name to `InstId.peer dst (memberKey sender)` when that peer is alive. A core
-cannot address a per-peer role. The `hint` is not the address.
+`route` resolves a multiplicity-one name to its live core. A pool
+(`slots` > 0) is the live occupant of the addressed slot, and `hint` is
+that slot, so a core can send to and call its own pool members. Any other
+per-peer name is the live occupant of the sender's subtree key.
 
 `deliver` refuses a dead actor, a call with no transition, and a call whose
 transition does not `acceptsCall`. The receive is then not enabled. A
 tombstone with no transition in the parent's current state is also refused,
 so it stays queued. The queued label is the template's tombstone, `#`, and
-the generation. A handler written on the base label still accepts it. Another non-call with no transition is accepted and
+the generation. A handler written on the base label still accepts the newest
+generation. A tombstone from an older generation is consumed and leaves the
+receiver idle, and does not run that handler. Another non-call with no transition is accepted and
 leaves the receiver `idle`. A program becomes `run`, or `idle` when the
 program is empty. `replyTo` is `callFrom`. Each outcome's typestate is
 copied onto the continuation.

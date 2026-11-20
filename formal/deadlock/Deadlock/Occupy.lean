@@ -284,10 +284,9 @@ theorem owed_append_msg (st : InstId → Actor) (dstName : String) (sender dst :
   have hslot := slot_append_msg st dstName sender dst msg hname hs
   omega
 
-theorem charge_tokens (a : Actor) (dst : String) (h : 1 ≤ a.tokens dst) :
+theorem charge_tokens (a : Actor) (dst : String) (_h : 1 ≤ a.tokens dst) :
     (chargeSender a dst).tokens dst + 1 = a.tokens dst := by
   simp [chargeSender, bumpToken]
-  omega
 
 theorem countFrom_join (sender : InstId) (ms ns : List Msg) :
     countFrom sender (ms ++ ns) = countFrom sender ms + countFrom sender ns := by

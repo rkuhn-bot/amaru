@@ -596,6 +596,15 @@ def subtreeKillable (D : Description) (name : String) : Bool :=
   let s := templateSubtree D name
   s != "" && D.templates.any fun t => t.subtree == s && t.timeoutKills
 
+/-- A pool child addressed by its core supervisor. The core may send to and
+call that child: the child's shutdown refunds the message. -/
+def coreSupervisedPool (D : Description) (src dst : String) : Bool :=
+  match templateOf D dst, templateOf D src with
+  | some child, some parent =>
+    child.slots != 0 && child.multiplicity == .perPeer &&
+      child.supervisor == src && parent.multiplicity == .one
+  | _, _ => false
+
 def callTermFails (D : Description) : List String :=
   D.edges.filterMap fun e =>
     if e.effect != .call then none
@@ -603,9 +612,9 @@ def callTermFails (D : Description) : List String :=
       match templateOf D e.dst with
       | none => some s!"fail: call {e.label} targets unknown template {e.dst}"
       | some t =>
-        -- A call may enter a terminable role only inside that role's subtree.
-        -- Anything else must be a permanent core: a kill there would not fail this caller.
-        if t.terminable && !sameSubtree D e.src e.dst then
+        -- A call may enter a terminable role inside that role's subtree, or a
+        -- pool child of the calling core. Anything else must be a permanent core.
+        if t.terminable && !sameSubtree D e.src e.dst && !coreSupervisedPool D e.src e.dst then
           some s!"fail: call {e.label} targets terminable template {e.dst}"
         else none
 
@@ -672,11 +681,14 @@ def subtreeFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
     if t.slots != 0 && (t.multiplicity != .perPeer || t.supervisor == "") then
       some s!"fail: pool {t.name} is a per-peer template with a supervisor"
-    else if t.slots != 0 && t.subtree == "" then
+    else if t.slots != 0 then
       match templateOf D t.supervisor with
       | some s =>
-        if s.multiplicity == .one then none
-        else some s!"fail: pool {t.name} is supervised by {t.supervisor}, which is not a core"
+        if s.multiplicity != .one then
+          some s!"fail: slots must be 0 under a per-peer parent"
+        else if t.subtree != "" && !(supervisorInSubtree D t) then
+          some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not in the subtree"
+        else none
       | none => some s!"fail: pool {t.name} names unknown supervisor {t.supervisor}"
     else if t.subtree == "" then
       if t.supervisor != "" then some s!"fail: {t.name} names a supervisor without a subtree"

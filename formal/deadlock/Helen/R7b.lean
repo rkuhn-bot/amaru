@@ -75,7 +75,7 @@ def landActs : List Action :=
   [.ingress Ac "Go", .recvBulk Ac, .exec Ac, .ingress Ac "Go", .ingress Ac "Go", .callTimeout Ac, .exec Ac,
    .recvBulk Ac, .exec Ac, .exec Ac, .exec Ac]
 
-def snap (w : World) : String × Nat × Nat × Nat × Nat :=
+def snap (w : World) : String × Nat × Nat × Int × Nat :=
   ((w.st Ac).typestate, (w.st Ac).box.length, (w.st Ac).parked.length, (w.st Ac).tokens "A",
    match (w.st Ac).phase with | .parked _ _ _ => 1 | .idle => 0 | .run _ => 2 | _ => 3)
 
