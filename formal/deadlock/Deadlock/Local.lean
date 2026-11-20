@@ -275,27 +275,27 @@ theorem local_parts (I : Impl) (h : LocalOk I) :
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
   exact ⟨h.1.1.1.1.1.1.1, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2,
-    h.2.1.1.1.1⟩
+    h.2.1.1.1.1.1⟩
 
 theorem unique_keys_local (I : Impl) (h : LocalOk I) : uniqueKeys I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.1.1.2
+  exact h.2.1.1.1.1.2
 
 theorem label_handled_local (I : Impl) (h : LocalOk I) : labelHandled I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.1.2
+  exact h.2.1.1.1.2
 
 theorem permanent_target_local (I : Impl) (h : LocalOk I) : permanentTarget I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.2
+  exact h.2.1.1.2
 
 theorem pure_sched_local (I : Impl) (h : LocalOk I) : pureSchedOk I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.2
+  exact h.2.1.2
 
 theorem transitionOk_of_mem (I : Impl) (h : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions) :
     transitionOk I tr = true := by
