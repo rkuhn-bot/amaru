@@ -68,8 +68,10 @@ the request never enters the mailbox. A live `awaitReply` does not last for
 the rest of a fair run (`await_not_forever`).
 
 The old `Reply` conjunct is false. The deadline can fire while the callee is
-still alive (`call_answered_reply_false`). A `Reply` guarantee needs the
-shelved timing model, where the deadline is later than the service time.
+still alive (`call_answered_reply_false`). There will never be a `Reply`
+guarantee: Amaru is not a real-time system. The callee-side handling
+guarantee plus the caller-side outcome totality is the final form of
+`call_answered`.
 
 ## 2026-11-20 — What deadlock freedom is about
 

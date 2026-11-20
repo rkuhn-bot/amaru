@@ -76,9 +76,10 @@ continuation per outcome (`finishCall_cont`). An `awaitReply` ends as
 `Reply` (`await_reply_end`) or `TimedOut` (`await_total`). `NotAdmitted`
 (`parked_not_admitted`) is the outcome when the request never enters the
 mailbox, so it is not an exit of `awaitReply`. A live `awaitReply` does not
-last for the rest of a fair run (`await_not_forever`). A `Reply` guarantee
-needs the shelved timing model, where the deadline is later than the service
-time. No proof may assume which caller outcome is taken.
+last for the rest of a fair run (`await_not_forever`). There will never be a
+`Reply` guarantee: Amaru is not a real-time system. The callee-side handling
+guarantee plus the caller-side outcome totality is the final form of
+`call_answered`. No proof may assume which caller outcome is taken.
 
 ## Supervision
 
