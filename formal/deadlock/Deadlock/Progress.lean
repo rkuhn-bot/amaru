@@ -25,8 +25,8 @@ def actionSubject : Action → Option InstId
   | .exec s => some s
   | .finish s => some s
   | .ingress s _ => some s
+  | .callTimeout s => some s
   | .spawn _ => none
-  | .kill _ _ => none
   | .stutter => none
 
 /-- `id` is blocked on `dst`. -/
@@ -109,7 +109,6 @@ theorem on_partner (w : World) (id dst : InstId) (act : Action) (hwait : WaitsOn
     exact ⟨chain_prefix w id dst s hwait hc, trivial⟩
   | ingress _ _ => exact h.2.elim
   | spawn _ => exact False.elim (by simp [actionSubject] at h)
-  | kill _ _ => exact False.elim (by simp [actionSubject] at h)
   | stutter => exact False.elim (by simp [actionSubject] at h)
 
 theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
@@ -127,9 +126,16 @@ theorem core_alive_reachable (I : Impl) (N : Nat) (w : World) (hR : Reachable I 
         have hto : templateOf I.desc dst = some t' := by simpa [tname] using ht'
         have hsame : t' = t := by injection (hto.symm.trans ht)
         simp [hsame, hterm] at hflag
-      | inr hSubKill =>
-        rcases hSubKill with ⟨_, _, _, hmem⟩
-        simp [isMember] at hmem
+      | inr hRest =>
+        rcases hRest with ⟨who, t', _, ht', htm, _, _, hw, _⟩
+        by_cases hsame : who = InstId.core dst
+        · have htW : templateOf I.desc dst = some t' := by simpa [hsame, tname] using ht'
+          have heq : t' = t := by injection (htW.symm.trans ht)
+          simp [heq, hterm] at htm
+        · have hstay := terminate_spares I.desc w who (InstId.core dst)
+            (by simp [terminableB, ht, hterm]) (fun h => hsame h.symm)
+          rw [hw, hstay] at hdie
+          exact hdie ih
 
 theorem enqueue_roster (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) : (enqueueOrPark w D sender dst msg isCall k).roster = w.roster := by
@@ -174,7 +180,7 @@ theorem release_roster (w : World) (id : InstId) (ps : List Parked) :
 theorem try_wake_roster (D : Description) (w : World) (id : InstId) (label : String) (writer : InstId) :
     (tryWake D w id label writer).roster = w.roster := by
   unfold tryWake
-  by_cases hgo : ((w.st id).life == .alive && (w.st id).prio.length < capPrio D w.N id &&
+  by_cases hgo : ((w.st id).life == .alive && prioLoad (w.st id).prio < capPrio D w.N id &&
       !((w.st id).prio.any (fun p => p.label == label))) = true
   · simp [hgo, setActor]
   · simp [hgo]
@@ -219,7 +225,7 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
     | selfSchedule label =>
       by_cases hany : a.prio.any (fun p => p.label == label) = true
       · simp [hk, hany, setActor]
-      · by_cases hlen : a.prio.length < capPrio I.desc w.N id
+      · by_cases hlen : prioLoad a.prio < capPrio I.desc w.N id
         · simp [hk, hany, hlen, setActor]
         · simp [hk, hany, hlen, setActor]
     | cell dst label value =>
@@ -257,15 +263,32 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
       cases ht : templateOf I.desc (tname id) with
       | none => simp only [hk, ht]
       | some t =>
-        by_cases hgo : t.terminable = true ∧ hasParkedCall a.parked = false
-        · simp only [hk, ht, hgo]
-          dsimp
-          rw [release_roster, (frame_set _ _ _).2.1, (frame_refundP _ _ _).2.1,
-            (frame_refund _ _ _).2.1, readCells_roster]
-        · have hf : (t.terminable && !hasParkedCall a.parked) = false := by
-            by_cases htB : t.terminable = true <;> by_cases hp : hasParkedCall a.parked = false <;>
-              simp [htB, hp] at hgo ⊢
-          simp only [hk, ht, hf]
+        by_cases htm : t.terminable = true
+        · by_cases hsub : t.subtree = ""
+          · by_cases hpk : hasParkedCall a.parked = false
+            · have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall a.parked)) = true := by
+                simp [htm, hsub, hpk, bne]
+              have hempty : (t.subtree == "") = true := by simp [hsub]
+              simp only [hk, ht, hgo, hempty]
+              dsimp
+              rw [release_roster, (frame_set _ _ _).2.1, (frame_refundP _ _ _).2.1,
+                (frame_refund _ _ _).2.1, readCells_roster]
+            · have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall a.parked)) = false := by
+                simp [htm, hsub, hpk, bne]
+              simp only [hk, ht, hgo]
+              rfl
+          · have hne : (t.subtree != "") = true := by simp [bne, beq_iff_eq, hsub]
+            have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall a.parked)) = true := by
+              simp [htm, hne]
+            have hempty : (t.subtree == "") = false := by simp [beq_iff_eq, hsub]
+            simp only [hk, ht, hgo, hempty]
+            cases hkey : memberKey id with
+            | none => rfl
+            | some key => exact killSubtree_roster w I.desc t.subtree key
+        · have htm' : t.terminable = false := by simpa [Bool.not_eq_true] using htm
+          have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall a.parked)) = false := by
+            simp [htm']
+          simp only [hk, ht, hgo]
           rfl
 
 theorem bulk_roster (I : Impl) (w : World) (id : InstId) (w' : World)
@@ -382,10 +405,6 @@ theorem one_peer_absent (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
               have hmul : (Multiplicity.one == Multiplicity.perPeer) = false := by decide
               simp [hsame, hone, hmul] at hgo
           · simp [hgo] at ha
-      | kill sub key =>
-        have hw := kill_apply_world I w w' sub key (by simpa [apply] using ha)
-        rw [hw, killSubtree_roster] at hin
-        exact hin
       | stutter =>
         cases stutter_unchanged I w w' (by simpa [apply] using ha)
         exact hin
@@ -640,14 +659,6 @@ theorem quiet_no_forced (I : Impl) (w : World)
   cases a with
   | spawn _ => simp [forced] at hf
   | ingress _ _ => simp [forced] at hf
-  | kill sub key =>
-    intro hen
-    have hwait : killWait w I.desc sub key = true := by
-      simp [Enabled, apply] at hen
-      cases hcond : killWait w I.desc sub key <;> simp [hcond] at hen
-      rfl
-    have hbusy := killWait_imp_busy I w sub key hwait
-    simp [runtimeBusy, hbusy] at hb
   | stutter => simp [forced] at hf
   | recvBulk s =>
     intro hen
@@ -698,15 +709,6 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
     (h : apply I a w = some w') (s : InstId) (hs : s ∉ w'.roster) :
     (w'.st s).phase = .idle ∧ (w'.st s).life ≠ .alive := by
   cases a with
-  | kill sub key =>
-    have hw := kill_apply_world I w w' sub key h
-    have hs0 : s ∉ w.roster := by
-      rw [hw, killSubtree_roster] at hs
-      exact hs
-    obtain ⟨hidle, hdead⟩ := hoff s hs0
-    have hkeep := killSubtree_off w I.desc sub key s hs0 hdead
-    rw [hw]
-    exact ⟨hkeep.1.trans hidle, by rw [hkeep.2]; exact hdead⟩
   | stutter =>
     have heq := stutter_unchanged I w w' h
     subst heq
@@ -819,10 +821,17 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
           intro d ck hbad
           rw [hidle] at hbad
           cases hbad
-        have hkeep := exec_keeps_quiet I w id (w.st id) k s hne hnpark hnreply
-        refine ⟨hkeep.1.trans hidle, ?_⟩
-        rw [hkeep.2]
-        exact hdead
+        cases exec_keeps_quiet I w id (w.st id) k s hne hnpark hnreply with
+        | inl hkeep =>
+          refine ⟨hkeep.1.trans hidle, ?_⟩
+          rw [hkeep.2]
+          exact hdead
+        | inr hdie =>
+          rcases hdie with ⟨hdead', hidle'⟩
+          refine ⟨hidle', ?_⟩
+          rw [hdead']
+          intro h
+          cases h
       | idle => simp [hph] at h
       | parked _ _ _ => simp [hph] at h
       | awaitReply _ _ => simp [hph] at h
@@ -886,11 +895,15 @@ theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (h
 Idle, that step is `recvPrio`, which runs `readCells` and clears the wake. -/
 theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     (N : Nat) (w : World) (hR : Reachable I N w) (r : InstId) (label : String)
-    (hlive : (w.st r).life = .alive) (hhas : hasLabel ((w.st r).prio) label) :
+    (hlive : (w.st r).life = .alive)
+    (hhas : ∃ m, m ∈ (w.st r).prio ∧ m.tombstone = false ∧ m.label = label) :
     ∃ act, Enabled I w act ∧ forced act = true ∧ ((w.st r).phase = .idle → act = .recvPrio r) := by
+  have hlabel : hasLabel ((w.st r).prio) label := by
+    rcases hhas with ⟨m, hm, _, hl⟩
+    exact ⟨m, hm, hl⟩
   cases hph : (w.st r).phase with
   | idle =>
-    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR) hlive hph hhas,
+    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR) hlive hph hlabel,
       rfl, fun _ => rfl⟩
   | run k =>
     exact ⟨.exec r, run_enabled I w r k hph hlive, rfl, fun hbad => by simp [hph] at hbad⟩
@@ -902,10 +915,9 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
       exact ⟨.finish r, peer_finish_enabled I w r k hph hf, rfl, fun hbad => by simp [hph] at hbad⟩
     | false =>
       have hLane := lane_reachable I hL hG N w hR
-      have hempty : (w.st r).prio = [] := by
-        have hp := pure_of_silent I.desc r hf
-        exact prio_empty_of_pure I hL hG w hLane r hp
-      simp [hasLabel, hempty] at hhas
+      have honly := prio_empty_of_pure I hL hG w hLane r (pure_of_silent I.desc r hf)
+      rcases hhas with ⟨m, hm, hord, _⟩
+      exact absurd hord (by simpa using honly m hm)
   | parked _ _ _ =>
     rcases blocked_progress I hG hL hA N w hR r ⟨hlive, by simp [hph]⟩ with
       ⟨act, hon, hen⟩ | ⟨kP, hkP, _⟩
@@ -927,7 +939,7 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
 theorem fin_exec_no_wake (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
     {N : Nat} (e : FinExec I N) (r : InstId) (label : String)
     (hlive : ((e.cfg e.len).st r).life = .alive)
-    (hhas : hasLabel (((e.cfg e.len).st r).prio) label) : False := by
+    (hhas : ∃ m, m ∈ ((e.cfg e.len).st r).prio ∧ m.tombstone = false ∧ m.label = label) : False := by
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
   obtain ⟨act, hen, hf, _⟩ := cell_wake_enabled I hG hL hA N (e.cfg e.len) hR r label hlive hhas
   have hoff : ∀ s, s ∉ (e.cfg e.len).roster →

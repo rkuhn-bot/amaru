@@ -6,6 +6,7 @@ import Deadlock.Witness
 import Deadlock.Semantics
 import Deadlock.Proof
 import Deadlock.Local
+import Deadlock.Intra
 import Deadlock.Theorem
 import Deadlock.Compat
 import Deadlock.RunInv

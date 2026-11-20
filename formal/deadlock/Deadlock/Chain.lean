@@ -248,7 +248,9 @@ theorem absorb_send (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
       obtain ⟨p, hp, hsender, _⟩ := hInv.2.1.bwd root dst false k hph
       have hin : parkIndex ((w.st dst).parked) root < ((w.st dst).parked).length :=
         parkIndex_of_mem _ root ⟨p, hp, hsender⟩
-      have hidx := (step_index I a w w' hA hInv.2.2 root dst false k k hph hstay hlive hlive' hin).1
+      have hHere := mail_here_reachable I hL hG N w hR
+      have hidx := (step_index I hG a w w' hA hInv.2.2 hHere hInv.1.rostered
+        root dst false k k hph hstay hlive hlive' hin).1
       have hidx' : parkIndex ((w'.st dst).parked) root ≤ parkIndex ((w.st dst).parked) root := hidx
       obtain ⟨acts1, w1, hC1, hrun1, hR1, hor⟩ := ih hR' hstay
       rcases hor with hdone | hfull
@@ -392,10 +394,11 @@ theorem not_mail_not_any (w : World) (hT : CallTagInv w) (c d : InstId) (k : Con
       cases hk
 
 /-- A step that leaves the caller in `awaitReply` does not move the call further back. -/
-theorem queue_mono (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (id dst : InstId) (k : Cont)
-    (h : apply I a w = some w') (hph : (w.st id).phase = .awaitReply dst k)
-    (hph' : (w'.st id).phase = .awaitReply dst k) (hM : MailInv w) (hT : CallTagInv w)
-    (hOcc : OccInv I w) (hlive' : (w'.st dst).life = .alive) :
+theorem queue_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
+    (id dst : InstId) (k : Cont) (h : apply I a w = some w')
+    (hph : (w.st id).phase = .awaitReply dst k) (hph' : (w'.st id).phase = .awaitReply dst k)
+    (hM : MailInv w) (hT : CallTagInv w) (hH : MailHere I.desc w) (hOcc : OccInv I w)
+    (hlive' : (w'.st dst).life = .alive) :
     queuePos w' id dst ≤ queuePos w id dst := by
   by_cases hq : callPos ((w.st dst).box) id < ((w.st dst).box).length
   · by_cases hrecv : a = .recvBulk dst
@@ -414,7 +417,7 @@ theorem queue_mono (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (id d
           simp [queuePos, hq]
         rw [hold]
         exact Nat.le_trans hnew (Nat.succ_le_succ (Nat.le_of_lt hlt))
-    · have hkeep := box_pos_mono I a w w' h hOcc dst id hrecv hlive' hq
+    · have hkeep := box_pos_mono I a w w' h hG hH hOcc dst id hrecv hlive' hq
       simp [queuePos, hq, hkeep.2]
       rw [hkeep.1]
       exact Nat.le_refl _
@@ -540,7 +543,9 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           have hlive' := park_target_alive I hL hG N w' hR' id dst false k hstay
           obtain ⟨p, hp, hsender, _⟩ := hInv.2.1.bwd id dst false k hph
           have hin := parkIndex_of_mem _ id ⟨p, hp, hsender⟩
-          have hidx := (step_index I (.exec dst) w w' happ hInv.2.2 id dst false k k hph hstay hliveD hlive' hin).1
+          have hHere := mail_here_reachable I hL hG N w hR
+          have hidx := (step_index I hG (.exec dst) w w' happ hInv.2.2 hHere hInv.1.rostered
+            id dst false k k hph hstay hliveD hlive' hin).1
           have hwork := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
           have hdebt' := send_debt_drop_work I w w' id dst hidx hwork
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
@@ -722,7 +727,8 @@ theorem reply_absorb (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     · have hR' := Reachable.step w w' a hR hA
       have hlive' := reply_target_alive I hL hG N w' hR' root dst k hstay
       have hT := call_tag_reachable I hL hG N w hR
-      have hq := queue_mono I hL a w w' root dst k hA hph hstay hInv.2.1 hT
+      have hHere := mail_here_reachable I hL hG N w hR
+      have hq := queue_mono I hL hG a w w' root dst k hA hph hstay hInv.2.1 hT hHere
         ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
       obtain ⟨acts1, w1, hC1, hrun1, hR1, hor⟩ := ih hR' hstay
       rcases hor with hdone | hfull
@@ -852,8 +858,9 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         rcases hnext with hstay | hgo | hidle
         · have hR' := Reachable.step w w' (.finish dst) hR happ
           have hlive' := reply_target_alive I hL hG N w' hR' id dst k hstay
-          have hq := queue_mono I hL (.finish dst) w w' id dst k happ hph hstay hInv.2.1
-            (call_tag_reachable I hL hG N w hR) ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
+          have hHere := mail_here_reachable I hL hG N w hR
+          have hq := queue_mono I hL hG (.finish dst) w w' id dst k happ hph hstay hInv.2.1
+            (call_tag_reachable I hL hG N w hR) hHere ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
           have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
           have hty := waiting_ty_step I (.finish dst) w w' id happ
@@ -892,8 +899,9 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         rcases hnext with hstay | hgo | hidle
         · have hR' := Reachable.step w w' (.finish dst) hR happ
           have hlive' := reply_target_alive I hL hG N w' hR' id dst k hstay
-          have hq := queue_mono I hL (.finish dst) w w' id dst k happ hph hstay hInv.2.1
-            (call_tag_reachable I hL hG N w hR) ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
+          have hHere := mail_here_reachable I hL hG N w hR
+          have hq := queue_mono I hL hG (.finish dst) w w' id dst k happ hph hstay hInv.2.1
+            (call_tag_reachable I hL hG N w hR) hHere ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
           have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
           have hty := waiting_ty_step I (.finish dst) w w' id happ
@@ -927,8 +935,9 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         rcases hnext with hstay | hgo | hidle
         · have hR' := Reachable.step w w' (.exec dst) hR happ
           have hlive' := reply_target_alive I hL hG N w' hR' id dst k hstay
-          have hq := queue_mono I hL (.exec dst) w w' id dst k happ hph hstay hInv.2.1
-            (call_tag_reachable I hL hG N w hR) ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
+          have hHere := mail_here_reachable I hL hG N w hR
+          have hq := queue_mono I hL hG (.exec dst) w w' id dst k happ hph hstay hInv.2.1
+            (call_tag_reachable I hL hG N w hR) hHere ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
           have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
           have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
@@ -1031,6 +1040,20 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           exact ⟨[.recvBulk dst], w', ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
             by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ, hnot, hwk⟩
 
+/-- A subtree kill that drops a call park leaves the caller running or idle. -/
+theorem resumed_unblocks (w : World) (id dst : InstId) (k : Cont)
+    (hph : (w.st id).phase = .idle ∨ (w.st id).phase = .run k) :
+    ¬ Blocked w id ∧ work ((w.st id).phase) < work (.parked dst true k) := by
+  rcases hph with hph | hph
+  · refine ⟨?_, ?_⟩
+    · intro hB
+      simp [Blocked, hph] at hB
+    · simp [work, phaseFuel, hph]
+  · refine ⟨?_, ?_⟩
+    · intro hB
+      simp [Blocked, hph] at hB
+    · simp [work, phaseFuel, hph]
+
 theorem call_absorb (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (dst root : InstId) (k : Cont) (w : World) (acts : List Action)
     (hC : ChainRun I dst w acts) (hR : Reachable I N w)
@@ -1040,23 +1063,26 @@ theorem call_absorb (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
       ((w1.st root).phase = .awaitReply dst k ∧ (w1.st root).typestate = (w.st root).typestate ∨
         runFrom I (some w) acts = some w1 ∧ (w1.st root).phase = .parked dst true k ∧
           parkIndex ((w1.st dst).parked) root ≤ parkIndex ((w.st dst).parked) root ∧
-          (w1.st root).typestate = (w.st root).typestate) := by
+          (w1.st root).typestate = (w.st root).typestate ∨
+        ¬ Blocked w1 root ∧ work ((w1.st root).phase) < work ((w.st root).phase)) := by
   induction hC with
   | nil w =>
-    exact ⟨[], w, ChainRun.nil w, rfl, hR, Or.inr ⟨rfl, hph, Nat.le_refl _, rfl⟩⟩
+    exact ⟨[], w, ChainRun.nil w, rfl, hR, Or.inr (Or.inl ⟨rfl, hph, Nat.le_refl _, rfl⟩)⟩
   | cons w a w' as hOn hA hRest ih =>
     have hInv := inv_reachable I N w hL hR
     have hnext := call_park_next I a w w' root dst k hInv.2.1 hInv.2.2 hA hph
     have hlift := on_partner w root dst a (waits_on_park w root dst true k hph) hOn
-    rcases hnext with hstay | hgo | ⟨_, _, hk, _⟩
+    rcases hnext with hstay | hgo | hleft
     · have hR' := Reachable.step w w' a hR hA
       have hlive := park_target_alive I hL hG N w hR root dst true k hph
       have hlive' := park_target_alive I hL hG N w' hR' root dst true k hstay
       obtain ⟨p, hp, hsender, _⟩ := hInv.2.1.bwd root dst true k hph
       have hin := parkIndex_of_mem _ root ⟨p, hp, hsender⟩
-      have hidx := (step_index I a w w' hA hInv.2.2 root dst true k k hph hstay hlive hlive' hin).1
+      have hHere := mail_here_reachable I hL hG N w hR
+      have hidx := (step_index I hG a w w' hA hInv.2.2 hHere hInv.1.rostered
+        root dst true k k hph hstay hlive hlive' hin).1
       obtain ⟨acts1, w1, hC1, hrun1, hR1, hor⟩ := ih hR' hstay
-      rcases hor with hadmit | hfull
+      rcases hor with hadmit | hfull | hdone
       · refine ⟨a :: acts1, w1, ChainRun.cons w a w' acts1 hlift hA hC1, ?_, hR1, Or.inl ?_⟩
         · simp [runFrom, hA, hrun1]
         · have hty := waiting_ty_step I a w w' root hA
@@ -1066,17 +1092,26 @@ theorem call_absorb (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
         have hty := waiting_ty_step I a w w' root hA
           (Or.inl ⟨dst, true, k, hph⟩) (Or.inl ⟨dst, true, k, hstay⟩)
         refine ⟨a :: acts1, w1, ChainRun.cons w a w' acts1 hlift hA hC1, ?_, hR1,
-          Or.inr ⟨?_, hph1, ?_, ?_⟩⟩
+          Or.inr (Or.inl ⟨?_, hph1, ?_, ?_⟩)⟩
         · simp [runFrom, hA, hrun1]
         · simp [runFrom, hA, hrest]
         · exact Nat.le_trans hle hidx
         · exact hty1.trans hty
+      · refine ⟨a :: acts1, w1, ChainRun.cons w a w' acts1 hlift hA hC1, ?_, hR1,
+          Or.inr (Or.inr ⟨hdone.1, ?_⟩)⟩
+        · simp [runFrom, hA, hrun1]
+        · have hwk : work ((w'.st root).phase) = work ((w.st root).phase) := by simp [hstay, hph]
+          exact Nat.lt_of_lt_of_eq hdone.2 hwk
     · have hty := waiting_ty_step I a w w' root hA
         (Or.inl ⟨dst, true, k, hph⟩) (Or.inr ⟨dst, k, hgo⟩)
       refine ⟨[a], w', ChainRun.cons w a w' [] hlift hA (ChainRun.nil w'), ?_,
         Reachable.step w w' a hR hA, Or.inl ⟨hgo, hty⟩⟩
       · simp [runFrom, hA]
-    · simp [OnChain, actionSubject, hk] at hOn
+    · have hunb := resumed_unblocks w' root dst k hleft
+      refine ⟨[a], w', ChainRun.cons w a w' [] hlift hA (ChainRun.nil w'), ?_,
+        Reachable.step w w' a hR hA, Or.inr (Or.inr ⟨hunb.1, ?_⟩)⟩
+      · simp [runFrom, hA]
+      · simpa [hph] using hunb.2
 
 theorem call_debt_drop_index (I : Impl) (w w' : World) (id dst : InstId) (hS : ProgSrc I w')
     (hidx : parkIndex ((w'.st dst).parked) id + 1 = parkIndex ((w.st dst).parked) id) :
@@ -1159,7 +1194,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           ⟨hliveD, by simp [hphD]⟩
           (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := call_absorb I hL hG N dst id k w acts hC hR hph
-      rcases hor with hadmit | hfull
+      rcases hor with hadmit | hfull | hdone
       · exact finishReply wA acts1 hC1 hrun1 hRA hadmit.1 hadmit.2
       · rcases hfull with ⟨hrunAll, hphA, hle, hty⟩
         have hwA : wA = w1 := run_determ I w acts wA w1 hrunAll hrun
@@ -1171,13 +1206,14 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         exact ⟨acts1 ++ acts2, w2, chain_append I id w acts1 wA acts2 hC1 hrun1 hC2,
           run_append_some I w acts1 acts2 wA w2 hrun1 hrun2, hR2, hnot,
           prepend_work w wA w2 id (by simp [hphA, hph]) hwk⟩
+      · exact ⟨acts1, wA, hC1, hrun1, hRA, hdone.1, hdone.2⟩
     | awaitReply _ _ =>
       obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
         ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
           ⟨hliveD, by simp [hphD]⟩
           (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
       obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := call_absorb I hL hG N dst id k w acts hC hR hph
-      rcases hor with hadmit | hfull
+      rcases hor with hadmit | hfull | hdone
       · exact finishReply wA acts1 hC1 hrun1 hRA hadmit.1 hadmit.2
       · rcases hfull with ⟨hrunAll, hphA, hle, hty⟩
         have hwA : wA = w1 := run_determ I w acts wA w1 hrunAll hrun
@@ -1189,6 +1225,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         exact ⟨acts1 ++ acts2, w2, chain_append I id w acts1 wA acts2 hC1 hrun1 hC2,
           run_append_some I w acts1 acts2 wA w2 hrun1 hrun2, hR2, hnot,
           prepend_work w wA w2 id (by simp [hphA, hph]) hwk⟩
+      · exact ⟨acts1, wA, hC1, hrun1, hRA, hdone.1, hdone.2⟩
     | awaitEffect kD =>
       have hen := effect_finish_enabled I w dst kD hphD
       cases happ : apply I (.finish dst) w with
@@ -1197,7 +1234,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         have hnext := call_park_next I (.finish dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
         have hchain := on_partner w id dst (.finish dst) (waits_on_park w id dst true k hph)
           (on_finish_self w dst)
-        rcases hnext with hstay | hgo | ⟨_, _, hk, _⟩
+        rcases hnext with hstay | hgo | hleft
         · obtain ⟨_, hworkD⟩ := finish_unblocks I w w' dst (by simpa [apply] using happ)
             ⟨hliveD, by simp [hphD]⟩
           have hR' := Reachable.step w w' (.finish dst) hR happ
@@ -1219,7 +1256,11 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           exact finishReply w' [.finish dst]
             (ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'))
             (by simp [runFrom, happ]) hR' hgo hty
-        · simp at hk
+        · have hunb := resumed_unblocks w' id dst k hleft
+          exact ⟨[.finish dst], w',
+            ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
+            by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ,
+            hunb.1, by simpa [hph] using hunb.2⟩
     | awaitPeer kD =>
       have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
         (Or.inl ⟨true, k, hph⟩)
@@ -1230,7 +1271,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         have hnext := call_park_next I (.finish dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
         have hchain := on_partner w id dst (.finish dst) (waits_on_park w id dst true k hph)
           (on_finish_self w dst)
-        rcases hnext with hstay | hgo | ⟨_, _, hk, _⟩
+        rcases hnext with hstay | hgo | hleft
         · obtain ⟨_, hworkD⟩ := finish_unblocks I w w' dst (by simpa [apply] using happ)
             ⟨hliveD, by simp [hphD]⟩
           have hR' := Reachable.step w w' (.finish dst) hR happ
@@ -1252,7 +1293,11 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           exact finishReply w' [.finish dst]
             (ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'))
             (by simp [runFrom, happ]) hR' hgo hty
-        · simp at hk
+        · have hunb := resumed_unblocks w' id dst k hleft
+          exact ⟨[.finish dst], w',
+            ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
+            by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ,
+            hunb.1, by simpa [hph] using hunb.2⟩
     | run kD =>
       have hen := run_enabled I w dst kD hphD hliveD
       cases happ : apply I (.exec dst) w with
@@ -1261,13 +1306,14 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         have hnext := call_park_next I (.exec dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
         have hchain := on_partner w id dst (.exec dst) (waits_on_park w id dst true k hph)
           (on_self_exec w dst)
-        rcases hnext with hstay | hgo | ⟨_, _, hk, _⟩
+        rcases hnext with hstay | hgo | hleft
         · have hR' := Reachable.step w w' (.exec dst) hR happ
           have hlive' := park_target_alive I hL hG N w' hR' id dst true k hstay
           obtain ⟨p, hp, hsender, _⟩ := hInv.2.1.bwd id dst true k hph
           have hin := parkIndex_of_mem _ id ⟨p, hp, hsender⟩
-          have hidx := (step_index I (.exec dst) w w' happ hInv.2.2 id dst true k k hph hstay
-            hliveD hlive' hin).1
+          have hHere := mail_here_reachable I hL hG N w hR
+          have hidx := (step_index I hG (.exec dst) w w' happ hInv.2.2 hHere hInv.1.rostered
+            id dst true k k hph hstay hliveD hlive' hin).1
           have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
           have hdebt' := call_debt_drop_work I w w' id dst hidx hworkD
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
@@ -1284,7 +1330,11 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           exact finishReply w' [.exec dst]
             (ChainRun.cons w (.exec dst) w' [] hchain happ (ChainRun.nil w'))
             (by simp [runFrom, happ]) hR' hgo hty
-        · simp at hk
+        · have hunb := resumed_unblocks w' id dst k hleft
+          exact ⟨[.exec dst], w',
+            ChainRun.cons w (.exec dst) w' [] hchain happ (ChainRun.nil w'),
+            by simp [runFrom, happ], Reachable.step w w' (.exec dst) hR happ,
+            hunb.1, by simpa [hph] using hunb.2⟩
     | idle =>
       have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
         obtain ⟨p, hp, _, _⟩ := hInv.2.1.bwd id dst true k hph
@@ -1298,7 +1348,7 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         have hnext := call_park_next I (.recvBulk dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
         have hchain := on_partner w id dst (.recvBulk dst) (waits_on_park w id dst true k hph)
           (on_self_bulk w dst)
-        rcases hnext with hstay | hgo | ⟨_, _, hk, _⟩
+        rcases hnext with hstay | hgo | hleft
         · obtain ⟨p, hp, hsender, hc⟩ := hInv.2.1.bwd id dst true k hph
           cases hpList : (w.st dst).parked with
           | nil => simp [hpList] at hp
@@ -1336,7 +1386,11 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           exact finishReply w' [.recvBulk dst]
             (ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'))
             (by simp [runFrom, happ]) hR' hgo hty
-        · simp at hk
+        · have hunb := resumed_unblocks w' id dst k hleft
+          exact ⟨[.recvBulk dst], w',
+            ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
+            by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ,
+            hunb.1, by simpa [hph] using hunb.2⟩
 
 theorem blocked_unblocks (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (_hA : Assumptions I)
     (N : Nat) (w : World) (hR : Reachable I N w) (id : InstId) (hB : Blocked w id)

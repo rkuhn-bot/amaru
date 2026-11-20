@@ -658,7 +658,8 @@ finishable, so the kill has to be enabled on this actor. -/
 def subtreeFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
     if t.subtree == "" then
-      if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
+      if t.supervisor != "" then some s!"fail: {t.name} names a supervisor without a subtree"
+      else if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
       else if templatePure D t.name then some (pureKillMsg t.name)
       else none
     else if t.multiplicity != .perPeer then

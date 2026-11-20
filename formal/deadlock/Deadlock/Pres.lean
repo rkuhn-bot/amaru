@@ -648,7 +648,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
         have hty' : (chargeSender (w.st sender) (tname sender)).typestate = k.toState := by
           rw [hcharge.1, hty]
         if hcall : isCall = true then
-          simp [hcall]
+          simp [hcall, issueCall]
           apply sem_set I w sender _ hS
           · exact hcharge.1
           · exact hcharge.2.1
@@ -696,7 +696,7 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
         have hty' : (chargeSender (w.st sender) (tname dst)).typestate = k.toState := by
           rw [hcharge.1, hty]
         if hcall : isCall = true then
-          simp [hcall]
+          simp [hcall, issueCall]
           apply sem_set I _ sender _ hdst
           · rw [setActor_other _ dst sender _ (hsame)]
             exact hcharge.1
@@ -733,19 +733,20 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
       by_cases hsame : sender = dst
       · subst hsame
         simp
+        have hk := condIssue_keeps isCall (chargeSender (w.st sender) (tname sender))
         apply sem_set I w sender _ hS
-        · exact hcharge.1
-        · exact hcharge.2.1
+        · exact hk.1.trans hcharge.1
+        · exact hk.2.1.trans hcharge.2.1
         · simp [contTy]
-          rw [hcharge.1]
+          rw [hk.1, hcharge.1]
           exact hty
         · simp [programOk]
-          rw [hcharge.1]
+          rw [hk.1, hcharge.1]
           exact htail
         · simp [waitEdge]
-          rw [hcharge.1]
+          rw [hk.1, hcharge.1]
           exact hedge
-        · exact idleOff_life hsender
+        · exact idleOff_life ((hk.2.1.trans hcharge.2.1).trans hsender)
         · exact Or.inr (hS.rostered sender hsender)
       · simp [hsame]
         rw [← halive]
@@ -761,27 +762,64 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
           · simpa [waitEdge] using hS.waited dst
           · exact idleOff_life halive
           · exact Or.inr (hS.rostered dst halive)
+        have hk := condIssue_keeps isCall (chargeSender (w.st sender) (tname dst))
         apply sem_set I _ sender _ hdst
         · rw [setActor_other _ dst sender _ (hsame)]
-          exact hcharge.1
+          exact hk.1.trans hcharge.1
         · rw [setActor_other _ dst sender _ (hsame)]
-          exact hcharge.2.1
+          exact hk.2.1.trans hcharge.2.1
         · simp [contTy, setActor_other _ dst sender _ hsame]
-          rw [hcharge.1]
+          rw [hk.1, hcharge.1]
           exact hty
         · simp [programOk, setActor_other _ dst sender _ hsame]
-          rw [hcharge.1]
+          rw [hk.1, hcharge.1]
           exact htail
         · simp [waitEdge, setActor_other _ dst sender _ hsame]
-          rw [hcharge.1]
+          rw [hk.1, hcharge.1]
           exact hedge
-        · exact idleOff_life hsender
+        · exact idleOff_life ((hk.2.1.trans hcharge.2.1).trans hsender)
         · exact Or.inr (hdst.rostered sender
             (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
   · simp [halive]
-    have hp := proceed_ok I.desc sender (w.st sender) k hty htail
-    exact sem_set I w sender (proceed (w.st sender) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_alive hp.2.1 hsender) (Or.inr (hS.rostered sender hsender))
+    by_cases hcall : isCall = true
+    · simp [hcall]
+      cases hlife : (w.st dst).life with
+      | dead =>
+        simp [hlife, issueCall]
+        apply sem_set I w sender _ hS
+        · rfl
+        · rfl
+        · simp [contTy]
+          exact hty
+        · simp [programOk]
+          exact htail
+        · simp [waitEdge]
+          simpa [hcall] using hedge
+        · exact idleOff_life hsender
+        · exact Or.inr (hS.rostered sender hsender)
+      | alive => exact absurd hlife halive
+      | absent =>
+        simp [hlife]
+        have hp := proceed_ok I.desc sender (issueCall (w.st sender)) k
+          ((issueCall_keeps _).1.trans hty) (by simpa [issueCall] using htail)
+        apply sem_set I w sender _ hS
+        · simp [finishCall]
+          exact hp.1.trans (issueCall_keeps _).1
+        · simp [finishCall]
+          exact hp.2.1.trans (issueCall_keeps _).2.1
+        · simp [finishCall]
+          exact hp.2.2.1
+        · simp [finishCall]
+          exact hp.2.2.2.1
+        · simp [finishCall]
+          exact hp.2.2.2.2
+        · exact idleOff_life ((hp.2.1.trans (issueCall_keeps _).2.1).trans hsender)
+        · exact Or.inr (hS.rostered sender hsender)
+    · have hcf : isCall = false := by cases hbb : isCall <;> simp_all
+      simp [hcf]
+      have hp := proceed_ok I.desc sender (w.st sender) k hty htail
+      exact sem_set I w sender (proceed (w.st sender) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1
+        hp.2.2.2.2 (idleOff_alive hp.2.1 hsender) (Or.inr (hS.rostered sender hsender))
 
 /-- A fitting `trySend` is an enqueue of an unreliable message, so it needs no blocking edge. -/
 theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)

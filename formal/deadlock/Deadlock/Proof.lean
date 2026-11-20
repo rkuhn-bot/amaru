@@ -123,9 +123,11 @@ theorem performReply_preserves_run (w : World) (sender s : InstId) (k k0 : Cont)
     · cases hph : (w.st caller).phase with
       | awaitReply dst ck =>
         by_cases hd : dst = sender
-        · simp only [hph, hd, if_true]
-          rw [setActor_other _ sender s _ hs, setActor_other _ caller s _ (Ne.symm hc)]
-          exact hp
+        · by_cases hm : (w.st sender).oweId = some (w.st caller).waitId
+          · simp [hph, hd, hm, setActor_other, hs]
+            rw [setActor_other _ caller s _ (Ne.symm hc)]
+            exact hp
+          · simp [hph, hd, hm, setActor_other, hs, hp]
         · simp [hph, hd, setActor_other, hs, hp]
       | idle => simp [hph, setActor_other, hs, hp]
       | run _ => simp [hph, setActor_other, hs, hp]
@@ -141,7 +143,8 @@ theorem enqueue_keeps_other_run (w : World) (D : Description) (sender dst : Inst
   unfold enqueueOrPark
   dsimp only
   cases hlife : (w.st dst).life
-  · simp [hlife, setActor_other, hs, hp]
+  · simp [hlife]
+    split <;> simp [setActor_other, hs, hp]
   · split
     · rename_i hbad
       exact False.elim (hbad rfl)
@@ -179,7 +182,8 @@ theorem enqueue_keeps_other_run (w : World) (D : Description) (sender dst : Inst
             rw [setActor_other _ sender s _ hs]
             simp [setActor_self, hp]
           · simp [hd, setActor_other, hs, hp]
-  · simp [hlife, setActor_other, hs, hp]
+  · simp [hlife]
+    split <;> simp [setActor_other, hs, hp]
 
 theorem tryWake_preserves_run (D : Description) (w : World) (dstId writer s : InstId) (label : String)
     (k : Cont) (hp : (w.st s).phase = .run k) :
@@ -261,9 +265,269 @@ theorem readCells_preserves_run (D : Description) (w : World) (id s : InstId) (k
     simp only [List.foldl_cons]
     exact ih _ hp
 
+theorem failWaiter_preserves_run (w : World) (dead i s : InstId) (k : Cont)
+    (hp : (w.st s).phase = .run k) : ((failWaiter w dead i).st s).phase = .run k := by
+  unfold failWaiter
+  split
+  · exact hp
+  · by_cases hs : s = i
+    · rw [hs] at hp ⊢
+      cases hph : (w.st i).phase with
+      | run _ => exact hp
+      | parked _ _ _ => rw [hph] at hp; cases hp
+      | awaitReply _ _ => rw [hph] at hp; cases hp
+      | idle => rw [hph] at hp; cases hp
+      | awaitEffect _ => rw [hph] at hp; cases hp
+      | awaitPeer _ => rw [hph] at hp; cases hp
+      | crashed => rw [hph] at hp; cases hp
+    · cases hph : (w.st i).phase with
+      | parked _ b _ =>
+        cases b with
+        | false =>
+          simp [hph]
+          split
+          · simp [setActor, hs, hp]
+          · exact hp
+        | true => simp [hph, hp]
+      | awaitReply _ _ => simp [hph, hp]
+      | idle => simp [hph, hp]
+      | run _ => simp [hph, hp]
+      | awaitEffect _ => simp [hph, hp]
+      | awaitPeer _ => simp [hph, hp]
+      | crashed => simp [hph, hp]
+
+theorem failWaiters_preserves_run (w : World) (dead s : InstId) (k : Cont)
+    (hp : (w.st s).phase = .run k) : ((failWaiters w dead).st s).phase = .run k := by
+  unfold failWaiters
+  suffices ∀ (ids : List InstId) (w : World), (w.st s).phase = .run k →
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st s).phase = .run k from
+    this w.roster w hp
+  intro ids
+  induction ids with
+  | nil =>
+    intro w hp
+    simpa using hp
+  | cons i ids ih =>
+    intro w hp
+    simp only [List.foldl_cons]
+    exact ih (failWaiter w dead i) (failWaiter_preserves_run w dead i s k hp)
+
+theorem abortActor_preserves_run (D : Description) (w : World) (id s : InstId) (a : Actor)
+    (k : Cont) (hs : s ≠ id) (hp : (w.st s).phase = .run k) :
+    ((abortActor D w id a).st s).phase = .run k := by
+  have hrel : ((releaseWorld D w id a).st s).phase = .run k := by
+    simp only [releaseWorld]
+    exact release_preserves_run _ id a.parked s k (by
+      rw [setActor_other _ id s _ hs]
+      exact fold_credit_parked_preserves_run a.parked _ (tname id) s k
+        (fold_credit_preserves_run a.box _ (tname id) s k
+          (readCells_preserves_run D w id s k hp))) hs
+  have hfail : ((failWaiters (releaseWorld D w id a) id).st s).phase = .run k :=
+    failWaiters_preserves_run _ id s k hrel
+  simpa [abortActor] using (admitDead_phase (failWaiters (releaseWorld D w id a) id) id s).1.trans hfail
+
+theorem enqueueTombstone_phase (D : Description) (w : World) (child s : InstId) :
+    ((enqueueTombstone D w child).st s).phase = (w.st s).phase := by
+  cases hsup : supervisorOf D child with
+  | none => simp [enqueueTombstone, hsup]
+  | some parent =>
+    simp [enqueueTombstone, hsup]
+    split
+    · by_cases h : s = parent
+      · simp [setActor, h]
+      · simp [setActor, h]
+    · rfl
+
+theorem abortActor_self_dead (D : Description) (w : World) (id : InstId) (a : Actor) :
+    ((abortActor D w id a).st id).life = .dead := by
+  have hrel := releaseWorld_self_dead D w id a
+  have hfail := (failWaiters_life (releaseWorld D w id a) id id).trans hrel
+  simpa [abortActor] using
+    (admitDead_phase (failWaiters (releaseWorld D w id a) id) id id).2.trans hfail
+
+theorem releaseWorld_other_life (D : Description) (w : World) (id s : InstId) (a : Actor)
+    (hs : s ≠ id) : ((releaseWorld D w id a).st s).life = (w.st s).life := by
+  let wCells := readCells D w id
+  let wMsgs := refundMsgs wCells (tname id) a.box
+  let wPark := refundParked wMsgs (tname id) a.parked
+  let dead : Actor :=
+    { wPark.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+  have h1 : (wCells.st s).life = (w.st s).life :=
+    congrArg (fun act => act.life) (cellsSt D w id s)
+  have h2 : (wMsgs.st s).life = (wCells.st s).life :=
+    (refundMsgs_rest wCells (tname id) a.box s).2.1
+  have h3 : (wPark.st s).life = (wMsgs.st s).life :=
+    (refundParked_rest wMsgs (tname id) a.parked s).2.1
+  have h4 : ((setActor wPark id dead).st s).life = (wPark.st s).life := by
+    simp [setActor, dead, hs]
+  have h5 : ((releaseParked (setActor wPark id dead) id a.parked).st s).life =
+      ((setActor wPark id dead).st s).life :=
+    releaseParked_life (setActor wPark id dead) id a.parked s
+  have heq : releaseWorld D w id a = releaseParked (setActor wPark id dead) id a.parked := by
+    simp [releaseWorld, wCells, wMsgs, wPark, dead]
+  simpa [heq] using h5.trans (h4.trans (h3.trans (h2.trans h1)))
+
+theorem abortActor_life_prev (D : Description) (w : World) (id s : InstId) (a : Actor)
+    (h : ((abortActor D w id a).st s).life = .alive) : (w.st s).life = .alive := by
+  have hfw : ((abortActor D w id a).st s).life = ((releaseWorld D w id a).st s).life := by
+    have hfail := failWaiters_life (releaseWorld D w id a) id s
+    simpa [abortActor] using
+      (admitDead_phase (failWaiters (releaseWorld D w id a) id) id s).2.trans hfail
+  rw [hfw] at h
+  by_cases hs : s = id
+  · rw [hs] at h
+    have hdead := releaseWorld_self_dead D w id a
+    rw [hdead] at h
+    cases h
+  · exact (releaseWorld_other_life D w id s a hs).symm.trans h
+
+theorem enqueueTombstone_life (D : Description) (w : World) (child s : InstId) :
+    ((enqueueTombstone D w child).st s).life = (w.st s).life := by
+  cases hsup : supervisorOf D child with
+  | none => simp [enqueueTombstone, hsup]
+  | some parent =>
+    simp [enqueueTombstone, hsup]
+    split
+    · by_cases h : s = parent
+      · simp [setActor, h]
+      · simp [setActor, h]
+    · rfl
+
+/-- A descendant fold does not bring an actor to life. -/
+theorem abortDesc_life_prev (fuel : Nat) (D : Description) (w : World) (parent s : InstId)
+    (h : ((abortDesc fuel D w parent).st s).life = .alive) : (w.st s).life = .alive := by
+  induction fuel generalizing w parent with
+  | zero => simpa [abortDesc] using h
+  | succ fuel ih =>
+    simp only [abortDesc] at h
+    let step (w : World) (child : InstId) : World :=
+      if isChild D parent child && (w.st child).life == .alive && childTerminable D child then
+        let w := abortDesc fuel D w child
+        abortActor D w child (w.st child)
+      else w
+    have hfold : ∀ (ids : List InstId) (w0 : World),
+        ((ids.foldl step w0).st s).life = .alive → (w0.st s).life = .alive := by
+      intro ids
+      induction ids with
+      | nil =>
+        intro _ h0
+        exact h0
+      | cons child ids ihids =>
+        intro w0 h0
+        simp only [List.foldl_cons, step] at h0
+        by_cases hcond : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = true
+        · simp only [hcond, ite_true] at h0
+          let wDesc := abortDesc fuel D w0 child
+          let wAct := abortActor D wDesc child (wDesc.st child)
+          have hActAlive : (wAct.st s).life = .alive := ihids wAct h0
+          have hDescAlive := abortActor_life_prev D wDesc child s (wDesc.st child) hActAlive
+          exact ih w0 child hDescAlive
+        · have hf : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = false := by
+            cases hb : isChild D parent child && (w0.st child).life == .alive && childTerminable D child with
+            | false => rfl
+            | true => exact absurd hb hcond
+          simp only [hf] at h0
+          exact ihids w0 h0
+    exact hfold w.roster w h
+
+/-- A survivor of a descendant abort keeps a running continuation. An actor the
+fold aborts is dead, so the final-alive hypothesis excludes it. -/
+theorem abortDesc_preserves_run (fuel : Nat) (D : Description) (w : World) (parent s : InstId)
+    (k : Cont) (hp : (w.st s).phase = .run k)
+    (hfin : ((abortDesc fuel D w parent).st s).life = .alive) :
+    ((abortDesc fuel D w parent).st s).phase = .run k := by
+  induction fuel generalizing w parent with
+  | zero => simpa [abortDesc] using hp
+  | succ fuel ihFuel =>
+    simp only [abortDesc] at hfin ⊢
+    let step (w : World) (child : InstId) : World :=
+      if isChild D parent child && (w.st child).life == .alive && childTerminable D child then
+        let w := abortDesc fuel D w child
+        abortActor D w child (w.st child)
+      else w
+    have hfoldLife : ∀ (ids : List InstId) (w0 : World),
+        ((ids.foldl step w0).st s).life = .alive → (w0.st s).life = .alive := by
+      intro ids
+      induction ids with
+      | nil =>
+        intro _ h0
+        exact h0
+      | cons child ids ihids =>
+        intro w0 h0
+        simp only [List.foldl_cons, step] at h0
+        by_cases hcond : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = true
+        · simp only [hcond, ite_true] at h0
+          let wDesc := abortDesc fuel D w0 child
+          let wAct := abortActor D wDesc child (wDesc.st child)
+          have hActAlive : (wAct.st s).life = .alive := ihids wAct h0
+          have hDescAlive := abortActor_life_prev D wDesc child s (wDesc.st child) hActAlive
+          exact abortDesc_life_prev fuel D w0 child s hDescAlive
+        · have hf : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = false := by
+            cases hb : isChild D parent child && (w0.st child).life == .alive && childTerminable D child with
+            | false => rfl
+            | true => exact absurd hb hcond
+          simp only [hf] at h0
+          exact ihids w0 h0
+    have hfold : ∀ (ids : List InstId) (w0 : World),
+        (w0.st s).phase = .run k →
+        ((ids.foldl step w0).st s).life = .alive →
+        ((ids.foldl step w0).st s).phase = .run k := by
+      intro ids
+      induction ids with
+      | nil =>
+        intro _ hp0 _
+        exact hp0
+      | cons child ids ihIds =>
+        intro w0 hp0 hlive
+        simp only [List.foldl_cons, step] at hlive ⊢
+        by_cases hcond : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = true
+        · simp only [hcond, ite_true] at hlive ⊢
+          let wDesc := abortDesc fuel D w0 child
+          let wAct := abortActor D wDesc child (wDesc.st child)
+          have hActAlive : (wAct.st s).life = .alive := hfoldLife ids wAct hlive
+          by_cases hvictim : s = child
+          · have hdead : (wAct.st child).life = .dead := by
+              simpa [wAct] using abortActor_self_dead D wDesc child (wDesc.st child)
+            rw [hvictim] at hActAlive
+            rw [hdead] at hActAlive
+            cases hActAlive
+          · have hDescAlive : (wDesc.st s).life = .alive :=
+              (abortActor_other_life D wDesc child s (wDesc.st child) hvictim).symm.trans hActAlive
+            have hpDesc := ihFuel w0 child hp0 hDescAlive
+            have hpAct :=
+              abortActor_preserves_run D wDesc child s (wDesc.st child) k hvictim hpDesc
+            exact ihIds wAct hpAct hlive
+        · have hf : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = false := by
+            cases hb : isChild D parent child && (w0.st child).life == .alive && childTerminable D child with
+            | false => rfl
+            | true => exact absurd hb hcond
+          simp only [hf] at hlive ⊢
+          exact ihIds w0 hp0 hlive
+    exact hfold w.roster w hp hfin
+
+/-- A stage that dies leaves a surviving actor on the continuation it was running. -/
+theorem terminateStage_preserves_run (D : Description) (w : World) (id s : InstId) (a : Actor)
+    (k : Cont) (hs : s ≠ id) (hp : (w.st s).phase = .run k)
+    (hfin : ((terminateStage D w id a).st s).life = .alive) :
+    ((terminateStage D w id a).st s).phase = .run k := by
+  let wDesc := abortDesc w.roster.length D w id
+  let wAct := abortActor D wDesc id (wDesc.st id)
+  have hActAlive : (wAct.st s).life = .alive := by
+    have hfin' : ((enqueueTombstone D wAct id).st s).life = .alive := by
+      simpa [terminateStage, wDesc, wAct] using hfin
+    exact (enqueueTombstone_life D wAct id s).symm.trans hfin'
+  have hDescAlive : (wDesc.st s).life = .alive :=
+    (abortActor_other_life D wDesc id s (wDesc.st id) hs).symm.trans hActAlive
+  have hpAct := abortActor_preserves_run D wDesc id s (wDesc.st id) k hs
+    (abortDesc_preserves_run w.roster.length D w id s k hp hDescAlive)
+  simpa [terminateStage, wDesc, wAct] using (enqueueTombstone_phase D wAct id s).trans hpAct
+
+/-- Another actor keeps a running continuation through this step when the step
+leaves that actor alive. Descendants of a terminating stage do not survive, so
+the survivor hypothesis is what makes the phase claim true. -/
 theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Actor) (k k0 : Cont)
     (s : InstId) (hs : s ≠ id) (hp : (w.st s).phase = .run k0)
-    (_ha : (w.st id).phase = .run k) :
+    (_ha : (w.st id).phase = .run k) (halive : ((execRun I w id a k).st s).life = .alive) :
     ((execRun I w id a k).st s).phase = .run k0 := by
   cases hk : k.rest with
   | nil =>
@@ -287,8 +551,11 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
     | call dst label hint =>
       simp
       split
-      · simp [setActor_other, hs, hp]
-      · exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
+      · simp [noteStale, setActor_other, hs, hp]
+      · split
+        · exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
+        · exact enqueue_keeps_other_run (noteStale w id dst) _ _ _ _ _ _ _ _
+            (by simpa [noteStale_st] using hp) hs
     | reply =>
       simpa using performReply_preserves_run w id s k k0 hp hs
     | selfSchedule label =>
@@ -309,15 +576,31 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
     | peer =>
       simp [setActor_other, hs, hp]
     | terminate =>
-      simp
-      split
-      · split
-        · exact release_preserves_run _ id a.parked s k0 (by
-            rw [setActor_other _ id s _ hs]
-            exact fold_credit_parked_preserves_run a.parked _ (tname id) s k0
-              (fold_credit_preserves_run a.box _ (tname id) s k0
-                (readCells_preserves_run I.desc w id s k0 hp))) hs
+      cases ht : templateOf I.desc (tname id) with
+      | none => simp [ht, hp]
+      | some t =>
+        simp only [ht]
+        split
+        · next hgo =>
+          by_cases hsub : t.subtree = ""
+          · simp [hsub]
+            have hpk : hasParkedCall a.parked = false := by
+              rcases hgo.2 with hne | hpk
+              · exact absurd hsub hne
+              · exact hpk
+            by_cases hch : hasChild I.desc w id = true
+            · simp [hch]
+              exact terminateStage_preserves_run I.desc w id s a k0 hs hp (by
+                simpa [execRun, hk, ht, hgo, hsub, hch, hpk] using halive)
+            · simp [hch]
+              exact release_preserves_run _ id a.parked s k0 (by
+                rw [setActor_other _ id s _ hs]
+                exact fold_credit_parked_preserves_run a.parked _ (tname id) s k0
+                  (fold_credit_preserves_run a.box _ (tname id) s k0
+                    (readCells_preserves_run I.desc w id s k0 hp))) hs
+          · simp [hsub]
+            exact terminateStage_preserves_run I.desc w id s a k0 hs hp (by
+              simpa [execRun, hk, ht, hgo, hsub] using halive)
         · simp [hp]
-      · simp [hp]
 
 end Deadlock

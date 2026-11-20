@@ -31,6 +31,93 @@ theorem countParked_append (sender : InstId) (ps : List Parked) (p : Parked) :
   | nil => simp [countParked]
   | cons h t ih => simp [countParked, ih, Nat.add_assoc, Nat.add_left_comm]
 
+/-- Messages that survive the strip are not from `dead`. -/
+theorem countFrom_filter_self (dead : InstId) (ms : List Msg) :
+    countFrom dead (ms.filter fun m => m.sender != dead) = 0 := by
+  induction ms with
+  | nil => simp [countFrom]
+  | cons m ms ih =>
+    cases hb : m.sender == dead with
+    | true =>
+      have hdrop : (m.sender != dead) = false := by simp [bne, hb]
+      simpa [List.filter, hdrop] using ih
+    | false =>
+      have hne : m.sender ≠ dead := by simpa [beq_iff_eq] using hb
+      have hkeep : (m.sender != dead) = true := by simp [bne, hb]
+      simpa [List.filter, hkeep, countFrom, hne] using ih
+
+theorem countFrom_filter_other (sender dead : InstId) (hne : sender ≠ dead) (ms : List Msg) :
+    countFrom sender (ms.filter fun m => m.sender != dead) = countFrom sender ms := by
+  induction ms with
+  | nil => simp [countFrom]
+  | cons m ms ih =>
+    cases hb : m.sender == dead with
+    | true =>
+      have hdrop : (m.sender != dead) = false := by simp [bne, hb]
+      have hnot : m.sender ≠ sender := by
+        intro heq
+        exact hne (heq ▸ (beq_iff_eq.mp hb))
+      simpa [List.filter, hdrop, countFrom, hnot] using ih
+    | false =>
+      have hkeep : (m.sender != dead) = true := by simp [bne, hb]
+      simpa [List.filter, hkeep, countFrom] using ih
+
+theorem countParked_filter_self (dead : InstId) (ps : List Parked) :
+    countParked dead (ps.filter fun p => p.sender != dead) = 0 := by
+  induction ps with
+  | nil => simp [countParked]
+  | cons p ps ih =>
+    cases hb : p.sender == dead with
+    | true =>
+      have hdrop : (p.sender != dead) = false := by simp [bne, hb]
+      simpa [List.filter, hdrop] using ih
+    | false =>
+      have hne : p.sender ≠ dead := by simpa [beq_iff_eq] using hb
+      have hkeep : (p.sender != dead) = true := by simp [bne, hb]
+      simpa [List.filter, hkeep, countParked, hne] using ih
+
+theorem countParked_filter_other (sender dead : InstId) (hne : sender ≠ dead) (ps : List Parked) :
+    countParked sender (ps.filter fun p => p.sender != dead) = countParked sender ps := by
+  induction ps with
+  | nil => simp [countParked]
+  | cons p ps ih =>
+    cases hb : p.sender == dead with
+    | true =>
+      have hdrop : (p.sender != dead) = false := by simp [bne, hb]
+      have hnot : p.sender ≠ sender := by
+        intro heq
+        exact hne (heq ▸ (beq_iff_eq.mp hb))
+      simpa [List.filter, hdrop, countParked, hnot] using ih
+    | false =>
+      have hkeep : (p.sender != dead) = true := by simp [bne, hb]
+      simpa [List.filter, hkeep, countParked] using ih
+
+theorem countFrom_len (dead : InstId) (ms : List Msg) :
+    countFrom dead ms = (ms.filter fun m => m.sender == dead).length := by
+  induction ms with
+  | nil => simp [countFrom]
+  | cons m ms ih =>
+    cases hb : m.sender == dead with
+    | true =>
+      have heq : m.sender = dead := beq_iff_eq.mp hb
+      simp [countFrom, heq, List.filter, hb, ih, Nat.add_comm]
+    | false =>
+      have hne : m.sender ≠ dead := by simpa [beq_iff_eq] using hb
+      simp [countFrom, hne, List.filter, hb, ih]
+
+theorem countParked_len (dead : InstId) (ps : List Parked) :
+    countParked dead ps = (ps.filter fun p => p.sender == dead).length := by
+  induction ps with
+  | nil => simp [countParked]
+  | cons p ps ih =>
+    cases hb : p.sender == dead with
+    | true =>
+      have heq : p.sender = dead := beq_iff_eq.mp hb
+      simp [countParked, heq, List.filter, hb, ih, Nat.add_comm]
+    | false =>
+      have hne : p.sender ≠ dead := by simpa [beq_iff_eq] using hb
+      simp [countParked, hne, List.filter, hb, ih]
+
 theorem countParked_zero_sender (sender : InstId) (ps : List Parked)
     (h : countParked sender ps = 0) : ∀ p ∈ ps, p.sender ≠ sender := by
   induction ps with
@@ -200,6 +287,85 @@ theorem owed_append_msg (st : InstId → Actor) (dstName : String) (sender dst :
 theorem charge_tokens (a : Actor) (dst : String) (h : 1 ≤ a.tokens dst) :
     (chargeSender a dst).tokens dst + 1 = a.tokens dst := by
   simp [chargeSender, bumpToken]
+  omega
+
+theorem countFrom_join (sender : InstId) (ms ns : List Msg) :
+    countFrom sender (ms ++ ns) = countFrom sender ms + countFrom sender ns := by
+  induction ms with
+  | nil => simp [countFrom]
+  | cons m ms ih => simp [countFrom, ih, Nat.add_assoc]
+
+/-- Messages admitted from a parked queue contribute exactly when their sender is `dead`. -/
+theorem countFrom_moved (sender dead : InstId) (ps : List Parked)
+    (hmsg : ∀ p ∈ ps, p.sender = p.msg.sender) :
+    countFrom sender ((ps.filter fun p => p.sender == dead).map (·.msg)) =
+      if sender = dead then (ps.filter fun p => p.sender == dead).length else 0 := by
+  induction ps with
+  | nil => simp [countFrom]
+  | cons p ps ih =>
+    have hhead := hmsg p List.mem_cons_self
+    have htail : ∀ q ∈ ps, q.sender = q.msg.sender := fun q hq => hmsg q (List.mem_cons_of_mem _ hq)
+    have ih' := ih htail
+    cases hb : p.sender == dead with
+    | true =>
+      have heq : p.sender = dead := beq_iff_eq.mp hb
+      have hfilter : ((p :: ps).filter fun q => q.sender == dead) =
+          p :: (ps.filter fun q => q.sender == dead) := by
+        simp [List.filter, hb]
+      rw [hfilter, List.map_cons, countFrom, ← hhead, heq, ih']
+      by_cases hs : sender = dead
+      · simp [hs, Nat.add_comm]
+      · have hne : ¬ dead = sender := fun h => hs h.symm
+        simp [hs, hne]
+    | false =>
+      have hfilter : ((p :: ps).filter fun q => q.sender == dead) =
+          ps.filter fun q => q.sender == dead := by
+        simp [List.filter, hb]
+      rw [hfilter, ih']
+
+/-- Moving `dead`'s parked entries into the box keeps every sender's slot count. -/
+theorem admit_count (sender dead : InstId) (a : Actor)
+    (hmsg : ∀ p ∈ a.parked, p.sender = p.msg.sender) :
+    countFrom sender (a.box ++ ((a.parked.filter fun p => p.sender == dead).map (·.msg))) +
+        countParked sender (a.parked.filter fun p => p.sender != dead) =
+      countFrom sender a.box + countParked sender a.parked := by
+  rw [countFrom_join]
+  have hmoved := countFrom_moved sender dead a.parked hmsg
+  by_cases hs : sender = dead
+  · have hmoved' : countFrom dead ((a.parked.filter fun p => p.sender == dead).map (·.msg)) =
+        (a.parked.filter fun p => p.sender == dead).length := by
+      simpa [hs] using hmoved
+    rw [hs, hmoved', countParked_filter_self, countParked_len]
+    omega
+  · have hmoved' : countFrom sender ((a.parked.filter fun p => p.sender == dead).map (·.msg)) = 0 := by
+      simpa [hs] using hmoved
+    rw [hmoved', countParked_filter_other sender dead hs]
+    omega
+
+/-- The actor `admitHost` installs: `dead`'s parked sends become ordinary mail. -/
+def admitActor (a : Actor) (dead : InstId) : Actor :=
+  { a with
+    box := a.box ++ ((a.parked.filter fun p => p.sender == dead).map (·.msg)),
+    parked := a.parked.filter fun p => p.sender != dead }
+
+theorem admit_slot (st : InstId → Actor) (host dead : InstId) (dst : String) (sender : InstId)
+    (hmsg : ∀ p ∈ (st host).parked, p.sender = p.msg.sender) :
+    slot (fun i => if i = host then admitActor (st host) dead else st i) dst sender host =
+      slot st dst sender host := by
+  cases hb : tname host == dst with
+  | false => simp [slot, hb]
+  | true =>
+    simp only [slot, hb, admitActor]
+    exact admit_count sender dead (st host) hmsg
+
+theorem admit_owed (st : InstId → Actor) (host dead : InstId) (dst : String) (sender : InstId)
+    (ids : List InstId) (nodup : ids.Nodup) (hmem : host ∈ ids)
+    (hmsg : ∀ p ∈ (st host).parked, p.sender = p.msg.sender) :
+    owed (fun i => if i = host then admitActor (st host) dead else st i) dst sender ids =
+      owed st dst sender ids := by
+  have hslot := admit_slot st host dead dst sender hmsg
+  have hrep := owed_replace st dst sender host (admitActor (st host) dead) ids nodup hmem
+  rw [hslot] at hrep
   omega
 
 end Deadlock

@@ -61,6 +61,26 @@ def noBulkSend : List Eff → Bool
   | .selfSchedule _ :: _ => false
   | _ :: es => noBulkSend es
 
+/-- What a continuation may still do. A lone terminable stays mute. A subtree
+member may send to a per-peer sibling and call one. Anything else is
+unconstrained here. -/
+def bulkScopeOf (D : Description) (name : String) (es : List Eff) : Bool :=
+  match templateOf D name with
+  | none => true
+  | some t =>
+    if !t.terminable then true
+    else if t.subtree == "" then noBulkSend es
+    else memberProgramOk D name es
+
+/-- The suffix after every `call` is the continuation of `Reply`, `NotAdmitted`,
+and `TimedOut`. Checking it once checks every branch: the three outcomes share
+that program, and no later proof may assume which outcome was taken. -/
+def callOutcomesOk (D : Description) (template toState : String) : List Eff → Bool
+  | [] => true
+  | .call _ _ _ :: es =>
+    effectsOk D template toState es && callOutcomesOk D template toState es
+  | _ :: es => callOutcomesOk D template toState es
+
 def transitionOk (I : Impl) (tr : Transition) : Bool :=
   match templateOf I.desc tr.template with
   | none => false
@@ -68,11 +88,12 @@ def transitionOk (I : Impl) (tr : Transition) : Bool :=
     (t.states.elem tr.fromState) && (t.states.elem tr.toState) && tr.release == 1 &&
       sendsOk I.desc tr.template tr.fromState tr.toState tr.program &&
       effectsOk I.desc tr.template tr.toState tr.program &&
+      callOutcomesOk I.desc tr.template tr.toState tr.program &&
       (if tr.acceptsCall then
         replyCount tr.program == 1 && !terminateBeforeReply tr.program
       else replyCount tr.program == 0) &&
       (if hasTerminate tr.program then t.terminable else true) &&
-      (if t.terminable then noBulkSend tr.program else true)
+      bulkScopeOf I.desc tr.template tr.program
 
 def callSites : List Transition → List (String × String)
   | [] => []
@@ -321,6 +342,23 @@ def replyGap (tr : Transition) : List String :=
   else if replyCount tr.program == 0 then []
   else [s!"fail: transition {tr.template} [{tr.label}] replies without accepting a call"]
 
+/-- Effects in a subtree member's program that leave the subtree. -/
+def scopeGap (D : Description) (template label : String) : List Eff → List String
+  | [] => []
+  | .send dst _ _ :: es =>
+    (if sameSubtree D template dst && perPeerB D dst then []
+     else [s!"fail: transition {template} [{label}] sends to {dst} outside its subtree"]) ++
+      scopeGap D template label es
+  | .trySend dst _ _ :: es =>
+    (if sameSubtree D template dst && perPeerB D dst then []
+     else [s!"fail: transition {template} [{label}] try-sends to {dst} outside its subtree"]) ++
+      scopeGap D template label es
+  | .call dst _ _ :: es =>
+    (if sameSubtree D template dst && perPeerB D dst then []
+     else [s!"fail: transition {template} [{label}] calls {dst} outside its subtree"]) ++
+      scopeGap D template label es
+  | _ :: es => scopeGap D template label es
+
 /-- One transition's local failures. Empty when `transitionOk` holds. -/
 def transitionIssues (I : Impl) (tr : Transition) : List String :=
   match templateOf I.desc tr.template with
@@ -338,9 +376,10 @@ def transitionIssues (I : Impl) (tr : Transition) : List String :=
     (if hasTerminate tr.program && !t.terminable then
       [s!"fail: transition {tr.template} [{tr.label}] terminates, and {tr.template} is not terminable"]
      else []) ++
-    (if t.terminable && !(noBulkSend tr.program) then
+    (if t.terminable && t.subtree == "" && !(noBulkSend tr.program) then
       [s!"fail: transition {tr.template} [{tr.label}] sends from terminable role {tr.template}"]
-     else [])
+     else []) ++
+    (if t.terminable && t.subtree != "" then scopeGap I.desc tr.template tr.label tr.program else [])
 
 def callIssues (I : Impl) : List String :=
   (callSites I.transitions).filterMap fun p =>

@@ -392,7 +392,7 @@ def actionText : Action → String
   | .finish id => s!"finish {instText id}"
   | .spawn template => s!"spawn {template}"
   | .ingress id label => s!"ingress {instText id} {label}"
-  | .kill sub key => s!"kill {sub} {key}"
+  | .callTimeout id => s!"callTimeout {instText id}"
   | .stutter => "stutter"
 
 private def decodeId (v : JVal) : Except String InstId := do
@@ -419,10 +419,6 @@ private def decodeAction (v : JVal) : Except String Action := do
   | "spawn" => return .spawn (← asString (← field v "template") "template")
   | "ingress" =>
     return .ingress (← decodeId (← field v "id")) (← asString (← field v "label") "label")
-  | "kill" =>
-    match jget v "key" with
-    | some (.num n) => return .kill (← asString (← field v "subtree") "subtree") n
-    | _ => throw "kill.key must be a number"
   | "stutter" => return .stutter
   | _ => throw s!"unknown step op {op}"
 
