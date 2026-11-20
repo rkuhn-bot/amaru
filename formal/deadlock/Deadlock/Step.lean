@@ -219,19 +219,12 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       have hedge : ∃ label, hasEdge I.desc (tname id) (w.st id).typestate (tname dstId) .call .blocking label = true := by
         refine ⟨l, ?_⟩
         simpa [resolve_tname I.desc id d dstId hr] using hhead.1
-      split
-      · apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := some id } true
-          (afterHead { k with rest := .call d l n :: es }) hS
-        · simp [afterHead, hty]
-        · simpa [afterHead] using htail
-        · exact hedge
-        · exact alive_if_busy I w hS id (by simp [hphase])
-      · apply enqueue_sem I (noteStale w id d) id dstId { label := l, sender := id, callFrom := some id } true
-          (afterHead { k with rest := .call d l n :: es }) (sem_stale I w id d hS)
-        · simp [noteStale_st, afterHead, hty]
-        · simpa [noteStale_st, afterHead] using htail
-        · simpa [noteStale_st] using hedge
-        · simpa [noteStale_st] using alive_if_busy I w hS id (by simp [hphase])
+      apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := some id } true
+        (afterHead { k with rest := .call d l n :: es }) hS
+      · simp [afterHead, hty]
+      · simpa [afterHead] using htail
+      · exact hedge
+      · exact alive_if_busy I w hS id (by simp [hphase])
 
 /-- The same heads, including a send or call that parks, preserve `MailInv`. -/
 theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff) (es : List Eff)
@@ -272,11 +265,8 @@ theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
         (proceed_keeps_life _ _))
     | some dstId =>
       simp [execRun, hr]
-      split
-      · exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := some id } true
-          (afterHead { k with rest := .call d l n :: es }) hM hfree
-      · exact enqueue_mail (noteStale w id d) I.desc id dstId { label := l, sender := id, callFrom := some id } true
-          (afterHead { k with rest := .call d l n :: es }) (mail_stale w id d hM) hfree
+      exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := some id } true
+        (afterHead { k with rest := .call d l n :: es }) hM hfree
 
 theorem exec_done_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemInv I w)
     (hphase : (w.st id).phase = .run { k with rest := [] }) :
@@ -3445,13 +3435,7 @@ theorem exec_run_open (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k :
         exact open_busy (noteStale w id d) id _ hOn (by simpa using busy_run id w k hph)
       | some dstId =>
         simp [execRun, hk, hr]
-        have hOn : OpenSlots (noteStale w id d) := by
-          intro t i hi
-          exact hO t i hi
-        split
-        · exact enqueue_open w I.desc id dstId _ true _ hO (busy_run id w k hph)
-        · exact enqueue_open (noteStale w id d) I.desc id dstId _ true _ hOn
-            (by simpa using busy_run id w k hph)
+        exact enqueue_open w I.desc id dstId _ true _ hO (busy_run id w k hph)
     | trySend d l n =>
       cases hr : route w I.desc id d with
       | none =>

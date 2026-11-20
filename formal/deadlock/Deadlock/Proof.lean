@@ -552,10 +552,7 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
       simp
       split
       · simp [noteStale, setActor_other, hs, hp]
-      · split
-        · exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
-        · exact enqueue_keeps_other_run (noteStale w id dst) _ _ _ _ _ _ _ _
-            (by simpa [noteStale_st] using hp) hs
+      · exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
     | reply =>
       simpa using performReply_preserves_run w id s k k0 hp hs
     | selfSchedule label =>

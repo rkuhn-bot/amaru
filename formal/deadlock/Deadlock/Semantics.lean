@@ -777,7 +777,6 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
         -- Alive or not, the call is timed. `enqueueOrPark` admits it, parks it,
         -- or leaves it parked on a dead name until `NotAdmitted`.
         let msg : Msg := { label := label, sender := id, callFrom := some id }
-        let w := if (w.st dstId).life != .alive then noteStale w id dst else w
         enqueueOrPark w I.desc id dstId msg true k'
     | .reply => performReply w id k
     | .selfSchedule label =>
@@ -5598,6 +5597,16 @@ theorem resume_keeps_life (a : Actor) (b : Bool) (dst : InstId) : (resumeSender 
     · exact proceed_keeps_life _ _
   · rfl
 
+/-- Resuming the actor installed at `id` keeps that actor's life. -/
+theorem set_resume_life (w : World) (id : InstId) (a : Actor) (b : Bool) (dst : InstId) :
+    ((setActor w id (resumeSender a b dst)).st id).life = a.life := by
+  simp [setActor, resume_keeps_life]
+
+/-- Resuming one actor leaves every other life untouched. -/
+theorem set_resume_life_other (w : World) (id i : InstId) (a : Actor) (b : Bool) (dst : InstId)
+    (hi : i ≠ id) : ((setActor w id (resumeSender a b dst)).st i).life = (w.st i).life := by
+  simp [setActor, hi]
+
 theorem bump_keeps_life (a : Actor) (dst : String) (delta : Int) : (bumpToken a dst delta).life = a.life := by
   unfold bumpToken
   rfl
@@ -6142,11 +6151,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
         simpa [noteStale_st] using hset.symm.trans hl
       | some dstId =>
         simp [hr] at hl
-        split at hl
-        · exact (enqueue_core_life w I.desc id dstId _ true (afterHead k) name).symm.trans hl
-        · have hlife :=
-            (enqueue_core_life (noteStale w id dst) I.desc id dstId _ true (afterHead k) name).symm.trans hl
-          simpa [noteStale_st] using hlife
+        exact (enqueue_core_life w I.desc id dstId _ true (afterHead k) name).symm.trans hl
     | reply =>
       simp [execRun, hk] at hl
       exact (reply_core_life w id k name).symm.trans hl

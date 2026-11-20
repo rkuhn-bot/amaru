@@ -9612,21 +9612,16 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (
         | some dstId =>
           simp [hr]
           by_cases hliveD : (w.st dstId).life = .alive
-          · simp [hliveD]
-            have hroute := route_of_resolve w I.desc id dst dstId hr hliveD
+          · have hroute := route_of_resolve w I.desc id dst dstId hr hliveD
             have hname := route_tname w I.desc id dst dstId hroute
             exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := some id } true
               ⟨.call dst label hint :: es, toState, replyTo⟩ (.call dst label hint) es label hint hO hT
               hph rfl (Or.inr (by simp [hname])) rfl hty hsender hnot
               (route_agrees w I.desc id dst dstId hroute) hbulk
-          · simp [hliveD]
-            have hOn := occ_of_core I w (noteStale w id dst) rfl rfl rfl (by simp [noteStale]) hO
-            have hTn : TyOk I.desc (noteStale w id dst) := by simpa [TyOk, noteStale] using hT
-            exact occ_enqueue I hL (noteStale w id dst) id dstId
+          · exact occ_enqueue I hL w id dstId
               { label := label, sender := id, callFrom := some id } true
-              ⟨.call dst label hint :: es, toState, replyTo⟩ (.call dst label hint) es label hint hOn hTn
-              (by simpa [noteStale] using hph) rfl (Or.inr (by simp [resolve_tname I.desc id dst dstId hr])) rfl
-              (by simpa [noteStale] using hty) (by simpa [noteStale] using hsender) hnot
+              ⟨.call dst label hint :: es, toState, replyTo⟩ (.call dst label hint) es label hint hO hT
+              hph rfl (Or.inr (by simp [resolve_tname I.desc id dst dstId hr])) rfl hty hsender hnot
               (resolve_agrees I.desc id dst dstId hr) hbulk
       | reply =>
         exact occ_reply I w id ⟨.reply :: es, toState, replyTo⟩ hO hS hph
@@ -10874,31 +10869,16 @@ theorem exec_pack (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
           (by simp [ha, proceed_box, noteStale_st]) (by simp [ha, proceed_parked, noteStale_st])
       | some host =>
         simp [hr]
-        by_cases hliveD : (w.st host).life = .alive
-        · simp [hliveD]
-          refine ⟨enqueue_keeps_here I.desc w hH id host
-              { label := label, sender := id, callFrom := some id } true (afterHead k) rfl ?_,
-            enqueue_align I.desc w hP id host
-              { label := label, sender := id, callFrom := some id } true (afterHead k) rfl⟩
-          intro hname
-          have hok := member_effect_of_scope I.desc (tname id) (.call dst label hint) es hname
-            (by simpa [hrest] using hB hname)
-          simpa [memberHere] using
-            scoped_resolve I.desc id host dst label hint (.call dst label hint) hname hok
-              (Or.inr (Or.inr rfl)) hr
-        · simp [hliveD]
-          have hHn : MailHere I.desc (noteStale w id dst) := by simpa [MailHere, noteStale] using hH
-          have hPn : ParkAlign (noteStale w id dst) := by simpa [ParkAlign, noteStale] using hP
-          refine ⟨enqueue_keeps_here I.desc (noteStale w id dst) hHn id host
-              { label := label, sender := id, callFrom := some id } true (afterHead k) rfl ?_,
-            enqueue_align I.desc (noteStale w id dst) hPn id host
-              { label := label, sender := id, callFrom := some id } true (afterHead k) rfl⟩
-          intro hname
-          have hok := member_effect_of_scope I.desc (tname id) (.call dst label hint) es hname
-            (by simpa [hrest] using hB hname)
-          simpa [memberHere] using
-            scoped_resolve I.desc id host dst label hint (.call dst label hint) hname hok
-              (Or.inr (Or.inr rfl)) hr
+        refine ⟨enqueue_keeps_here I.desc w hH id host
+            { label := label, sender := id, callFrom := some id } true (afterHead k) rfl ?_,
+          enqueue_align I.desc w hP id host
+            { label := label, sender := id, callFrom := some id } true (afterHead k) rfl⟩
+        intro hname
+        have hok := member_effect_of_scope I.desc (tname id) (.call dst label hint) es hname
+          (by simpa [hrest] using hB hname)
+        simpa [memberHere] using
+          scoped_resolve I.desc id host dst label hint (.call dst label hint) hname hok
+            (Or.inr (Or.inr rfl)) hr
     | reply =>
       simp only [execRun, hrest, performReply]
       cases hto : k.replyTo with

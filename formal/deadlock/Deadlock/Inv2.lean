@@ -651,26 +651,14 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             exact Or.inl (scope_proceed I.desc (tname id) (w.st id) ⟨es, toState, replyTo⟩ htail)
           | some dstId =>
             simp [hr]
-            by_cases hlive : (w.st dstId).life = .alive
-            · simp [hlive]
-              exact Or.inl (by simpa [enqueue_sender_cont, afterHead, List.tail_cons] using htail)
-            · simp [hlive]
-              exact Or.inl (by simpa [enqueue_sender_cont, afterHead, List.tail_cons, noteStale_st] using htail)
+            exact Or.inl (by simpa [enqueue_sender_cont, afterHead, List.tail_cons] using htail)
         · simp [execRun, hrest]
           cases hr : resolveId I.desc id dst with
           | none => simp [hr, setActor, hi, noteStale_st]
           | some dstId =>
             simp [hr]
-            by_cases hlive : (w.st dstId).life = .alive
-            · simp [hlive]
-              exact Or.inr (enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-                ⟨es, toState, replyTo⟩ i hi)
-            · simp [hlive]
-              have hph' := enqueue_phase_other (noteStale w id dst) I.desc id dstId
-                { label := label, sender := id, callFrom := some id } true
-                (afterHead { rest := .call dst label hint :: es, toState := toState, replyTo := replyTo }) i hi
-              rw [noteStale_st] at hph'
-              exact Or.inr hph'
+            exact Or.inr (enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
+              ⟨es, toState, replyTo⟩ i hi)
       | trySend dst label hint =>
         by_cases hi : i = id
         · have htail := scope_tail I.desc (tname id) (.trySend dst label hint) es

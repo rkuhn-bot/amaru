@@ -685,13 +685,7 @@ theorem exec_ty (I : Impl) (w : World) (id : InstId) (k : Cont) (hT : TyOk I.des
           (by cases hrk : (afterHead k).rest <;> simp [proceed, hrk, noteStale_st])
       | some dst =>
         simp [execRun, hk, hr]
-        by_cases halive : (w.st dst).life = .alive
-        · simp [halive]
-          exact enqueue_ty I.desc w id dst _ true (afterHead k) hT (by simp [afterHead, hty])
-        · simp [halive]
-          have hTn : TyOk I.desc (noteStale w id d) := by simpa [TyOk, noteStale_st] using hT
-          exact enqueue_ty I.desc (noteStale w id d) id dst _ true (afterHead k) hTn
-            (by simpa [noteStale_st, afterHead] using hty)
+        exact enqueue_ty I.desc w id dst _ true (afterHead k) hT (by simp [afterHead, hty])
     | trySend d l n =>
       cases hr : route w I.desc id d with
       | none =>
@@ -1315,8 +1309,7 @@ theorem exec_ix (I : Impl) (w : World) (id : InstId) (k : Cont) (name : String) 
       cases hr : resolveId I.desc id d with
       | none => simp [execRun, hk, hr, noteStale, setActor]
       | some dst =>
-        simp [execRun, hk, hr]
-        split <;> simp [enqueue_ix, noteStale]
+        simp [execRun, hk, hr, enqueue_ix]
     | trySend d l n =>
       cases hr : route w I.desc id d with
       | none => simp [execRun, hk, hr, setActor]
