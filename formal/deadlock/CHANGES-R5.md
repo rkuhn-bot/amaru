@@ -10,6 +10,17 @@ is gone, so the old `∃ sub key, act = .kill` disjunct is not a step. The loss
 disjunct is `lostHost`: the target's life is `shuttingDown` or `dead`. It is
 not deleted.
 
+The liveness headline is deadlock-free or crashed. `crashWorld` sets
+`World.crashed`, and every action is then disabled. A call to a dead,
+shutting-down, or absent target ends `NotAdmitted` on its own continuation
+and its own typestate. Counts and `LocalOk` range over every outcome branch.
+A per-peer stage may supervise its own subtree. A parent restarts a dead
+child at a fresh generation of the same key. A dead supervisor admits no
+child. `prioSized` counts tombstones still queued from dead predecessors,
+and `maySpawnRoot` refuses the spawn when that count does not fit. A
+tombstone with no transition in the parent's current state stays queued.
+A shutting-down sender's parked entries are removed at the mark.
+
 ## What `Delivered` will say
 
 A reliable message is either handled by its target, or the target began

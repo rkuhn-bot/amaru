@@ -55,24 +55,27 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, `prio` nonempty, `deliver` accepts | Consume the `prio` head. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer template and `aliveCount < N` | Fresh peer, idle, on the roster. |
+| `spawn template` | per-peer root, `aliveCount < N`, supervisor alive, and `prioSized` still holds with the tombstones queued on that supervisor | Fresh generation at the subtree key, idle, on the roster. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not `terminableB`, and enough `tokens` | Append one reliable self-message and charge. |
-| `kill sub key` | `killWait`: a live `timeoutKills` member of that key is in `awaitPeer` | `killSubtree`. |
-| `stutter` | not `runtimeBusy` | Same world. |
+| `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
-`runtimeBusy` is a roster actor who can `recvBulk`, `recvPrio`, `exec`, or
-`finish`, or `killBusy`.
+`runtimeBusy` is a roster actor who can `recvBulk`, `recvPrio`, `exec`,
+`finish`, or `callTimeout`.
 
 One `exec` step, by the head effect:
 
-- `send` and `call` use `route`. A miss is `noteStale` and the sender
-  proceeds. A hit is `enqueueOrPark`: into `box` when the target is alive,
-  its `parked` list is empty, and `box` has room; otherwise onto `parked`.
-  A dead or absent target stores nothing. A call then waits in `awaitReply`
-  or `parked` with `isCall`.
+- `send` and `call` use `route` (a call first uses `resolveId`). A miss is
+  `noteStale` and the sender proceeds. A hit is `enqueueOrPark`: into `box`
+  when the target is alive, its `parked` list is empty, and `box` has room;
+  otherwise onto `parked`. A dead, shutting-down, or absent target stores
+  nothing. A send then proceeds. A call ends as `NotAdmitted` on
+  `onNotAdmitted`, and does not enter `awaitReply`. An admitted call waits
+  in `awaitReply` (room) or `parked` with `isCall` (no room). `Reply`,
+  `NotAdmitted`, and `TimedOut` each run their own continuation into their
+  own typestate.
 - `trySend` stores only when the target is alive, unparked, and not full.
-  The copy is `reliable = false`. Otherwise it is discarded and the sender
-  proceeds.
+  The copy is `reliable = false`. `Full` runs `onFull` and `Gone` runs
+  `onGone`, each into its own typestate. The admitted path keeps `toState`.
 - `reply` is `performReply`: the caller runs only when it is in
   `awaitReply` of this sender.
 - `selfSchedule` enqueues its label on `prio`, or crashes when the lane is
@@ -80,11 +83,12 @@ One `exec` step, by the head effect:
 - `cell` writes `max` of the old value and sets `dirty`. The first write
   wakes readers with `wakeReaders` (`tryWake`, one unreliable `prio` message
   per label).
-- `internal` becomes `awaitEffect`. `peer` becomes `awaitPeer`.
-- `terminate` runs only when the template is `terminable` and `parked` holds
-  no call. It `readCells`, `refundMsgs`, `refundParked`, installs `dead` with
-  an empty mailbox, and `releaseParked` (a non-call parked sender resumes; a
-  call is left). Otherwise the world is unchanged.
+- `internal` becomes `awaitEffect`. `peer` becomes `awaitPeer`. The data
+  path is `finish`. The timeout is `callTimeout`, which runs `onTimeout`
+  into its own typestate.
+- `terminate` is the shutdown below. A permanent core crashes the roster.
+  A stage in a supervision tree marks itself and its descendants. A lone
+  terminable with no child and no parked call shuts only itself down.
 
 `route` resolves a multiplicity-one name to its live core, and a per-peer
 name to `InstId.peer dst (memberKey sender)` when that peer is alive. A core
@@ -92,9 +96,11 @@ cannot address a per-peer role. The `hint` is not the address.
 
 `deliver` refuses a dead actor, a call with no transition, and a call whose
 transition does not `acceptsCall`. The receive is then not enabled. A
-non-call with no transition is accepted and leaves the receiver `idle`. A
-program becomes `run`, or `idle` when the program is empty. `replyTo` is
-`callFrom`.
+tombstone with no transition in the parent's current state is also refused,
+so it stays queued. Another non-call with no transition is accepted and
+leaves the receiver `idle`. A program becomes `run`, or `idle` when the
+program is empty. `replyTo` is `callFrom`. Each outcome's typestate is
+copied onto the continuation.
 
 ## Runtime rules
 
@@ -113,26 +119,33 @@ computation: `apply` is one step.
 `Fair.prio` take a receive that is enabled infinitely often. Fairness does
 not force `ingress`, `spawn`, or `stutter`.
 
-An untimed peer (`peerUntimed`) is not a `Deadlock`. `finish` is enabled on
-it only when `peerFinishable` (`timedCohortEnds`: a timed peer in the subtree
-can kill it). `PurePeerEnd` is the wait where `peerFinishable` is false. That
-wait is the external peer. Nothing in the model ends it.
+An untimed peer (`peerUntimed`) is not a `Deadlock`. Its data result is
+`finish` and its timeout is `callTimeout`. `peerFinishable` is true, so
+`PurePeerEnd` is empty. There is no subtree kill that ends the wait.
 
-## Kill and drop
+## Shutdown and drop
 
-`killSubtree` is `killMembers` then `plantTombstone`. Each live member is
-`killOne`: refund what its `box` and `parked` held, `failWaiters` (a sender
-parked on the member proceeds; a caller in `awaitReply` becomes `idle`),
-`forgetSender` (delete that member's entries from other actors' `parked`
-lists), then `dead`, `idle`, and an empty mailbox. `plantTombstone` stores
-the key. Peer selection belongs to the application typegraph.
-The parent's reaction is not a step of `kill`.
+`terminate` of a stage in a supervision tree is `terminateStage`: `markTree`
+marks that stage and every descendant shutting down, and `enqueueTombstone`
+places one tombstone on the immediate supervisor's priority lane. The
+supervisor may be a per-peer stage of the same subtree. The parent answers
+the tombstone in its own later step. A sibling is not a descendant, and
+nothing here clears a sibling's mailbox. A lone terminable with no child
+and no parked call is `shutdownActor` of itself. A permanent core's
+`terminate`, and a priority enqueue onto a full lane, are `crashWorld`.
 
-A drop that is not a kill: `trySend` discards when the target is missing or
+`markShutdown` sets `shuttingDown` and `idle`, and `releaseOutbound` drops
+that sender's parked entries on other hosts at the mark, not at the seal.
+The seal is a later `exec`: `releaseWorld` refunds the mailbox, installs
+`dead`, and resumes non-call parked senders. A crashed world has
+`crashed = true`. Every action, including spawn, ingress, and stutter, is
+disabled, so the run stops. The liveness claim is deadlock-free or crashed.
+
+A drop that is not a crash: `trySend` discards when the target is missing or
 the box is not free; `noteStale` records a route miss and stores nothing;
 `enqueueOrPark` toward a target that is not alive stores nothing and does
 not charge. A stored reliable message is not dropped by a later send. Mail
-inside a member is refunded or deleted by `killOne`, not left for a later
+inside a shutting-down member is refunded by the seal, not left for a later
 receive.
 
 ## Later

@@ -73,6 +73,22 @@ guarantee: Amaru is not a real-time system. The callee-side handling
 guarantee plus the caller-side outcome totality is the final form of
 `call_answered`.
 
+## 2026-11-20 — Deadlock-free or crashed
+
+`deadlock_freedom` is deadlock-free or crashed. A fair run of a `GraphOk`
+and `LocalOk` implementation is not stuck on a parked send, or a step has
+crashed the roster. `crashWorld` sets `World.crashed`. Spawn, ingress,
+stutter, and every runtime action are then disabled, so the run stops.
+Crash is a reachable outcome: a permanent core's `terminate`, and a priority
+enqueue onto a full lane. It is not a silent escape from a stuck parked send.
+
+`prioSized` counts the children that can tombstone at once, the other
+priority senders, and the tombstones still queued from dead predecessors.
+`maySpawnRoot` passes that last count and refuses the spawn when the lane
+cannot hold another. A parent restarts a dead child at a fresh generation
+of the same subtree key. The dead id is not reused. A supervisor that is
+dead or shutting down admits no new child.
+
 ## 2026-11-20 — What deadlock freedom is about
 
 `deadlock_freedom` is about parked sends. A run is deadlocked when a send sits

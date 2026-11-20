@@ -652,9 +652,20 @@ def templatePure (D : Description) (name : String) : Bool :=
 def pureKillMsg (name : String) : String :=
   s!"fail: {name} is a pure untimed peer and its own timeout does not kill the subtree"
 
-/-- A nonempty subtree is a per-peer cohort that dies in one step. A pure untimed
-peer must be that timeout itself: a sibling's wait does not make this mailbox
-finishable, so the kill has to be enabled on this actor. -/
+/-- A per-peer supervisor of the same subtree, or a multiplicity-one core. -/
+def supervisorInSubtree (D : Description) (t : Template) : Bool :=
+  match templateOf D t.supervisor with
+  | none => false
+  | some s =>
+    (s.multiplicity == .one) ||
+      (s.multiplicity == .perPeer && s.subtree == t.subtree && s.name != t.name)
+
+/-- A nonempty subtree is a per-peer cohort. Its supervisor, when it names one,
+is a multiplicity-one core or a per-peer stage of the same subtree. The step
+relation does not require every member to be terminable, and it does not
+require a `timeoutKills` role: any stage may `terminate`, and the tombstone
+goes to the immediate supervisor. `timeoutKills` on a template with no subtree
+is still rejected: the flag names a subtree kill the template does not belong to. -/
 def subtreeFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
     if t.subtree == "" then
@@ -664,17 +675,8 @@ def subtreeFails (D : Description) : List String :=
       else none
     else if t.multiplicity != .perPeer then
       some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
-    else if !t.terminable then
-      some s!"fail: subtree {t.subtree} member {t.name} is not terminable"
-    else if !(D.templates.any fun u => u.subtree == t.subtree && u.timeoutKills) then
-      some s!"fail: subtree {t.subtree} has no timeoutKills role"
-    else if t.supervisor != "" &&
-        (match templateOf D t.supervisor with
-          | some s => !(s.multiplicity == .one)
-          | none => true) then
-      some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not a permanent core"
-    else if templatePure D t.name && !t.timeoutKills then
-      some (pureKillMsg t.name)
+    else if t.supervisor != "" && !supervisorInSubtree D t then
+      some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not in the subtree"
     else none
 
 def pureTermMsg (name : String) : String :=

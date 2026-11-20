@@ -19,54 +19,102 @@ def hasEdge (D : Description) (src ss dst : String) (effect : EffectKind) (kind 
   D.edges.any fun e =>
     e.src == src && e.srcState == ss && e.dst == dst && e.effect == effect && e.kind == kind && e.label == label
 
+mutual
 def selfLabels : List Eff → List String
   | [] => []
-  | .selfSchedule l :: es => l :: selfLabels es
-  | _ :: es => selfLabels es
+  | e :: es => effSelf e ++ selfLabels es
 
+def effSelf : Eff → List String
+  | .selfSchedule l => [l]
+  | .trySend _ _ _ onFull onGone => selfLabels onFull ++ selfLabels onGone
+  | .call _ _ _ onNotAdmitted onTimedOut => selfLabels onNotAdmitted ++ selfLabels onTimedOut
+  | .peer onTimeout => selfLabels onTimeout
+  | _ => []
+end
+
+mutual
 /-- Labels a program can wake on `reader`'s priority lane by a `cell` write. -/
 def cellWakeLabels (reader : String) : List Eff → List String
   | [] => []
-  | .cell d l _ :: es => (if d == reader then [l] else []) ++ cellWakeLabels reader es
-  | _ :: es => cellWakeLabels reader es
+  | e :: es => effWake reader e ++ cellWakeLabels reader es
+
+def effWake (reader : String) : Eff → List String
+  | .cell d l _ => if d == reader then [l] else []
+  | .trySend _ _ _ onFull onGone => cellWakeLabels reader onFull ++ cellWakeLabels reader onGone
+  | .call _ _ _ onNotAdmitted onTimedOut =>
+    cellWakeLabels reader onNotAdmitted ++ cellWakeLabels reader onTimedOut
+  | .peer onTimeout => cellWakeLabels reader onTimeout
+  | _ => []
+end
 
 def sendsOk (D : Description) (template srcState dstState : String) (prog : List Eff) : Bool :=
   D.templates.all fun t =>
     sendsTo t.name prog + floorState D template dstState t.name ≤ floorState D template srcState t.name
 
-def effectsOk (D : Description) (template toState : String) : List Eff → Bool
-  | [] => true
-  | .send d l _ :: es => hasEdge D template toState d .send .blocking l && effectsOk D template toState es
-  | .trySend d l _ onFull onGone :: es =>
-    hasEdge D template toState d .trySend .nonBlocking l &&
-      !(D.edges.any fun e => e.ingress && e.src == template && e.dst == d && e.label == l) &&
-      effectsOk D template toState onFull && effectsOk D template toState onGone &&
-      effectsOk D template toState es
-  | .call d l _ onNotAdmitted onTimedOut :: es =>
-    hasEdge D template toState d .call .blocking l &&
-      effectsOk D template toState onNotAdmitted && effectsOk D template toState onTimedOut &&
-      effectsOk D template toState es
-  | .cell d l _ :: es => hasEdge D template toState d .cell .nonBlocking l && effectsOk D template toState es
-  | .peer onTimeout :: es =>
-    effectsOk D template toState onTimeout && effectsOk D template toState es
-  | _ :: es => effectsOk D template toState es
+/-- Typestate each outcome lands in. `here` is the reply, admitted, and data path. -/
+structure BranchAt where
+  here : String
+  notAdmitted : String := ""
+  timedOut : String := ""
+  timeout : String := ""
+  full : String := ""
+  gone : String := ""
 
+/-- The typestate a replacing branch is checked in. Empty keeps `here`. -/
+def focus (a : BranchAt) (s : String) : BranchAt :=
+  { a with here := if s == "" then a.here else s }
+
+mutual
+def effectsOk (D : Description) (template : String) (at_ : BranchAt) : List Eff → Bool
+  | [] => true
+  | e :: es => effectOk D template at_ e && effectsOk D template at_ es
+
+/-- One effect, at `at_.here`. A replacing branch is checked at its own typestate. -/
+def effectOk (D : Description) (template : String) (at_ : BranchAt) : Eff → Bool
+  | .send d l _ => hasEdge D template at_.here d .send .blocking l
+  | .trySend d l _ onFull onGone =>
+    hasEdge D template at_.here d .trySend .nonBlocking l &&
+      !(D.edges.any fun e => e.ingress && e.src == template && e.dst == d && e.label == l) &&
+      effectsOk D template (focus at_ at_.full) onFull &&
+      effectsOk D template (focus at_ at_.gone) onGone
+  | .call d l _ onNotAdmitted onTimedOut =>
+    hasEdge D template at_.here d .call .blocking l &&
+      effectsOk D template (focus at_ at_.notAdmitted) onNotAdmitted &&
+      effectsOk D template (focus at_ at_.timedOut) onTimedOut
+  | .cell d l _ => hasEdge D template at_.here d .cell .nonBlocking l
+  | .peer onTimeout => effectsOk D template (focus at_ at_.timeout) onTimeout
+  | _ => true
+end
+
+mutual
 def hasTerminate : List Eff → Bool
   | [] => false
-  | .terminate :: _ => true
-  | _ :: es => hasTerminate es
+  | e :: es => effTerminates e || hasTerminate es
 
+def effTerminates : Eff → Bool
+  | .terminate => true
+  | .trySend _ _ _ onFull onGone => hasTerminate onFull || hasTerminate onGone
+  | .call _ _ _ onNotAdmitted onTimedOut => hasTerminate onNotAdmitted || hasTerminate onTimedOut
+  | .peer onTimeout => hasTerminate onTimeout
+  | _ => false
+end
+
+mutual
 /-- A terminable program must not leave a reliable message behind. `send`,
 `trySend`, and `call` are bulk; `selfSchedule` is a reliable priority message
 that `terminate` would clear. -/
 def noBulkSend : List Eff → Bool
   | [] => true
-  | .send _ _ _ :: _ => false
-  | .trySend _ _ _ _ _ :: _ => false
-  | .call _ _ _ _ _ :: _ => false
-  | .selfSchedule _ :: _ => false
-  | .peer onTimeout :: es => noBulkSend onTimeout && noBulkSend es
-  | _ :: es => noBulkSend es
+  | e :: es => effMute e && noBulkSend es
+
+def effMute : Eff → Bool
+  | .send _ _ _ => false
+  | .trySend _ _ _ onFull onGone => noBulkSend onFull && noBulkSend onGone
+  | .call _ _ _ onNotAdmitted onTimedOut => noBulkSend onNotAdmitted && noBulkSend onTimedOut
+  | .selfSchedule _ => false
+  | .peer onTimeout => noBulkSend onTimeout
+  | _ => true
+end
 
 /-- What a continuation may still do. A lone terminable stays mute. A subtree
 member may send to a per-peer sibling and call one. Anything else is
@@ -79,33 +127,57 @@ def bulkScopeOf (D : Description) (name : String) (es : List Eff) : Bool :=
     else if t.subtree == "" then noBulkSend es
     else memberProgramOk D name es
 
-/-- Every outcome continuation is a program `LocalOk` accepts. `Reply` is the
-tail, `NotAdmitted` and `TimedOut` are the call's own lists, a peer wait has
-data and timeout, and `trySend` has admitted, `Full`, and `Gone`. -/
-def callOutcomesOk (D : Description) (template toState : String) : List Eff → Bool
+/-- `Reply` is the tail. `NotAdmitted`, `TimedOut`, peer timeout, `Full`, and
+`Gone` are checked at their own typestate by `effectsOk`. -/
+def callOutcomesOk (D : Description) (template : String) (at_ : BranchAt) (es : List Eff) : Bool :=
+  effectsOk D template at_ es
+
+def branchAt (tr : Transition) : BranchAt where
+  here := tr.toState
+  notAdmitted := tr.toNotAdmitted
+  timedOut := tr.toTimedOut
+  timeout := tr.toTimeout
+  full := tr.toFull
+  gone := tr.toGone
+
+/-- Empty names the transition's `toState`, which is checked on its own. -/
+def stateNamed (t : Template) (s : String) : Bool :=
+  s == "" || t.states.elem s
+
+mutual
+/-- `Eff.spawn` names a per-peer child this template supervises. -/
+def spawnScope (D : Description) (src : String) : List Eff → Bool
   | [] => true
-  | .call _ _ _ onNotAdmitted onTimedOut :: es =>
-    effectsOk D template toState es && effectsOk D template toState onNotAdmitted &&
-      effectsOk D template toState onTimedOut && callOutcomesOk D template toState es &&
-      callOutcomesOk D template toState onNotAdmitted &&
-      callOutcomesOk D template toState onTimedOut
-  | .trySend _ _ _ onFull onGone :: es =>
-    effectsOk D template toState onFull && effectsOk D template toState onGone &&
-      callOutcomesOk D template toState es && callOutcomesOk D template toState onFull &&
-      callOutcomesOk D template toState onGone
-  | .peer onTimeout :: es =>
-    effectsOk D template toState onTimeout && callOutcomesOk D template toState es &&
-      callOutcomesOk D template toState onTimeout
-  | _ :: es => callOutcomesOk D template toState es
+  | e :: es => spawnEffect D src e && spawnScope D src es
+
+def spawnEffect (D : Description) (src : String) : Eff → Bool
+  | .spawn child =>
+    match templateOf D child with
+    | some ct =>
+      ct.supervisor == src && ct.multiplicity == .perPeer &&
+        match templateOf D src with
+        | some p => p.multiplicity == .perPeer
+        | none => false
+    | none => false
+  | .trySend _ _ _ onFull onGone => spawnScope D src onFull && spawnScope D src onGone
+  | .call _ _ _ onNotAdmitted onTimedOut =>
+    spawnScope D src onNotAdmitted && spawnScope D src onTimedOut
+  | .peer onTimeout => spawnScope D src onTimeout
+  | _ => true
+end
 
 def transitionOk (I : Impl) (tr : Transition) : Bool :=
   match templateOf I.desc tr.template with
   | none => false
   | some t =>
+    let at_ := branchAt tr
     (t.states.elem tr.fromState) && (t.states.elem tr.toState) && tr.release == 1 &&
+      stateNamed t tr.toNotAdmitted && stateNamed t tr.toTimedOut &&
+      stateNamed t tr.toTimeout && stateNamed t tr.toFull && stateNamed t tr.toGone &&
       sendsOk I.desc tr.template tr.fromState tr.toState tr.program &&
-      effectsOk I.desc tr.template tr.toState tr.program &&
-      callOutcomesOk I.desc tr.template tr.toState tr.program &&
+      effectsOk I.desc tr.template at_ tr.program &&
+      callOutcomesOk I.desc tr.template at_ tr.program &&
+      spawnScope I.desc tr.template tr.program &&
       (if tr.acceptsCall then
         replyCount tr.program == 1 && !terminateBeforeReply tr.program
       else replyCount tr.program == 0) &&
@@ -220,10 +292,18 @@ def permanentTarget (I : Impl) : Bool :=
         (t.multiplicity == .one && t.terminable == false) || sameSubtree I.desc e.src e.dst
     else true
 
+mutual
 def noSelfSchedule : List Eff → Bool
   | [] => true
-  | .selfSchedule _ :: _ => false
-  | _ :: es => noSelfSchedule es
+  | e :: es => effNoSched e && noSelfSchedule es
+
+def effNoSched : Eff → Bool
+  | .selfSchedule _ => false
+  | .trySend _ _ _ onFull onGone => noSelfSchedule onFull && noSelfSchedule onGone
+  | .call _ _ _ onNotAdmitted onTimedOut => noSelfSchedule onNotAdmitted && noSelfSchedule onTimedOut
+  | .peer onTimeout => noSelfSchedule onTimeout
+  | _ => true
+end
 
 /-- A pure untimed template does not arm its own priority lane. The peer wait
 is not finishable, so a self-scheduled label would never be received. -/
@@ -231,14 +311,20 @@ def pureSchedOk (I : Impl) : Bool :=
   I.transitions.all fun tr =>
     if templatePure I.desc tr.template then noSelfSchedule tr.program else true
 
-/-- A supervised template names one tombstone label, and its supervisor has a
-transition on that label. -/
+/-- A supervised template names one tombstone label, and its supervisor handles
+that label in every state the template declares. A tombstone that arrives in
+a state with no transition stays queued. -/
 def tombstoneHandled (I : Impl) : Bool :=
   I.desc.templates.all fun t =>
     if t.supervisor == "" then true
     else
       t.tombstone != "" &&
-        I.transitions.any fun tr => tr.template == t.supervisor && tr.label == t.tombstone
+        match templateOf I.desc t.supervisor with
+        | none => false
+        | some sup =>
+          sup.states.all fun st =>
+            I.transitions.any fun tr =>
+              tr.template == t.supervisor && tr.fromState == st && tr.label == t.tombstone
 
 def localTail (I : Impl) : Bool :=
   stepsCoverB I && uniqueKeys I && labelHandled I && permanentTarget I && pureSchedOk I &&
@@ -250,6 +336,9 @@ def localOkB (I : Impl) : Bool :=
     (compatFails I.desc).isEmpty && localTail I
 
 def LocalOk (I : Impl) : Prop := localOkB I = true
+
+instance (I : Impl) : Decidable (LocalOk I) :=
+  inferInstanceAs (Decidable (localOkB I = true))
 
 /-- Trust boundary. Nothing in here is a theorem about Rust.
 `rust_refines` says the node's programs are `I.transitions`.
@@ -370,6 +459,8 @@ def programGap (D : Description) (template toState label : String) : List Eff �
   | .cell d l _ :: es =>
     if hasEdge D template toState d .cell .nonBlocking l then programGap D template toState label es
     else [s!"fail: transition {template} [{label}] writes cell {l} on {d} from {toState}, which is not a non-blocking cell edge"]
+  | .peer onTimeout :: es =>
+    programGap D template toState label onTimeout ++ programGap D template toState label es
   | _ :: es => programGap D template toState label es
 
 def replyGap (tr : Transition) : List String :=
@@ -417,6 +508,11 @@ def transitionIssues (I : Impl) (tr : Transition) : List String :=
     floorGap I.desc tr.template tr.fromState tr.toState tr.label tr.program ++
     programGap I.desc tr.template tr.toState tr.label tr.program ++
     replyGap tr ++
+    (if stateNamed t tr.toNotAdmitted && stateNamed t tr.toTimedOut &&
+        stateNamed t tr.toTimeout && stateNamed t tr.toFull && stateNamed t tr.toGone then []
+     else [s!"fail: transition {tr.template} [{tr.label}] names an outcome state the template does not declare"]) ++
+    (if spawnScope I.desc tr.template tr.program then []
+     else [s!"fail: transition {tr.template} [{tr.label}] spawns a stage it does not supervise"]) ++
     (if hasTerminate tr.program && !t.terminable then
       [s!"fail: transition {tr.template} [{tr.label}] terminates, and {tr.template} is not terminable"]
      else []) ++

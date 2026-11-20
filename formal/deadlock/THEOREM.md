@@ -12,11 +12,15 @@ chain, when that actor is not a pure untimed peer end. It ends with that
 actor not `Blocked`.
 
 `fair_delivered` is liveness for a `Fair` run of a `GraphOk` and `LocalOk`
-implementation. `Delivered` says every reliable message in the bulk box, the
-parked list, or the priority lane is later the head consumed by `recvBulk` or
-`recvPrio`, matched by the id the storing actor assigned when it accepted the
-message, or a subtree kill credits it. A try-drop send and a superseding
-cell wake are not obligations. An admitted call leaves `awaitReply`.
+implementation that has not crashed. The headline is deadlock-free or
+crashed: a fair run is not stuck, or a step has already crashed the roster
+and no further action is enabled. `Delivered` says every reliable message in
+the bulk box, the parked list, or the priority lane is later the head
+consumed by `recvBulk` or `recvPrio`, matched by the id the storing actor
+assigned when it accepted the message, or the target had begun shutting down
+or had terminated while the message was still queued. A try-drop send and a
+superseding cell wake are not obligations. An admitted call leaves
+`awaitReply`.
 `Assumptions` is only `rust_refines`.
 
 The handled half is not a separate obligation. Once a stage has returned its
@@ -29,12 +33,12 @@ once deadlock freedom has brought the target back to receiving
 (`idle_when_free`) and the stage's own step has terminated. `Fair.bulk` and
 `Fair.prio` are what take the enabled receive. Nothing here is an axiom.
 The loss half stays: mail still queued when the target shuts down or
-terminates may be dropped, and the sender still does not block. The definition
-in `Deliver.lean` still writes that loss as a subtree kill. The per-message
-wording, a target that began shutting down or terminated before handling the
-message, replaces that disjunct when the shutting-down phase exists. It does
-not delete the loss case, and it does not promise delivery for every target
-that was not shutting down at the moment of enqueue.
+terminates may be dropped, and the sender still does not block. The loss is
+that the target had begun shutting down or had terminated while the message
+was still queued. It is not a subtree kill. It does not delete the loss
+case, and it does not promise delivery for every target that was not
+shutting down at the moment of enqueue. The proof text in `Deliver.lean`
+is not yet restated against this wording.
 
 `loss_fair` and `loss_not_delivered` are the run without that check. A
 terminable actor accepts a reliable message and then executes `terminate`,
