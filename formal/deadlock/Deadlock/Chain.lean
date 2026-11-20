@@ -431,6 +431,41 @@ theorem queue_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action
     have hz' := queue_zero_of_no_mail w' id dst hmail'
     simp [hz, hz']
 
+/-- The call does not move backward. A dead callee holds no mail, so the
+position is zero. -/
+theorem queue_mono_life (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (a : Action) (w w' : World) (id dst : InstId) (k : Cont)
+    (h : apply I a w = some w')
+    (hph : (w.st id).phase = .awaitReply dst k) (hph' : (w'.st id).phase = .awaitReply dst k)
+    (hM : MailInv w) (hT : CallTagInv w) (hH : MailHere I.desc w) (hOcc : OccInv I w)
+    (hR' : Reachable I N w')
+    (hlive : (w'.st dst).life = .alive ∨ (w'.st dst).life = .dead) :
+    queuePos w' id dst ≤ queuePos w id dst := by
+  rcases hlive with hlive | hdead
+  · exact queue_mono I hL hG a w w' id dst k h hph hph' hM hT hH hOcc hlive
+  · have hT' := call_tag_reachable I hL hG N w' hR'
+    have hnot : (w'.st dst).life ≠ .alive := by
+      rw [hdead]
+      intro h
+      cases h
+    have hnom : ¬mailCall w' dst id := by
+      rcases hT'.awaiting id dst k hph' with h1 | h2 | h3 | h4
+      · rcases h1.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+        · exact absurd (box_alive I hL hG N w' hR' dst (fun e => by simp [e] at hm)) hnot
+        · exact absurd (mailbox_alive I hL N w' hR' dst (fun e => by simp [e] at hp)) hnot
+      · exact absurd (busy_alive I N w' hR' dst (by
+          intro hidle
+          rcases h2.2.1 with ⟨_, hcar, _⟩
+          simp [carriedCont, hidle] at hcar)) hnot
+      · exact absurd (busy_alive I N w' hR' dst (by
+          intro hidle
+          rcases h3.2.2 with ⟨_, hcar, _⟩
+          simp [carriedCont, hidle] at hcar)) hnot
+      · exact h4.2.2.1
+    rw [queue_zero_of_no_mail w' id dst hnom]
+    exact Nat.zero_le _
+
+
 theorem prepend_work (w w' w2 : World) (id : InstId)
     (hph : (w'.st id).phase = (w.st id).phase)
     (hwk : work ((w2.st id).phase) < work ((w'.st id).phase)) :
@@ -725,11 +760,10 @@ theorem reply_absorb (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     have hlift := on_partner w root dst a (waits_on_reply w root dst k hph) hOn
     rcases hnext with hstay | hgo | hidle
     · have hR' := Reachable.step w w' a hR hA
-      have hlive' := reply_target_alive I hL hG N w' hR' root dst k hstay
-      have hT := call_tag_reachable I hL hG N w hR
-      have hHere := mail_here_reachable I hL hG N w hR
-      have hq := queue_mono I hL hG a w w' root dst k hA hph hstay hInv.2.1 hT hHere
-        ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
+      have hq := queue_mono_life I hL hG N a w w' root dst k hA hph hstay hInv.2.1
+        (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
+        ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+        (reply_target_alive I hL hG N w' hR' root dst k hstay)
       obtain ⟨acts1, w1, hC1, hrun1, hR1, hor⟩ := ih hR' hstay
       rcases hor with hdone | hfull
       · refine ⟨a :: acts1, w1, ChainRun.cons w a w' acts1 hlift hA hC1, ?_, hR1, Or.inl ?_⟩
@@ -797,248 +831,280 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
   induction fuel using Nat.strongRecOn with
   | ind fuel ihf =>
     intro w id dst k hn hph hR hdebt
-    have hliveD := reply_target_alive I hL hG N w hR id dst k hph
-    have hbelow := reply_below I hL hG N w hR id dst k hs hok hph hliveD
-    have hInv := inv_reachable I N w hL hR
-    have hbelowN : heightOf hs (nodeAt w dst) + 1 < n :=
-      Nat.lt_of_le_of_lt (Nat.succ_le_of_lt hbelow) hn
-    cases hphD : (w.st dst).phase with
-    | crashed =>
-      exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
-    | parked _ _ _ =>
-      obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
-        ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
-          ⟨hliveD, by simp [hphD]⟩
-          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
-      obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := reply_absorb I hL hG N dst id k w acts hC hR hph
-      rcases hor with hdone | hfull
-      · rcases hdone with ⟨hnot, hwk⟩
-        exact ⟨acts1, wA, hC1, hrun1, hRA, hnot, hwk⟩
-      · rcases hfull with ⟨hrunAll, hphA, hle, hty⟩
-        have hwA : wA = w1 := run_determ I w acts wA w1 hrunAll hrun
-        have hdebt' := reply_debt_drop I w wA id dst hle (by simpa [hwA] using hworkD)
-          (prog_src_reachable I N wA hRA)
-        have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-        obtain ⟨acts2, w2, hC2, hrun2, hR2, hnot, hwk⟩ :=
-          ihf (replyDebt I wA id dst) hfuel wA id dst k (height_same hs w wA id n hty hn) hphA hRA
-            (Nat.le_refl _)
-        exact ⟨acts1 ++ acts2, w2, chain_append I id w acts1 wA acts2 hC1 hrun1 hC2,
-          run_append_some I w acts1 acts2 wA w2 hrun1 hrun2, hR2, hnot,
-          prepend_work w wA w2 id (by simp [hphA, hph]) hwk⟩
-    | awaitReply _ _ =>
-      obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
-        ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
-          ⟨hliveD, by simp [hphD]⟩
-          (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
-      obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := reply_absorb I hL hG N dst id k w acts hC hR hph
-      rcases hor with hdone | hfull
-      · rcases hdone with ⟨hnot, hwk⟩
-        exact ⟨acts1, wA, hC1, hrun1, hRA, hnot, hwk⟩
-      · rcases hfull with ⟨hrunAll, hphA, hle, hty⟩
-        have hwA : wA = w1 := run_determ I w acts wA w1 hrunAll hrun
-        have hdebt' := reply_debt_drop I w wA id dst hle (by simpa [hwA] using hworkD)
-          (prog_src_reachable I N wA hRA)
-        have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-        obtain ⟨acts2, w2, hC2, hrun2, hR2, hnot, hwk⟩ :=
-          ihf (replyDebt I wA id dst) hfuel wA id dst k (height_same hs w wA id n hty hn) hphA hRA
-            (Nat.le_refl _)
-        exact ⟨acts1 ++ acts2, w2, chain_append I id w acts1 wA acts2 hC1 hrun1 hC2,
-          run_append_some I w acts1 acts2 wA w2 hrun1 hrun2, hR2, hnot,
-          prepend_work w wA w2 id (by simp [hphA, hph]) hwk⟩
-    | awaitEffect kD =>
-      have hen := effect_finish_enabled I w dst kD hphD
-      cases happ : apply I (.finish dst) w with
-      | none => exact False.elim (hen happ)
-      | some w' =>
-        have hnext := await_next I (.finish dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
-        have hchain := on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph)
-          (on_finish_self w dst)
-        obtain ⟨_, hworkD⟩ := finish_unblocks I w w' dst (by simpa [apply] using happ)
-          ⟨hliveD, by simp [hphD]⟩
-        rcases hnext with hstay | hgo | hidle
-        · have hR' := Reachable.step w w' (.finish dst) hR happ
-          have hlive' := reply_target_alive I hL hG N w' hR' id dst k hstay
-          have hHere := mail_here_reachable I hL hG N w hR
-          have hq := queue_mono I hL hG (.finish dst) w w' id dst k happ hph hstay hInv.2.1
-            (call_tag_reachable I hL hG N w hR) hHere ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
-          have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
+    rcases reply_target_alive I hL hG N w hR id dst k hph with hliveD | hdead
+    · have hbelow := reply_below I hL hG N w hR id dst k hs hok hph hliveD
+      have hInv := inv_reachable I N w hL hR
+      have hbelowN : heightOf hs (nodeAt w dst) + 1 < n :=
+        Nat.lt_of_le_of_lt (Nat.succ_le_of_lt hbelow) hn
+      cases hphD : (w.st dst).phase with
+      | crashed =>
+        exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
+      | parked _ _ _ =>
+        obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
+          ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
+            ⟨hliveD, by simp [hphD]⟩
+            (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
+        obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := reply_absorb I hL hG N dst id k w acts hC hR hph
+        rcases hor with hdone | hfull
+        · rcases hdone with ⟨hnot, hwk⟩
+          exact ⟨acts1, wA, hC1, hrun1, hRA, hnot, hwk⟩
+        · rcases hfull with ⟨hrunAll, hphA, hle, hty⟩
+          have hwA : wA = w1 := run_determ I w acts wA w1 hrunAll hrun
+          have hdebt' := reply_debt_drop I w wA id dst hle (by simpa [hwA] using hworkD)
+            (prog_src_reachable I N wA hRA)
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-          have hty := waiting_ty_step I (.finish dst) w w' id happ
-            (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
-          obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
-            ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
+          obtain ⟨acts2, w2, hC2, hrun2, hR2, hnot, hwk⟩ :=
+            ihf (replyDebt I wA id dst) hfuel wA id dst k (height_same hs w wA id n hty hn) hphA hRA
               (Nat.le_refl _)
-          exact ⟨.finish dst :: acts, w2, ChainRun.cons w (.finish dst) w' acts hchain happ hC,
-            by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
-          exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB
-            simp [Blocked, hidle] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp only [work, phaseFuel, hidle, hph]
-            omega
-          exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
-    | awaitPeer kD =>
-      have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
-        (Or.inr ⟨k, hph⟩)
-      have hen := peer_finish_enabled I w dst kD hphD hfin
-      cases happ : apply I (.finish dst) w with
-      | none => exact False.elim (hen happ)
-      | some w' =>
-        have hnext := await_next I (.finish dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
-        have hchain := on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph)
-          (on_finish_self w dst)
-        obtain ⟨_, hworkD⟩ := finish_unblocks I w w' dst (by simpa [apply] using happ)
-          ⟨hliveD, by simp [hphD]⟩
-        rcases hnext with hstay | hgo | hidle
-        · have hR' := Reachable.step w w' (.finish dst) hR happ
-          have hlive' := reply_target_alive I hL hG N w' hR' id dst k hstay
-          have hHere := mail_here_reachable I hL hG N w hR
-          have hq := queue_mono I hL hG (.finish dst) w w' id dst k happ hph hstay hInv.2.1
-            (call_tag_reachable I hL hG N w hR) hHere ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
-          have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
+          exact ⟨acts1 ++ acts2, w2, chain_append I id w acts1 wA acts2 hC1 hrun1 hC2,
+            run_append_some I w acts1 acts2 wA w2 hrun1 hrun2, hR2, hnot,
+            prepend_work w wA w2 id (by simp [hphA, hph]) hwk⟩
+      | awaitReply _ _ =>
+        obtain ⟨acts, w1, hC, hrun, _, _, hworkD⟩ :=
+          ihn (heightOf hs (nodeAt w dst) + 1) w dst hbelowN (Nat.lt_succ_self _) hR
+            ⟨hliveD, by simp [hphD]⟩
+            (by intro ⟨kP, hkP, _⟩; rw [hphD] at hkP; cases hkP)
+        obtain ⟨acts1, wA, hC1, hrun1, hRA, hor⟩ := reply_absorb I hL hG N dst id k w acts hC hR hph
+        rcases hor with hdone | hfull
+        · rcases hdone with ⟨hnot, hwk⟩
+          exact ⟨acts1, wA, hC1, hrun1, hRA, hnot, hwk⟩
+        · rcases hfull with ⟨hrunAll, hphA, hle, hty⟩
+          have hwA : wA = w1 := run_determ I w acts wA w1 hrunAll hrun
+          have hdebt' := reply_debt_drop I w wA id dst hle (by simpa [hwA] using hworkD)
+            (prog_src_reachable I N wA hRA)
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-          have hty := waiting_ty_step I (.finish dst) w w' id happ
-            (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
-          obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
-            ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
+          obtain ⟨acts2, w2, hC2, hrun2, hR2, hnot, hwk⟩ :=
+            ihf (replyDebt I wA id dst) hfuel wA id dst k (height_same hs w wA id n hty hn) hphA hRA
               (Nat.le_refl _)
-          exact ⟨.finish dst :: acts, w2, ChainRun.cons w (.finish dst) w' acts hchain happ hC,
-            by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
-          exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB
-            simp [Blocked, hidle] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp only [work, phaseFuel, hidle, hph]
-            omega
-          exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
-    | run kD =>
-      have hen := run_enabled I w dst kD hphD hliveD
-      cases happ : apply I (.exec dst) w with
-      | none => exact False.elim (hen happ)
-      | some w' =>
-        have hnext := await_next I (.exec dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
-        have hchain := on_partner w id dst (.exec dst) (waits_on_reply w id dst k hph) (on_self_exec w dst)
-        rcases hnext with hstay | hgo | hidle
-        · have hR' := Reachable.step w w' (.exec dst) hR happ
-          have hlive' := reply_target_alive I hL hG N w' hR' id dst k hstay
-          have hHere := mail_here_reachable I hL hG N w hR
-          have hq := queue_mono I hL hG (.exec dst) w w' id dst k happ hph hstay hInv.2.1
-            (call_tag_reachable I hL hG N w hR) hHere ((inv3_reachable I hL hG N w hR).1.2.1) hlive'
-          have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
-          have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
-          have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-          have hty := waiting_ty_step I (.exec dst) w w' id happ
-            (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
-          obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
-            ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
-              (Nat.le_refl _)
-          exact ⟨.exec dst :: acts, w2, ChainRun.cons w (.exec dst) w' acts hchain happ hC,
-            by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
-          exact ⟨[.exec dst], w', ChainRun.cons w (.exec dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.exec dst) hR happ, hnot, hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB
-            simp [Blocked, hidle] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp only [work, phaseFuel, hidle, hph]
-            omega
-          exact ⟨[.exec dst], w', ChainRun.cons w (.exec dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.exec dst) hR happ, hnot, hwk⟩
-    | idle =>
-      have hT := call_tag_reachable I hL hG N w hR
-      have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
-        rcases hT.awaiting id dst k hph with hmail | hhand | hpend
-        · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
-          · exact Or.inl (fun hempty => by simp [hempty] at hm)
-          · exact Or.inr (fun hempty => by simp [hempty] at hp)
-        · rcases hhand.2.1 with ⟨_, hcar, _⟩
-          simp [carriedCont, hphD] at hcar
-        · rcases hpend.2.2 with ⟨_, hcar, _⟩
-          simp [carriedCont, hphD] at hcar
-      have hen := can_receive_enabled I hL w dst
-        ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
-        ⟨⟨hliveD, hphD⟩, hmail⟩
-      cases happ : apply I (.recvBulk dst) w with
-      | none => exact False.elim (hen happ)
-      | some w' =>
-        have hnext := await_next I (.recvBulk dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
-        have hchain := on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph)
-          (on_self_bulk w dst)
-        rcases hnext with hstay | hgo | hidle
-        · have hpos : callPos ((w.st dst).box) id < ((w.st dst).box).length := by
-            rcases hT.awaiting id dst k hph with hmailA | hhand | hpend
-            · exact (await_mail_in_box w hT id dst k hph hmailA.1).1
-            · rcases hhand.2.1 with ⟨_, hcar, _⟩
-              simp [carriedCont, hphD] at hcar
-            · rcases hpend.2.2 with ⟨_, hcar, _⟩
-              simp [carriedCont, hphD] at hcar
-          have hR' := Reachable.step w w' (.recvBulk dst) hR happ
-          rcases recv_box_progress I hL w w' dst id k (by simpa [apply] using happ) hInv.2.1 hT hph hpos with
-            hhand | hcloser
-          · have hzero := queue_zero_of_no_mail w' id dst hhand.2.1
-            have hold : 0 < queuePos w id dst := by
-              simp [queuePos, hpos]
-            have hq : queuePos w' id dst < queuePos w id dst := by
-              rw [hzero]; exact hold
-            have hdebt' := reply_debt_queue I w w' id dst (prog_src_reachable I N w' hR') hq
+          exact ⟨acts1 ++ acts2, w2, chain_append I id w acts1 wA acts2 hC1 hrun1 hC2,
+            run_append_some I w acts1 acts2 wA w2 hrun1 hrun2, hR2, hnot,
+            prepend_work w wA w2 id (by simp [hphA, hph]) hwk⟩
+      | awaitEffect kD =>
+        have hen := effect_finish_enabled I w dst kD hphD
+        cases happ : apply I (.finish dst) w with
+        | none => exact False.elim (hen happ)
+        | some w' =>
+          have hnext := await_next I (.finish dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
+          have hchain := on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph)
+            (on_finish_self w dst)
+          obtain ⟨_, hworkD⟩ := finish_unblocks I w w' dst (by simpa [apply] using happ)
+            ⟨hliveD, by simp [hphD]⟩
+          rcases hnext with hstay | hgo | hidle
+          · have hR' := Reachable.step w w' (.finish dst) hR happ
+            have hq := queue_mono_life I hL hG N (.finish dst) w w' id dst k happ hph hstay hInv.2.1
+              (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
+              ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+              (reply_target_alive I hL hG N w' hR' id dst k hstay)
+            have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
             have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-            have hty := waiting_ty_step I (.recvBulk dst) w w' id happ
+            have hty := waiting_ty_step I (.finish dst) w w' id happ
               (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
             obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
               ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
                 (Nat.le_refl _)
-            exact ⟨.recvBulk dst :: acts, w2, ChainRun.cons w (.recvBulk dst) w' acts hchain happ hC,
+            exact ⟨.finish dst :: acts, w2, ChainRun.cons w (.finish dst) w' acts hchain happ hC,
               by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
-          · have hlt := hcloser.2.2
-            have hnew : queuePos w' id dst ≤ callPos ((w'.st dst).box) id + 1 := by
-              by_cases hp : callPos ((w'.st dst).box) id < ((w'.st dst).box).length
-              · simp [queuePos, hp]
-              · simp [queuePos, hp]
-            have hold : queuePos w id dst = callPos ((w.st dst).box) id + 1 := by simp [queuePos, hpos]
-            have hq : queuePos w' id dst < queuePos w id dst := by
-              rw [hold]
-              exact Nat.lt_of_le_of_lt (Nat.le_trans hnew (Nat.succ_le_of_lt hlt)) (Nat.lt_succ_self _)
-            have hdebt' := reply_debt_queue I w w' id dst (prog_src_reachable I N w' hR') hq
+          · have hnot : ¬ Blocked w' id := by
+              intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
+            exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
+          · have hnot : ¬ Blocked w' id := by
+              intro hB
+              simp [Blocked, hidle] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp only [work, phaseFuel, hidle, hph]
+              omega
+            exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
+      | awaitPeer kD =>
+        have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+          (Or.inr ⟨k, hph⟩)
+        have hen := peer_finish_enabled I w dst kD hphD hfin
+        cases happ : apply I (.finish dst) w with
+        | none => exact False.elim (hen happ)
+        | some w' =>
+          have hnext := await_next I (.finish dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
+          have hchain := on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph)
+            (on_finish_self w dst)
+          obtain ⟨_, hworkD⟩ := finish_unblocks I w w' dst (by simpa [apply] using happ)
+            ⟨hliveD, by simp [hphD]⟩
+          rcases hnext with hstay | hgo | hidle
+          · have hR' := Reachable.step w w' (.finish dst) hR happ
+            have hq := queue_mono_life I hL hG N (.finish dst) w w' id dst k happ hph hstay hInv.2.1
+              (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
+              ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+              (reply_target_alive I hL hG N w' hR' id dst k hstay)
+            have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
             have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
-            have hty := waiting_ty_step I (.recvBulk dst) w w' id happ
+            have hty := waiting_ty_step I (.finish dst) w w' id happ
               (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
             obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
               ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
                 (Nat.le_refl _)
-            exact ⟨.recvBulk dst :: acts, w2, ChainRun.cons w (.recvBulk dst) w' acts hchain happ hC,
+            exact ⟨.finish dst :: acts, w2, ChainRun.cons w (.finish dst) w' acts hchain happ hC,
               by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
-        · have hnot : ¬ Blocked w' id := by
-            intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
-          have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
-          exact ⟨[.recvBulk dst], w', ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ, hnot, hwk⟩
-        · have hnot : ¬ Blocked w' id := by
+          · have hnot : ¬ Blocked w' id := by
+              intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
+            exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
+          · have hnot : ¬ Blocked w' id := by
+              intro hB
+              simp [Blocked, hidle] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp only [work, phaseFuel, hidle, hph]
+              omega
+            exact ⟨[.finish dst], w', ChainRun.cons w (.finish dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.finish dst) hR happ, hnot, hwk⟩
+      | run kD =>
+        have hen := run_enabled I w dst kD hphD hliveD
+        cases happ : apply I (.exec dst) w with
+        | none => exact False.elim (hen happ)
+        | some w' =>
+          have hnext := await_next I (.exec dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
+          have hchain := on_partner w id dst (.exec dst) (waits_on_reply w id dst k hph) (on_self_exec w dst)
+          rcases hnext with hstay | hgo | hidle
+          · have hR' := Reachable.step w w' (.exec dst) hR happ
+            have hq := queue_mono_life I hL hG N (.exec dst) w w' id dst k happ hph hstay hInv.2.1
+              (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
+              ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+              (reply_target_alive I hL hG N w' hR' id dst k hstay)
+            have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
+            have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
+            have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
+            have hty := waiting_ty_step I (.exec dst) w w' id happ
+              (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
+            obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
+              ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
+                (Nat.le_refl _)
+            exact ⟨.exec dst :: acts, w2, ChainRun.cons w (.exec dst) w' acts hchain happ hC,
+              by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
+          · have hnot : ¬ Blocked w' id := by
+              intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
+            exact ⟨[.exec dst], w', ChainRun.cons w (.exec dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.exec dst) hR happ, hnot, hwk⟩
+          · have hnot : ¬ Blocked w' id := by
+              intro hB
+              simp [Blocked, hidle] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp only [work, phaseFuel, hidle, hph]
+              omega
+            exact ⟨[.exec dst], w', ChainRun.cons w (.exec dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.exec dst) hR happ, hnot, hwk⟩
+      | idle =>
+        have hT := call_tag_reachable I hL hG N w hR
+        have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
+          rcases hT.awaiting id dst k hph with hmail | hhand | hpend | hdeadC
+          · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+            · exact Or.inl (fun hempty => by simp [hempty] at hm)
+            · exact Or.inr (fun hempty => by simp [hempty] at hp)
+          · rcases hhand.2.1 with ⟨_, hcar, _⟩
+            simp [carriedCont, hphD] at hcar
+          · rcases hpend.2.2 with ⟨_, hcar, _⟩
+            simp [carriedCont, hphD] at hcar
+          · rw [hliveD] at hdeadC
+            cases hdeadC.1
+        have hen := can_receive_enabled I hL w dst
+          ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+          ⟨⟨hliveD, hphD⟩, hmail⟩
+        cases happ : apply I (.recvBulk dst) w with
+        | none => exact False.elim (hen happ)
+        | some w' =>
+          have hnext := await_next I (.recvBulk dst) w w' id dst k hInv.2.1 hInv.2.2 happ hph
+          have hchain := on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph)
+            (on_self_bulk w dst)
+          rcases hnext with hstay | hgo | hidle
+          · have hpos : callPos ((w.st dst).box) id < ((w.st dst).box).length := by
+              rcases hT.awaiting id dst k hph with hmailA | hhand | hpend | hdeadC
+              · exact (await_mail_in_box w hT id dst k hph hmailA.1).1
+              · rcases hhand.2.1 with ⟨_, hcar, _⟩
+                simp [carriedCont, hphD] at hcar
+              · rcases hpend.2.2 with ⟨_, hcar, _⟩
+                simp [carriedCont, hphD] at hcar
+              · rw [hliveD] at hdeadC
+                cases hdeadC.1
+            have hR' := Reachable.step w w' (.recvBulk dst) hR happ
+            rcases recv_box_progress I hL w w' dst id k (by simpa [apply] using happ) hInv.2.1 hT hph hpos with
+              hhand | hcloser
+            · have hzero := queue_zero_of_no_mail w' id dst hhand.2.1
+              have hold : 0 < queuePos w id dst := by
+                simp [queuePos, hpos]
+              have hq : queuePos w' id dst < queuePos w id dst := by
+                rw [hzero]; exact hold
+              have hdebt' := reply_debt_queue I w w' id dst (prog_src_reachable I N w' hR') hq
+              have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
+              have hty := waiting_ty_step I (.recvBulk dst) w w' id happ
+                (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
+              obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
+                ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
+                  (Nat.le_refl _)
+              exact ⟨.recvBulk dst :: acts, w2, ChainRun.cons w (.recvBulk dst) w' acts hchain happ hC,
+                by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
+            · have hlt := hcloser.2.2
+              have hnew : queuePos w' id dst ≤ callPos ((w'.st dst).box) id + 1 := by
+                by_cases hp : callPos ((w'.st dst).box) id < ((w'.st dst).box).length
+                · simp [queuePos, hp]
+                · simp [queuePos, hp]
+              have hold : queuePos w id dst = callPos ((w.st dst).box) id + 1 := by simp [queuePos, hpos]
+              have hq : queuePos w' id dst < queuePos w id dst := by
+                rw [hold]
+                exact Nat.lt_of_le_of_lt (Nat.le_trans hnew (Nat.succ_le_of_lt hlt)) (Nat.lt_succ_self _)
+              have hdebt' := reply_debt_queue I w w' id dst (prog_src_reachable I N w' hR') hq
+              have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
+              have hty := waiting_ty_step I (.recvBulk dst) w w' id happ
+                (Or.inr ⟨dst, k, hph⟩) (Or.inr ⟨dst, k, hstay⟩)
+              obtain ⟨acts, w2, hC, hrun, hR2, hnot, hwk⟩ :=
+                ihf (replyDebt I w' id dst) hfuel w' id dst k (height_same hs w w' id n hty hn) hstay hR'
+                  (Nat.le_refl _)
+              exact ⟨.recvBulk dst :: acts, w2, ChainRun.cons w (.recvBulk dst) w' acts hchain happ hC,
+                by simp [runFrom, happ, hrun], hR2, hnot, prepend_work w w' w2 id (by simp [hstay, hph]) hwk⟩
+          · have hnot : ¬ Blocked w' id := by
+              intro hB; simp [Blocked, hgo] at hB; cases hk : k.rest <;> simp [proceed, hk] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp [hgo, hph]; exact work_proceed_reply (w.st id) dst k
+            exact ⟨[.recvBulk dst], w', ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ, hnot, hwk⟩
+          · have hnot : ¬ Blocked w' id := by
+              intro hB
+              simp [Blocked, hidle] at hB
+            have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
+              simp only [work, phaseFuel, hidle, hph]
+              omega
+            exact ⟨[.recvBulk dst], w', ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
+              by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ, hnot, hwk⟩
+    · have hl := busy_alive I N w hR id (by rw [hph]; intro h; cases h)
+      have hen : Enabled I w (.callTimeout id) := by
+        unfold Enabled
+        simp [apply, callTimeout, hl, hph, bne]
+      cases happ : apply I (.callTimeout id) w with
+      | none => exact False.elim (hen happ)
+      | some w' =>
+        rcases callTimeout_self w w' id (by simpa [apply] using happ) with hawait | hpark
+        · rcases hawait with ⟨_, kA, hpre, hpost⟩
+          have hjoin := hpre.symm.trans hph
+          injection hjoin with _ hk
+          have hph' : (w'.st id).phase = (proceed (w.st id) k).phase := by rw [hpost, hk]
+          have hnot : ¬ Blocked w' id := by
             intro hB
-            simp [Blocked, hidle] at hB
+            simp [Blocked, hph'] at hB
+            cases hr : k.rest <;> simp [proceed, hr] at hB <;> cases hB
           have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
-            simp only [work, phaseFuel, hidle, hph]
-            omega
-          exact ⟨[.recvBulk dst], w', ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
-            by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ, hnot, hwk⟩
+            rw [hph']
+            simp [hph]
+            exact work_proceed_reply (w.st id) dst k
+          exact ⟨[.callTimeout id], w',
+            ChainRun.cons w (.callTimeout id) w' []
+              (by simp [OnChain, actionSubject, InChain.refl]) happ (ChainRun.nil w'),
+            by simp [runFrom, happ], Reachable.step w w' (.callTimeout id) hR happ, hnot, hwk⟩
+        · rcases hpark with ⟨_, _, hpre, _⟩
+          rw [hph] at hpre
+          cases hpre
+
 
 /-- A subtree kill that drops a call park leaves the caller running or idle. -/
 theorem resumed_unblocks (w : World) (id dst : InstId) (k : Cont)

@@ -140,6 +140,36 @@ D. An untimed peer wait needs a live, armed timeout killer at its key. A
 static role test is not enough. `finish` on the success path does not resume
 an untimed wait.
 
+## `CallTagInv.awaiting`
+
+A caller in `awaitReply` is in one of four states. The first three are the
+live callee: the call is in its mailbox, the handler owes the reply, or the
+reply is the next effect. The fourth is the callee already dead, the caller
+still alive, and nobody owing or holding that call id. There is no
+shutting-down life yet; when that phase exists it joins this disjunct.
+
+This is the pure-stage timeout. A caller waiting on a dead callee is not a
+stuck call: the deadline stays enabled and fairness ends it as `TimedOut`,
+or as `NotAdmitted` when the call was never admitted. `call_answered` is
+unchanged. It is `Reply` while the callee stays alive and is not shutting
+down, and `NotAdmitted` or `TimedOut` otherwise. The fourth disjunct is how
+the dead case is proved: the timeout is enabled, and fairness fires it.
+`abort_await_not_tag` stays as a regression against the old three-disjunct
+formula, which does not hold after the abort. Deadlock freedom, `Delivered`,
+and `call_answered` are not weakened. The invariant covers one more
+reachable state that the approved semantics already produces.
+
+## `replyTo` scrub
+
+A deadline of an admitted call clears `replyTo` on the callee when that
+callee still owes the call. The effect list and the typestate target stay.
+A late reply is ignored. `step_keeps_run` and `step_keeps_quiet` record that
+scrub and nothing else. The same fact is what `run_prefix`, `run_holds`,
+`quiet_prefix`, `effect_resumes`, and `peer_resumes` carry: the continuation
+afterwards has the same effects and the same typestate target. While the
+caller named by `replyTo` stays in `awaitReply`, the scrub does not happen,
+so a reply that is still owed runs as that reply (`run_holds_owed`).
+
 ## Not a weakening
 
 `fair_delivered` keeps a loss disjunct. The companion fact that a target

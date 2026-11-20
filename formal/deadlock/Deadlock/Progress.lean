@@ -478,26 +478,30 @@ theorem park_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N :
     intro hempty
     simp [hempty] at hp)
 
+/-- The callee of an `awaitReply` is alive, or already dead. A dead callee leaves
+the caller's deadline enabled. -/
 theorem reply_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id dst : InstId) (k : Cont)
-    (hph : (w.st id).phase = .awaitReply dst k) : (w.st dst).life = .alive := by
+    (hph : (w.st id).phase = .awaitReply dst k) :
+    (w.st dst).life = .alive ∨ (w.st dst).life = .dead := by
   have hT := call_tag_reachable I hL hG N w hR
-  rcases hT.awaiting id dst k hph with hmail | hhand | hpend
+  rcases hT.awaiting id dst k hph with hmail | hhand | hpend | hdead
   · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
-    · exact box_alive I hL hG N w hR dst (by
+    · exact Or.inl (box_alive I hL hG N w hR dst (by
         intro hempty
-        simp [hempty] at hm)
-    · exact mailbox_alive I hL N w hR dst (by
+        simp [hempty] at hm))
+    · exact Or.inl (mailbox_alive I hL N w hR dst (by
         intro hempty
-        simp [hempty] at hp)
-  · exact busy_alive I N w hR dst (by
+        simp [hempty] at hp))
+  · exact Or.inl (busy_alive I N w hR dst (by
       intro hidle
       rcases hhand.2.1 with ⟨_, hcar, _⟩
-      simp [carriedCont, hidle] at hcar)
-  · exact busy_alive I N w hR dst (by
+      simp [carriedCont, hidle] at hcar))
+  · exact Or.inl (busy_alive I N w hR dst (by
       intro hidle
       rcases hpend.2.2 with ⟨_, hcar, _⟩
-      simp [carriedCont, hidle] at hcar)
+      simp [carriedCont, hidle] at hcar))
+  · exact Or.inr hdead.1
 
 theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I) (N : Nat)
     (w : World) (hR : Reachable I N w) (hs : List (Node × Nat))
@@ -571,51 +575,57 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
         · exact Or.inl ⟨act, on_partner w id dst act (waits_on_park w id dst isCall k hph) hchain, hen⟩
         · rw [hphD] at hkP; cases hkP
     | awaitReply dst k =>
-      have hliveD := reply_target_alive I hL hG N w hR id dst k hph
-      have hdrop := reply_below I hL hG N w hR id dst k hs hok hph hliveD
-      cases hphD : (w.st dst).phase with
-      | idle =>
-        have hT := call_tag_reachable I hL hG N w hR
-        have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
-          rcases hT.awaiting id dst k hph with hmail | hhand | hpend
-          · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
-            · exact Or.inl (fun hempty => by simp [hempty] at hm)
-            · exact Or.inr (fun hempty => by simp [hempty] at hp)
-          · rcases hhand.2.1 with ⟨_, hcar, _⟩
-            simp [carriedCont, hphD] at hcar
-          · rcases hpend.2.2 with ⟨_, hcar, _⟩
-            simp [carriedCont, hphD] at hcar
-        exact Or.inl ⟨.recvBulk dst,
-          on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph) (on_self_bulk w dst),
-          can_receive_enabled I hL w dst
-          ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
-          ⟨⟨hliveD, hphD⟩, hmail⟩⟩
-      | run kD =>
-        exact Or.inl ⟨.exec dst,
-          on_partner w id dst (.exec dst) (waits_on_reply w id dst k hph) (on_self_exec w dst),
-          run_enabled I w dst kD hphD hliveD⟩
-      | awaitEffect kD =>
-        exact Or.inl ⟨.finish dst,
-          on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
-          effect_finish_enabled I w dst kD hphD⟩
-      | awaitPeer kD =>
-        have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
-          (Or.inr ⟨k, hph⟩)
-        exact Or.inl ⟨.finish dst,
-          on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
-          peer_finish_enabled I w dst kD hphD hfin⟩
-      | crashed =>
-        exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
-      | parked _ _ _ =>
-        rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
-          ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
-        · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
-        · rw [hphD] at hkP; cases hkP
-      | awaitReply _ _ =>
-        rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
-          ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
-        · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
-        · rw [hphD] at hkP; cases hkP
+      rcases reply_target_alive I hL hG N w hR id dst k hph with hliveD | hdead
+      · have hdrop := reply_below I hL hG N w hR id dst k hs hok hph hliveD
+        cases hphD : (w.st dst).phase with
+        | idle =>
+          have hT := call_tag_reachable I hL hG N w hR
+          have hmail : (w.st dst).box ≠ [] ∨ (w.st dst).parked ≠ [] := by
+            rcases hT.awaiting id dst k hph with hmail | hhand | hpend | hdead
+            · rcases hmail.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+              · exact Or.inl (fun hempty => by simp [hempty] at hm)
+              · exact Or.inr (fun hempty => by simp [hempty] at hp)
+            · rcases hhand.2.1 with ⟨_, hcar, _⟩
+              simp [carriedCont, hphD] at hcar
+            · rcases hpend.2.2 with ⟨_, hcar, _⟩
+              simp [carriedCont, hphD] at hcar
+            · rw [hliveD] at hdead
+              cases hdead.1
+          exact Or.inl ⟨.recvBulk dst,
+            on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph) (on_self_bulk w dst),
+            can_receive_enabled I hL w dst
+            ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+            ⟨⟨hliveD, hphD⟩, hmail⟩⟩
+        | run kD =>
+          exact Or.inl ⟨.exec dst,
+            on_partner w id dst (.exec dst) (waits_on_reply w id dst k hph) (on_self_exec w dst),
+            run_enabled I w dst kD hphD hliveD⟩
+        | awaitEffect kD =>
+          exact Or.inl ⟨.finish dst,
+            on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
+            effect_finish_enabled I w dst kD hphD⟩
+        | awaitPeer kD =>
+          have hfin := target_finishable I hG w (inv_reachable I N w hL hR) id dst
+            (Or.inr ⟨k, hph⟩)
+          exact Or.inl ⟨.finish dst,
+            on_partner w id dst (.finish dst) (waits_on_reply w id dst k hph) (on_finish_self w dst),
+            peer_finish_enabled I w dst kD hphD hfin⟩
+        | crashed =>
+          exact False.elim ((reachable_not_crashed I hL hG N w hR) dst (by simp [hphD]))
+        | parked _ _ _ =>
+          rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+            ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
+          · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
+          · rw [hphD] at hkP; cases hkP
+        | awaitReply _ _ =>
+          rcases ih dst (Nat.lt_of_lt_of_le hdrop (Nat.le_of_lt_succ hn))
+            ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
+          · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
+          · rw [hphD] at hkP; cases hkP
+      · have hl := busy_alive I N w hR id (by rw [hph]; intro h; cases h)
+        exact Or.inl ⟨.callTimeout id,
+          by simp [OnChain, actionSubject, InChain.refl],
+          by unfold Enabled; simp [apply, callTimeout, hl, hph, bne]⟩
 
 /-- In a reachable world every live wait has an enabled step whose subject is
 on that actor's wait chain. An ingress into an unrelated core does not count. -/
