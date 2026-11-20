@@ -14,8 +14,10 @@ def notParked (ph : Phase) : Prop :=
 Kept separate from `SemInv`: a mailbox update and the sender's phase update are
 one step, and the intermediate state is not in the relation. -/
 structure MailInv (w : World) : Prop where
+  /-- A parked entry names a sender that is still parked on this mailbox, or a
+  sender that has halted. Shutdown leaves the entry until the seal. -/
   fwd : ∀ (mb : InstId) (p : Parked), p ∈ (w.st mb).parked →
-    ∃ k, (w.st p.sender).phase = .parked mb p.isCall k
+    (∃ k, (w.st p.sender).phase = .parked mb p.isCall k) ∨ Halted (w.st p.sender).life
   /-- A live target stores the parked entry. A call parked on a target that is
   already dead has no entry: the deadline takes `NotAdmitted`. An absent name is
   never a park target, because spawning it would make the callee live. -/
@@ -46,19 +48,23 @@ theorem MailInv.bwdSend {w : World} (hM : MailInv w) (id dst : InstId) (k : Cont
     ∃ p, p ∈ (w.st dst).parked ∧ p.sender = id ∧ p.isCall = false :=
   hM.bwdEntry id dst false k hph (Or.inl rfl)
 
-theorem not_queued (w : World) (id : InstId) (hM : MailInv w) (hf : notParked (w.st id).phase) :
+theorem not_queued (w : World) (id : InstId) (hM : MailInv w) (hf : notParked (w.st id).phase)
+    (hlive : (w.st id).life = .alive) :
     ∀ mb p, p ∈ (w.st mb).parked → p.sender ≠ id := by
   intro mb p hp heq
-  obtain ⟨k, hk⟩ := hM.fwd mb p hp
-  rw [heq] at hk
-  simp [notParked, hk] at hf
+  rcases hM.fwd mb p hp with ⟨k, hk⟩ | hh
+  · rw [heq] at hk
+    simp [notParked, hk] at hf
+  · rw [heq] at hh
+    rcases hh with h | h <;> simp [hlive] at h
 
 theorem mail_copy (w w' : World) (hM : MailInv w) (h : ∀ i, w'.st i = w.st i) : MailInv w' := by
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     rw [h] at hp
-    obtain ⟨k, hk⟩ := hM.fwd mb p hp
-    exact ⟨k, by simpa [h] using hk⟩
+    rcases hM.fwd mb p hp with ⟨k, hk⟩ | hh
+    · exact Or.inl ⟨k, by simpa [h] using hk⟩
+    · exact Or.inr (by simpa [h] using hh)
   · intro id dst c k hk
     rw [h] at hk
     rcases hM.bwd id dst c k hk with ⟨p, hp, hs, hc⟩ | ⟨hc, hdead⟩
@@ -94,20 +100,35 @@ theorem mail_set_free (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
     (hold : notParked (w.st id).phase) (hnew : notParked a.phase)
     (hlist : a.parked = (w.st id).parked) (hlife : a.life = (w.st id).life) :
     MailInv (setActor w id a) := by
-  have hnq := not_queued w id hM hold
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = id
     · rw [hmb, setActor_self, hlist] at hp
-      have hne := hnq id p hp
-      obtain ⟨k, hk⟩ := hM.fwd id p hp
-      rw [setActor_other w id p.sender a hne, hmb]
-      exact ⟨k, hk⟩
+      rcases hM.fwd id p hp with ⟨k, hk⟩ | hh
+      · have hne : p.sender ≠ id := by
+          intro heq
+          rw [heq] at hk
+          simp [notParked, hk] at hold
+        rw [setActor_other w id p.sender a hne, hmb]
+        exact Or.inl ⟨k, hk⟩
+      · by_cases hne : p.sender = id
+        · rw [hne, setActor_self, hlife, hmb]
+          exact Or.inr (by simpa [hne] using hh)
+        · rw [setActor_other w id p.sender a hne, hmb]
+          exact Or.inr hh
     · rw [setActor_other w id mb a hmb] at hp
-      have hne := hnq mb p hp
-      obtain ⟨k, hk⟩ := hM.fwd mb p hp
-      rw [setActor_other w id p.sender a hne]
-      exact ⟨k, hk⟩
+      rcases hM.fwd mb p hp with ⟨k, hk⟩ | hh
+      · have hne : p.sender ≠ id := by
+          intro heq
+          rw [heq] at hk
+          simp [notParked, hk] at hold
+        rw [setActor_other w id p.sender a hne]
+        exact Or.inl ⟨k, hk⟩
+      · by_cases hne : p.sender = id
+        · rw [hne, setActor_self, hlife]
+          exact Or.inr (by simpa [hne] using hh)
+        · rw [setActor_other w id p.sender a hne]
+          exact Or.inr hh
   · intro sid dst c k hk
     by_cases hs : sid = id
     · rw [hs, setActor_self] at hk
@@ -155,21 +176,31 @@ theorem mail_set_same (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
   · intro mb p hp
     by_cases hmb : mb = id
     · rw [hmb, setActor_self, hlist] at hp
-      obtain ⟨k, hk⟩ := hM.fwd id p hp
-      by_cases hs : p.sender = id
-      · rw [hs, setActor_self, hphase, hmb]
-        rw [hs] at hk
-        exact ⟨k, hk⟩
-      · rw [setActor_other w id p.sender a hs]
-        exact ⟨k, by simpa [hmb] using hk⟩
+      rcases hM.fwd id p hp with ⟨k, hk⟩ | hh
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hphase, hmb]
+          rw [hs] at hk
+          exact Or.inl ⟨k, hk⟩
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inl ⟨k, by simpa [hmb] using hk⟩
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hlife, hmb]
+          exact Or.inr (by simpa [hs] using hh)
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inr (by simpa [hmb] using hh)
     · rw [setActor_other w id mb a hmb] at hp
-      obtain ⟨k, hk⟩ := hM.fwd mb p hp
-      by_cases hs : p.sender = id
-      · rw [hs, setActor_self, hphase]
-        rw [hs] at hk
-        exact ⟨k, hk⟩
-      · rw [setActor_other w id p.sender a hs]
-        exact ⟨k, hk⟩
+      rcases hM.fwd mb p hp with ⟨k, hk⟩ | hh
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hphase]
+          rw [hs] at hk
+          exact Or.inl ⟨k, hk⟩
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inl ⟨k, hk⟩
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hlife]
+          exact Or.inr (by simpa [hs] using hh)
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inr hh
   · intro sid dst c k hk
     by_cases hs : sid = id
     · rw [hs, setActor_self, hphase] at hk
@@ -223,23 +254,33 @@ theorem mail_scrub (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
   · intro mb p hp
     by_cases hmb : mb = id
     · rw [hmb, setActor_self, hlist] at hp
-      obtain ⟨k, hk⟩ := hM.fwd id p hp
-      by_cases hs : p.sender = id
-      · rw [hs] at hk
-        obtain ⟨k', hk'⟩ := htoNew id p.isCall k hk
-        rw [hs, setActor_self, hmb]
-        exact ⟨k', hk'⟩
-      · rw [setActor_other w id p.sender a hs]
-        exact ⟨k, by simpa [hmb] using hk⟩
+      rcases hM.fwd id p hp with ⟨k, hk⟩ | hh
+      · by_cases hs : p.sender = id
+        · rw [hs] at hk
+          obtain ⟨k', hk'⟩ := htoNew id p.isCall k hk
+          rw [hs, setActor_self, hmb]
+          exact Or.inl ⟨k', hk'⟩
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inl ⟨k, by simpa [hmb] using hk⟩
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hlife, hmb]
+          exact Or.inr (by simpa [hs] using hh)
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inr (by simpa [hmb] using hh)
     · rw [setActor_other w id mb a hmb] at hp
-      obtain ⟨k, hk⟩ := hM.fwd mb p hp
-      by_cases hs : p.sender = id
-      · rw [hs] at hk
-        obtain ⟨k', hk'⟩ := htoNew mb p.isCall k hk
-        rw [hs, setActor_self]
-        exact ⟨k', hk'⟩
-      · rw [setActor_other w id p.sender a hs]
-        exact ⟨k, hk⟩
+      rcases hM.fwd mb p hp with ⟨k, hk⟩ | hh
+      · by_cases hs : p.sender = id
+        · rw [hs] at hk
+          obtain ⟨k', hk'⟩ := htoNew mb p.isCall k hk
+          rw [hs, setActor_self]
+          exact Or.inl ⟨k', hk'⟩
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inl ⟨k, hk⟩
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hlife]
+          exact Or.inr (by simpa [hs] using hh)
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inr hh
   · intro sid dst c k hk
     by_cases hs : sid = id
     · rw [hs, setActor_self] at hk
@@ -342,25 +383,31 @@ theorem mail_not_admitted (w : World) (caller dst : InstId) (a : Actor) (hM : Ma
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     have hold := hsub mb p hp
-    obtain ⟨k, hk⟩ := hM.fwd mb p hold
-    have hne : p.sender ≠ caller := by
-      intro hs
-      rcases hph with ⟨k0, hk0⟩
-      have hphs : (w.st caller).phase = .parked dst true k0 := by simpa [hs] using hk0
-      have hk' : (w.st caller).phase = .parked mb p.isCall k := by simpa [hs] using hk
-      have hsame := hphs.symm.trans hk'
-      injection hsame with hmb hcall _
-      have hbad := hkept p (by simpa [hmb] using hp)
-      rw [← hcall] at hbad
-      simp [beq_iff_eq] at hbad
-      exact absurd hs hbad
-    by_cases hmb : mb = caller
-    · rw [setActor_other wR caller p.sender a hne]
-      rw [hphaseR]
-      exact ⟨k, hk⟩
-    · rw [setActor_other wR caller p.sender a hne]
-      rw [hphaseR]
-      exact ⟨k, hk⟩
+    rcases hM.fwd mb p hold with ⟨k, hk⟩ | hh
+    · have hne : p.sender ≠ caller := by
+        intro hs
+        rcases hph with ⟨k0, hk0⟩
+        have hphs : (w.st caller).phase = .parked dst true k0 := by simpa [hs] using hk0
+        have hk' : (w.st caller).phase = .parked mb p.isCall k := by simpa [hs] using hk
+        have hsame := hphs.symm.trans hk'
+        injection hsame with hmb hcall _
+        have hbad := hkept p (by simpa [hmb] using hp)
+        rw [← hcall] at hbad
+        simp [beq_iff_eq] at hbad
+        exact absurd hs hbad
+      by_cases hmb : mb = caller
+      · rw [setActor_other wR caller p.sender a hne]
+        rw [hphaseR]
+        exact Or.inl ⟨k, hk⟩
+      · rw [setActor_other wR caller p.sender a hne]
+        rw [hphaseR]
+        exact Or.inl ⟨k, hk⟩
+    · by_cases hs : p.sender = caller
+      · rw [hs, setActor_self, hlife]
+        exact Or.inr (by simpa [hs] using hh)
+      · rw [setActor_other wR caller p.sender a hs]
+        rw [hlifeR p.sender]
+        exact Or.inr hh
   · intro sid mb c k hk
     by_cases hs : sid = caller
     · rw [hs, setActor_self] at hk
@@ -422,27 +469,36 @@ theorem mail_not_admitted (w : World) (caller dst : InstId) (a : Actor) (hM : Ma
 that name would have no mailbox entry afterwards. -/
 theorem mail_awake (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
     (hphase : a.phase = (w.st id).phase) (hlist : a.parked = (w.st id).parked)
-    (hquiet : ∀ s c k, (w.st s).phase = .parked id c k → False) :
+    (hquiet : ∀ s c k, (w.st s).phase = .parked id c k → False)
+    (hopen : ¬ Halted (w.st id).life) :
     MailInv (setActor w id a) := by
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = id
     · rw [hmb, setActor_self, hlist] at hp
-      obtain ⟨k, hk⟩ := hM.fwd id p hp
-      by_cases hs : p.sender = id
-      · rw [hs, setActor_self, hphase, hmb]
-        rw [hs] at hk
-        exact ⟨k, hk⟩
-      · rw [setActor_other w id p.sender a hs]
-        exact ⟨k, by simpa [hmb] using hk⟩
+      rcases hM.fwd id p hp with ⟨k, hk⟩ | hh
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hphase, hmb]
+          rw [hs] at hk
+          exact Or.inl ⟨k, hk⟩
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inl ⟨k, by simpa [hmb] using hk⟩
+      · by_cases hs : p.sender = id
+        · exact absurd (by simpa [hs] using hh) hopen
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inr (by simpa [hmb] using hh)
     · rw [setActor_other w id mb a hmb] at hp
-      obtain ⟨k, hk⟩ := hM.fwd mb p hp
-      by_cases hs : p.sender = id
-      · rw [hs, setActor_self, hphase]
-        rw [hs] at hk
-        exact ⟨k, hk⟩
-      · rw [setActor_other w id p.sender a hs]
-        exact ⟨k, hk⟩
+      rcases hM.fwd mb p hp with ⟨k, hk⟩ | hh
+      · by_cases hs : p.sender = id
+        · rw [hs, setActor_self, hphase]
+          rw [hs] at hk
+          exact Or.inl ⟨k, hk⟩
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inl ⟨k, hk⟩
+      · by_cases hs : p.sender = id
+        · exact absurd (by simpa [hs] using hh) hopen
+        · rw [setActor_other w id p.sender a hs]
+          exact Or.inr hh
   · intro sid dst c k hk
     by_cases hs : sid = id
     · rw [hs, setActor_self, hphase] at hk
@@ -516,12 +572,13 @@ theorem proceed_not_parked (a : Actor) (k : Cont) : notParked (proceed a k).phas
 /-- Park the sender on its own mailbox: one actor carries both the entry and the phase. -/
 theorem mail_park_self (w : World) (sender : InstId) (a : Actor) (entry : Parked)
     (c : Bool) (k : Cont) (hM : MailInv w) (hfree : notParked (w.st sender).phase)
+    (hlive : (w.st sender).life = .alive)
     (hphase : a.phase = .parked sender c k)
     (hlist : a.parked = (w.st sender).parked ++ [entry])
     (hentry : entry.sender = sender ∧ entry.isCall = c)
     (hlife : a.life = (w.st sender).life) :
     MailInv (setActor w sender a) := by
-  have hnq := not_queued w sender hM hfree
+  have hnq := not_queued w sender hM hfree hlive
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = sender
@@ -530,17 +587,21 @@ theorem mail_park_self (w : World) (sender : InstId) (a : Actor) (entry : Parked
       cases hp with
       | inl hold =>
         have hne := hnq sender p hold
-        obtain ⟨ck, hck⟩ := hM.fwd sender p hold
-        rw [setActor_other w sender p.sender a hne, hmb]
-        exact ⟨ck, hck⟩
+        rcases hM.fwd sender p hold with ⟨ck, hck⟩ | hh
+        · rw [setActor_other w sender p.sender a hne, hmb]
+          exact Or.inl ⟨ck, hck⟩
+        · rw [setActor_other w sender p.sender a hne, hmb]
+          exact Or.inr hh
       | inr hnew =>
         rw [hnew, hentry.1, hentry.2, hmb, setActor_self, hphase]
-        exact ⟨k, rfl⟩
+        exact Or.inl ⟨k, rfl⟩
     · rw [setActor_other w sender mb a hmb] at hp
       have hne := hnq mb p hp
-      obtain ⟨ck, hck⟩ := hM.fwd mb p hp
-      rw [setActor_other w sender p.sender a hne]
-      exact ⟨ck, hck⟩
+      rcases hM.fwd mb p hp with ⟨ck, hck⟩ | hh
+      · rw [setActor_other w sender p.sender a hne]
+        exact Or.inl ⟨ck, hck⟩
+      · rw [setActor_other w sender p.sender a hne]
+        exact Or.inr hh
   · intro sid dst c' k' hk
     by_cases hs : sid = sender
     · rw [hs, setActor_self, hphase] at hk
@@ -606,13 +667,14 @@ theorem mail_park_self (w : World) (sender : InstId) (a : Actor) (entry : Parked
 /-- Park `sender` on a different mailbox. The entry and the phase are the final state. -/
 theorem mail_park_other (w : World) (dst sender : InstId) (a stored : Actor) (entry : Parked)
     (c : Bool) (k : Cont) (hM : MailInv w) (hdiff : sender ≠ dst)
-    (hfree : notParked (w.st sender).phase) (hdstPh : stored.phase = (w.st dst).phase)
+    (hfree : notParked (w.st sender).phase) (hlive : (w.st sender).life = .alive)
+    (hdstPh : stored.phase = (w.st dst).phase)
     (hdstPk : stored.parked = (w.st dst).parked ++ [entry])
     (hentry : entry.sender = sender ∧ entry.isCall = c)
     (hsPh : a.phase = .parked dst c k) (hsPk : a.parked = (w.st sender).parked)
     (hlifeS : a.life = (w.st sender).life) (hlifeD : stored.life = (w.st dst).life) :
     MailInv (setActor (setActor w dst stored) sender a) := by
-  have hnq := not_queued w sender hM hfree
+  have hnq := not_queued w sender hM hfree hlive
   let final := setActor (setActor w dst stored) sender a
   have stS : final.st sender = a := by simp [final, setActor]
   have stD : final.st dst = stored := by
@@ -625,42 +687,61 @@ theorem mail_park_other (w : World) (dst sender : InstId) (a stored : Actor) (en
     by_cases hms : mb = sender
     · rw [hms, stS, hsPk] at hp
       have hne := hnq sender p hp
-      obtain ⟨ck, hck⟩ := hM.fwd sender p hp
-      by_cases hd : p.sender = dst
-      · rw [hd, stD, hdstPh]
-        rw [hd] at hck
-        exact ⟨ck, by simpa [hms] using hck⟩
-      · rw [stO p.sender hne hd]
-        exact ⟨ck, by simpa [hms] using hck⟩
+      rcases hM.fwd sender p hp with ⟨ck, hck⟩ | hh
+      · by_cases hd : p.sender = dst
+        · rw [hd, stD, hdstPh]
+          rw [hd] at hck
+          exact Or.inl ⟨ck, by simpa [hms] using hck⟩
+        · rw [stO p.sender hne hd]
+          exact Or.inl ⟨ck, by simpa [hms] using hck⟩
+      · by_cases hd : p.sender = dst
+        · rw [hd, stD, hlifeD]
+          exact Or.inr (by simpa [hd] using hh)
+        · rw [stO p.sender hne hd]
+          exact Or.inr (by simpa [hms] using hh)
     · by_cases hmd : mb = dst
       · rw [hmd, stD, hdstPk] at hp
         simp [List.mem_append, List.mem_singleton] at hp
         cases hp with
         | inl hold =>
           have hne := hnq dst p hold
-          obtain ⟨ck, hck⟩ := hM.fwd dst p hold
-          by_cases hsnd : p.sender = sender
+          rcases hM.fwd dst p hold with ⟨ck, hck⟩ | hh
+          · by_cases hsnd : p.sender = sender
+            · exact absurd hsnd hne
+            · by_cases hd : p.sender = dst
+              · rw [hd, stD, hdstPh]
+                rw [hd] at hck
+                exact Or.inl ⟨ck, by simpa [hmd] using hck⟩
+              · rw [stO p.sender hsnd hd]
+                exact Or.inl ⟨ck, by simpa [hmd] using hck⟩
+          · by_cases hsnd : p.sender = sender
+            · exact absurd hsnd hne
+            · by_cases hd : p.sender = dst
+              · rw [hd, stD, hlifeD]
+                exact Or.inr (by simpa [hd] using hh)
+              · rw [stO p.sender hsnd hd]
+                exact Or.inr (by simpa [hmd] using hh)
+        | inr hnew =>
+          rw [hnew, hentry.1, hentry.2, hmd, stS, hsPh]
+          exact Or.inl ⟨k, rfl⟩
+      · rw [stO mb hms hmd] at hp
+        have hne := hnq mb p hp
+        rcases hM.fwd mb p hp with ⟨ck, hck⟩ | hh
+        · by_cases hsnd : p.sender = sender
           · exact absurd hsnd hne
           · by_cases hd : p.sender = dst
             · rw [hd, stD, hdstPh]
               rw [hd] at hck
-              exact ⟨ck, by simpa [hmd] using hck⟩
+              exact Or.inl ⟨ck, hck⟩
             · rw [stO p.sender hsnd hd]
-              exact ⟨ck, by simpa [hmd] using hck⟩
-        | inr hnew =>
-          rw [hnew, hentry.1, hentry.2, hmd, stS, hsPh]
-          exact ⟨k, rfl⟩
-      · rw [stO mb hms hmd] at hp
-        have hne := hnq mb p hp
-        obtain ⟨ck, hck⟩ := hM.fwd mb p hp
-        by_cases hsnd : p.sender = sender
-        · exact absurd hsnd hne
-        · by_cases hd : p.sender = dst
-          · rw [hd, stD, hdstPh]
-            rw [hd] at hck
-            exact ⟨ck, hck⟩
-          · rw [stO p.sender hsnd hd]
-            exact ⟨ck, hck⟩
+              exact Or.inl ⟨ck, hck⟩
+        · by_cases hsnd : p.sender = sender
+          · exact absurd hsnd hne
+          · by_cases hd : p.sender = dst
+            · rw [hd, stD, hlifeD]
+              exact Or.inr (by simpa [hd] using hh)
+            · rw [stO p.sender hsnd hd]
+              exact Or.inr hh
   · intro sid dbox isC ck hk
     by_cases hs : sid = sender
     · rw [hs, stS, hsPh] at hk
@@ -742,23 +823,28 @@ theorem await_not_parked (a : Actor) (dst : InstId) (k : Cont) :
 
 /-- A call parked on a target that is already absent or dead stores no entry. -/
 theorem mail_call_miss (w : World) (sender dst : InstId) (a : Actor) (k : Cont) (hM : MailInv w)
-    (hfree : notParked (w.st sender).phase) (hdead : (w.st dst).life = .dead)
+    (hfree : notParked (w.st sender).phase) (hlive : (w.st sender).life = .alive)
+    (hdead : (w.st dst).life = .dead)
     (hphase : a.phase = .parked dst true k) (hlist : a.parked = (w.st sender).parked)
     (hlife : a.life = (w.st sender).life) : MailInv (setActor w sender a) := by
-  have hnq := not_queued w sender hM hfree
+  have hnq := not_queued w sender hM hfree hlive
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     by_cases hmb : mb = sender
     · rw [hmb, setActor_self, hlist] at hp
       have hne := hnq sender p hp
-      obtain ⟨ck, hck⟩ := hM.fwd sender p hp
-      rw [setActor_other w sender p.sender a hne, hmb]
-      exact ⟨ck, hck⟩
+      rcases hM.fwd sender p hp with ⟨ck, hck⟩ | hh
+      · rw [setActor_other w sender p.sender a hne, hmb]
+        exact Or.inl ⟨ck, hck⟩
+      · rw [setActor_other w sender p.sender a hne, hmb]
+        exact Or.inr hh
     · rw [setActor_other w sender mb a hmb] at hp
       have hne := hnq mb p hp
-      obtain ⟨ck, hck⟩ := hM.fwd mb p hp
-      rw [setActor_other w sender p.sender a hne]
-      exact ⟨ck, hck⟩
+      rcases hM.fwd mb p hp with ⟨ck, hck⟩ | hh
+      · rw [setActor_other w sender p.sender a hne]
+        exact Or.inl ⟨ck, hck⟩
+      · rw [setActor_other w sender p.sender a hne]
+        exact Or.inr hh
   · intro sid dbox c k' hk
     by_cases hs : sid = sender
     · rw [hs, setActor_self, hphase] at hk
@@ -801,7 +887,8 @@ theorem mail_call_miss (w : World) (sender dst : InstId) (a : Actor) (k : Cont) 
 /-- A blocking enqueue, including the branch that parks, preserves `MailInv`.
 The parked entry and the sender's phase are the final state together. -/
 theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
-    (isCall : Bool) (k : Cont) (hM : MailInv w) (hfree : notParked (w.st sender).phase) :
+    (isCall : Bool) (k : Cont) (hM : MailInv w) (hfree : notParked (w.st sender).phase)
+    (hlive : (w.st sender).life = .alive) :
     MailInv (enqueueOrPark w D sender dst msg isCall k) := by
   unfold enqueueOrPark
   dsimp only
@@ -863,7 +950,7 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
         apply mail_park_self w sender _
           { sender := sender,
             msg := { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid },
-            isCall := isCall } isCall k hM hfree
+            isCall := isCall } isCall k hM hfree hlive
         · simp
         · simp [issueCall, chargeSender, bumpToken]
           split <;> exact ⟨rfl, rfl⟩
@@ -881,7 +968,7 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
               [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }],
             nextMid := (w.st dst).nextMid + 1 }
           { sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }
-          isCall k hM hsame hfree
+          isCall k hM hsame hfree hlive
         · rfl
         · rfl
         · simp
@@ -914,9 +1001,11 @@ theorem mail_of_clear (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
     (hother : ∀ i, i ≠ id → (∀ p ∈ ps, p.sender ≠ i) →
       (w.st i).phase = (w0.st i).phase ∨
         (notParked (w0.st i).phase ∧ notParked (w.st i).phase))
-    (hlife : ∀ i, (w0.st i).life = .dead → (w.st i).life = .dead) :
+    (hlife : ∀ i, (w0.st i).life = .dead → (w.st i).life = .dead)
+    (halive : (w0.st id).life = .alive)
+    (hhalt : ∀ i, Halted (w0.st i).life → Halted (w.st i).life) :
     MailInv w := by
-  have hnq := not_queued w0 id hM hfree
+  have hnq := not_queued w0 id hM hfree halive
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
     have hmb : mb ≠ id := by
@@ -924,21 +1013,22 @@ theorem mail_of_clear (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
       rw [h, hidPk] at hp
       cases hp
     have hp0 : p ∈ (w0.st mb).parked := by simpa [hpk mb hmb] using hp
-    obtain ⟨k, hk⟩ := hM.fwd mb p hp0
-    have hsnd : p.sender ≠ id := hnq mb p hp0
-    have hnot : ∀ q ∈ ps, q.sender ≠ p.sender := by
-      intro q hq heq
-      have hq0 : q ∈ (w0.st id).parked := (hqueue q).mp hq
-      have huniq := hM.uniq id mb q p hq0 hp0 (by rw [heq])
-      exact hmb huniq.1.symm
-    have hph : (w.st p.sender).phase = (w0.st p.sender).phase := by
-      rcases hother p.sender hsnd hnot with heq | ⟨hold, hnew⟩
-      · exact heq
-      · rw [hk] at hold
-        unfold notParked at hold
-        exact nomatch hold
-    rw [hph]
-    exact ⟨k, hk⟩
+    rcases hM.fwd mb p hp0 with ⟨k, hk⟩ | hh
+    · have hsnd : p.sender ≠ id := hnq mb p hp0
+      have hnot : ∀ q ∈ ps, q.sender ≠ p.sender := by
+        intro q hq heq
+        have hq0 : q ∈ (w0.st id).parked := (hqueue q).mp hq
+        have huniq := hM.uniq id mb q p hq0 hp0 (by rw [heq])
+        exact hmb huniq.1.symm
+      have hph : (w.st p.sender).phase = (w0.st p.sender).phase := by
+        rcases hother p.sender hsnd hnot with heq | ⟨hold, hnew⟩
+        · exact heq
+        · rw [hk] at hold
+          unfold notParked at hold
+          exact nomatch hold
+      rw [hph]
+      exact Or.inl ⟨k, hk⟩
+    · exact Or.inr (hhalt p.sender hh)
   · intro sid dst c k hk
     have hsid : sid ≠ id := by
       intro h
@@ -981,8 +1071,10 @@ theorem mail_drop (w0 w : World) (id : InstId) (p : Parked) (ps : List Parked) (
     (hpk : ∀ i, i ≠ id → (w.st i).parked = (w0.st i).parked)
     (hresume : notParked (w.st p.sender).phase)
     (hother : ∀ i, i ≠ id → i ≠ p.sender → (w.st i).phase = (w0.st i).phase)
-    (hlife : ∀ i, (w0.st i).life = .dead → (w.st i).life = .dead) : MailInv w := by
-  have hnq := not_queued w0 id hM hfree
+    (hlife : ∀ i, (w0.st i).life = .dead → (w.st i).life = .dead)
+    (halive : (w0.st id).life = .alive)
+    (hhalt : ∀ i, Halted (w0.st i).life → Halted (w.st i).life) : MailInv w := by
+  have hnq := not_queued w0 id hM hfree halive
   have hhead : p ∈ (w0.st id).parked := by rw [hqueue]; exact List.mem_cons_self
   have hsnd : p.sender ≠ id := hnq id p hhead
   have hnodup : p ∉ ps := by
@@ -994,21 +1086,23 @@ theorem mail_drop (w0 w : World) (id : InstId) (p : Parked) (ps : List Parked) (
     by_cases hmb : mb = id
     · rw [hmb, hidPk] at hq
       have hq0 : q ∈ (w0.st id).parked := by rw [hqueue]; exact List.mem_cons_of_mem _ hq
-      obtain ⟨k, hk⟩ := hM.fwd id q hq0
-      have hne : q.sender ≠ p.sender := by
-        intro heq
-        have hqeq := (hM.uniq id id q p hq0 hhead heq).2
-        rw [hqeq] at hq
-        exact hnodup hq
-      rw [hmb, hother q.sender (hnq id q hq0) hne]
-      exact ⟨k, hk⟩
+      rcases hM.fwd id q hq0 with ⟨k, hk⟩ | hh
+      · have hne : q.sender ≠ p.sender := by
+          intro heq
+          have hqeq := (hM.uniq id id q p hq0 hhead heq).2
+          rw [hqeq] at hq
+          exact hnodup hq
+        rw [hmb, hother q.sender (hnq id q hq0) hne]
+        exact Or.inl ⟨k, hk⟩
+      · exact Or.inr (hhalt q.sender hh)
     · have hq0 : q ∈ (w0.st mb).parked := by simpa [hpk mb hmb] using hq
-      obtain ⟨k, hk⟩ := hM.fwd mb q hq0
-      have hwho : q.sender ≠ p.sender := by
-        intro heq
-        exact hmb (hM.uniq id mb p q hhead hq0 heq.symm).1.symm
-      rw [hother q.sender (hnq mb q hq0) hwho]
-      exact ⟨k, hk⟩
+      rcases hM.fwd mb q hq0 with ⟨k, hk⟩ | hh
+      · have hwho : q.sender ≠ p.sender := by
+          intro heq
+          exact hmb (hM.uniq id mb p q hhead hq0 heq.symm).1.symm
+        rw [hother q.sender (hnq mb q hq0) hwho]
+        exact Or.inl ⟨k, hk⟩
+      · exact Or.inr (hhalt q.sender hh)
   · intro sid dst c k hk
     have hsid : sid ≠ id := by
       intro h
@@ -1059,7 +1153,9 @@ theorem mail_of_abort (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
     (hother : ∀ i, i ≠ id → (∀ p ∈ ps, p.sender ≠ i) →
       (w.st i).phase = (w0.st i).phase ∨
         (notParked (w0.st i).phase ∧ notParked (w.st i).phase))
-    (hlife : ∀ i, (w0.st i).life = .dead → (w.st i).life = .dead) :
+    (hlife : ∀ i, (w0.st i).life = .dead → (w.st i).life = .dead)
+    (hhalt : ∀ i, Halted (w0.st i).life → Halted (w.st i).life)
+    (hpark : ∀ i mb c k, (w0.st i).phase = .parked mb c k → ¬ Halted (w0.st i).life) :
     MailInv w := by
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro mb p hp
@@ -1071,23 +1167,24 @@ theorem mail_of_abort (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
       have hfilt : p ∈ (w0.st mb).parked.filter fun q => q.sender != id := by
         simpa [hpk mb hmb] using hp
       exact List.mem_filter.mp hfilt
-    obtain ⟨k, hk⟩ := hM.fwd mb p hmem.1
-    have hsnd : p.sender ≠ id := by
-      intro heq
-      have hb : (p.sender == id) = true := beq_iff_eq.mpr heq
-      simp [bne, hb] at hmem
-    have hnot : ∀ q ∈ ps, q.sender ≠ p.sender := by
-      intro q hq heq
-      have hq0 : q ∈ (w0.st id).parked := (hqueue q).mp hq
-      have huniq := hM.uniq id mb q p hq0 hmem.1 (by rw [heq])
-      exact hmb huniq.1.symm
-    have hph : (w.st p.sender).phase = (w0.st p.sender).phase := by
-      rcases hother p.sender hsnd hnot with heq | ⟨hold, _⟩
-      · exact heq
-      · rw [hk] at hold
-        simp [notParked] at hold
-    rw [hph]
-    exact ⟨k, hk⟩
+    rcases hM.fwd mb p hmem.1 with ⟨k, hk⟩ | hh
+    · have hsnd : p.sender ≠ id := by
+        intro heq
+        have hb : (p.sender == id) = true := beq_iff_eq.mpr heq
+        simp [bne, hb] at hmem
+      have hnot : ∀ q ∈ ps, q.sender ≠ p.sender := by
+        intro q hq heq
+        have hq0 : q ∈ (w0.st id).parked := (hqueue q).mp hq
+        have huniq := hM.uniq id mb q p hq0 hmem.1 (by rw [heq])
+        exact hmb huniq.1.symm
+      have hph : (w.st p.sender).phase = (w0.st p.sender).phase := by
+        rcases hother p.sender hsnd hnot with heq | ⟨hold, _⟩
+        · exact heq
+        · rw [hk] at hold
+          simp [notParked] at hold
+      rw [hph]
+      exact Or.inl ⟨k, hk⟩
+    · exact Or.inr (hhalt p.sender hh)
   · intro sid dst c k hk
     have hsid : sid ≠ id := by
       intro h
@@ -1104,12 +1201,14 @@ theorem mail_of_abort (w0 w : World) (id : InstId) (ps : List Parked) (hM : Mail
           simp [notParked] at hbad
       have hph0 := hstay p hp (by rw [hsender]; exact hsid) hcall
       rw [hsender] at hph0
-      obtain ⟨k', hk'⟩ := hM.fwd id p ((hqueue p).mp hp)
-      rw [hsender] at hk'
-      have hk0 : (w0.st sid).phase = .parked dst c k := by rw [← hph0]; exact hk
-      rw [hk'] at hk0
-      cases hk0
-      exact Or.inr ⟨hcall, hdead⟩
+      rcases hM.fwd id p ((hqueue p).mp hp) with ⟨k', hk'⟩ | hh
+      · rw [hsender] at hk'
+        have hk0 : (w0.st sid).phase = .parked dst c k := by rw [← hph0]; exact hk
+        rw [hk'] at hk0
+        cases hk0
+        exact Or.inr ⟨hcall, hdead⟩
+      · have hph1 : (w0.st sid).phase = .parked dst c k := by rw [← hph0]; exact hk
+        exact absurd (by simpa [hsender] using hh) (hpark sid dst c k hph1)
     · have hnot : ∀ q ∈ ps, q.sender ≠ sid := by
         intro q hq heq
         exact hsent ⟨q, hq, heq⟩

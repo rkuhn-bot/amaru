@@ -256,6 +256,7 @@ theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       simp [execRun, hr]
       exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := none } false
         (afterHead { k with rest := .send d l n :: es }) hM hfree
+        (busy_alive I w hS id (by simp [hphase]) (by simp [hphase]))
   · obtain ⟨d, l, n, he⟩ := he
     subst he
     cases hr : resolveId I.desc id d with
@@ -267,6 +268,7 @@ theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       simp [execRun, hr]
       exact enqueue_mail w I.desc id dstId { label := l, sender := id, callFrom := some id } true
         (afterHead { k with rest := .call d l n :: es }) hM hfree
+        (busy_alive I w hS id (by simp [hphase]) (by simp [hphase]))
 
 theorem exec_done_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (hS : SemInv I w)
     (hphase : (w.st id).phase = .run { k with rest := [] }) :
@@ -323,7 +325,8 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
       refine ⟨try_room_sem I w id dstId msg k' hS (by simp [k', afterHead, hty])
           (by simpa [k', afterHead] using htail) hroom.1.1 hroom.1.2 hroom.2
           (busy_alive I w hS id (by simp [hphase]) (by simp [hphase])),
-        enqueue_mail w I.desc id dstId msg false k' hM hfree⟩
+        enqueue_mail w I.desc id dstId msg false k' hM hfree
+          (busy_alive I w hS id (by simp [hphase]) (by simp [hphase]))⟩
     · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
@@ -1404,6 +1407,7 @@ def bornPeer (I : Impl) (template initial : String) : Actor :=
 theorem spawn_mail (I : Impl) (w : World) (template : String) (w' : World) (hM : MailInv w)
     (hfree : slotFree w template)
     (hlot : (w.st (InstId.peer template (w.nextIx template))).life ≠ .dead)
+    (hopen : ¬ Halted (w.st (InstId.peer template (w.nextIx template))).life)
     (h : spawn I w template = some w') : MailInv w' := by
   unfold spawn at h
   split at h
@@ -1425,16 +1429,17 @@ theorem spawn_mail (I : Impl) (w : World) (template : String) (w' : World) (hM :
       have hM1 := mail_awake _ pid (bornPeer I template t.initial) hMg
         (by simp [bornPeer, withTokens, hst]; exact hfree.1.symm)
         (by simp [bornPeer, withTokens, hst]; exact hfree.2)
-        hquiet
+        hquiet (by simpa [hst] using hopen)
       exact mail_copy _ _ hM1 fun i => readCells_st I.desc _ pid i
     · simp [hif] at h
 
 theorem spawn_inv (I : Impl) (w : World) (template : String) (w' : World) (hS : SemInv I w)
     (hM : MailInv w) (hfree : slotFree w template)
     (hlot : (w.st (InstId.peer template (w.nextIx template))).life ≠ .dead)
+    (hopen : ¬ Halted (w.st (InstId.peer template (w.nextIx template))).life)
     (h : spawn I w template = some w') :
     SemInv I w' ∧ MailInv w' :=
-  ⟨spawn_sem I w w' template hS h, spawn_mail I w template w' hM hfree hlot h⟩
+  ⟨spawn_sem I w w' template hS h, spawn_mail I w template w' hM hfree hlot hopen h⟩
 
 theorem finish_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w) (hM : MailInv w)
     (h : finishWait I w id = some w') : SemInv I w' ∧ MailInv w' := by
@@ -3828,13 +3833,17 @@ theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w'
   | finish id =>
     exact ⟨(finish_inv I w w' id hS hM ha).1, (finish_inv I w w' id hS hM ha).2, open_finish I w id w' hO ha⟩
   | spawn template =>
+    have h0 := hO template (w.nextIx template) (Nat.le_refl _)
     have hlot : (w.st (InstId.peer template (w.nextIx template))).life ≠ .dead := by
-      have h0 := hO template (w.nextIx template) (Nat.le_refl _)
       rw [h0.1]
       intro h
       cases h
-    exact ⟨(spawn_inv I w template w' hS hM (open_slot w hO template) hlot ha).1,
-      (spawn_inv I w template w' hS hM (open_slot w hO template) hlot ha).2,
+    have hopen : ¬ Halted (w.st (InstId.peer template (w.nextIx template))).life := by
+      rw [h0.1]
+      intro h
+      rcases h with h | h <;> cases h
+    exact ⟨(spawn_inv I w template w' hS hM (open_slot w hO template) hlot hopen ha).1,
+      (spawn_inv I w template w' hS hM (open_slot w hO template) hlot hopen ha).2,
       open_spawn I w template w' hO ha⟩
   | ingress dst label =>
     exact ⟨ingress_sem I w w' dst label hS ha, ingress_mail I w w' dst label hM ha,
