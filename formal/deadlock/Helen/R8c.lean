@@ -1,0 +1,638 @@
+import Deadlock.Semantics
+import Deadlock.Local
+set_option autoImplicit false
+set_option maxRecDepth 100000
+namespace Deadlock.Helen8c
+open Deadlock
+
+/-! Copied verbatim from Examples.lean:8-33 (Examples cannot be imported beside
+Semantics: both declare `Deadlock.overflowDesc`). -/
+def tpl (name : String) (cap : Nat) (states : List String) (initial : String) (mustFit : Bool) : Template where
+  name := name
+  multiplicity := .one
+  capacity := .ofNat cap
+  priorityCapacity := .ofNat 4
+  priorityBound := .ofNat 1
+  states := states
+  initial := initial
+  terminable := false
+  untimedPeer := false
+  mustFit := mustFit
+
+def sendEdge (src ss dst label : String) (occ : Nat) : Edge where
+  src := src
+  srcState := ss
+  dst := dst
+  kind := .blocking
+  reliability := .reliable
+  effect := .send
+  label := label
+  scope := .intra
+  occupancy := .ofNat occ
+  repliesInDequeue := false
+  ingress := false
+  ingressLegal := none
+  cell := .none
+
+def tr (t f l to : String) (p : List Eff) : Transition :=
+  { template := t, fromState := f, label := l, program := p, toState := to, acceptsCall := false, release := 1 }
+
+def runAt (I : Impl) (N : Nat) (acts : List Action) : Option World :=
+  acts.foldl (fun w a => w.bind (apply I a)) (some (initWorld I N))
+
+def lifeTag (l : Life) : Nat := match l with | .absent => 0 | .alive => 1 | .shuttingDown => 2 | .dead => 3
+
+def crashedB (w : Option World) : Bool :=
+  match w with
+  | some w => w.roster.any fun id => (w.st id).life == .dead && (w.st id).phase == .crashed
+  | none => false
+
+def ing (t st : String) : Edge :=
+  { (sendEdge t st t "Go" 1) with effect := .trySend, kind := .nonBlocking, reliability := .reliable, ingress := true, occupancy := { a := 1, b := 0 }, ingressLegal := some (Affine.ofNat 1) }
+
+def step (t f l to : String) : CompatStep := { template := t, fromState := f, toState := to, label := l }
+
+/-! ## 1. Root connections under a core supervisor; `prioSized` holds, yet respawn
+overflows the lane (F4 sizing). Also: unmatched tombstone in a later state, key split. -/
+
+def tA : Template := { tpl "A" 2 ["idle", "done"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
+  timeoutKills := true, supervisor := "P", tombstone := "dead/A" }
+def tB : Template := { tpl "B" 2 ["idle"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s" }
+def tP : Template := tpl "P" 2 ["idle", "seen"] "idle" true
+
+def subDesc : Description where
+  name := "subtree"
+  freshNames := true
+  templates := [tP, tA, tB]
+  edges := [ing "A" "idle", ing "A" "done"]
+  compatibility := .all
+  steps := [step "A" "idle" "Go" "done", step "A" "done" "Go" "done", step "P" "idle" "dead/A" "seen"]
+
+/-- `P` handles `dead/A` only in `idle`. `tombstoneHandled` asks for one such transition. -/
+def subImpl : Impl where
+  desc := subDesc
+  transitions := [tr "A" "idle" "Go" "done" [.terminate], tr "A" "done" "Go" "done" [],
+                  tr "P" "idle" "dead/A" "seen" []]
+
+def Pc : InstId := .core "P"
+def B0 : InstId := .peer "B" 0 0
+def A0 : InstId := .peer "A" 0 0
+def A1 : InstId := .peer "A" 0 1
+
+/-- Respawn stays at key 0. `g` is the generation. -/
+def cycle (g : Nat) : List Action :=
+  [.spawn "A", .ingress (.peer "A" 0 g) "Go", .recvBulk (.peer "A" 0 g),
+    .exec (.peer "A" 0 g), .exec (.peer "A" 0 g)]
+
+private theorem r7_sub_graph : checkBool subDesc = true := by decide
+
+/-- `P` does not handle `dead/A` in `seen`, so `LocalOk` rejects the design. -/
+private theorem r7_sub_local : localOkB subImpl = false := by decide
+
+/-- The static bound, with no tombstone left queued, passes for `P` at `N = 1`. -/
+private theorem r7_sub_prioSized : prioSized subDesc "P" 1 (prioLabels subImpl "P").length = true ∧
+    prioSizeFails subImpl 1 = [] := by decide
+
+/-- Four tombstones fit. A fifth root spawn is admitted. The new child's
+`terminate` then crashes on the full lane. -/
+private theorem r7_respawn_overflow :
+    ((runAt subImpl 1 ((List.range 4).flatMap cycle)).map fun w =>
+      ((w.st Pc).prio.length, capPrio subDesc 1 Pc)) = some (4, 4) ∧
+    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle)) = false ∧
+    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
+    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
+    ((runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) = some true ∧
+    prioSized subDesc "P" 1 (prioLabels subImpl "P").length 4 = false := by decide
+
+/-- A tombstone that arrives in `seen` stays queued. `LocalOk` requires the label
+in every declared state of the parent. -/
+def tombActs : List Action := cycle 0 ++ [.recvPrio Pc] ++ cycle 1 ++ [.recvPrio Pc]
+private theorem r7_tombstone_later_state :
+    ((runAt subImpl 1 (cycle 0 ++ [.recvPrio Pc] ++ cycle 1)).map fun w =>
+      ((w.st Pc).typestate, (w.st Pc).prio.map (·.label))) = some ("seen", ["dead/A#1"]) ∧
+    runAt subImpl 1 tombActs = none ∧
+    findTr subImpl "P" "seen" "dead/A" = none := by decide
+
+/-- After A generation 0 dies, the replacement is generation 1 at the same key,
+and it still routes to the live B. -/
+def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.spawn "A"]
+private theorem r7_respawn_key_split :
+    ((runAt subImpl 1 splitActs).map fun w =>
+      (lifeTag (w.st A0).life, lifeTag (w.st A1).life, lifeTag (w.st B0).life,
+       route w subDesc A1 "B", route w subDesc B0 "A")) =
+    some (3, 1, 1, some B0, some A1) := by decide
+
+/-- A permanent core's `terminate` crashes the roster, and nothing runs after that. -/
+def ingP : Edge := { ing "P" "idle" with occupancy := { a := 0, b := 1 } }
+
+def crashDesc : Description :=
+  { subDesc with edges := subDesc.edges ++ [ingP], steps := subDesc.steps ++ [step "P" "idle" "Go" "idle"] }
+
+def crashImpl : Impl where
+  desc := crashDesc
+  transitions := [tr "P" "idle" "Go" "idle" [.terminate]]
+
+def crashActs : List Action := [.ingress Pc "Go", .recvBulk Pc, .exec Pc]
+
+private theorem r7_crash_absorbing :
+    crashedB (runAt crashImpl 1 crashActs) = true ∧
+      ((runAt crashImpl 1 crashActs).map (·.crashed)) = some true ∧
+      runAt crashImpl 1 (crashActs ++ [.spawn "A"]) = none ∧
+      runAt crashImpl 1 (crashActs ++ [.stutter]) = none ∧
+      runAt crashImpl 1 (crashActs ++ [.ingress Pc "Go"]) = none := by decide
+
+/-! ## 2. F3 / F5 / F8: a per-peer connection supervises a handler, which
+supervises a worker. -/
+
+def tConn : Template := { tpl "Conn" 4 ["idle", "up", "done"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 4, b := 1 }, terminable := true, subtree := "net",
+  timeoutKills := true, supervisor := "Mgr", tombstone := "dead/Conn" }
+def tHand : Template := { tpl "Hand" 2 ["idle"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "net",
+  supervisor := "Conn", tombstone := "dead/Hand" }
+def tWork : Template := { tpl "Work" 2 ["idle"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "net",
+  supervisor := "Hand", tombstone := "dead/Work" }
+def tMgr : Template := tpl "Mgr" 2 ["idle"] "idle" true
+
+def treeDesc : Description where
+  name := "tree"
+  freshNames := true
+  templates := [tMgr, tConn, tHand, tWork]
+  edges := [ing "Conn" "idle", ing "Conn" "up", ing "Conn" "done", ing "Hand" "idle", ing "Work" "idle"]
+  compatibility := .all
+  steps := []
+
+def treeImpl : Impl where
+  desc := treeDesc
+  transitions := [tr "Conn" "idle" "Go" "up" [.spawn "Hand"],
+                  tr "Conn" "up" "Go" "done" [.terminate],
+                  tr "Conn" "done" "Go" "done" [.spawn "Hand"],
+                  tr "Hand" "idle" "Go" "idle" [.spawn "Work"],
+                  tr "Work" "idle" "Go" "idle" [.terminate],
+                  tr "Mgr" "idle" "dead/Conn" "idle" [],
+                  tr "Conn" "idle" "dead/Hand" "idle" [], tr "Hand" "idle" "dead/Work" "idle" []]
+
+def C0 : InstId := .peer "Conn" 0 0
+def H0 : InstId := .peer "Hand" 0 0
+def K0 : InstId := .peer "Work" 0 0
+def K1 : InstId := .peer "Work" 0 1
+
+def treeActs : List Action :=
+  [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,      -- Conn spawns Hand#0
+   .ingress H0 "Go", .recvBulk H0, .exec H0,                     -- Hand spawns Work#0
+   .ingress C0 "Go", .recvBulk C0, .exec C0]                     -- Conn terminates
+
+def treeSnap (w : Option World) : Option (List Nat × List String) :=
+  w.map fun w => ([lifeTag (w.st C0).life, lifeTag (w.st H0).life, lifeTag (w.st K0).life],
+    (w.st (.core "Mgr")).prio.map (·.label))
+
+/-- F3/F5 positive: children are born at the parent's key, a per-peer parent
+supervises them, and `terminate` marks the grandchild too. One tombstone, to `Mgr`. -/
+private theorem r7_terminate_marks_grandchild :
+    treeSnap (runAt treeImpl 1 (treeActs.take 7)) = some ([1, 1, 1], []) ∧
+    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], ["dead/Conn#0"]) ∧
+    isChild treeDesc C0 H0 = true ∧ isChild treeDesc H0 K0 = true := by decide
+
+/-- After the seals, all three are dead. -/
+private theorem r7_tree_sealed :
+    treeSnap (runAt treeImpl 1 (treeActs ++ [.exec C0, .exec H0, .exec K0])) =
+      some ([3, 3, 3], ["dead/Conn#0"]) := by decide
+
+/-- A per-peer supervisor of its own subtree passes `GraphOk`. -/
+private theorem r7_tree_graph_ok : subtreeFails treeDesc = [] ∧ checkBool treeDesc = true := by decide
+
+/-- A second spawn while the child is alive does not crash, and does not birth a second copy. -/
+private theorem r7_respawn_child_live :
+    let acts : List Action := [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,
+      .ingress H0 "Go", .recvBulk H0, .exec H0, .ingress H0 "Go", .recvBulk H0, .exec H0]
+    crashedB (runAt treeImpl 1 acts) = false ∧
+      ((runAt treeImpl 1 acts).map fun w => lifeTag (w.st K0).life) = some 1 := by decide
+
+/-- A dead child is restarted at a fresh generation of the same key. -/
+private theorem r7_respawn_child_fresh :
+    let acts : List Action := [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,
+      .ingress H0 "Go", .recvBulk H0, .exec H0,
+      .ingress K0 "Go", .recvBulk K0, .exec K0, .exec K0,
+      .ingress H0 "Go", .recvBulk H0, .exec H0]
+    crashedB (runAt treeImpl 1 acts) = false ∧
+      ((runAt treeImpl 1 acts).map fun w =>
+        (lifeTag (w.st K0).life, lifeTag (w.st K1).life)) = some (3, 1) := by decide
+
+/-! ## 3. F2 positive and the supervisor-not-alive crash. -/
+
+def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true }
+def tX : Template := { tpl "X" 2 ["idle", "sent"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
+  timeoutKills := true, supervisor := "Q", tombstone := "dead/X" }
+def tY : Template := { tpl "Y" 2 ["idle", "done"] "idle" true with
+  multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
+  supervisor := "Q", tombstone := "dead/Y" }
+def tH : Template := { tpl "H" 0 ["idle", "got"] "idle" false with
+  multiplicity := .perPeer, terminable := true, subtree := "s" }
+
+def deadDesc : Description where
+  name := "dead-sender"
+  freshNames := true
+  templates := [tQ, tX, tY, tH]
+  edges := [ing "X" "idle", ing "X" "sent", ing "Y" "idle", ing "Y" "done",
+            { (sendEdge "X" "sent" "H" "M" 1) with occupancy := { a := 1, b := 0 } }]
+  compatibility := .all
+  steps := [step "X" "idle" "Go" "sent", step "Y" "idle" "Go" "done", step "Q" "idle" "dead/Y" "gone",
+            step "Q" "idle" "dead/X" "gone", step "Q" "gone" "dead/Y" "gone", step "Q" "gone" "dead/X" "gone",
+            step "H" "idle" "M" "got", step "X" "sent" "Go" "sent",
+            step "Y" "done" "Go" "done", step "H" "got" "M" "got"]
+
+def deadImpl : Impl where
+  desc := deadDesc
+  transitions := [tr "X" "idle" "Go" "sent" [.send "H" "M" 0],
+                  tr "Y" "idle" "Go" "done" [.terminate],
+                  tr "Q" "idle" "dead/Y" "gone" [.terminate],
+                  tr "Q" "idle" "dead/X" "gone" [],
+                  tr "Q" "gone" "dead/Y" "gone" [],
+                  tr "Q" "gone" "dead/X" "gone" [],
+                  tr "H" "idle" "M" "got" [],
+                  tr "X" "sent" "Go" "sent" [], tr "Y" "done" "Go" "done" [],
+                  tr "H" "got" "M" "got" []]
+
+def X0 : InstId := .peer "X" 0 0
+def Y0 : InstId := .peer "Y" 0 0
+def Hh : InstId := .peer "H" 0 0
+def Qc : InstId := .core "Q"
+
+def deadActs : List Action :=
+  [.spawn "X", .spawn "Y", .spawn "H",
+   .ingress X0 "Go", .recvBulk X0, .exec X0,
+   .ingress Y0 "Go", .recvBulk Y0, .exec Y0, .exec Y0,
+   .recvPrio Qc, .exec Qc, .exec X0]
+
+def deadSnap (w : Option World) : Option (Nat × Nat × String × Nat × Nat) :=
+  w.map fun w => (lifeTag (w.st X0).life, lifeTag (w.st Hh).life, (w.st Hh).typestate,
+    (w.st Hh).parked.length, (w.st X0).tokens "H")
+
+private theorem r7_dead_graph : checkBool deadDesc = true := by decide
+private theorem r7_dead_local : LocalOk deadImpl := by
+  unfold LocalOk
+  decide
+
+/-- The parked entry leaves when X is marked, not only when X seals. H has
+nothing of X's left, so `recvBulk H` is disabled. -/
+private theorem r7_dead_sender_refunded :
+    deadSnap (runAt deadImpl 1 (deadActs.take 12)) = some (2, 1, "idle", 0, 1) ∧
+    deadSnap (runAt deadImpl 1 deadActs) = some (3, 1, "idle", 0, 1) ∧
+    (runAt deadImpl 1 (deadActs ++ [.recvBulk Hh])) = none := by decide
+
+/-- A dead supervisor admits no new child. The prefix is a live world, and the
+spawn itself is disabled. -/
+private theorem r7_dead_supervisor_refused :
+    (runAt deadImpl 1 (deadActs ++ [.exec Qc])).isSome = true ∧
+    crashedB (runAt deadImpl 1 (deadActs ++ [.exec Qc])) = false ∧
+    runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y"]) = none := by decide
+
+
+/-! ## R7: original R6c statements, API-adapted (`.peer n k` → `.peer n key gen`), refuted -/
+
+/-- The fifth root spawn is admitted, and the `terminate` inside that cycle
+crashes on the full lane. -/
+private theorem r7_root_respawn_crashes :
+    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
+    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
+    ((runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) =
+      some true := by decide
+
+/-- Original statement: the second tombstone is consumed in `seen`. Now `recvPrio` is
+disabled there (the prefix up to it runs). -/
+private theorem r7_orig_tombstone_later_refuted :
+    ((runAt subImpl 1 tombActs).map fun w => ((w.st Pc).typestate, (w.st Pc).prio.length)) ≠
+      some ("seen", 0) ∧
+    (runAt subImpl 1 (cycle 0 ++ [.recvPrio Pc] ++ cycle 1)).isSome = true := by decide
+
+private theorem r7_orig_key_split_refuted :
+    ((runAt subImpl 1 splitActs).map fun w =>
+      (lifeTag (w.st A0).life, lifeTag (w.st A1).life, lifeTag (w.st B0).life,
+       route w subDesc A1 "B", route w subDesc B0 "A")) ≠ some (3, 1, 1, none, none) := by decide
+
+private theorem r7_orig_crash_not_absorbing_refuted :
+    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4 ++
+      [.spawn "A", .ingress (.peer "A" 0 5) "Go"])).isSome = false := by decide
+
+private theorem r7_orig_tree_graph_rejected_refuted : checkBool treeDesc ≠ false := by decide
+
+private theorem r7_orig_respawn_child_crashes_refuted :
+    crashedB (runAt treeImpl 1 [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,
+      .ingress H0 "Go", .recvBulk H0, .exec H0, .ingress H0 "Go", .recvBulk H0, .exec H0]) ≠ true := by decide
+
+/-- Original: the spawn under a dead `Q` and Y#1's terminate crash. Now the spawn itself
+is disabled (the prefix before it is a real world). -/
+private theorem r7_orig_dead_supervisor_crash_refuted :
+    crashedB (runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y", .ingress (.peer "Y" 0 1) "Go",
+      .recvBulk (.peer "Y" 0 1), .exec (.peer "Y" 0 1)])) ≠ true ∧
+    (runAt deadImpl 1 (deadActs ++ [.exec Qc])).isSome = true := by decide
+
+/-! ## R7: `respawn_overflow` on a design that passes `LocalOk` (P handles `dead/A` in `seen`). -/
+
+def subImpl2 : Impl := { subImpl with
+  desc := { subDesc with steps := subDesc.steps ++ [step "P" "seen" "dead/A" "seen"] },
+  transitions := subImpl.transitions ++ [tr "P" "seen" "dead/A" "seen" []] }
+
+private theorem r7_sub2_ok : checkBool subImpl2.desc = true ∧ LocalOk subImpl2 ∧ prioSizeFails subImpl2 1 = [] := by
+  refine ⟨by decide, by unfold LocalOk; decide, by decide⟩
+
+/-- Four tombstones queued, the fifth root spawn is admitted, and its `terminate`
+crashes. `LocalOk` does not refuse the spawn. -/
+private theorem r7_sub2_root_crashes :
+    ((runAt subImpl2 1 ((List.range 4).flatMap cycle)).map fun w => ((w.st Pc).prio.length, w.crashed)) =
+      some (4, false) ∧
+    (runAt subImpl2 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
+    crashedB (runAt subImpl2 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
+    ((runAt subImpl2 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) = some true := by decide
+
+/-! ## R7 NEW: a per-peer parent restarting its child overflows its lane and crashes,
+in a `GraphOk ∧ LocalOk ∧ prioSized` design. `tombstoneRoom` guards only root spawns. -/
+
+def rTrs : List Transition := [tr "Conn" "idle" "Go" "idle" [.spawn "Hand"],
+                  tr "Conn" "up" "Go" "up" [], tr "Conn" "done" "Go" "done" [],
+                  tr "Hand" "idle" "Go" "idle" [.terminate],
+                  tr "Work" "idle" "Go" "idle" [],
+                  tr "Mgr" "idle" "dead/Conn" "idle" [],
+                  tr "Conn" "idle" "dead/Hand" "idle" [], tr "Conn" "up" "dead/Hand" "up" [],
+                  tr "Conn" "done" "dead/Hand" "done" [],
+                  tr "Hand" "idle" "dead/Work" "idle" []]
+
+def rTree : Impl where
+  desc := { treeDesc with steps := rTrs.map fun t => step t.template t.fromState t.label t.toState }
+  transitions := rTrs
+
+/-- Conn spawns Hand generation `g`; Hand terminates and seals; the tombstone stays queued. -/
+def hcycle (g : Nat) : List Action :=
+  [.ingress C0 "Go", .recvBulk C0, .exec C0,
+   .ingress (.peer "Hand" 0 g) "Go", .recvBulk (.peer "Hand" 0 g), .exec (.peer "Hand" 0 g),
+   .exec (.peer "Hand" 0 g)]
+
+private theorem r7_rtree_ok : checkBool rTree.desc = true ∧ LocalOk rTree ∧ prioSizeFails rTree 1 = [] := by
+  refine ⟨by decide, by unfold LocalOk; decide, by decide⟩
+
+private theorem r7_child_restart_overflow :
+    ((runAt rTree 1 (.spawn "Conn" :: (List.range 4).flatMap hcycle)).map fun w =>
+      ((w.st C0).prio.length, capPrio rTree.desc 1 C0, w.crashed)) = some (4, 4, false) ∧
+    ((runAt rTree 1 (.spawn "Conn" :: (List.range 4).flatMap hcycle ++ (hcycle 4).take 6)).map
+      (·.crashed)) = some true := by decide
+
+/-- Generation 0's tombstone stays queued while generation 1 is alive. The label
+carries that generation, so the two are not the same message. -/
+private theorem r7_stale_tombstone :
+    ((runAt rTree 1 (.spawn "Conn" :: hcycle 0 ++ (hcycle 1).take 3)).map fun w =>
+      ((w.st C0).prio.map (·.label), (w.st C0).prio.map (·.sender),
+        lifeTag (w.st (.peer "Hand" 0 1)).life)) =
+      some (["dead/Hand#0"], [.peer "Hand" 0 0], 1) := by decide
+
+/-! ## R7: N1 counts, nested branches and stored continuations -/
+
+private theorem r7_nested_counted :
+    sendsTo "A" [.peer [.trySend "X" "l" 0 [] [.call "Y" "q" 0 [.send "A" "M" 0, .send "A" "M" 0] []]]] = 2 ∧
+    sendsTo "A" [.call "Y" "q" 0 [.send "A" "M" 0] [.trySend "A" "M" 0 [.send "A" "M" 0] []], .send "A" "M" 0] = 1 ∧
+    selfLabels [.peer [.call "Y" "q" 0 [] [.trySend "X" "l" 0 [.selfSchedule "z"] []]]] = ["z"] ∧
+    hasTerminate [.trySend "X" "l" 0 [] [.peer [.terminate]]] = true ∧
+    noSelfSchedule [.call "Y" "q" 0 [.peer [.selfSchedule "z"]] []] = false := by decide
+
+
+/-! ## A core's pool: `slots` children, indexed by slot and generation. -/
+
+def tM : Template := tpl "M" 4 ["idle"] "idle" false
+def tW : Template := { tpl "W" 4 ["idle"] "idle" false with
+  multiplicity := .perPeer, slots := 2, supervisor := "M", subtree := "pw",
+  terminable := true, tombstone := "dead/W" }
+
+def ingM : Edge := { ing "M" "idle" with occupancy := { a := 0, b := 1 } }
+
+def poolDesc : Description where
+  name := "pool"
+  freshNames := true
+  templates := [tM, tW]
+  edges := [ingM, ing "W" "idle"]
+  compatibility := .all
+  steps := [step "M" "idle" "Go" "idle", step "W" "idle" "Go" "idle",
+            step "M" "idle" "dead/W" "idle"]
+
+def poolImpl : Impl where
+  desc := poolDesc
+  transitions := [tr "M" "idle" "Go" "idle" [.spawn "W"],
+                  tr "W" "idle" "Go" "idle" [.terminate],
+                  tr "M" "idle" "dead/W" "idle" []]
+
+def Mc : InstId := .core "M"
+
+def birth : List Action := [.ingress Mc "Go", .recvBulk Mc, .exec Mc]
+
+def killSlot (k g : Nat) : List Action :=
+  [.ingress (.peer "W" k g) "Go", .recvBulk (.peer "W" k g),
+   .exec (.peer "W" k g), .exec (.peer "W" k g)]
+
+def poolLives (w : World) : List Nat :=
+  [lifeTag (w.st (.peer "W" 0 0)).life, lifeTag (w.st (.peer "W" 1 0)).life,
+   lifeTag (w.st (.peer "W" 0 1)).life]
+
+private theorem r7_pool_sized :
+    subtreeFails poolDesc = [] ∧
+    population poolDesc "W" 1 poolDesc.templates.length = 2 ∧
+    simultaneousTombstones poolDesc "M" 1 = 2 ∧
+    LocalOk poolImpl := by
+  refine ⟨by decide, by decide, by decide, by unfold LocalOk; decide⟩
+
+/-- Two spawns fill the two slots. A third is a no-op. Killing slot 0 and
+spawning again births generation 1 in that slot. -/
+private theorem r7_pool_slots :
+    ((runAt poolImpl 1 (birth ++ birth)).map poolLives) = some [1, 1, 0] ∧
+    ((runAt poolImpl 1 (birth ++ birth ++ birth)).map poolLives) = some [1, 1, 0] ∧
+    ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ birth)).map poolLives) =
+      some [3, 1, 1] := by decide
+
+/-! ## Mail queued by an old generation is charged to the key. -/
+
+def tBox : Template := tpl "H" 4 ["idle"] "idle" false
+def tS : Template := { tpl "S" 4 ["idle"] "idle" false with
+  multiplicity := .perPeer, subtree := "mail", terminable := true }
+
+def mailEdge : Edge :=
+  { (sendEdge "S" "idle" "H" "M" 0) with occupancy := { a := 1, b := 0 } }
+
+def mailDesc : Description where
+  name := "old-mail"
+  freshNames := true
+  templates := [tBox, tS]
+  edges := [ing "S" "idle", mailEdge]
+  compatibility := .all
+  steps := [step "S" "idle" "Go" "idle"]
+
+def mailImpl : Impl where
+  desc := mailDesc
+  transitions := [tr "S" "idle" "Go" "idle" [.send "H" "M" 0, .terminate]]
+
+def S0 : InstId := .peer "S" 0 0
+def S1 : InstId := .peer "S" 0 1
+def Hc : InstId := .core "H"
+
+def mailActs : List Action :=
+  [.spawn "S", .ingress S0 "Go", .recvBulk S0, .exec S0, .exec S0, .exec S0, .spawn "S"]
+
+private theorem r7_old_mail_charged :
+    ((runAt mailImpl 1 [.spawn "S"]).map fun w => (w.st S0).tokens "H") = some 1 ∧
+    ((runAt mailImpl 1 mailActs).map fun w =>
+      (lifeTag (w.st S0).life, lifeTag (w.st S1).life,
+       (w.st Hc).box.length, (w.st S1).tokens "H")) = some (3, 1, 1, 0) := by decide
+
+
+/-! # Round 8 probes (N5, N15, N16). Definitions above are copied from the
+branch's Helen/R7c.lean (its theorems renamed `r7_*`, re-checked here). -/
+
+/-! ## N15: a stale tombstone is still handled by the base-label handler. -/
+
+/-- Gen 0's `dead/Hand#0` is delivered while gen 1 is alive. There is no
+`dead/Hand#0` transition: `findDeliver` falls back to the base label and runs
+the same `dead/Hand` handler a current-generation tombstone would run. -/
+theorem stale_runs_base_handler :
+    findTr rTree "Conn" "idle" "dead/Hand#0" = none ∧
+    ((runAt rTree 1 (.spawn "Conn" :: hcycle 0 ++ (hcycle 1).take 3 ++ [.recvPrio C0])).map fun w =>
+      ((w.st C0).prio.length, lifeTag (w.st (.peer "Hand" 0 1)).life,
+        decide ((w.st C0).phase = .idle), (w.st C0).typestate)) = some (0, 1, true, "idle") := by decide
+
+/-! ## N16: the charge goes to the new generation, the credit to the dead one. -/
+
+/-- On the branch's own `mailImpl` (R7c; NOT LocalOk, see `mail_not_local`):
+two dead generations queue 2 > budget 1 on H, and gen 2's `budget - queued`
+truncates to 0. The deficit of 1 is invisible in `Nat`. -/
+theorem mail_not_local : localOkB mailImpl = false := by decide
+def S2 : InstId := .peer "S" 0 2
+def mailActs2 : List Action :=
+  mailActs ++ [.ingress S1 "Go", .recvBulk S1, .exec S1, .exec S1, .exec S1, .spawn "S"]
+theorem nat_truncation :
+    ((runAt mailImpl 1 mailActs2).map fun w =>
+      ((w.st Hc).box.length, queuedFromKey w "S" 0 "H", (w.st S2).tokens "H",
+        lifeTag (w.st S2).life)) = some (2, 2, 0, 1) := by decide
+
+/-! ### N16 on the self budget: a restarted stage is starved of ingress forever.
+`R` sends itself two `Self` and terminates before reading them. A new
+generation is spawned while the old one is still shutting down. Its own-template
+tokens are charged the two queued messages; the old box is refunded to the
+dead id at the seal; the new generation can never pass the ingress gate. -/
+
+def tR : Template := { tpl "R" 3 ["x", "idle"] "x" true with
+  multiplicity := .perPeer, subtree := "rs", terminable := true, capacity := { a := 4, b := 1 } }
+def selfEdge : Edge := { sendEdge "R" "idle" "R" "Self" 0 with occupancy := { a := 2, b := 0 } }
+def starveDesc : Description where
+  name := "starve"
+  freshNames := true
+  templates := [tR]
+  edges := [ing "R" "x", ing "R" "idle", selfEdge]
+  compatibility := .all
+  steps := [step "R" "x" "Go" "idle", step "R" "idle" "Go" "idle", step "R" "idle" "Self" "idle",
+            step "R" "x" "Self" "x"]
+def starveImpl : Impl where
+  desc := starveDesc
+  transitions := [tr "R" "x" "Go" "idle" [.send "R" "Self" 0, .send "R" "Self" 0, .terminate],
+                  tr "R" "idle" "Go" "idle" [], tr "R" "idle" "Self" "idle" [],
+                  tr "R" "x" "Self" "x" []]
+def R0 : InstId := .peer "R" 0 0
+def R1 : InstId := .peer "R" 0 1
+def allActs : List Action :=
+  [.ingress R1 "Go", .ingress R1 "Self", .recvBulk R1, .recvPrio R1, .exec R1, .finish R1, .callTimeout R1,
+   .recvBulk R0, .exec R0, .finish R0, .spawn "R"]
+def starveActs : List Action :=
+  [.spawn "R", .ingress R0 "Go", .recvBulk R0, .exec R0, .exec R0, .exec R0, .spawn "R", .exec R0]
+
+theorem starve_ok : checkBool starveDesc = true ∧ LocalOk starveImpl := ⟨by decide, by unfold LocalOk; decide⟩
+
+/-- R1 is born while R0 is shutting down with two `Self` in its box. R1 gets
+3 - 2 = 1 token; R0's seal refunds the two messages to R0 itself (dead). -/
+theorem restart_starved :
+    ((runAt starveImpl 1 starveActs).map fun w =>
+      (lifeTag (w.st R0).life, lifeTag (w.st R1).life, (w.st R1).tokens "R", (w.st R0).tokens "R")) =
+      some (3, 1, 1, 3) ∧
+    ((runAt starveImpl 1 starveActs).map fun w =>
+      ((w.st R1).typestate, decide ((w.st R1).phase = .idle), (w.st R1).box.length,
+        tokenHold starveDesc "R" "R" (w.st R1))) = some ("x", true, 0, 2) ∧
+    (runAt starveImpl 1 (starveActs ++ [.ingress R1 "Go"])).isNone = true := by decide
+
+/-- Same design, R1 spawned after the seal: it gets the full budget and takes ingress. -/
+theorem order_dependent :
+    ((runAt starveImpl 1 (starveActs.take 6 ++ [.exec R0, .spawn "R", .ingress R1 "Go"])).map fun w =>
+      (lifeTag (w.st R1).life, (w.st R1).box.length)) = some (1, 1) := by decide
+
+/-- R1 has no other input: the only actor that could fill its box is itself.
+Starting from the starved world, no action ever enables R1's ingress again: it
+is a fixed point for every action except a spawn, which `aliveCount < N` refuses. -/
+theorem starved_frozen :
+    ((runAt starveImpl 1 starveActs).map fun w =>
+      ((Helen8c.allActs.map fun a => (apply starveImpl a w).isSome))) =
+      some (Helen8c.allActs.map fun _ => false) := by decide
+
+
+/-! ## N5: pools. -/
+
+/-- A slot is reused before its old child has sealed: gen 0 of slot 0 is still
+shutting down (life 2) when gen 1 is born in the same slot. -/
+theorem slot_reused_before_seal :
+    ((runAt poolImpl 1 (birth ++ birth ++ (killSlot 0 0).take 3 ++ birth)).map poolLives) =
+      some [2, 1, 1] := by decide
+
+/-- The core cannot address its own pool. `M` spawns `W` and then sends it a job:
+`LocalOk` rejects the reliable send (and the route from a core to a per-peer
+role has no key, so it would not resolve anyway). -/
+def jobDesc : Description :=
+  { poolDesc with
+    edges := poolDesc.edges ++ [{ (sendEdge "M" "idle" "W" "Job" 0) with occupancy := { a := 0, b := 1 } }],
+    steps := poolDesc.steps ++ [step "W" "idle" "Job" "idle"] }
+def jobImpl : Impl where
+  desc := jobDesc
+  transitions := [tr "M" "idle" "Go" "idle" [.spawn "W", .send "W" "Job" 0],
+                  tr "W" "idle" "Go" "idle" [.terminate], tr "W" "idle" "Job" "idle" [],
+                  tr "M" "idle" "dead/W" "idle" []]
+theorem pool_unaddressable_local : localOkB jobImpl = false := by decide
+def jobImplT : Impl :=
+  { jobImpl with transitions := [tr "M" "idle" "Go" "idle" [.spawn "W", .trySend "W" "Job" 0 [] []],
+                  tr "W" "idle" "Go" "idle" [.terminate], tr "W" "idle" "Job" "idle" [],
+                  tr "M" "idle" "dead/W" "idle" []] }
+/-- Even ignoring `LocalOk`, the job goes nowhere: the route fails and is
+recorded in `failures`; W's box stays empty. -/
+theorem pool_route_fails :
+    ((runAt jobImpl 1 (birth ++ [.exec Mc])).map fun w =>
+      ((w.st (.peer "W" 0 0)).box.length, w.failures.length)) = some (0, 1) := by decide
+
+/-- A per-peer pool under a per-peer parent passes `subtreeFails`, and its
+population is multiplied, but no step can ever birth it: `spawnChild` is
+`none` for a per-peer parent with `slots ≠ 0`, and `spawnEffect` rejects it. -/
+def ppP : Template := { tpl "P" 4 ["idle"] "idle" false with multiplicity := .perPeer, subtree := "pp", terminable := true }
+def ppQ : Template := { tpl "Q" 4 ["idle"] "idle" false with
+  multiplicity := .perPeer, slots := 2, supervisor := "P", subtree := "pp", terminable := true, tombstone := "dead/Q" }
+def ppDesc : Description where
+  name := "pp"
+  freshNames := true
+  templates := [ppP, ppQ]
+  edges := [ing "P" "idle", ing "Q" "idle"]
+  compatibility := .all
+  steps := [step "P" "idle" "Go" "idle", step "Q" "idle" "Go" "idle", step "P" "idle" "dead/Q" "idle"]
+def ppImpl : Impl where
+  desc := ppDesc
+  transitions := [tr "P" "idle" "Go" "idle" [.spawn "Q"], tr "Q" "idle" "Go" "idle" [],
+                  tr "P" "idle" "dead/Q" "idle" []]
+theorem nested_pool_unbirthable :
+    subtreeFails ppDesc = [] ∧
+    population ppDesc "Q" 1 ppDesc.templates.length = 2 ∧
+    localOkB ppImpl = false ∧
+    (runAt ppImpl 1 [.spawn "P", .ingress (.peer "P" 0 0) "Go", .recvBulk (.peer "P" 0 0),
+      .exec (.peer "P" 0 0)]).map (·.crashed) = some true := by decide
+end Deadlock.Helen8c
+
+#print axioms Deadlock.Helen8c.stale_runs_base_handler
+#print axioms Deadlock.Helen8c.mail_not_local
+#print axioms Deadlock.Helen8c.nat_truncation
+#print axioms Deadlock.Helen8c.starve_ok
+#print axioms Deadlock.Helen8c.restart_starved
+#print axioms Deadlock.Helen8c.order_dependent
+#print axioms Deadlock.Helen8c.starved_frozen
+#print axioms Deadlock.Helen8c.slot_reused_before_seal
+#print axioms Deadlock.Helen8c.pool_unaddressable_local
+#print axioms Deadlock.Helen8c.pool_route_fails
+#print axioms Deadlock.Helen8c.nested_pool_unbirthable
