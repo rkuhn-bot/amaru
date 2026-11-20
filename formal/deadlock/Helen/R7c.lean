@@ -92,19 +92,15 @@ theorem sub_graph : checkBool subDesc = true := by decide
 theorem sub_local : localOkB subImpl = false := by decide
 
 /-- The static bound, with no tombstone left queued, passes for `P` at `N = 1`. -/
-theorem sub_prioSized : prioSized subDesc "P" 1 (prioLabels subImpl "P").length = true ∧
-    prioSizeFails subImpl 1 = [] := by decide
+theorem sub_prioSized : tombstoneAffine subDesc "P" = { a := 1, b := 0 } ∧
+    prioSized subDesc "P" (prioLabels subImpl "P").length = false ∧
+    prioSizeFails subImpl ≠ [] := by decide
 
 /-- Four tombstones fit. A fifth root spawn is admitted. The new child's
 `terminate` then crashes on the full lane. -/
 theorem respawn_overflow :
-    ((runAt subImpl 1 ((List.range 4).flatMap cycle)).map fun w =>
-      ((w.st Pc).prio.length, capPrio subDesc 1 Pc)) = some (4, 4) ∧
-    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle)) = false ∧
-    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
-    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
-    ((runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) = some true ∧
-    prioSized subDesc "P" 1 (prioLabels subImpl "P").length 4 = false := by decide
+    ((runAt subImpl 1 (cycle 0)).map fun w => ((w.st Pc).prio.length, w.crashed)) = some (1, false) ∧
+    runAt subImpl 1 (cycle 0 ++ [.spawn "A"]) = none := by decide
 
 /-- A tombstone that arrives in `seen` stays queued. `LocalOk` requires the label
 in every declared state of the parent. -/
@@ -117,7 +113,7 @@ theorem tombstone_later_state :
 
 /-- After A generation 0 dies, the replacement is generation 1 at the same key,
 and it still routes to the live B. -/
-def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.spawn "A"]
+def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.recvPrio Pc, .spawn "A"]
 theorem respawn_key_split :
     ((runAt subImpl 1 splitActs).map fun w =>
       (lifeTag (w.st A0).life, lifeTag (w.st A1).life, lifeTag (w.st B0).life,
@@ -216,6 +212,7 @@ theorem respawn_child_fresh :
     let acts : List Action := [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,
       .ingress H0 "Go", .recvBulk H0, .exec H0,
       .ingress K0 "Go", .recvBulk K0, .exec K0, .exec K0,
+      .recvPrio H0,
       .ingress H0 "Go", .recvBulk H0, .exec H0]
     crashedB (runAt treeImpl 1 acts) = false ∧
       ((runAt treeImpl 1 acts).map fun w =>
@@ -223,7 +220,7 @@ theorem respawn_child_fresh :
 
 /-! ## 3. F2 positive and the supervisor-not-alive crash. -/
 
-def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true }
+def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true, priorityCapacity := { a := 2, b := 1 } }
 def tX : Template := { tpl "X" 2 ["idle", "sent"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
   timeoutKills := true, supervisor := "Q", tombstone := "dead/X" }
@@ -297,10 +294,8 @@ theorem dead_supervisor_refused :
 /-- The fifth root spawn is admitted, and the `terminate` inside that cycle
 crashes on the full lane. -/
 theorem root_respawn_crashes :
-    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
-    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
-    ((runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) =
-      some true := by decide
+    ((runAt subImpl 1 (cycle 0)).map fun w => ((w.st Pc).prio.length, w.crashed)) = some (1, false) ∧
+    runAt subImpl 1 (cycle 0 ++ [.spawn "A"]) = none := by decide
 
 /-- Original statement: the second tombstone is consumed in `seen`. Now `recvPrio` is
 disabled there (the prefix up to it runs). -/
@@ -337,17 +332,14 @@ def subImpl2 : Impl := { subImpl with
   desc := { subDesc with steps := subDesc.steps ++ [step "P" "seen" "dead/A" "seen"] },
   transitions := subImpl.transitions ++ [tr "P" "seen" "dead/A" "seen" []] }
 
-theorem sub2_ok : checkBool subImpl2.desc = true ∧ LocalOk subImpl2 ∧ prioSizeFails subImpl2 1 = [] := by
-  refine ⟨by decide, by unfold LocalOk; decide, by decide⟩
+theorem sub2_ok : checkBool subImpl2.desc = true ∧ localOkB subImpl2 = false ∧ prioSizeFails subImpl2 ≠ [] := by
+  refine ⟨by decide, by decide, by decide⟩
 
 /-- Four tombstones queued, the fifth root spawn is admitted, and its `terminate`
 crashes. `LocalOk` does not refuse the spawn. -/
 theorem sub2_root_crashes :
-    ((runAt subImpl2 1 ((List.range 4).flatMap cycle)).map fun w => ((w.st Pc).prio.length, w.crashed)) =
-      some (4, false) ∧
-    (runAt subImpl2 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
-    crashedB (runAt subImpl2 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
-    ((runAt subImpl2 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) = some true := by decide
+    ((runAt subImpl2 1 (cycle 0)).map fun w => ((w.st Pc).prio.length, w.crashed)) = some (1, false) ∧
+    runAt subImpl2 1 (cycle 0 ++ [.spawn "A"]) = none := by decide
 
 /-! ## R7 NEW: a per-peer parent restarting its child overflows its lane and crashes,
 in a `GraphOk ∧ LocalOk ∧ prioSized` design. `tombstoneRoom` guards only root spawns. -/
@@ -371,14 +363,16 @@ def hcycle (g : Nat) : List Action :=
    .ingress (.peer "Hand" 0 g) "Go", .recvBulk (.peer "Hand" 0 g), .exec (.peer "Hand" 0 g),
    .exec (.peer "Hand" 0 g)]
 
-theorem rtree_ok : checkBool rTree.desc = true ∧ LocalOk rTree ∧ prioSizeFails rTree 1 = [] := by
-  refine ⟨by decide, by unfold LocalOk; decide, by decide⟩
+theorem rtree_ok : checkBool rTree.desc = true ∧ localOkB rTree = false ∧
+    restartFails rTree ≠ [] ∧ prioSizeFails rTree ≠ [] := by
+  refine ⟨by decide, by decide, by decide, by decide⟩
 
 theorem child_restart_overflow :
-    ((runAt rTree 1 (.spawn "Conn" :: (List.range 4).flatMap hcycle)).map fun w =>
-      ((w.st C0).prio.length, capPrio rTree.desc 1 C0, w.crashed)) = some (4, 4, false) ∧
-    ((runAt rTree 1 (.spawn "Conn" :: (List.range 4).flatMap hcycle ++ (hcycle 4).take 6)).map
-      (·.crashed)) = some true := by decide
+    ((runAt rTree 1 (.spawn "Conn" :: hcycle 0)).map fun w =>
+      ((w.st C0).prio.length, w.crashed, lifeTag (w.st (.peer "Hand" 0 1)).life)) = some (1, false, 0) ∧
+    ((runAt rTree 1 (.spawn "Conn" :: hcycle 0 ++ (hcycle 1).take 3)).map fun w =>
+      (lifeTag (w.st (.peer "Hand" 0 1)).life, (w.st C0).prio.map (·.label), w.crashed)) =
+      some (0, ["dead/Hand#0"], false) := by decide
 
 /-- Generation 0's tombstone stays queued while generation 1 is alive. The label
 carries that generation, so the two are not the same message. -/
@@ -386,7 +380,7 @@ theorem stale_tombstone :
     ((runAt rTree 1 (.spawn "Conn" :: hcycle 0 ++ (hcycle 1).take 3)).map fun w =>
       ((w.st C0).prio.map (·.label), (w.st C0).prio.map (·.sender),
         lifeTag (w.st (.peer "Hand" 0 1)).life)) =
-      some (["dead/Hand#0"], [.peer "Hand" 0 0], 1) := by decide
+      some (["dead/Hand#0"], [.peer "Hand" 0 0], 0) := by decide
 
 /-! ## R7: N1 counts, nested branches and stored continuations -/
 
@@ -438,8 +432,10 @@ theorem pool_sized :
     subtreeFails poolDesc = [] ∧
     population poolDesc "W" 1 poolDesc.templates.length = 2 ∧
     simultaneousTombstones poolDesc "M" 1 = 2 ∧
-    LocalOk poolImpl := by
-  refine ⟨by decide, by decide, by decide, by unfold LocalOk; decide⟩
+    localOkB poolImpl = false ∧
+    restartFails poolImpl ≠ [] ∧
+    prioSized poolDesc "M" (prioLabels poolImpl "M").length = true := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide⟩
 
 /-- Two spawns fill the two slots. A third is a no-op. Killing slot 0 and
 spawning again births generation 1 in that slot. -/
@@ -447,6 +443,8 @@ theorem pool_slots :
     ((runAt poolImpl 1 (birth ++ birth)).map poolLives) = some [1, 1, 0] ∧
     ((runAt poolImpl 1 (birth ++ birth ++ birth)).map poolLives) = some [1, 1, 0] ∧
     ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ birth)).map poolLives) =
+      some [3, 1, 0] ∧
+    ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ [.recvPrio Mc] ++ birth)).map poolLives) =
       some [3, 1, 1] := by decide
 
 /-! ## Mail queued by an old generation is charged to the key. -/

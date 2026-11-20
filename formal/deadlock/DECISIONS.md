@@ -82,15 +82,11 @@ stutter, and every runtime action are then disabled, so the run stops.
 Crash is a reachable outcome: a permanent core's `terminate`, and a priority
 enqueue onto a full lane. It is not a silent escape from a stuck parked send.
 
-`prioSized` counts the children that can tombstone at once, the other
-priority senders, and the tombstones still queued from dead predecessors.
-It does not bound restarts. `maySpawnRoot` does not consult that count:
-pure-stage `AddStage` does not refuse a spawn, and a tombstone that does
-not fit crashes the roster. A parent restarts a dead child at a fresh
-generation of the same key. The dead id is not reused. A supervisor that is
-dead or shutting down admits no new child. A core births a pool of `slots`
-children, indexed by slot and generation, and that `slots` multiplies the
-population and the tombstone count.
+A parent restarts a dead child at a fresh generation of the same key. The
+dead id is not reused. A supervisor that is dead or shutting down admits no
+new child. A core births a pool of `slots` children, indexed by slot and
+generation, and that `slots` multiplies the population and the tombstone
+count. The restart bound is the later decision on this page.
 
 ## 2026-11-20 — What deadlock freedom is about
 
@@ -112,3 +108,25 @@ add a prio-first runtime assumption to `SEMANTICS.md`, and do not change
 `Fair`. The known gap is accepted for now: a prio-first runtime satisfies
 `Fair.bulk` only if the priority lane eventually drains, and nothing in the
 model guarantees that.
+
+## 2026-11-20 — A slot has one outstanding tombstone
+
+Tombstones count toward `capPrio`. An enqueue that does not fit is
+`crashWorld`. A supervisor may re-spawn a child slot only in the transition
+that consumes that slot's tombstone, or later, once that tombstone is no
+longer queued. Until then the spawn is not enabled: `Eff.spawn` is a no-op,
+the same as a full pool, and a root spawn by a core into that slot returns
+no world. The predecessor may still be shutting down when its tombstone is
+consumed. The successor is born then, and refunds still go to the live
+generation.
+
+`LocalOk` rejects a program that spawns the child from a state which can run
+while the tombstone is still queued, so a checked design cannot rely on the
+no-op. Each slot then has at most one tombstone outstanding. The static bound
+is `prioSized`: the sum over child templates of slots times multiplicity,
+plus the other priority senders. A root a core spawns is one slot per root
+population, the same shape of bound. `prioSizeFails` is part of `LocalOk`.
+Under that check a tombstone enqueue has room (`no_tombstone_overflow`), so
+tombstone overflow is not a crash source for a checked design. A
+self-schedule or a cell wake that does not fit still crashes. That is
+pure-stage's panic, and it is not discharged by the slot bound.

@@ -223,14 +223,12 @@ def prioOk (I : Impl) : Bool :=
     let labels := prioLabels I t.name
     labels.length ≤ t.priorityBound.b && t.priorityBound.a == 0
 
-/-- The static size under which a priority lane does not overflow: capacity
-covers every child that can tombstone at once plus the other priority senders.
-Full-duplex sizing makes the tombstone term `population`, a product along the
-supervision tree. Not part of `LocalOk`. The checker will report these lines
-later. -/
-def prioSizeFails (I : Impl) (N : Nat) : List String :=
+/-- The static size under which a priority lane does not overflow. Capacity
+covers one tombstone per child slot, for every root population, plus the other
+priority senders. Part of `LocalOk`. -/
+def prioSizeFails (I : Impl) : List String :=
   I.desc.templates.filterMap fun t =>
-    if prioSized I.desc t.name N (prioLabels I t.name).length then none
+    if prioSized I.desc t.name (prioLabels I t.name).length then none
     else some s!"fail: priority lane {t.name} holds fewer slots than the tombstones and other priority senders it can receive at once"
 
 /-- Every program the semantics can fire is one of the steps the relation was closed under. -/
@@ -307,9 +305,71 @@ def tombstoneHandled (I : Impl) : Bool :=
             I.transitions.any fun tr =>
               tr.template == t.supervisor && tr.fromState == st && tr.label == t.tombstone
 
+/-- `child` is spawned somewhere in this program, including a continuation.
+Fuel keeps the recursion structural, so the checker reduces. Running out of
+fuel counts as a spawn, so a program the walk did not finish cannot slip past
+the restart check. -/
+def programSpawnsFuel (child : String) : Nat → List Eff → Bool
+  | 0, _ => true
+  | _ + 1, [] => false
+  | n + 1, .spawn c :: es => c == child || programSpawnsFuel child n es
+  | n + 1, .trySend _ _ _ onFull onGone :: es =>
+    programSpawnsFuel child n onFull || programSpawnsFuel child n onGone || programSpawnsFuel child n es
+  | n + 1, .call _ _ _ onNotAdmitted onTimedOut :: es =>
+    programSpawnsFuel child n onNotAdmitted || programSpawnsFuel child n onTimedOut ||
+      programSpawnsFuel child n es
+  | n + 1, .peer onTimeout :: es =>
+    programSpawnsFuel child n onTimeout || programSpawnsFuel child n es
+  | n + 1, _ :: es => programSpawnsFuel child n es
+
+def programSpawns (child : String) (es : List Eff) : Bool :=
+  programSpawnsFuel child 64 es
+
+def spawnToStates (I : Impl) (supervisor child : String) : List String :=
+  I.transitions.filterMap fun tr =>
+    if tr.template == supervisor && programSpawns child tr.program then some tr.toState else none
+
+/-- One step of the states reachable from `seen` along transitions of `template`
+whose label is not `blocked`. -/
+def succAvoid (I : Impl) (template blocked : String) (seen : List String) : List String :=
+  I.transitions.foldl (fun acc tr =>
+    if tr.template == template && seen.elem tr.fromState && tr.label != blocked &&
+        !(acc.elem tr.toState) then
+      tr.toState :: acc
+    else acc) seen
+
+def closeAvoidIter (I : Impl) (template blocked : String) : Nat → List String → List String
+  | 0, seen => seen
+  | n + 1, seen =>
+    let next := succAvoid I template blocked seen
+    if next.length == seen.length then seen else closeAvoidIter I template blocked n next
+
+def closeAvoid (I : Impl) (template blocked : String) (seed : List String) : List String :=
+  closeAvoidIter I template blocked (I.transitions.length + seed.length + 1) seed
+
+/-- A spawn of a supervised child that can run while that child's tombstone is
+still queued. The transition that consumes the tombstone is allowed. A later
+spawn is allowed from a state that cannot be reached, without consuming the
+tombstone, from a state in which the child may already be alive. -/
+def restartFails (I : Impl) : List String :=
+  I.desc.templates.flatMap fun child =>
+    if child.supervisor == "" || child.tombstone == "" then []
+    else
+      let queued := closeAvoid I child.supervisor child.tombstone
+        (spawnToStates I child.supervisor child.name)
+      I.transitions.filterMap fun tr =>
+        if tr.template == child.supervisor && programSpawns child.name tr.program &&
+            tr.label != child.tombstone && queued.elem tr.fromState then
+          some s!"fail: {child.supervisor} re-spawns {child.name} from {tr.fromState} on {tr.label} while that slot's tombstone may still be queued"
+        else none
+
+def restartOk (I : Impl) : Bool := (restartFails I).isEmpty
+
+def prioSizeOk (I : Impl) : Bool := (prioSizeFails I).isEmpty
+
 def localTail (I : Impl) : Bool :=
   stepsCoverB I && uniqueKeys I && labelHandled I && permanentTarget I && pureSchedOk I &&
-    tombstoneHandled I
+    (tombstoneHandled I && restartOk I && prioSizeOk I)
 
 def localOkB (I : Impl) : Bool :=
   I.transitions.all (transitionOk I) && callTotal I && targetsAll I.desc &&
@@ -618,6 +678,6 @@ def closedIssues (I : Impl) : List String :=
 def localIssues (I : Impl) : List String :=
   (I.transitions.flatMap (transitionIssues I)) ++ callIssues I ++ targetIssues I.desc ++
     shapeIssues I.desc ++ closedIssues I ++ prioIssues I ++ coverIssues I ++ keyIssues I ++
-    handledIssues I ++ permanentIssues I ++ schedIssues I
+    handledIssues I ++ permanentIssues I ++ schedIssues I ++ restartFails I ++ prioSizeFails I
 
 end Deadlock

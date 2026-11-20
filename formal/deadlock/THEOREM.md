@@ -27,8 +27,6 @@ still crash the roster are:
 - `terminate` of a permanent core
 - a self-schedule that does not fit the priority lane
 - a cell wake that does not fit the priority lane
-- a tombstone that does not fit the priority lane: a child restart, and a
-  root respawn while predecessors' tombstones are still queued
 - `enqueueTombstone` when the parent is not alive, or when the tombstone
   label is empty
 - the `terminate` fall-through, a stage the shutdown cases do not classify
@@ -41,11 +39,19 @@ program's `terminate` meets one of the classified shutdown cases; and a
 step looks up a template the description declares. This note does not
 prove those sites unreachable. A design that reaches one of them crashes.
 
-`prioSized` counts one tombstone per child that can be alive at once, and
-`slots` of a pool. It does not bound how often a child is restarted, and
-this development does not claim that a `prioSized` design cannot crash.
-`maySpawnRoot` does not refuse a spawn for lack of lane room. Pure-stage
-`AddStage` does not refuse a spawn; the later enqueue is what crashes.
+`prioSized` is part of `LocalOk`. It is one tombstone per child slot — `slots`
+times that child's multiplicity, and one slot per root population for a root
+a core spawns — plus the other priority senders. `LocalOk` also rejects a
+re-spawn that can run while that slot's tombstone is still queued. The
+semantics makes the same spawn a no-op, and a root spawn into such a slot is
+not enabled. Each slot therefore has at most one tombstone outstanding.
+`no_tombstone_overflow` is the room fact: under `prioSized`, a tombstone
+enqueue does not crash when the ones already queued are strictly under that
+slot bound and the other priority messages are within the static sender
+count. A death enqueues for a slot whose previous tombstone has been
+consumed, which is that case. Tombstone overflow is not a crash source under
+the checks. A self-schedule or a cell wake that does not fit still crashes,
+matching pure-stage's panic; those enqueues are not given the slot bound.
 `LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head

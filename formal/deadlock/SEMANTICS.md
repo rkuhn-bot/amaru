@@ -64,7 +64,7 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, `prio` nonempty, `deliver` accepts | Consume the `prio` head. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root with `slots = 0`, `aliveCount < N`, supervisor alive | Fresh generation at an open subtree key, idle, on the roster. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A full supervisor lane does not refuse the spawn: the later tombstone enqueue crashes. A dead id is not reused. |
+| `spawn template` | per-peer root with `slots = 0` and a free key, supervisor alive | Fresh generation at a free key, idle, on the roster. A core-supervised root uses keys `0 ..< N`; a key whose tombstone is still queued is not free, and the spawn is not enabled. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot whose tombstone is still queued is not free: that spawn is a no-op. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
@@ -142,7 +142,11 @@ An untimed peer (`peerUntimed`) is not a `Deadlock`. Its data result is
 marks that stage and every descendant shutting down, and `enqueueTombstone`
 places one tombstone on the immediate supervisor's priority lane. The
 supervisor may be a per-peer stage of the same subtree. The parent answers
-the tombstone in its own later step. A sibling is not a descendant, and
+the tombstone in its own later step. A re-spawn of that slot is enabled in
+the transition that consumes the tombstone, or later, once the tombstone is
+no longer queued. Until then the spawn is a no-op, the same as a full pool,
+and a root spawn into that slot is not enabled. The predecessor may still be
+shutting down when the tombstone is consumed. A sibling is not a descendant, and
 nothing here clears a sibling's mailbox. A lone terminable with no child
 and no parked call is `shutdownActor` of itself. A permanent core's
 `terminate`, and a priority enqueue onto a full lane, are `crashWorld`.

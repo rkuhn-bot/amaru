@@ -93,8 +93,9 @@ inductive Eff where
   shutting down. Siblings are not children of each other. -/
   | abort
   | terminate
-  /-- A per-peer stage spawns one child of `template` at its own subtree key.
-  A core spawns a pool child into a free slot below that template's `slots`. -/
+  /-- A per-peer stage spawns one child of `template` at its own key.
+  A core spawns a pool child into a free slot below that template's `slots`.
+  A slot whose tombstone is still queued is not free, and the spawn is a no-op. -/
   | spawn (template : String)
 
 mutual
@@ -566,35 +567,79 @@ def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
             | .one => N
             | .perPeer => population D t.supervisor N fuel
 
-/-- How many tombstones can sit on one instance of `parent` at once.
-A per-peer parent has one instance of each child template, or `slots` of a
-pool child. A core is the supervisor of every instance, and that count is
-`population`: the product along the supervision tree, times `slots` for a
-pool, not a flat `N` of labels. -/
-def simultaneousTombstones (D : Description) (parent : String) (N : Nat) : Nat :=
+/-- How many of `t` one parent instance can have outstanding. `slots = 0` is one
+child at the parent's key; a pool is its `slots`. -/
+def slotCount (t : Template) : Nat := if t.slots == 0 then 1 else t.slots
+
+/-- Tombstones one instance of `parent` can hold at once, as `a * N + b`.
+A per-peer parent's lane sees each direct child once, or `slots` of a pool.
+A core's lane sees `slots` of a pool and one slot per root population for a
+root child (`slots = 0`). That is `slots` times the child's multiplicity.
+A restart does not add a second term: the spawn rule keeps one tombstone
+per slot. -/
+def tombstoneAffine (D : Description) (parent : String) : Affine :=
   match templateOf D parent with
-  | none => 0
+  | none => .zero
   | some sup =>
-    D.templates.foldl (fun n t =>
+    D.templates.foldl (fun acc t =>
       if t.supervisor == parent && t.tombstone != "" then
         match sup.multiplicity with
-        | .one => n + population D t.name N D.templates.length
-        | .perPeer => n + (if t.slots == 0 then 1 else t.slots)
-      else n) 0
+        | .perPeer => { a := acc.a, b := acc.b + slotCount t }
+        | .one =>
+          if t.slots == 0 then { a := acc.a + 1, b := acc.b }
+          else { a := acc.a, b := acc.b + t.slots }
+      else acc) .zero
 
-/-- Slots a priority lane must have so it does not overflow: every child that
-can tombstone at once, plus the other priority senders (self-schedules and
-cell wakes), plus tombstones from dead predecessors still sitting on the lane.
-`otherSenders` is the static second count. `queued` is those leftover
-tombstones. The static check passes `0`. A spawn is not refused when the
-sum exceeds the capacity: the later tombstone enqueue crashes the roster. -/
-def prioDemand (D : Description) (parent : String) (N otherSenders : Nat) (queued : Nat := 0) : Nat :=
-  simultaneousTombstones D parent N + otherSenders + queued
+/-- How many tombstones can sit on one instance of `parent` at population `N`.
+This is `tombstoneAffine` evaluated, so a core's root children scale with `N`
+and a pool contributes its `slots`. -/
+def simultaneousTombstones (D : Description) (parent : String) (N : Nat) : Nat :=
+  (tombstoneAffine D parent).eval N
 
-def prioSized (D : Description) (parent : String) (N otherSenders : Nat) (queued : Nat := 0) : Bool :=
+/-- The static priority demand: one tombstone per child slot, plus the other
+priority senders. `otherSenders` is the self-schedule and cell-wake count.
+There is no leftover-restart term. The lane still crashes if an enqueue does
+not fit; `prioSized` is the check under which a tombstone enqueue has room. -/
+def prioDemandAffine (D : Description) (parent : String) (otherSenders : Nat) : Affine :=
+  { a := (tombstoneAffine D parent).a, b := (tombstoneAffine D parent).b + otherSenders }
+
+def prioDemand (D : Description) (parent : String) (N otherSenders : Nat) : Nat :=
+  (prioDemandAffine D parent otherSenders).eval N
+
+def prioSized (D : Description) (parent : String) (otherSenders : Nat) : Bool :=
   match templateOf D parent with
   | none => false
-  | some t => decide (prioDemand D parent N otherSenders queued ≤ t.priorityCapacity.eval N)
+  | some t => Affine.leB (prioDemandAffine D parent otherSenders) t.priorityCapacity
+
+/-- One more tombstone fits a `prioSized` lane when the tombstones already
+queued are strictly under the slot bound and the other priority messages are
+within the static sender count. The restart rule is what keeps a slot's
+queued count at zero at the moment that slot dies again. -/
+theorem tombstone_enqueue_room
+    (D : Description) (parent : String) (other tombs rest N : Nat) (t : Template)
+    (ht : templateOf D parent = some t)
+    (hs : prioSized D parent other = true)
+    (hrest : rest ≤ other)
+    (htombs : tombs + 1 ≤ (tombstoneAffine D parent).eval N) :
+    tombs + rest < t.priorityCapacity.eval N := by
+  simp only [prioSized, ht] at hs
+  have hcap := Affine.eval_le_of_leB (prioDemandAffine D parent other) t.priorityCapacity hs N
+  have hdem :
+      (prioDemandAffine D parent other).eval N = (tombstoneAffine D parent).eval N + other := by
+    unfold prioDemandAffine Affine.eval
+    exact (Nat.add_assoc ((tombstoneAffine D parent).a * N) (tombstoneAffine D parent).b other).symm
+  have hbound : (tombstoneAffine D parent).eval N + other ≤ t.priorityCapacity.eval N := by
+    simpa [hdem] using hcap
+  have hstep : tombs + rest + 1 ≤ (tombstoneAffine D parent).eval N + other := by
+    have hsum : tombs + 1 + rest ≤ (tombstoneAffine D parent).eval N + other :=
+      Nat.add_le_add htombs hrest
+    have hcomm : tombs + rest + 1 = tombs + 1 + rest := by
+      calc tombs + rest + 1
+        _ = tombs + (rest + 1) := by rw [Nat.add_assoc]
+        _ = tombs + (1 + rest) := by rw [Nat.add_comm rest 1]
+        _ = tombs + 1 + rest := by rw [← Nat.add_assoc]
+    simpa [hcomm] using hsum
+  exact Nat.lt_of_succ_le (Nat.le_trans hstep hbound)
 
 /-- Tombstones still queued on `id`. A dead child's message stays until the
 parent's `recvPrio`, and a replacement has to count it. -/
@@ -1189,6 +1234,53 @@ def enqueueTombstone (D : Description) (w : World) (child : InstId) : World :=
       setActor w parent
         { p with prio := p.prio ++ [msg], nextMid := p.nextMid + 1 }
 
+/-- A tombstone enqueue does not crash when the parent is alive, the label is
+non-empty, and the lane has room. A full lane, a dead parent, and an empty
+label still crash. -/
+theorem enqueueTombstone_fits
+    (D : Description) (w : World) (child parent : InstId)
+    (hsup : liveSupervisor D w child = some parent)
+    (hlife : (w.st parent).life = .alive)
+    (hlabel : (tombstoneMsg D (w.st parent) child).label ≠ "")
+    (hroom : prioLoad (w.st parent).prio < capPrio D w.N parent)
+    (hcrash : w.crashed = false) :
+    (enqueueTombstone D w child).crashed = false := by
+  unfold enqueueTombstone
+  simp only [hsup]
+  have hif : ((w.st parent).life != .alive) = false := by simp [hlife]
+  have hlab : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+    simpa [beq_iff_eq] using hlabel
+  have hdec : decide (prioLoad (w.st parent).prio ≥ capPrio D w.N parent) = false :=
+    decide_eq_false (Nat.not_le.mpr hroom)
+  split
+  · next hbad => simp [hif, hlab, hdec] at hbad
+  · simp [setActor, hcrash]
+
+/-- Under `prioSized`, a tombstone fits when the queued tombstones are strictly
+under the slot bound and the other priority messages are within the static
+sender count. That is the enqueue a restart leaves: the slot's previous
+tombstone has been consumed, so this death is not a second one for the slot. -/
+theorem no_tombstone_overflow
+    (D : Description) (w : World) (child parent : InstId) (parentName : String)
+    (other tombs rest : Nat) (t : Template)
+    (ht : templateOf D parentName = some t)
+    (hs : prioSized D parentName other = true)
+    (hrest : rest ≤ other)
+    (htombs : tombs + 1 ≤ (tombstoneAffine D parentName).eval w.N)
+    (hload : prioLoad (w.st parent).prio = tombs + rest)
+    (hsup : liveSupervisor D w child = some parent)
+    (hlife : (w.st parent).life = .alive)
+    (hlabel : (tombstoneMsg D (w.st parent) child).label ≠ "")
+    (hname : tname parent = parentName)
+    (hcrash : w.crashed = false) :
+    (enqueueTombstone D w child).crashed = false := by
+  have hlt : tombs + rest < t.priorityCapacity.eval w.N :=
+    tombstone_enqueue_room D parentName other tombs rest w.N t ht hs hrest htombs
+  have hcap : capPrio D w.N parent = t.priorityCapacity.eval w.N := by
+    unfold capPrio
+    rw [hname, ht]
+  exact enqueueTombstone_fits D w child parent hsup hlife hlabel (by simpa [hload, hcap] using hlt) hcrash
+
 /-- Drop parked entries whose sender is `dead` on every other host, and return
 those slots to `dead`. The host's own mailbox is left alone. A host that holds
 nothing of `dead` is skipped. -/
@@ -1292,8 +1384,10 @@ def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : 
 roster. `crashWorld` sets `w.crashed` and every later action is disabled, so
 the world is absorbing. The liveness claim is deadlock-free or crashed: a fair
 run of a checked implementation is not stuck, or a step has already crashed
-the roster. A theorem that crash is unreachable under `prioSized` is not
-claimed here. -/
+the roster. `no_tombstone_overflow` is the tombstone half: under `prioSized`,
+one more tombstone fits when the ones already queued are strictly under the
+slot bound and the other priority messages are within the static sender count.
+A self-schedule or a cell wake that does not fit still crashes. -/
 def WorldCrashed (w : World) : Prop :=
   ∃ id, id ∈ w.roster ∧ (w.st id).life = .dead ∧ (w.st id).phase = .crashed
 
@@ -1329,22 +1423,37 @@ def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
       enqueueTombstone D w child
     else w) w
 
-/-- Lowest slot in `0 ..< n` with no live `name`. Structural in the fuel. -/
-def freeSlot (w : World) (name : String) (n : Nat) : Option Nat :=
+/-- A tombstone for `child` at slot `k` is still on `parent`'s priority lane. -/
+def slotTombstoneQueued (w : World) (parent : InstId) (child : String) (k : Nat) : Bool :=
+  (w.st parent).prio.any fun m =>
+    m.tombstone &&
+      match m.sender with
+      | .peer n key _ => n == child && key == k
+      | .core _ => false
+
+/-- Lowest slot in `0 ..< n` with no live `name` and no tombstone of that slot
+still queued on `parent`. Structural in the fuel. A queued tombstone occupies
+the slot until the supervisor consumes it. -/
+def freeSlot (w : World) (parent : InstId) (name : String) (n : Nat) : Option Nat :=
   let rec go (fuel : Nat) : Option Nat :=
     match fuel with
     | 0 => none
     | fuel + 1 =>
       let k := n - (fuel + 1)
-      if aliveAt w name k then go fuel else some k
+      if aliveAt w name k || slotTombstoneQueued w parent name k then go fuel else some k
   go n
 
+/-- Lowest root key in `0 ..< n` whose tombstone is not still on the core. -/
+def freeRootSlot (w : World) (supervisor name : String) (n : Nat) : Option Nat :=
+  freeSlot w (.core supervisor) name n
+
 /-- A per-peer parent births one child at its own key. A core births one pool
-child in a free slot below `slots`. A live child is left as it is. A dead
-child is restarted at a fresh generation of the same slot; the dead id stays
-on the roster, and mail that generation still has queued is charged to the
-new one's tokens. A parent that is not alive admits nobody. A spawn the
-template does not allow is `none`, and the effect then crashes. -/
+child in a free slot below `slots`. A live child is left as it is. A slot
+whose tombstone is still queued is not free: the spawn is a no-op, the same
+as a full pool, until the supervisor consumes that tombstone. The predecessor
+may still be shutting down when the tombstone is consumed; the new generation
+is then born at the same slot. A parent that is not alive admits nobody. A
+spawn the template does not allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
   match templateOf I.desc child with
   | none => none
@@ -1353,7 +1462,7 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
       match parent with
       | .core _ =>
         if t.slots != 0 then
-          match freeSlot w child t.slots with
+          match freeSlot w parent child t.slots with
           | some k =>
             let id := InstId.peer child k (maxGen w child k)
             some (admitBorn I w id (bornActor I.desc w child k t.initial))
@@ -1364,8 +1473,10 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
           match findLive w child k with
           | some _ => some w
           | none =>
-            let id := InstId.peer child k (maxGen w child k)
-            some (admitBorn I w id (bornActor I.desc w child k t.initial))
+            if slotTombstoneQueued w parent child k then some w
+            else
+              let id := InstId.peer child k (maxGen w child k)
+              some (admitBorn I w id (bornActor I.desc w child k t.initial))
         else none
     else if t.multiplicity == .perPeer && t.supervisor == tname parent then
       some w
@@ -2249,21 +2360,13 @@ def supervisorLive (D : Description) (w : World) (t : Template) : Bool :=
       | .one => (w.st (.core t.supervisor)).life == .alive
       | .perPeer => false
 
-/-- Room on the supervisor's lane for one more tombstone, counting the ones
-still queued from dead predecessors. -/
-def tombstoneRoom (D : Description) (w : World) (t : Template) : Bool :=
-  if t.supervisor == "" || t.tombstone == "" then true
-  else
-    match templateOf D t.supervisor with
-    | none => false
-    | some sup =>
-      match sup.multiplicity with
-      | .one => prioSized D t.supervisor w.N 0 (queuedTombstones w (.core t.supervisor))
-      | .perPeer => true
-
+/-- A root under a core uses the same slot bound as a pool. Keys are
+`0 ..< N`. A key with a live occupant, or with that template's tombstone
+still on the core, is not free. No such key means the spawn is not enabled. -/
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
-  t.multiplicity == .perPeer && t.slots == 0 && rootOf D t &&
-    decide (aliveCount w template < w.N) && supervisorLive D w t
+  t.multiplicity == .perPeer && t.slots == 0 && rootOf D t && supervisorLive D w t &&
+    if t.supervisor != "" then (freeRootSlot w t.supervisor template w.N).isSome
+    else decide (aliveCount w template < w.N)
 
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
@@ -2273,7 +2376,14 @@ def spawn (I : Impl) (w : World) (template : String) : Option World :=
       let base : Actor :=
         { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
           tokens := fun _ => 0 }
-      if t.subtree == "" then
+      if t.supervisor != "" then
+        match freeRootSlot w t.supervisor template w.N with
+        | some k =>
+          let id := InstId.peer template k (maxGen w template k)
+          let w := { w with roster := w.roster ++ [id] }
+          some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
+        | none => none
+      else if t.subtree == "" then
         let k := w.nextIx template
         let id := InstId.peer template k 0
         let w := { w with roster := w.roster ++ [id], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n }
@@ -6780,27 +6890,39 @@ theorem spawn_core_life (I : Impl) (w : World) (template : String) (w' : World) 
     simp only [ht] at h
     by_cases hgo : maySpawnRoot I.desc w template t = true
     · simp only [hgo, ite_true] at h
-      by_cases hsub : (t.subtree == "") = true
-      · simp only [hsub, ite_true] at h
-        cases h
-        have hpeer : InstId.core name ≠ InstId.peer template (w.nextIx template) 0 := by
-          intro h; cases h
-        simp [setActor, cellsSt, hpeer]
-      · have hsubF : (t.subtree == "") = false := by simpa [Bool.not_eq_true] using hsub
-        simp only [hsubF, ite_false] at h
-        cases hk : openSubtreeKey I.desc w t.subtree template with
+      by_cases hsup : (t.supervisor != "") = true
+      · simp only [hsup, ite_true] at h
+        cases hk : freeRootSlot w t.supervisor template w.N with
         | some k =>
           simp [hk] at h
           cases h
           have hpeer : InstId.core name ≠ InstId.peer template k (maxGen w template k) := by
             intro h; cases h
           simp [setActor, cellsSt, hpeer]
-        | none =>
-          simp [hk] at h
+        | none => simp [hk] at h
+      · have hsupF : (t.supervisor != "") = false := by simpa [Bool.not_eq_true] using hsup
+        simp only [hsupF, ite_false] at h
+        by_cases hsub : (t.subtree == "") = true
+        · simp only [hsub, ite_true] at h
           cases h
-          have hpeer : InstId.core name ≠ InstId.peer template (w.nextKey t.subtree) (maxGen w template (w.nextKey t.subtree)) := by
+          have hpeer : InstId.core name ≠ InstId.peer template (w.nextIx template) 0 := by
             intro h; cases h
           simp [setActor, cellsSt, hpeer]
+        · have hsubF : (t.subtree == "") = false := by simpa [Bool.not_eq_true] using hsub
+          simp only [hsubF, ite_false] at h
+          cases hk : openSubtreeKey I.desc w t.subtree template with
+          | some k =>
+            simp [hk] at h
+            cases h
+            have hpeer : InstId.core name ≠ InstId.peer template k (maxGen w template k) := by
+              intro h; cases h
+            simp [setActor, cellsSt, hpeer]
+          | none =>
+            simp [hk] at h
+            cases h
+            have hpeer : InstId.core name ≠ InstId.peer template (w.nextKey t.subtree) (maxGen w template (w.nextKey t.subtree)) := by
+              intro h; cases h
+            simp [setActor, cellsSt, hpeer]
     · simp [hgo] at h
 
 theorem releaseOutbound_life (w : World) (dead s : InstId) :
@@ -7257,10 +7379,13 @@ theorem spawnChild_core_life (I : Impl) (w w' : World) (parent : InstId) (child 
         · split at h
           · cases h
             rfl
-          · cases h
-            have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
-              intro h; cases h
-            simp [admitBorn, setActor, cellsSt, hpeer]
+          · split at h
+            · cases h
+              rfl
+            · cases h
+              have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
+                intro h; cases h
+              simp [admitBorn, setActor, cellsSt, hpeer]
         · simp at h
     · split at h
       · cases h

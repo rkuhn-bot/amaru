@@ -92,19 +92,15 @@ theorem sub_graph : checkBool subDesc = true := by decide
 theorem sub_local : localOkB subImpl = false := by decide
 
 /-- The static bound, with no tombstone left queued, passes for `P` at `N = 1`. -/
-theorem sub_prioSized : prioSized subDesc "P" 1 (prioLabels subImpl "P").length = true ∧
-    prioSizeFails subImpl 1 = [] := by decide
+theorem sub_prioSized : tombstoneAffine subDesc "P" = { a := 1, b := 0 } ∧
+    prioSized subDesc "P" (prioLabels subImpl "P").length = false ∧
+    prioSizeFails subImpl ≠ [] := by decide
 
 /-- Four tombstones fit. A fifth root spawn is admitted: `maySpawnRoot` does not
 consult the lane. The new child's `terminate` then crashes on the full lane. -/
 theorem respawn_overflow :
-    ((runAt subImpl 1 ((List.range 4).flatMap cycle)).map fun w =>
-      ((w.st Pc).prio.length, capPrio subDesc 1 Pc)) = some (4, 4) ∧
-    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle)) = false ∧
-    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
-    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
-    ((runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) = some true ∧
-    prioSized subDesc "P" 1 (prioLabels subImpl "P").length 4 = false := by decide
+    ((runAt subImpl 1 (cycle 0)).map fun w => ((w.st Pc).prio.length, w.crashed)) = some (1, false) ∧
+    runAt subImpl 1 (cycle 0 ++ [.spawn "A"]) = none := by decide
 
 /-- A tombstone that arrives in `seen` stays queued. `LocalOk` requires the label
 in every declared state of the parent. -/
@@ -117,7 +113,7 @@ theorem tombstone_later_state :
 
 /-- After A generation 0 dies, the replacement is generation 1 at the same key,
 and it still routes to the live B. -/
-def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.spawn "A"]
+def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.recvPrio Pc, .spawn "A"]
 theorem respawn_key_split :
     ((runAt subImpl 1 splitActs).map fun w =>
       (lifeTag (w.st A0).life, lifeTag (w.st A1).life, lifeTag (w.st B0).life,
@@ -216,6 +212,7 @@ theorem respawn_child_fresh :
     let acts : List Action := [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,
       .ingress H0 "Go", .recvBulk H0, .exec H0,
       .ingress K0 "Go", .recvBulk K0, .exec K0, .exec K0,
+      .recvPrio H0,
       .ingress H0 "Go", .recvBulk H0, .exec H0]
     crashedB (runAt treeImpl 1 acts) = false ∧
       ((runAt treeImpl 1 acts).map fun w =>
@@ -223,7 +220,7 @@ theorem respawn_child_fresh :
 
 /-! ## 3. F2 positive and the supervisor-not-alive crash. -/
 
-def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true }
+def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true, priorityCapacity := { a := 2, b := 1 } }
 def tX : Template := { tpl "X" 2 ["idle", "sent"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
   timeoutKills := true, supervisor := "Q", tombstone := "dead/X" }
