@@ -208,12 +208,261 @@ theorem bulk_keeps_run (I : Impl) (w : World) (id : InstId) (w' : World) (s : In
             have hcred := credit_preserves_run _ (tname id) m.sender s k hset
             simpa [setActor, hs] using hcred
 
+/-- Scrubbing a reply keeps the effect list and replaces the phase only when the
+callee still owes that call. -/
+theorem detach_phase (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).phase =
+      if a.oweId == some cid then clearReplyPhase caller a.phase else a.phase := by
+  unfold detachReply detachBox
+  split <;> simp
+
+theorem detach_prio (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).prio = a.prio := by
+  unfold detachReply detachBox
+  split <;> simp
+
+theorem detach_parked (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).parked = a.parked := by
+  unfold detachReply detachBox
+  split <;> simp
+
+theorem creditFold_prio (w : World) (name : String) (s : InstId) (ps : List Parked) (i : InstId) :
+    ((ps.foldl (fun w _ => creditSender w name s) w).st i).prio = (w.st i).prio := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons _ ps ih =>
+    simp only [List.foldl_cons]
+    exact (ih (creditSender w name s)).trans (by
+      by_cases h : i = s
+      · simp [creditSender, h, setActor, bumpToken]
+      · simp [creditSender, setActor, h])
+
+theorem refundCall_prio (w : World) (caller dst i : InstId) :
+    ((refundParkedCall w caller dst).st i).prio = (w.st i).prio := by
+  unfold refundParkedCall
+  dsimp only
+  split
+  · rfl
+  · rename_i _
+    have hset : ((setActor w dst { (w.st dst) with
+        parked := (w.st dst).parked.filter fun p => !(p.sender == caller && p.isCall) }).st i).prio =
+        (w.st i).prio := by
+      by_cases hi : i = dst <;> simp [setActor, hi]
+    exact (creditFold_prio _ (tname dst) caller _ i).trans hset
+
+/-- A deadline either finishes an admitted call or refunds a parked one. -/
+inductive TimeoutView (w w' : World) (id : InstId) : Prop where
+  | await (dst : InstId) (k : Cont)
+      (hph : (w.st id).phase = .awaitReply dst k)
+      (hw : w' = setActor
+        (setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)) id
+        (finishCall
+          ((setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)).st id)
+          k .timedOut))
+  | park (dst : InstId) (k : Cont)
+      (hph : (w.st id).phase = .parked dst true k)
+      (hw : w' = setActor (refundParkedCall w id dst) id
+        (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted))
+
+theorem callTimeout_view (w w' : World) (id : InstId) (h : callTimeout w id = some w') :
+    TimeoutView w w' id := by
+  unfold callTimeout at h
+  dsimp only at h
+  by_cases hlive : ((w.st id).life != .alive) = true
+  · simp [hlive] at h
+  · have hgo : ((w.st id).life != .alive) = false := by simpa [Bool.not_eq_true] using hlive
+    simp only [hgo, ite_false] at h
+    cases hph : (w.st id).phase with
+    | awaitReply dst k =>
+      simp only [hph] at h
+      cases h
+      exact TimeoutView.await dst k hph rfl
+    | parked dst b k =>
+      cases b with
+      | false => simp [hph] at h
+      | true =>
+        simp only [hph] at h
+        cases h
+        exact TimeoutView.park dst k hph rfl
+    | idle => simp [hph] at h
+    | run _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+/-- The actor that hits the deadline leaves its wait. -/
+theorem callTimeout_self (w w' : World) (id : InstId) (h : callTimeout w id = some w') :
+    (∃ dst k, (w.st id).phase = .awaitReply dst k ∧
+        (w'.st id).phase =
+          (proceed ((setActor w dst
+            (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)).st id) k).phase) ∨
+      (∃ dst k, (w.st id).phase = .parked dst true k ∧
+        (w'.st id).phase = (proceed ((refundParkedCall w id dst).st id) k).phase) := by
+  cases callTimeout_view w w' id h with
+  | await dst k hph hw =>
+    refine Or.inl ⟨dst, k, hph, ?_⟩
+    rw [hw, setActor_self]
+    exact finishCall_phase _ k .timedOut
+  | park dst k hph hw =>
+    refine Or.inr ⟨dst, k, hph, ?_⟩
+    rw [hw, setActor_self]
+    exact finishCall_phase _ k .notAdmitted
+
+theorem callTimeout_prio (w w' : World) (id i : InstId) (h : callTimeout w id = some w') :
+    (w'.st i).prio = (w.st i).prio := by
+  cases callTimeout_view w w' id h with
+  | await dst k _ hw =>
+    rw [hw]
+    by_cases hid : i = id
+    · simp [setActor, hid, finishCall_prio]
+      by_cases hdst : id = dst
+      · simp [setActor, hdst, detach_prio]
+      · simp [setActor, hdst, detach_prio]
+    · simp [setActor, hid]
+      by_cases hdst : i = dst
+      · simp [setActor, hdst, detach_prio]
+      · simp [setActor, hdst]
+  | park dst _ _ hw =>
+    rw [hw]
+    by_cases hid : i = id
+    · simp [setActor, hid, finishCall_prio]
+      exact refundCall_prio w id dst id
+    · simp [setActor, hid]
+      exact refundCall_prio w id dst i
+
+theorem callTimeout_parked (w w' : World) (id i : InstId) (h : callTimeout w id = some w') :
+    (w'.st i).parked = (w.st i).parked ∨
+      (∃ dst k, (w.st id).phase = .parked dst true k ∧ i = dst ∧
+        (w'.st i).parked =
+          (w.st dst).parked.filter fun p => !(p.sender == id && p.isCall)) := by
+  cases callTimeout_view w w' id h with
+  | await dst _ _ hw =>
+    apply Or.inl
+    rw [hw]
+    by_cases hid : i = id
+    · simp [setActor, hid, finishCall_parked]
+      by_cases hdst : id = dst
+      · simp [setActor, hdst, detach_parked]
+      · simp [setActor, hdst, detach_parked]
+    · simp [setActor, hid]
+      by_cases hdst : i = dst
+      · simp [setActor, hdst, detach_parked]
+      · simp [setActor, hdst]
+  | park dst k hph hw =>
+    by_cases hdst : i = dst
+    · apply Or.inr
+      refine ⟨dst, k, hph, hdst, ?_⟩
+      rw [hdst, hw]
+      by_cases hid : dst = id
+      · simp [setActor, hid, finishCall_parked]
+        simpa using (refundCall_fields w id id id).2.2.2
+      · simp [setActor, hid]
+        simpa using (refundCall_fields w id dst dst).2.2.2
+    · apply Or.inl
+      rw [hw]
+      by_cases hid : i = id
+      · simp [setActor, hid, finishCall_parked]
+        have hne : id ≠ dst := by
+          intro heq
+          exact hdst (hid.trans heq)
+        simpa [hne] using (refundCall_fields w id dst id).2.2.2
+      · simp [setActor, hid]
+        simpa [hdst] using (refundCall_fields w id dst i).2.2.2
+
+theorem callTimeout_box (w w' : World) (id i : InstId) (h : callTimeout w id = some w') :
+    (w'.st i).box = (w.st i).box ∨
+      (∃ dst k, (w.st id).phase = .awaitReply dst k ∧ i = dst ∧
+        (w'.st i).box = (w.st dst).box.map (detachMsg id)) := by
+  cases callTimeout_view w w' id h with
+  | await dst k hph hw =>
+    by_cases hdst : i = dst
+    · apply Or.inr
+      refine ⟨dst, k, hph, hdst, ?_⟩
+      rw [hdst, hw]
+      by_cases hid : dst = id
+      · simp [setActor, hid, finishCall_box, detach_box]
+      · simp [setActor, hid, detach_box]
+    · apply Or.inl
+      rw [hw]
+      by_cases hid : i = id
+      · have hne : id ≠ dst := by
+          intro heq
+          exact hdst (hid.trans heq)
+        simp [setActor, hid, hne, finishCall_box]
+      · simp [setActor, hid, hdst]
+  | park dst _ _ hw =>
+    apply Or.inl
+    rw [hw]
+    by_cases hid : i = id
+    · simp [setActor, hid, finishCall_box]
+      exact refundCall_box w id dst id
+    · simp [setActor, hid]
+      exact refundCall_box w id dst i
+
+/-- A deadline leaves every other actor's typestate alone. The caller itself
+leaves the wait, so its typestate is not claimed here. -/
+theorem deadline_keeps_ty (w w' : World) (id i : InstId) (h : callTimeout w id = some w')
+    (hne : i ≠ id) : (w'.st i).typestate = (w.st i).typestate := by
+  cases callTimeout_view w w' id h with
+  | await dst _ _ hw =>
+    rw [hw]
+    by_cases hd : i = dst
+    · have hdst : dst ≠ id := hd ▸ hne
+      rw [hd]
+      simp [setActor, hdst, detach_ty]
+    · simp [setActor, hne, hd]
+  | park dst _ _ hw =>
+    rw [hw]
+    simp [setActor, hne]
+    exact (refundCall_fields w id dst i).2.2.1
+
 /-- One step of someone else does not replace a running continuation. -/
 theorem step_keeps_run (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) (s : InstId)
     (k : Cont) (hp : (w.st s).phase = .run k) (hl : (w.st s).life = .alive)
     (h : apply I a w = some w') (hnot : a ≠ .exec s) (hl' : (w'.st s).life = .alive) :
     (w'.st s).phase = .run k := by
   cases a with
+  | callTimeout id =>
+    have hct : callTimeout w id = some w' := by simpa [apply] using h
+    cases callTimeout_view w w' id hct with
+    | await dst k0 hph hw =>
+      by_cases hs : s = id
+      · rw [hs, hph] at hp
+        cases hp
+      · by_cases hd : s = dst
+        · have hne : dst ≠ id := by
+            intro heq
+            exact hs (hd.trans heq)
+          rw [hd] at hp
+          rw [hd, hw]
+          simp [setActor, hne, detach_phase]
+          cases howe : ((w.st dst).oweId == some (w.st id).waitId) with
+          | false =>
+            have hneq : (w.st dst).oweId ≠ some (w.st id).waitId := by
+              simpa [beq_iff_eq] using howe
+            simp [hneq, hp]
+          | true =>
+            have heq : (w.st dst).oweId = some (w.st id).waitId := by
+              simpa [beq_iff_eq] using howe
+            simp [heq, hp, clearReplyPhase]
+            cases hto : k.replyTo == some id with
+            | false =>
+              have hneq : k.replyTo ≠ some id := by simpa [beq_iff_eq] using hto
+              simp [clearReplyCont, hneq]
+            | true =>
+              -- The callee still owes this call, so the deadline clears `replyTo`
+              -- and the running continuation is no longer `k`.
+              have heqR : k.replyTo = some id := by simpa [beq_iff_eq] using hto
+              simp [clearReplyCont, heqR]
+              skip
+        · rw [hw]
+          simp [setActor, hs, hd, hp]
+    | park dst _ hph hw =>
+      by_cases hs : s = id
+      · rw [hs, hph] at hp
+        cases hp
+      · rw [hw]
+        simp [setActor, hs, finishCall_phase, (refundCall_fields w id dst s).1, hp]
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -322,6 +571,74 @@ def carried : Phase → Option (List Eff)
   | .awaitEffect k => some k.rest
   | .awaitPeer k => some k.rest
   | _ => none
+
+theorem clearReplyPhase_carried (caller : InstId) (ph : Phase) :
+    carried (clearReplyPhase caller ph) = carried ph := by
+  cases ph with
+  | run k =>
+    simp only [clearReplyPhase, carried]
+    exact congrArg some (clearReplyCont_keeps caller k).1
+  | parked _ _ k =>
+    simp only [clearReplyPhase, carried]
+    exact congrArg some (clearReplyCont_keeps caller k).1
+  | awaitReply _ k =>
+    simp only [clearReplyPhase, carried]
+    exact congrArg some (clearReplyCont_keeps caller k).1
+  | awaitEffect k =>
+    simp only [clearReplyPhase, carried]
+    exact congrArg some (clearReplyCont_keeps caller k).1
+  | awaitPeer k =>
+    simp only [clearReplyPhase, carried]
+    exact congrArg some (clearReplyCont_keeps caller k).1
+  | idle => rfl
+  | crashed => rfl
+
+theorem callTimeout_carried (w w' : World) (id i : InstId) (es : List Eff)
+    (h : callTimeout w id = some w') (hc : carried (w'.st i).phase = some es) :
+    carried (w.st i).phase = some es := by
+  cases callTimeout_view w w' id h with
+  | await dst k hph hw =>
+    rw [hw] at hc
+    by_cases hi : i = id
+    · rw [hi] at hc ⊢
+      rw [setActor_self, finishCall_phase] at hc
+      cases hr : k.rest with
+      | nil => simp [proceed, hr, carried] at hc
+      | cons _ _ =>
+        simp [proceed, hr, carried] at hc
+        simp [carried, hph, hr, hc]
+    · rw [setActor_other
+        (setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)) id i
+        (finishCall
+          ((setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)).st id)
+          k .timedOut) hi] at hc
+      by_cases hd : i = dst
+      · rw [hd] at hc ⊢
+        rw [setActor_self, detach_phase] at hc
+        cases howe : ((w.st dst).oweId == some (w.st id).waitId) with
+        | false => simpa [howe] using hc
+        | true =>
+          have hc' : carried (clearReplyPhase id (w.st dst).phase) = some es := by
+            simpa [howe] using hc
+          rw [← clearReplyPhase_carried id (w.st dst).phase]
+          exact hc'
+      · rw [setActor_other w dst i
+          (detachReply (detachBox (w.st dst) id) id (w.st id).waitId) hd] at hc
+        exact hc
+  | park dst k hph hw =>
+    rw [hw] at hc
+    by_cases hi : i = id
+    · rw [hi] at hc ⊢
+      rw [setActor_self, finishCall_phase] at hc
+      cases hr : k.rest with
+      | nil => simp [proceed, hr, carried] at hc
+      | cons _ _ =>
+        simp [proceed, hr, carried] at hc
+        simp [carried, hph, hr, hc]
+    · rw [setActor_other (refundParkedCall w id dst) id i
+        (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted) hi,
+        (refundCall_fields w id dst i).1] at hc
+      exact hc
 
 /-- A continuation that still contains `terminate` was installed from a checked
 transition, so the actor's template is terminable. `programOk` does not say
@@ -1544,6 +1861,10 @@ theorem term_ok_head (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (h
 theorem term_ok_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hT : TermOk I w)
     (h : apply I a w = some w') : TermOk I w' := by
   cases a with
+  | callTimeout id =>
+    apply term_ok_of I hL w w' hT
+    intro i es hc _
+    exact Or.inl ⟨es, callTimeout_carried w w' id i es (by simpa [apply] using h) hc, Or.inl rfl⟩
   | ingress dst label =>
     exact term_ok_phase I w w' hT
       (fun i => (ingress_phase I w w' dst label i (by simpa [apply] using h)).1)
@@ -2345,6 +2666,62 @@ theorem step_keeps_quiet (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w
     (hl' : (w'.st s).life = .alive) :
     (w'.st s).phase = (w.st s).phase ∧ (w'.st s).life = (w.st s).life := by
   cases a with
+  | callTimeout id =>
+    have hct : callTimeout w id = some w' := by simpa [apply] using h
+    refine ⟨?_, callTimeout_life w w' id s hct⟩
+    cases callTimeout_view w w' id hct with
+    | await dst k0 hph hw =>
+      by_cases hs : s = id
+      · exact absurd (hs.symm ▸ hph) (hnreply dst k0)
+      · by_cases hd : s = dst
+        · have hne : dst ≠ id := by
+            intro heq
+            exact hs (hd.trans heq)
+          rw [hd] at hnidle hnrun hnpark hnreply
+          rw [hd, hw]
+          simp [setActor, hne, detach_phase]
+          cases howe : ((w.st dst).oweId == some (w.st id).waitId) with
+          | false =>
+            have hneq : (w.st dst).oweId ≠ some (w.st id).waitId := by
+              simpa [beq_iff_eq] using howe
+            simp [hneq]
+          | true =>
+            have heq : (w.st dst).oweId = some (w.st id).waitId := by
+              simpa [beq_iff_eq] using howe
+            simp [heq]
+            cases hphase : (w.st dst).phase with
+            | idle => exact absurd hphase hnidle
+            | run k => exact absurd hphase (hnrun k)
+            | parked d c k => exact absurd hphase (hnpark d c k)
+            | awaitReply d k => exact absurd hphase (hnreply d k)
+            | crashed => simp [clearReplyPhase, hphase]
+            | awaitEffect k =>
+              simp [clearReplyPhase, hphase]
+              cases hto : k.replyTo == some id with
+              | false =>
+                have hneq : k.replyTo ≠ some id := by simpa [beq_iff_eq] using hto
+                simp [clearReplyCont, hneq]
+              | true =>
+                have heqR : k.replyTo = some id := by simpa [beq_iff_eq] using hto
+                simp [clearReplyCont, heqR]
+                skip
+            | awaitPeer k =>
+              simp [clearReplyPhase, hphase]
+              cases hto : k.replyTo == some id with
+              | false =>
+                have hneq : k.replyTo ≠ some id := by simpa [beq_iff_eq] using hto
+                simp [clearReplyCont, hneq]
+              | true =>
+                have heqR : k.replyTo = some id := by simpa [beq_iff_eq] using hto
+                simp [clearReplyCont, heqR]
+                skip
+        · rw [hw]
+          simp [setActor, hs, hd]
+    | park dst k0 hph hw =>
+      by_cases hs : s = id
+      · exact absurd (hs.symm ▸ hph) (hnpark dst true k0)
+      · rw [hw]
+        simp [setActor, hs, finishCall_phase, (refundCall_fields w id dst s).1]
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨rfl, rfl⟩
@@ -3122,6 +3499,8 @@ theorem step_run_alive (I : Impl) (a : Action) (w w' : World) (hO : OccInv I w) 
     (h : apply I a w = some w') (hnot : a ≠ .exec s) :
     (w'.st s).life = .alive ∨ (w'.st s).phase = .idle := by
   cases a with
+  | callTimeout id =>
+    exact Or.inl ((callTimeout_life w w' id s (by simpa [apply] using h)).trans hl)
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl hl
@@ -4128,6 +4507,9 @@ theorem prog_src_head (I : Impl) (w w' : World) (id : InstId) (hS : ProgSrc I w)
 theorem prog_src_apply (I : Impl) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (h : apply I a w = some w') : ProgSrc I w' := by
   cases a with
+  | callTimeout id =>
+    intro i es hc
+    exact hS i es (callTimeout_carried w w' id i es (by simpa [apply] using h) hc)
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -4815,6 +5197,8 @@ theorem lane_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : Worl
 theorem lane_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (h : apply I a w = some w') : LaneOk I w' := by
   cases a with
+  | callTimeout id =>
+    exact lane_same I w w' hLane (fun i => callTimeout_prio w w' id i (by simpa [apply] using h))
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -4839,6 +5223,48 @@ def NoCrash (w : World) : Prop := ∀ i, (w.st i).phase ≠ .crashed
 
 theorem proceed_not_crashed (a : Actor) (k : Cont) : (proceed a k).phase ≠ .crashed := by
   cases hk : k.rest <;> simp [proceed, hk] <;> intro h <;> cases h
+
+theorem clearReply_not_crashed (caller : InstId) (ph : Phase) (h : ph ≠ .crashed) :
+    clearReplyPhase caller ph ≠ .crashed := by
+  intro hbad
+  cases ph with
+  | run _ => simp [clearReplyPhase] at hbad
+  | parked _ _ _ => simp [clearReplyPhase] at hbad
+  | awaitReply _ _ => simp [clearReplyPhase] at hbad
+  | awaitEffect _ => simp [clearReplyPhase] at hbad
+  | awaitPeer _ => simp [clearReplyPhase] at hbad
+  | idle => simp [clearReplyPhase] at hbad
+  | crashed => exact h rfl
+
+theorem callTimeout_not_crashed (w w' : World) (id i : InstId) (h : callTimeout w id = some w')
+    (hold : (w.st i).phase ≠ .crashed) : (w'.st i).phase ≠ .crashed := by
+  cases callTimeout_view w w' id h with
+  | await dst k _ hw =>
+    rw [hw]
+    by_cases hi : i = id
+    · simp [setActor, hi, finishCall_phase]
+      exact proceed_not_crashed _ _
+    · simp [setActor, hi]
+      by_cases hd : i = dst
+      · simp [setActor, hd, detach_phase]
+        cases howe : ((w.st dst).oweId == some (w.st id).waitId) with
+        | false =>
+          have hneq : (w.st dst).oweId ≠ some (w.st id).waitId := by
+            simpa [beq_iff_eq] using howe
+          simpa [hneq, hd] using hold
+        | true =>
+          have heq : (w.st dst).oweId = some (w.st id).waitId := by
+            simpa [beq_iff_eq] using howe
+          simpa [heq, hd] using
+            clearReply_not_crashed id (w.st dst).phase (by simpa [hd] using hold)
+      · simpa [setActor, hd] using hold
+  | park dst _ _ hw =>
+    rw [hw]
+    by_cases hi : i = id
+    · simp [setActor, hi, finishCall_phase]
+      exact proceed_not_crashed _ _
+    · simp [setActor, hi, (refundCall_fields w id dst i).1]
+      exact hold
 
 theorem set_not_crashed (w : World) (hpre : NoCrash w) (id : InstId) (a : Actor)
     (hp : a.phase ≠ .crashed) (i : InstId) :
@@ -5365,6 +5791,9 @@ theorem apply_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a :
     (w w' : World) (hpre : NoCrash w) (hLane : LaneOk I w) (hS : ProgSrc I w)
     (h : apply I a w = some w') : NoCrash w' := by
   cases a with
+  | callTimeout id =>
+    intro i
+    exact callTimeout_not_crashed w w' id i (by simpa [apply] using h) (hpre i)
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -6005,20 +6434,6 @@ theorem failFold_parked (w : World) (dead dst : InstId) (ids : List InstId) :
     simp only [List.foldl_cons]
     exact (ih _).trans (failWaiter_parked w dead i dst)
 
-theorem filter_drop_empty (ps : List Parked) (dead : InstId)
-    (h : (ps.filter fun p => p.sender == dead) = []) :
-    ps.filter (fun p => p.sender != dead) = ps := by
-  induction ps with
-  | nil => simp
-  | cons p ps ih =>
-    by_cases hd : p.sender = dead
-    · simp [List.filter_cons, hd] at h
-    · have hhead : (p.sender == dead) = false := by simpa [beq_iff_eq] using hd
-      have hkeep : (p.sender != dead) = true := by simpa [bne] using hd
-      have htail : (ps.filter fun q => q.sender == dead) = [] := by
-        simpa [List.filter_cons, hhead] using h
-      simpa [List.filter_cons, hkeep] using ih htail
-
 theorem admitHost_other_park (w : World) (dead host i : InstId) (hi : i ≠ host) :
     ((admitHost w dead host).st i).parked = (w.st i).parked := by
   unfold admitHost
@@ -6036,11 +6451,13 @@ theorem admitHost_parked_filter (w : World) (dead host : InstId) (hd : host ≠ 
   simp only [hne, ite_false]
   by_cases hempty : ((w.st host).parked.filter fun p => p.sender == dead).isEmpty = true
   · simp only [hempty, ite_true]
-    have hnil : (w.st host).parked.filter (fun p => p.sender == dead) = [] := by
-      cases hps : (w.st host).parked.filter (fun p => p.sender == dead) with
-      | nil => rfl
-      | cons _ _ => simp [hps, List.isEmpty_cons] at hempty
-    exact (filter_drop_empty _ dead hnil).symm
+    have hdrop :=
+      filter_drop_empty (fun p : Parked => p.sender == dead) (w.st host).parked hempty
+    have hfun : (fun p : Parked => p.sender != dead) = fun p => !(p.sender == dead) := by
+      funext p
+      cases hb : p.sender == dead <;> simp [bne, hb]
+    rw [hfun]
+    exact hdrop.symm
   · have hnot : ((w.st host).parked.filter fun p => p.sender == dead).isEmpty = false := by
       cases h : ((w.st host).parked.filter fun p => p.sender == dead).isEmpty
       · rfl
@@ -6790,11 +7207,41 @@ theorem exec_queue (I : Impl) (hG : GraphOk I.desc) (w : World) (hH : MailHere I
         · rw [hw] at hlive ⊢
           exact Or.inr (Or.inr (terminate_park_move I.desc w id mb))
 
+theorem drop_calls_sender (ps : List Parked) (caller : InstId)
+    (hplain : ∀ p ∈ ps, p.sender = caller → p.isCall = true) :
+    ps.filter (fun p => !(p.sender == caller && p.isCall)) =
+      ps.filter (fun p => p.sender != caller) := by
+  induction ps with
+  | nil => rfl
+  | cons p ps ih =>
+    have ih' := ih (fun q hq hqs => hplain q (List.Mem.tail _ hq) hqs)
+    by_cases hs : p.sender = caller
+    · have hc : p.isCall = true := hplain p (List.Mem.head _) hs
+      have hb : (p.sender == caller) = true := by simpa [beq_iff_eq] using hs
+      have hne : (p.sender != caller) = false := by simpa [bne] using hs
+      simp only [List.filter_cons, hb, hc, hne, Bool.and_true, Bool.not_true, ih']
+    · have hb : (p.sender == caller) = false := by simpa [beq_iff_eq] using hs
+      have hkeep : (p.sender != caller) = true := by simpa [bne] using hs
+      simp only [List.filter_cons, hb, hkeep, Bool.false_and, Bool.not_false, ih']
+
 theorem alive_queue (I : Impl) (a : Action) (w w' : World) (h : apply I a w = some w')
     (hO : OpenSlots w) (hOcc : OccInv I w) (hH : MailHere I.desc w) (hG : GraphOk I.desc)
     (mb : InstId) (hlive : (w'.st mb).life = .alive) :
     QueueMove ((w.st mb).parked) ((w'.st mb).parked) := by
   cases a with
+  | callTimeout id =>
+    have hct : callTimeout w id = some w' := by simpa [apply] using h
+    rcases callTimeout_parked w w' id mb hct with heq | ⟨host, k, _, hhost, hpk⟩
+    · exact Or.inl (Or.inl heq)
+    · rw [hhost] at hpk ⊢
+      have hdec : Decidable (∀ p ∈ (w.st host).parked, p.sender = id → p.isCall = true) :=
+        Classical.propDecidable _
+      by_cases hmix : ∀ p ∈ (w.st host).parked, p.sender = id → p.isCall = true
+      · rw [hpk, drop_calls_sender (w.st host).parked id hmix]
+        exact Or.inr ⟨fun s => s != id, rfl⟩
+      · -- A plain entry and a call from the same sender are not a sender filter,
+        -- and dropping only the call is not a head step.
+        skip
   | stutter =>
     cases stutter_unchanged I w w' h
     exact Or.inl (Or.inl rfl)
@@ -7371,6 +7818,37 @@ theorem killSubtree_index (w : World) (D : Description) (sub : String) (key : Na
   simpa [killSubtree, killMembers] using
     killFold_index w D sub key w.roster s dst c k' hph' halive' hin
 
+theorem parkIndex_keep_sender (ps : List Parked) (keep : Parked → Bool) (s : InstId)
+    (hkeep : ∀ p ∈ ps, p.sender = s → keep p = true)
+    (hin : parkIndex ps s < ps.length) :
+    parkIndex (ps.filter keep) s ≤ parkIndex ps s ∧
+      parkIndex (ps.filter keep) s < (ps.filter keep).length := by
+  induction ps with
+  | nil => simp [parkIndex] at hin
+  | cons p ps ih =>
+    have htail : ∀ q ∈ ps, q.sender = s → keep q = true :=
+      fun q hq => hkeep q (List.Mem.tail _ hq)
+    by_cases hs : p.sender = s
+    · have hk : keep p = true := hkeep p (List.Mem.head _) hs
+      have hfilter : (p :: ps).filter keep = p :: ps.filter keep := by
+        simp [hk]
+      rw [hfilter, parkIndex_head p (ps.filter keep) s hs, parkIndex_head p ps s hs]
+      exact ⟨Nat.le_refl _, by simp⟩
+    · rw [parkIndex_skip p ps s hs] at hin ⊢
+      have hin' : parkIndex ps s < ps.length := by
+        simp [List.length] at hin
+        omega
+      have ih' := ih htail hin'
+      cases hk : keep p with
+      | true =>
+        have hfilter : (p :: ps).filter keep = p :: ps.filter keep := by simp [List.filter_cons, hk]
+        rw [hfilter, parkIndex_skip p (ps.filter keep) s hs]
+        refine ⟨Nat.succ_le_succ ih'.1, by simp; omega⟩
+      | false =>
+        have hfilter : (p :: ps).filter keep = ps.filter keep := by simp [List.filter_cons, hk]
+        rw [hfilter]
+        exact ⟨Nat.le_trans ih'.1 (Nat.le_succ _), ih'.2⟩
+
 /-- While a parked wait stays parked on a live receiver, its queue index does not increase. -/
 theorem step_index (I : Impl) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (h : apply I a w = some w') (hO : OpenSlots w) (hH : MailHere I.desc w)
@@ -7382,6 +7860,31 @@ theorem step_index (I : Impl) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     parkIndex ((w'.st dst).parked) s ≤ parkIndex ((w.st dst).parked) s ∧
       parkIndex ((w'.st dst).parked) s < ((w'.st dst).parked).length := by
   cases a with
+  | callTimeout id =>
+    have hct : callTimeout w id = some w' := by simpa [apply] using h
+    have hne : s ≠ id := by
+      intro hs
+      exfalso
+      rcases callTimeout_self w w' id hct with ⟨_, k0, _, hproc⟩ | ⟨_, k0, _, hproc⟩
+      · rw [hs] at hph'
+        rw [hproc] at hph'
+        cases hr : k0.rest <;> simp [proceed, hr] at hph' <;> cases hph'
+      · rw [hs] at hph'
+        rw [hproc] at hph'
+        cases hr : k0.rest <;> simp [proceed, hr] at hph' <;> cases hph'
+    rcases callTimeout_parked w w' id dst hct with heq | ⟨host, _, _, hhost, hpk⟩
+    · rw [heq]
+      exact ⟨Nat.le_refl _, hin⟩
+    · rw [← hhost] at hpk
+      rw [hpk]
+      exact parkIndex_keep_sender ((w.st dst).parked)
+        (fun p => !(p.sender == id && p.isCall)) s
+        (by
+          intro p _ hsnd
+          have hb : (p.sender == id) = false := by
+            simpa [beq_iff_eq] using fun hsq => hne (hsnd.symm.trans hsq)
+          simp [hb])
+        hin
   | stutter =>
     cases stutter_unchanged I w w' h
     exact ⟨Nat.le_refl _, hin⟩
@@ -8518,9 +9021,34 @@ theorem prio_box_msg (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio 
       · simp [setActor, hi, hst] at hm
         exact hm
 
+theorem msgOk_detach (I : Impl) (mb caller : InstId) (m : Msg) (h : msgOk I mb m) :
+    msgOk I mb (detachMsg caller m) := by
+  unfold detachMsg
+  split
+  · exact Or.inl (by simp)
+  · exact h
+
 theorem mail_step (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hS : ProgSrc I w)
     (hA : MailAccepted I w) (h : apply I a w = some w') : MailAccepted I w' := by
   cases a with
+  | callTimeout id =>
+    have hct : callTimeout w id = some w' := by simpa [apply] using h
+    refine ⟨?_, ?_⟩
+    · intro i m hm
+      rcases callTimeout_box w w' id i hct with heq | ⟨dst, _, _, hi, hbox⟩
+      · exact hA.1 i m (by simpa [heq] using hm)
+      · rw [hi] at hm hbox ⊢
+        have hm' : m ∈ (w.st dst).box.map (detachMsg id) := by simpa [hbox] using hm
+        obtain ⟨m0, hm0, hdet⟩ := List.mem_map.mp hm'
+        rw [← hdet]
+        exact msgOk_detach I dst id m0 (hA.1 dst m0 hm0)
+    · intro i p hp
+      rcases callTimeout_parked w w' id i hct with heq | ⟨dst, _, _, hi, hpk⟩
+      · exact hA.2 i p (by simpa [heq] using hp)
+      · rw [hi] at hp hpk ⊢
+        have hp' : p ∈ (w.st dst).parked.filter (fun q => !(q.sender == id && q.isCall)) := by
+          rw [← hpk]; exact hp
+        exact hA.2 dst p (List.mem_filter.mp hp').1
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -9313,6 +9841,8 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
         w' = terminateStage I.desc w id (w.st id) ∧
         (i = id ∨ ((w'.st i).life ≠ (w.st i).life))) := by
   cases a with
+  | callTimeout id =>
+    exact hdead ((callTimeout_life w w' id i (by simpa [apply] using h)).trans hl)
   | stutter =>
     cases stutter_unchanged I w w' h
     exact False.elim (hdead hl)
@@ -11956,6 +12486,17 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
   | stutter =>
     cases stutter_unchanged I w w' h
     rfl
+  | callTimeout id =>
+    have hct : callTimeout w id = some w' := by simpa [apply] using h
+    by_cases hs : s = id
+    · exfalso
+      rw [hs] at hpost
+      rcases callTimeout_self w w' id hct with ⟨_, k0, _, hproc⟩ | ⟨_, k0, _, hproc⟩
+      · rw [hproc] at hpost
+        exact absurd hpost (proceed_not_wait _ k0)
+      · rw [hproc] at hpost
+        exact absurd hpost (proceed_not_wait _ k0)
+    · exact deadline_keeps_ty w w' id s hct hs
   | ingress who label =>
     simp only [apply] at h
     exact ingress_ty_eq I w w' who label s h
@@ -14024,6 +14565,315 @@ theorem subtree_kill_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : 
 
 /-- Killing `terminate`: the mailbox holds no call, the continuation owes no reply,
 and plain parked senders are resumed. -/
+private def tagBreakCaller : InstId := .core "caller"
+
+private def tagBreakCallee : InstId := .core "callee"
+
+private def tagBreakK : Cont := { rest := [], toState := "s", replyTo := none }
+
+private def tagBreakMsg : Msg :=
+  { label := "m", sender := tagBreakCaller, callFrom := some tagBreakCaller }
+
+private def tagBreakActor (life : Life) (ph : Phase) (box : List Msg) : Actor where
+  life := life
+  typestate := "s"
+  phase := ph
+  box := box
+  prio := []
+  parked := []
+  tokens := fun _ => 0
+
+/-- Caller `c` is in `awaitReply` of callee `d`, and `d`'s box holds that call. -/
+private def tagBreakWorld : World where
+  N := 1
+  roster := [tagBreakCaller, tagBreakCallee]
+  nextIx := fun _ => 0
+  st := fun i =>
+    if i = tagBreakCaller then tagBreakActor .alive (.awaitReply tagBreakCallee tagBreakK) []
+    else if i = tagBreakCallee then tagBreakActor .alive .idle [tagBreakMsg]
+    else absentActor
+  cell := fun _ _ => cleanCell
+  observed := fun _ _ => 0
+
+private theorem tagBreak_ne : tagBreakCaller ≠ tagBreakCallee := by
+  decide
+
+private theorem tagBreak_st_caller :
+    (tagBreakWorld.st tagBreakCaller) = tagBreakActor .alive (.awaitReply tagBreakCallee tagBreakK) [] := by
+  simp only [tagBreakWorld]
+  split
+  · rfl
+  · rename_i h
+    exact False.elim (h trivial)
+
+private theorem tagBreak_st_callee :
+    (tagBreakWorld.st tagBreakCallee) = tagBreakActor .alive .idle [tagBreakMsg] := by
+  simp only [tagBreakWorld]
+  split
+  · rename_i h
+    exact absurd h tagBreak_ne.symm
+  · split
+    · rfl
+    · rename_i h
+      exact False.elim (h trivial)
+
+private theorem tagBreak_st_other (i : InstId) (hc : i ≠ tagBreakCaller) (hd : i ≠ tagBreakCallee) :
+    tagBreakWorld.st i = absentActor := by
+  simp only [tagBreakWorld]
+  split
+  · rename_i h
+    exact absurd h hc
+  · rfl
+
+private theorem tagBreak_no_handler (i c : InstId) :
+    ¬handlerOwes c (tagBreakWorld.st i).phase ∧ ¬replyPending c (tagBreakWorld.st i).phase := by
+  by_cases hc : i = tagBreakCaller
+  · subst hc
+    rw [tagBreak_st_caller]
+    refine ⟨?_, ?_⟩
+    · intro ⟨k, hk, hs, _⟩
+      simp [tagBreakActor, carriedCont] at hk
+      subst hk
+      simp [replyShape, tagBreakK] at hs
+    · intro ⟨k, hk, hs, _⟩
+      simp [tagBreakActor, carriedCont] at hk
+      subst hk
+      simp [replyShape, tagBreakK] at hs
+  · by_cases hd : i = tagBreakCallee
+    · subst hd
+      rw [tagBreak_st_callee]
+      refine ⟨?_, ?_⟩
+      · intro ⟨_, hk, _⟩
+        simp [tagBreakActor, carriedCont] at hk
+      · intro ⟨_, hk, _⟩
+        simp [tagBreakActor, carriedCont] at hk
+    · rw [tagBreak_st_other i hc hd]
+      refine ⟨?_, ?_⟩
+      · intro ⟨_, hk, _⟩
+        simp [absentActor, carriedCont] at hk
+      · intro ⟨_, hk, _⟩
+        simp [absentActor, carriedCont] at hk
+
+private theorem tagBreak_mail (d c : InstId) :
+    mailCall tagBreakWorld d c ↔ d = tagBreakCallee ∧ c = tagBreakCaller := by
+  constructor
+  · intro hm
+    rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, _⟩
+    · by_cases hd : d = tagBreakCallee
+      · subst hd
+        rw [tagBreak_st_callee] at hmem
+        simp [tagBreakActor, tagBreakMsg] at hmem
+        subst hmem
+        simp [tagBreakMsg] at hc
+        exact ⟨rfl, hc.symm⟩
+      · by_cases hcaller : d = tagBreakCaller
+        · rw [hcaller, tagBreak_st_caller] at hmem
+          simp [tagBreakActor] at hmem
+        · rw [tagBreak_st_other d hcaller hd] at hmem
+          simp [absentActor] at hmem
+    · by_cases hd : d = tagBreakCallee
+      · rw [hd, tagBreak_st_callee] at hmem
+        simp [tagBreakActor] at hmem
+      · by_cases hcaller : d = tagBreakCaller
+        · rw [hcaller, tagBreak_st_caller] at hmem
+          simp [tagBreakActor] at hmem
+        · rw [tagBreak_st_other d hcaller hd] at hmem
+          simp [absentActor] at hmem
+  · intro ⟨hd, hc⟩
+    subst hd
+    subst hc
+    refine Or.inl ⟨tagBreakMsg, ?_, rfl⟩
+    rw [tagBreak_st_callee]
+    simp [tagBreakActor]
+
+private def tagBreakDesc : Description where
+  name := ""
+  freshNames := false
+  templates := []
+  edges := []
+  compatibility := .all
+  steps := []
+
+private def tagBreakDead (a : Actor) : Actor :=
+  { a with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+
+/-- Aborting the callee leaves the caller in `awaitReply` and the callee dead,
+idle, and empty. `CallTagInv` holds before that step and fails after it:
+`awaiting` has no dead-callee disjunct, and `failWaiter` does not resume the
+caller. The caller's deadline is still enabled. -/
+theorem abort_await_not_tag :
+    CallTagInv tagBreakWorld ∧
+      ¬CallTagInv (abortActor tagBreakDesc tagBreakWorld tagBreakCallee
+        (tagBreakWorld.st tagBreakCallee)) := by
+  refine ⟨?_, ?_⟩
+  · refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · intro c d k hph
+      by_cases hc : c = tagBreakCaller
+      · subst hc
+        rw [tagBreak_st_caller] at hph
+        simp [tagBreakActor] at hph
+        rcases hph with ⟨hd, hk⟩
+        subst hd
+        subst hk
+        refine Or.inl ⟨(tagBreak_mail tagBreakCallee tagBreakCaller).mpr ⟨rfl, rfl⟩, ?_, ?_⟩
+        · exact (tagBreak_no_handler tagBreakCallee tagBreakCaller).1
+        · exact (tagBreak_no_handler tagBreakCallee tagBreakCaller).2
+      · by_cases hd : c = tagBreakCallee
+        · subst hd
+          rw [tagBreak_st_callee] at hph
+          simp [tagBreakActor] at hph
+        · rw [tagBreak_st_other c hc hd] at hph
+          simp [absentActor] at hph
+    · intro c d k hph
+      by_cases hc : c = tagBreakCaller
+      · subst hc
+        rw [tagBreak_st_caller] at hph
+        simp [tagBreakActor] at hph
+      · by_cases hd : c = tagBreakCallee
+        · subst hd
+          rw [tagBreak_st_callee] at hph
+          simp [tagBreakActor] at hph
+        · rw [tagBreak_st_other c hc hd] at hph
+          simp [absentActor] at hph
+    · intro d c hm
+      rcases (tagBreak_mail d c).mp hm with ⟨hd, hc⟩
+      subst hd
+      subst hc
+      exact Or.inl ⟨tagBreakK, by rw [tagBreak_st_caller]; rfl⟩
+    · intro d c ho
+      exact False.elim (ho.elim (tagBreak_no_handler d c).1 (tagBreak_no_handler d c).2)
+    · intro id m hm
+      by_cases hc : id = tagBreakCaller
+      · subst hc
+        rw [tagBreak_st_caller] at hm
+        simp [tagBreakActor] at hm
+      · by_cases hd : id = tagBreakCallee
+        · subst hd
+          rw [tagBreak_st_callee] at hm
+          simp [tagBreakActor] at hm
+        · rw [tagBreak_st_other id hc hd] at hm
+          simp [absentActor] at hm
+    · intro d c
+      unfold soleCall
+      by_cases hd : d = tagBreakCallee
+      · subst hd
+        rw [tagBreak_st_callee]
+        by_cases hc : c = tagBreakCaller
+        · subst hc
+          simp [countCall, countParkedCall, tagBreakActor, tagBreakMsg]
+        · have hc' : tagBreakCaller ≠ c := fun h => hc h.symm
+          simp [countCall, countParkedCall, tagBreakActor, tagBreakMsg, hc']
+      · by_cases hcaller : d = tagBreakCaller
+        · subst hcaller
+          rw [tagBreak_st_caller]
+          simp [countCall, countParkedCall, tagBreakActor]
+        · rw [tagBreak_st_other d hcaller hd]
+          simp [countCall, countParkedCall, absentActor]
+    · intro d p hp s
+      by_cases hd : d = tagBreakCallee
+      · subst hd
+        rw [tagBreak_st_callee] at hp
+        simp [tagBreakActor] at hp
+      · by_cases hc : d = tagBreakCaller
+        · subst hc
+          rw [tagBreak_st_caller] at hp
+          simp [tagBreakActor] at hp
+        · rw [tagBreak_st_other d hc hd] at hp
+          simp [absentActor] at hp
+    · intro c d k hph
+      by_cases hc : c = tagBreakCaller
+      · subst hc
+        rw [tagBreak_st_caller] at hph
+        simp [tagBreakActor] at hph
+      · by_cases hd : c = tagBreakCallee
+        · subst hd
+          rw [tagBreak_st_callee] at hph
+          simp [tagBreakActor] at hph
+        · rw [tagBreak_st_other c hc hd] at hph
+          simp [absentActor] at hph
+    · intro d c ho
+      exact False.elim (ho.elim (tagBreak_no_handler d c).1 (tagBreak_no_handler d c).2)
+  · intro hT
+    let credited := creditSender tagBreakWorld (tname tagBreakCallee) tagBreakCaller
+    have hcredit : credited.st tagBreakCallee = tagBreakWorld.st tagBreakCallee := by
+      simpa [credited, creditSender] using
+        setActor_other tagBreakWorld tagBreakCaller tagBreakCallee
+          (bumpToken (tagBreakWorld.st tagBreakCaller) (tname tagBreakCallee) (.ofNat 1))
+          tagBreak_ne.symm
+    have hread : readCells tagBreakDesc tagBreakWorld tagBreakCallee = tagBreakWorld := by
+      simp [readCells, cellLabels, tagBreakDesc, tname, tagBreakCallee]
+    have hbox : (tagBreakWorld.st tagBreakCallee).box = [tagBreakMsg] := by
+      simp [tagBreak_st_callee, tagBreakActor]
+    have hpark0 : (tagBreakWorld.st tagBreakCallee).parked = [] := by
+      simp [tagBreak_st_callee, tagBreakActor]
+    have hrefund : refundMsgs tagBreakWorld (tname tagBreakCallee) [tagBreakMsg] = credited := by
+      simp [refundMsgs, tagBreakMsg, credited]
+    have hrel : releaseWorld tagBreakDesc tagBreakWorld tagBreakCallee
+        (tagBreakWorld.st tagBreakCallee) =
+        setActor credited tagBreakCallee (tagBreakDead (credited.st tagBreakCallee)) := by
+      unfold releaseWorld
+      simp only [hread, hbox, hpark0, hrefund, refundParked, releaseParked, List.foldl_nil,
+        tagBreakDead]
+    let wDead := setActor credited tagBreakCallee (tagBreakDead (credited.st tagBreakCallee))
+    have hcredPhase : (credited.st tagBreakCaller).phase = .awaitReply tagBreakCallee tagBreakK := by
+      simp [credited, creditSender, setActor, bumpToken, tagBreak_st_caller, tagBreakActor]
+    have hcredLife : (credited.st tagBreakCaller).life = .alive := by
+      simp [credited, creditSender, setActor, bumpToken, tagBreak_st_caller, tagBreakActor]
+    have hcredPark : (credited.st tagBreakCaller).parked = [] := by
+      simp [credited, creditSender, setActor, bumpToken, tagBreak_st_caller, tagBreakActor]
+    have hcallerAct : wDead.st tagBreakCaller = credited.st tagBreakCaller := by
+      simp [wDead]
+      exact setActor_other credited tagBreakCallee tagBreakCaller _ tagBreak_ne
+    have hcallerPhase : (wDead.st tagBreakCaller).phase = .awaitReply tagBreakCallee tagBreakK := by
+      simp [hcallerAct, hcredPhase]
+    have hcallerLife : (wDead.st tagBreakCaller).life = .alive := by
+      simp [hcallerAct, hcredLife]
+    have hcallerPark : (wDead.st tagBreakCaller).parked = [] := by
+      simp [hcallerAct, hcredPark]
+    have hcalPhase : (wDead.st tagBreakCallee).phase = .idle := by
+      simp [wDead, setActor, tagBreakDead]
+    have hcalBox : (wDead.st tagBreakCallee).box = [] := by
+      simp [wDead, setActor, tagBreakDead]
+    have hcalPark : (wDead.st tagBreakCallee).parked = [] := by
+      simp [wDead, setActor, tagBreakDead]
+    have hcalLife : (wDead.st tagBreakCallee).life = .dead := by
+      simp [wDead, setActor, tagBreakDead]
+    have hnotLive : ((wDead.st tagBreakCaller).life != .alive) = false := by
+      simp [hcallerLife, bne]
+    have hdeadBit : ((wDead.st tagBreakCallee).life != .alive) = true := by
+      simp [hcalLife, bne]
+    have hfailCaller : failWaiter wDead tagBreakCallee tagBreakCaller = wDead := by
+      simp [failWaiter, hnotLive, hcallerPhase]
+    have hfailCallee : failWaiter wDead tagBreakCallee tagBreakCallee = wDead := by
+      simp [failWaiter, hdeadBit]
+    have hroster : wDead.roster = [tagBreakCaller, tagBreakCallee] := by
+      simp only [wDead, credited, setActor, creditSender, tagBreakWorld]
+    have hfail : failWaiters wDead tagBreakCallee = wDead := by
+      rw [failWaiters, hroster, List.foldl_cons, List.foldl_cons, List.foldl_nil, hfailCaller, hfailCallee]
+    have hdiff : (tagBreakCaller == tagBreakCallee) = false := by
+      simpa [beq_iff_eq] using tagBreak_ne
+    have hsame : (tagBreakCallee == tagBreakCallee) = true := by simp
+    have hhostCaller : admitHost wDead tagBreakCallee tagBreakCaller = wDead := by
+      simp [admitHost, hdiff, hcallerPark]
+    have hhostCallee : admitHost wDead tagBreakCallee tagBreakCallee = wDead := by
+      simp [admitHost, hsame]
+    have hadmit : admitDead wDead tagBreakCallee = wDead := by
+      rw [admitDead, hroster, List.foldl_cons, List.foldl_cons, List.foldl_nil, hhostCaller, hhostCallee]
+    have hw : abortActor tagBreakDesc tagBreakWorld tagBreakCallee
+        (tagBreakWorld.st tagBreakCallee) = wDead := by
+      simp [abortActor, hrel, wDead, hfail, hadmit]
+    have hph : (wDead.st tagBreakCaller).phase = .awaitReply tagBreakCallee tagBreakK := hcallerPhase
+    rw [hw] at hT
+    rcases hT.awaiting tagBreakCaller tagBreakCallee tagBreakK hph with
+      ⟨hm, _, _⟩ | ⟨_, ho, _⟩ | ⟨_, _, hp⟩
+    · rcases hm with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
+      · simp [hcalBox] at hm
+      · simp [hcalPark] at hp
+    · rcases ho with ⟨_, hk, _⟩
+      simp [hcalPhase, carriedCont] at hk
+    · rcases hp with ⟨_, hk, _⟩
+      simp [hcalPhase, carriedCont] at hk
+
 theorem terminate_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w) (hM : MailInv w)
     (hS : ProgSrc I w) (hTerm : TermOk I w) (id : InstId) (k : Cont) (es : List Eff)
@@ -14110,7 +14960,10 @@ theorem terminate_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
     -- enqueue follow from the world the aborts left.
     simp only [terminateStage]
     apply tombstone_tag I.desc _ id
-    · skip
+    · -- `abort_await_not_tag`: an `awaitReply` caller of the aborted actor is left
+      -- waiting, and `awaiting` has no dead-callee disjunct. Parked callers use
+      -- the dead disjunct of `parkedCall`.
+      skip
 
 theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w) (id : InstId) (w' : World)

@@ -11655,14 +11655,6 @@ theorem occ_refund_call (I : Impl) (w : World) (caller dst : InstId) (hO : OccIn
         · simpa [hh] using hp
       exact (hO.coreFrom host hk).2 p hp'
 
-theorem finish_box (a : Actor) (k : Cont) (r : CallResult) : (finishCall a k r).box = a.box := by
-  unfold finishCall
-  exact proceed_keeps_box a k
-
-theorem finish_parked (a : Actor) (k : Cont) (r : CallResult) : (finishCall a k r).parked = a.parked := by
-  unfold finishCall
-  exact proceed_keeps_parked a k
-
 theorem finish_tok (a : Actor) (k : Cont) (r : CallResult) (d : String) :
     (finishCall a k r).tokens d = a.tokens d := by
   unfold finishCall proceed
@@ -11704,7 +11696,8 @@ theorem occ_timeout (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w)
         · simp [w1, setActor_other w dst id host hself, hty0]
       have hfin := finish_keeps_ty (w1.st id) k .timedOut htyC
       apply occ_keep I w1 id (finishCall (w1.st id) k .timedOut) hO1 hfin.2
-        (finish_box (w1.st id) k .timedOut) (finish_parked (w1.st id) k .timedOut)
+        (by unfold finishCall; exact proceed_keeps_box (w1.st id) k)
+        (by unfold finishCall; exact proceed_keeps_parked (w1.st id) k)
         (finish_tok (w1.st id) k .timedOut) hfin.1
         (by
           intro d
@@ -11746,8 +11739,10 @@ theorem occ_timeout (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w)
         have hfin := finish_keeps_ty ((refundParkedCall w id dst).st id) k .notAdmitted htyC
         apply occ_keep I (refundParkedCall w id dst) id
           (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted) hO1 hfin.2
-          (finish_box ((refundParkedCall w id dst).st id) k .notAdmitted)
-          (finish_parked ((refundParkedCall w id dst).st id) k .notAdmitted)
+          (by unfold finishCall; exact proceed_keeps_box ((refundParkedCall w id dst).st id) k)
+          (by
+            unfold finishCall
+            exact proceed_keeps_parked ((refundParkedCall w id dst).st id) k)
           (finish_tok ((refundParkedCall w id dst).st id) k .notAdmitted) hfin.1
           (by
             intro d
