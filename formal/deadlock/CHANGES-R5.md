@@ -66,11 +66,19 @@ behaviour of the step relation, not a hypothesis to be added.
 
 ## Calls
 
-`call_answered` promises `Reply` only when the callee stays live and not
-shutting down until it replies. A callee that terminates or begins shutting
-down after admission does not owe `Reply`. The same reduction applies: the
-callee returns to the handler, and the runtime delivers. The three call
-outcomes are unchanged. No proof may assume which one is taken.
+`call_answered` is the callee's handling guarantee, not a `Reply` promise.
+The old `Reply` conjunct is false: the caller's deadline can fire while the
+callee is still alive (`call_answered_reply_false`). Replacing it is not a
+weakening. If the request is admitted, queued at the callee under `mid`, and
+the callee stays alive, the callee handles it by `recvBulk` of that `mid`,
+whichever outcome the caller records. The caller-side totality is one
+continuation per outcome (`finishCall_cont`). An `awaitReply` ends as
+`Reply` (`await_reply_end`) or `TimedOut` (`await_total`). `NotAdmitted`
+(`parked_not_admitted`) is the outcome when the request never enters the
+mailbox, so it is not an exit of `awaitReply`. A live `awaitReply` does not
+last for the rest of a fair run (`await_not_forever`). A `Reply` guarantee
+needs the shelved timing model, where the deadline is later than the service
+time. No proof may assume which caller outcome is taken.
 
 ## Supervision
 
@@ -124,8 +132,10 @@ B. A call carries a duration. `awaitReply` resumes with a reply, not
 admitted, or timed out. The caller's continuation is checked on every
 branch, and no proof assumes which branch runs. The timeout stays enabled
 from `awaitReply`, including a call that is still parked. A call id stops a
-late reply from resuming a newer wait. `call_answered` promises a reply only
-while the callee stays live and not shutting down.
+late reply from resuming a newer wait. `call_answered` is the callee
+handling an admitted `mid` while it stays alive. The caller's three outcomes
+are `await_reply_end` (`Reply`), `await_total` (`TimedOut`), and
+`parked_not_admitted` (`NotAdmitted`), each on its own continuation.
 
 C. Termination follows Supervision, and not before. Voluntary `terminate`
 replaces `peerTimeout`'s built-in `killSubtree`. The upward message is the
@@ -176,15 +186,22 @@ or holding that call id.
 
 This is the pure-stage timeout. A caller waiting on a dead callee is not a
 stuck call: the deadline stays enabled and fairness ends it as `TimedOut`,
-or as `NotAdmitted` when the call was never admitted. `call_answered` is
-the statement in `Deliver.lean`. It is `Reply` while the callee stays alive,
-and `NotAdmitted` or `TimedOut` once the callee has halted before the answer.
-The fourth disjunct is how the halted case is proved: the timeout is enabled,
+or as `NotAdmitted` when the call was never admitted. `call_answered` in
+`Deliver.lean` does not promise `Reply`. That conjunct is false, because the
+deadline races the reply (`call_answered_reply_false`). The theorem is that
+an admitted request, still in the callee's mailbox under `mid`, is handled
+by `recvBulk` of that `mid` when the callee stays alive, whatever the caller
+records. The caller lemma is one continuation per outcome. An `awaitReply`
+ends as `Reply` or `TimedOut`. `NotAdmitted` is the outcome when the request
+never enters the mailbox.
+The fourth disjunct is how a halted callee is proved: the timeout is enabled,
 and fairness fires it.
 `abort_await_not_tag` stays as a regression against the old three-disjunct
-formula, which does not hold after the abort. Deadlock freedom, `Delivered`,
-and `call_answered` are not weakened. The invariant covers one more
-reachable state that the approved semantics already produces.
+formula, which does not hold after the abort. `call_answered_reply_false`
+stays as the regression against the `Reply` conjunct. Deadlock freedom and
+`Delivered` are not weakened. The replacement of the false `Reply` conjunct
+is not a weakening. The invariant covers one more reachable state that the
+approved semantics already produces.
 
 ## `replyTo` scrub
 

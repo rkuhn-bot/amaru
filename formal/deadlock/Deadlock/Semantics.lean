@@ -7230,4 +7230,324 @@ theorem worldCrashed_of_b (w : World) (h : worldCrashedB w = true) : WorldCrashe
 theorem tombstones_exceed_capPrio : WorldCrashed overflowRun :=
   worldCrashed_of_b overflowRun (by decide)
 
+/-- Each call outcome runs one continuation. `Reply` keeps `rest`.
+`NotAdmitted` runs `onNotAdmitted`. `TimedOut` runs `onTimedOut`. -/
+theorem finishCall_cont (a : Actor) (k : Cont) (r : CallResult) :
+    (finishCall a k r).lastCall = some (a.waitId, r) ∧
+      (finishCall a k r).phase = (proceed a (selectCall k r)).phase ∧
+      (selectCall k r).rest =
+        match r with
+        | .reply => k.rest
+        | .notAdmitted => k.onNotAdmitted
+        | .timedOut => k.onTimedOut := by
+  cases r <;> simp [finishCall, selectCall]
+
+theorem proceed_not_await (a : Actor) (k k' : Cont) (d : InstId) :
+    (proceed a k).phase ≠ .awaitReply d k' := by
+  cases hr : k.rest <;> intro h <;> simp [proceed, hr] at h
+
+theorem detachBox_id (a : Actor) (caller : InstId) :
+    (detachBox a caller).waitId = a.waitId ∧ (detachBox a caller).life = a.life := by
+  simp [detachBox]
+
+theorem detachReply_id (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply a caller cid).waitId = a.waitId ∧ (detachReply a caller cid).life = a.life := by
+  unfold detachReply
+  split <;> simp
+
+theorem detachReply_box (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply a caller cid).box = a.box := by
+  unfold detachReply
+  split <;> rfl
+
+theorem proceed_phase_actor (a b : Actor) (k : Cont) :
+    (proceed a k).phase = (proceed b k).phase := by
+  cases hr : k.rest <;> simp [proceed, hr]
+
+/-- `TimedOut` ends an `awaitReply` on `onTimedOut`. The callee stays at the
+same life: the deadline does not dequeue the request. -/
+theorem await_timeout_end (w w' : World) (c d : InstId) (k : Cont)
+    (hl : (w.st c).life = .alive) (hph : (w.st c).phase = .awaitReply d k)
+    (h : callTimeout w c = some w') :
+    (w'.st c).lastCall = some ((w.st c).waitId, CallResult.timedOut) ∧
+      (w'.st c).phase = (proceed (w.st c) (selectCall k CallResult.timedOut)).phase ∧
+      (w'.st d).life = (w.st d).life := by
+  unfold callTimeout at h
+  have hlive : ((w.st c).life != .alive) = false := by simp [hl, bne]
+  simp only [hlive, ite_false, hph] at h
+  let host := detachReply (detachBox (w.st d) c) c (w.st c).waitId
+  let w1 := setActor w d host
+  have hw' : w' = setActor w1 c (finishCall (w1.st c) k CallResult.timedOut) := by
+    simpa [host, w1] using h.symm
+  have hwait : (w1.st c).waitId = (w.st c).waitId := by
+    by_cases hcd : c = d
+    · subst hcd
+      simp [w1, setActor_self, host, detachReply_id, detachBox_id]
+    · simp [w1, setActor_other w d c host hcd]
+  have hlifeC : (w1.st c).life = (w.st c).life := by
+    by_cases hcd : c = d
+    · subst hcd
+      simp [w1, setActor_self, host, detachReply_id, detachBox_id]
+    · simp [w1, setActor_other w d c host hcd]
+  have hself : (w'.st c) = finishCall (w1.st c) k CallResult.timedOut := by
+    rw [hw', setActor_self]
+  refine ⟨?_, ?_, ?_⟩
+  · simp [hself, finishCall, hwait]
+  · have hphP := proceed_phase_actor (w1.st c) (w.st c) (selectCall k CallResult.timedOut)
+    simpa [hself, finishCall, selectCall] using hphP
+  · by_cases hcd : c = d
+    · subst hcd
+      rw [hw', setActor_self, finishCall_life, hlifeC]
+    · have hdc : d ≠ c := fun h => hcd h.symm
+      rw [hw', setActor_other w1 c d _ hdc]
+      simp [w1, setActor_self, host, detachReply_id, detachBox_id]
+
+/-- The deadline leaves the callee's mailbox mapped by `detachMsg`. It does not
+dequeue the request. -/
+theorem await_timeout_box (w w' : World) (c d : InstId) (k : Cont)
+    (hl : (w.st c).life = .alive) (hph : (w.st c).phase = .awaitReply d k)
+    (h : callTimeout w c = some w') (hcd : c ≠ d) :
+    (w'.st d).box = (detachBox (w.st d) c).box := by
+  unfold callTimeout at h
+  have hlive : ((w.st c).life != .alive) = false := by simp [hl, bne]
+  simp only [hlive, ite_false, hph] at h
+  let host := detachReply (detachBox (w.st d) c) c (w.st c).waitId
+  let w1 := setActor w d host
+  have hw' : w' = setActor w1 c (finishCall (w1.st c) k CallResult.timedOut) := by
+    simpa [host, w1] using h.symm
+  have hdc : d ≠ c := fun h => hcd h.symm
+  rw [hw', setActor_other w1 c d _ hdc]
+  simp [w1, setActor_self, host, detachReply_box]
+
+/-- A matching reply ends that `awaitReply` on `rest`. The effect's `replyTo`
+names the caller, the caller is waiting on this sender, and the owed id is
+the caller's wait id. -/
+theorem await_reply_end (w : World) (sender c d : InstId) (k ck : Cont)
+    (hreply : k.replyTo = some c)
+    (hph : (w.st c).phase = .awaitReply d ck)
+    (hd : d = sender) (howe : (w.st sender).oweId = some (w.st c).waitId)
+    (hns : c ≠ sender) :
+    ((performReply w sender k).st c).lastCall = some ((w.st c).waitId, CallResult.reply) ∧
+      ((performReply w sender k).st c).phase =
+        (proceed (w.st c) (selectCall ck CallResult.reply)).phase := by
+  unfold performReply
+  rw [hreply]
+  cases hphase : (w.st c).phase with
+  | awaitReply dst ck' =>
+    have heq : Phase.awaitReply d ck = Phase.awaitReply dst ck' := hph.symm.trans hphase
+    injection heq with hdst hck
+    subst hck
+    have hds : dst = sender := hdst.symm.trans hd
+    simp [setActor, hphase, hds, howe, hns, finishCall, selectCall]
+  | idle | run _ | parked _ _ _ | awaitEffect _ | awaitPeer _ | crashed =>
+    cases hph.symm.trans hphase
+
+/-- Refunding a parked call does not change the caller's wait id or life. -/
+theorem refundCall_wait (w : World) (caller dst : InstId) :
+    ((refundParkedCall w caller dst).st caller).waitId = (w.st caller).waitId ∧
+      ((refundParkedCall w caller dst).st caller).life = (w.st caller).life := by
+  unfold refundParkedCall
+  dsimp only
+  let pred := fun p : Parked => p.sender == caller && p.isCall
+  let keep := (w.st dst).parked.filter fun p => !pred p
+  split
+  · exact ⟨rfl, rfl⟩
+  · let base := setActor w dst { (w.st dst) with parked := keep }
+    have hbase : (base.st caller).waitId = (w.st caller).waitId ∧
+        (base.st caller).life = (w.st caller).life := by
+      by_cases hi : caller = dst
+      · simp [base, hi, setActor_self]
+      · simp [base, setActor_other w dst caller _ hi]
+    have hfold : ∀ (ps : List Parked) (w0 : World),
+        (w0.st caller).waitId = (w.st caller).waitId →
+        (w0.st caller).life = (w.st caller).life →
+        (((ps.foldl (fun w _ => creditSender w (tname dst) caller) w0).st caller).waitId =
+          (w.st caller).waitId) ∧
+        (((ps.foldl (fun w _ => creditSender w (tname dst) caller) w0).st caller).life =
+          (w.st caller).life) := by
+      intro ps
+      induction ps with
+      | nil =>
+        intro w0 hw hl
+        exact ⟨hw, hl⟩
+      | cons p ps ih =>
+        intro w0 hw hl
+        simp only [List.foldl_cons]
+        have hcredit :
+            ((creditSender w0 (tname dst) caller).st caller).waitId = (w0.st caller).waitId ∧
+              ((creditSender w0 (tname dst) caller).st caller).life = (w0.st caller).life := by
+          simp [creditSender, setActor_self, bumpToken]
+        exact ih (creditSender w0 (tname dst) caller) (hcredit.1.trans hw) (hcredit.2.trans hl)
+    have hstep := hfold ((w.st dst).parked.filter pred) base hbase.1 hbase.2
+    simpa [base, keep, pred, Bool.not_and] using hstep
+
+/-- `NotAdmitted` ends a parked call on `onNotAdmitted`. It is not how an
+`awaitReply` ends. -/
+theorem parked_not_admitted (w w' : World) (c d : InstId) (k : Cont)
+    (hl : (w.st c).life = .alive) (hph : (w.st c).phase = .parked d true k)
+    (h : callTimeout w c = some w') :
+    (w'.st c).lastCall = some ((w.st c).waitId, CallResult.notAdmitted) ∧
+      (w'.st c).phase =
+        (proceed (w.st c) (selectCall k CallResult.notAdmitted)).phase := by
+  unfold callTimeout at h
+  have hlive : ((w.st c).life != .alive) = false := by simp [hl, bne]
+  simp only [hlive, ite_false, hph] at h
+  have hw' : w' = setActor (refundParkedCall w c d) c
+      (finishCall ((refundParkedCall w c d).st c) k CallResult.notAdmitted) := by
+    simpa using h.symm
+  have hkeep := refundCall_wait w c d
+  have hself : (w'.st c) =
+      finishCall ((refundParkedCall w c d).st c) k CallResult.notAdmitted := by
+    rw [hw', setActor_self]
+  refine ⟨?_, ?_⟩
+  · simp [hself, finishCall, hkeep.1]
+  · simpa [hself, finishCall, selectCall] using
+      proceed_phase_actor ((refundParkedCall w c d).st c) (w.st c)
+        (selectCall k CallResult.notAdmitted)
+
+theorem await_still_enabled (I : Impl) (w : World) (c d : InstId) (k : Cont)
+    (hl : (w.st c).life = .alive) (hph : (w.st c).phase = .awaitReply d k) :
+    Enabled I w (.callTimeout c) := by
+  unfold Enabled apply callTimeout
+  have hlive : ((w.st c).life != .alive) = false := by simp [hl, bne]
+  simp [hlive, hph]
+
+/-- An `awaitReply` does not last for the rest of a fair run while the caller
+stays alive. The deadline stays enabled, and fairness takes it. -/
+theorem await_not_forever (I : Impl) {N : Nat} (ρ : Run I N) (hF : Fair ρ)
+    (c d : InstId) (i : Nat)
+    (hph : ∀ t, i ≤ t → ∃ k, ((ρ.cfg t).st c).phase = .awaitReply d k)
+    (hlive : ∀ t, i ≤ t → ((ρ.cfg t).st c).life = .alive) : False := by
+  have hen : ∀ t, i ≤ t → Enabled I (ρ.cfg t) (.callTimeout c) := by
+    intro t ht
+    obtain ⟨k, hk⟩ := hph t ht
+    exact await_still_enabled I (ρ.cfg t) c d k (hlive t ht) hk
+  obtain ⟨j, hj, hact⟩ := hF.weak (.callTimeout c) i rfl hen
+  have happ := ρ.valid j
+  rw [hact] at happ
+  simp only [apply] at happ
+  obtain ⟨k, hk⟩ := hph j hj
+  have hend := await_timeout_end (ρ.cfg j) (ρ.cfg (j + 1)) c d k (hlive j hj) hk happ
+  obtain ⟨k', hk'⟩ := hph (j + 1) (Nat.le_trans hj (Nat.le_succ j))
+  exact proceed_not_await ((ρ.cfg j).st c) (selectCall k CallResult.timedOut) k' d
+    (hend.2.1.symm.trans hk')
+
+/-- Caller-side totality for the deadline step. A live `awaitReply` that takes
+`callTimeout` records `TimedOut` and runs `onTimedOut`.
+
+The three caller outcomes, each on its own continuation (`finishCall_cont`):
+`Reply` is a matching reply (`await_reply_end`), `TimedOut` is this step, and
+`NotAdmitted` is a parked call whose deadline fires before the request enters
+the mailbox (`parked_not_admitted`). `NotAdmitted` is not an exit of
+`awaitReply`. A live `awaitReply` does not last for the rest of a fair run
+(`await_not_forever`). -/
+theorem await_total (I : Impl) {N : Nat} (ρ : Run I N) (_hF : Fair ρ)
+    (c d : InstId) (k : Cont) (i j : Nat)
+    (hph : ((ρ.cfg j).st c).phase = .awaitReply d k)
+    (hl : ((ρ.cfg j).st c).life = .alive)
+    (_hle : i ≤ j) (hact : ρ.act j = .callTimeout c) :
+    ((ρ.cfg (j + 1)).st c).lastCall = some (((ρ.cfg j).st c).waitId, CallResult.timedOut) ∧
+      ((ρ.cfg (j + 1)).st c).phase =
+        (proceed ((ρ.cfg j).st c) (selectCall k CallResult.timedOut)).phase ∧
+      (selectCall k CallResult.timedOut).rest = k.onTimedOut := by
+  have happ := ρ.valid j
+  rw [hact] at happ
+  simp only [apply] at happ
+  have hend := await_timeout_end (ρ.cfg j) (ρ.cfg (j + 1)) c d k hl hph happ
+  have hrest : (selectCall k CallResult.timedOut).rest = k.onTimedOut := by
+    simp [selectCall]
+  exact ⟨hend.1, hend.2.1, hrest⟩
+
+/-- The world in which the callee is alive and the caller is already in
+`awaitReply`, with the request still queued. -/
+def raceDesc : Description where
+  name := "race"
+  freshNames := true
+  templates := []
+  edges := []
+  compatibility := .all
+  steps := []
+
+def raceImpl : Impl where
+  desc := raceDesc
+  transitions := []
+
+def replyFalseK : Cont where
+  rest := [.reply]
+  toState := "idle"
+  replyTo := none
+  onNotAdmitted := []
+  onTimedOut := []
+
+def replyFalseMsg : Msg where
+  label := "Req"
+  sender := .core "caller"
+  callFrom := some (.core "caller")
+  mid := 3
+  callId := some 7
+
+def replyFalseActor (ph : Phase) : Actor where
+  life := .alive
+  typestate := "idle"
+  phase := ph
+  box := []
+  prio := []
+  parked := []
+  tokens := fun _ => 0
+  waitId := 7
+  nextCall := 8
+
+def replyFalseWorld : World where
+  N := 1
+  roster := [.core "caller", .core "callee"]
+  nextIx := fun _ => 0
+  st := fun i =>
+    if i = .core "caller" then replyFalseActor (.awaitReply (.core "callee") replyFalseK)
+    else if i = .core "callee" then
+      { replyFalseActor .idle with box := [replyFalseMsg] }
+    else absentActor
+  cell := fun _ _ => cleanCell
+  observed := fun _ _ => 0
+
+/-- The `Reply` conjunct is false. The caller is in `awaitReply`, the callee is
+alive, and the deadline is enabled. Taking it records `TimedOut` for that call
+id and leaves the callee alive, with message `3` still queued. A later reply
+cannot turn that result into `Reply`: `finishCall` retires the id. -/
+theorem call_answered_reply_false :
+    let c := InstId.core "caller"
+    let d := InstId.core "callee"
+    (replyFalseWorld.st d).life = .alive ∧
+      (replyFalseWorld.st c).phase = .awaitReply d replyFalseK ∧
+      Enabled raceImpl replyFalseWorld (.callTimeout c) ∧
+      ∃ w, callTimeout replyFalseWorld c = some w ∧
+        (w.st d).life = .alive ∧
+        (w.st c).lastCall = some (7, CallResult.timedOut) ∧
+        (w.st c).lastCall ≠ some (7, CallResult.reply) ∧
+        ∃ m, m ∈ (w.st d).box ∧ m.mid = 3 ∧ m.callId = some 7 := by
+  intro c d
+  have hl : (replyFalseWorld.st c).life = .alive := rfl
+  have hph : (replyFalseWorld.st c).phase = .awaitReply d replyFalseK := rfl
+  have hen := await_still_enabled raceImpl replyFalseWorld c d replyFalseK hl hph
+  cases hopt : callTimeout replyFalseWorld c with
+  | none => simp [Enabled, apply, hopt] at hen
+  | some w =>
+    have hend := await_timeout_end replyFalseWorld w c d replyFalseK hl hph hopt
+    have hwid : (replyFalseWorld.st c).waitId = 7 := rfl
+    have hne : c ≠ d := by decide
+    have hbox := await_timeout_box replyFalseWorld w c d replyFalseK hl hph hopt hne
+    have hcal : (replyFalseWorld.st d).life = .alive := rfl
+    have hst : (replyFalseWorld.st d).box = [replyFalseMsg] := by
+      have hnc : d ≠ InstId.core "caller" := by decide
+      simp [replyFalseWorld, replyFalseActor, d, hnc]
+    refine ⟨rfl, hph, hen, ⟨w, ?_, ?_, ?_, ?_, ?_⟩⟩
+    · rfl
+    · simpa [hcal] using hend.2.2
+    · simpa [hend.1, hwid]
+    · intro hbad
+      simp [hend.1, hwid] at hbad
+    · rw [hbox, detachBox, hst]
+      refine ⟨detachMsg c replyFalseMsg, List.Mem.head _, ?_, ?_⟩
+      · simp [detachMsg, replyFalseMsg, c]
+      · simp [detachMsg, replyFalseMsg, c]
+
 end Deadlock

@@ -54,6 +54,23 @@ Under full-duplex sizing the child count is `population`, the product along
 the supervision tree. `prioSizeFails` is that check. It is not wired into
 `LocalOk` yet; the checker will report it later.
 
+## 2026-11-20 — call_answered does not promise Reply
+
+`call_answered` is the callee's handling guarantee. An admitted call is a
+request queued at the callee under `mid`. If the callee stays alive, it
+handles that request by `recvBulk` of `mid`. The caller's outcome is not
+part of that claim.
+
+The caller's totality is one continuation per outcome (`finishCall_cont`).
+An `awaitReply` ends as `Reply` (`await_reply_end`) or `TimedOut`
+(`await_total`). `NotAdmitted` (`parked_not_admitted`) is the outcome when
+the request never enters the mailbox. A live `awaitReply` does not last for
+the rest of a fair run (`await_not_forever`).
+
+The old `Reply` conjunct is false. The deadline can fire while the callee is
+still alive (`call_answered_reply_false`). A `Reply` guarantee needs the
+shelved timing model, where the deadline is later than the service time.
+
 ## 2026-11-20 — What deadlock freedom is about
 
 `deadlock_freedom` is about parked sends. A run is deadlocked when a send sits

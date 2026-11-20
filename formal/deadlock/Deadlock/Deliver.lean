@@ -27,30 +27,6 @@ def drainDrops {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (start : Nat)
     drainDrops ρ id start hot k +
       if (ρ.act (start + k) == .recvBulk id) && hot (start + k) then 1 else 0
 
-/-- `Reply` while the callee stays alive. `NotAdmitted` or `TimedOut` once the
-callee has shut down or terminated before the call is answered. The caller is
-waiting in `awaitReply` or on a parked call. -/
-def callWaiting (a : Actor) (d : InstId) (k : Cont) : Prop :=
-  a.phase = .awaitReply d k ∨ a.phase = .parked d true k
-
-theorem call_answered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
-    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (c d : InstId) (k : Cont)
-    (hph : callWaiting ((ρ.cfg i).st c) d k) :
-    ((∀ t, i ≤ t → ((ρ.cfg t).st d).life = .alive) →
-      ∃ j, i ≤ j ∧
-        ((ρ.cfg j).st c).lastCall = some (((ρ.cfg i).st c).waitId, .reply)) ∧
-    ((∃ t, i ≤ t ∧ ((ρ.cfg t).st d).life ≠ .alive ∧
-        ∀ u, i ≤ u → u ≤ t → callWaiting ((ρ.cfg u).st c) d k) →
-      ∃ j, i ≤ j ∧ ∃ r, (r = CallResult.notAdmitted ∨ r = CallResult.timedOut) ∧
-        ((ρ.cfg j).st c).lastCall = some (((ρ.cfg i).st c).waitId, r)) := by
-  -- The callee that stays alive is delivered by the runtime and `Fair`.
-  -- A callee that has halted is the timeout, which stays enabled.
-  refine ⟨?_, ?_⟩
-  · intro _hstay
-    exact ?reply
-  · intro _hgone
-    exact ?halted
-
 /-- Bulk mail in delivery order: the box, then parked messages. -/
 def bulkQ (a : Actor) : List Msg := a.box ++ a.parked.map (·.msg)
 
@@ -2609,5 +2585,34 @@ theorem fair_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
    fun i id m hm hr =>
       have ⟨j, hj, hact, htaken⟩ := prio_delivered I hL hG hA ρ hF i id m hm hr
       ⟨j, hj, Or.inl ⟨hact, htaken⟩⟩⟩
+
+/-- An admitted call is a request sitting in the callee's mailbox under `mid`.
+`callId` is the id the callee stored when it accepted the message. A parked
+call has not entered the mailbox: `NotAdmitted` removes it, and there is then
+no `mid` to handle. `Reply` and `TimedOut` both leave an admitted message
+queued. `callTimeout` only clears `callFrom`. -/
+def admittedCall (a : Actor) (m : Msg) : Prop :=
+  m ∈ a.box ∧ m.reliable = true ∧ m.callId.isSome = true
+
+/-- If the call is admitted and the callee stays alive, the callee handles that
+request: a `recvBulk` of message `mid`. The caller's outcome is not part of
+the claim. `call_answered_reply_false` is the race that makes a `Reply`
+promise false. `Reply`, `TimedOut`, and `NotAdmitted` are the caller's three
+outcomes, each on its own continuation. -/
+theorem call_answered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
+    {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (d : InstId) (m : Msg)
+    (hm : admittedCall ((ρ.cfg i).st d) m)
+    (hlive : ∀ t, i ≤ t → ((ρ.cfg t).st d).life = .alive) :
+    ∃ j, i ≤ j ∧ ρ.act j = .recvBulk d ∧ takenBulk ((ρ.cfg j).st d) m.mid := by
+  obtain ⟨hbox, hr, hcall⟩ := hm
+  cases hcid : m.callId with
+  | none => simp [hcid] at hcall
+  | some _ =>
+    obtain ⟨j, hj, hdisj⟩ := (fair_delivered I hL hG hA ρ hF).1 i d m hbox hr
+    rcases hdisj with hrecv | ⟨hlost, _⟩
+    · exact ⟨j, hj, hrecv.1, hrecv.2⟩
+    · have hl := hlive j hj
+      rw [lostHost, Halted, hl] at hlost
+      rcases hlost with h | h <;> cases h
 
 end Deadlock
