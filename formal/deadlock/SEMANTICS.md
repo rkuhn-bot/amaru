@@ -10,10 +10,11 @@ commit as any change to that step relation.
 `World` holds `N`, `roster`, `nextIx`, `st`, `cell`, `observed`, `failures`,
 and `tombstone`.
 
-`InstId` is `core name` or `peer name index`. `nextIx` only grows. `spawn`
-allocates `InstId.peer template (nextIx template)` and a dead index is never
-reused. `memberKey` is that index; a core has none. `isMember` is a peer
-whose index is the key and whose template's subtree is `sub`.
+`InstId` is `core name` or `peer name key generation`. A pool child of a
+core is indexed by a slot below the template's `slots` and by generation.
+A dead id is not reused. `memberKey` is the key; a core has none.
+`isMember` is a peer whose key is the subtree key and whose template's
+subtree is `sub`.
 
 An `Actor` has `life`, `typestate`, `phase`, `box`, `prio`, `parked`,
 `tokens`, and `nextMid`.
@@ -30,8 +31,12 @@ wake are `reliable = false`.
 
 `tokens dst` is the remaining send credit toward template `dst`.
 `enqueueOrPark` spends one with `chargeSender`. A receive gives it back
-with `creditSender`. `capBulk` and `capPrio` bound the queues. A priority
-wake is not charged.
+with `creditSender`. While idle, the ingress gate reserves the current
+typestate's floor. While a continuation is open, it reserves the maximum
+of `sends + floor(landing)` over the paths still open, and a parked call
+counts its own message on the `TimedOut` path. A new generation's tokens
+are that budget minus mail still queued from any generation of the same
+key. `capBulk` and `capPrio` bound the queues. A priority wake is not charged.
 
 `cell dst label` is a monotonic dirty bit. `observed id label` is the value
 a reader has recorded. `readCells` clears the bits it copies.
@@ -55,8 +60,8 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, `prio` nonempty, `deliver` accepts | Consume the `prio` head. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root, `aliveCount < N`, supervisor alive, and `prioSized` still holds with the tombstones queued on that supervisor | Fresh generation at the subtree key, idle, on the roster. A dead id is not reused. |
-| `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not `terminableB`, and enough `tokens` | Append one reliable self-message and charge. |
+| `spawn template` | per-peer root with `slots = 0`, `aliveCount < N`, supervisor alive | Fresh generation at an open subtree key, idle, on the roster. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A full supervisor lane does not refuse the spawn: the later tombstone enqueue crashes. A dead id is not reused. |
+| `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
 `runtimeBusy` is a roster actor who can `recvBulk`, `recvPrio`, `exec`,
@@ -97,7 +102,8 @@ cannot address a per-peer role. The `hint` is not the address.
 `deliver` refuses a dead actor, a call with no transition, and a call whose
 transition does not `acceptsCall`. The receive is then not enabled. A
 tombstone with no transition in the parent's current state is also refused,
-so it stays queued. Another non-call with no transition is accepted and
+so it stays queued. The queued label is the template's tombstone, `#`, and
+the generation. A handler written on the base label still accepts it. Another non-call with no transition is accepted and
 leaves the receiver `idle`. A program becomes `run`, or `idle` when the
 program is empty. `replyTo` is `callFrom`. Each outcome's typestate is
 copied onto the continuation.

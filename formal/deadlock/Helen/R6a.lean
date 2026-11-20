@@ -60,9 +60,10 @@ def ingC (st : String) : Edge :=
 def callDesc : Description where
   name := "timed-call"
   freshNames := true
-  templates := [tpl "C" 2 ["idle", "wait", "miss"] "idle" true, tpl "B" 2 ["idle"] "idle" true]
-  edges := [ingC "idle", ingC "wait",
-            { (sendEdge "C" "wait" "B" "Q" 1) with effect := .call, repliesInDequeue := true }]
+  templates := [tpl "C" 3 ["idle", "wait", "miss"] "idle" true, tpl "B" 2 ["idle"] "idle" true]
+  edges := [ingC "idle", ingC "wait", ingC "miss",
+            { (sendEdge "C" "wait" "B" "Q" 1) with effect := .call, repliesInDequeue := true },
+            { (sendEdge "C" "miss" "B" "Q" 1) with effect := .call, repliesInDequeue := true }]
   compatibility := .all
   steps := [{ template := "C", fromState := "idle", toState := "wait", label := "Go" },
             { template := "C", fromState := "wait", toState := "wait", label := "Go" },

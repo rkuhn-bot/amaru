@@ -14,7 +14,29 @@ actor not `Blocked`.
 `fair_delivered` is liveness for a `Fair` run of a `GraphOk` and `LocalOk`
 implementation that has not crashed. The headline is deadlock-free or
 crashed: a fair run is not stuck, or a step has already crashed the roster
-and no further action is enabled. `Delivered` says every reliable message in
+and no further action is enabled.
+
+## Deadlock-free or crashed
+
+A fair run is exactly a non-crashing infinite run. Once `crashWorld` sets
+`World.crashed`, every action is disabled, including stutter, ingress, and
+spawn, and the run stops. The claim is deadlock-free or crashed. `LocalOk`
+does not remove the crash. Under `GraphOk` and `LocalOk` the steps that
+still crash the roster are:
+
+- `terminate` of a permanent core
+- a self-schedule that does not fit the priority lane
+- a cell wake that does not fit the priority lane
+- a tombstone that does not fit the priority lane: a child restart, and a
+  root respawn while predecessors' tombstones are still queued
+
+`prioSized` counts one tombstone per child that can be alive at once, and
+`slots` of a pool. It does not bound how often a child is restarted, and
+this development does not claim that a `prioSized` design cannot crash.
+`maySpawnRoot` does not refuse a spawn for lack of lane room. Pure-stage
+`AddStage` does not refuse a spawn; the later enqueue is what crashes.
+`LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
+template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head
 consumed by `recvBulk` or `recvPrio`, matched by the id the storing actor
 assigned when it accepted the message, or the target had begun shutting down

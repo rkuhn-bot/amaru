@@ -94,7 +94,7 @@ inductive Eff where
   | abort
   | terminate
   /-- A per-peer stage spawns one child of `template` at its own subtree key.
-  Cores do not run this effect: a supervision tree is built by its own members. -/
+  A core spawns a pool child into a free slot below that template's `slots`. -/
   | spawn (template : String)
 
 mutual
@@ -337,6 +337,9 @@ structure Msg where
   /-- A supervision tombstone. It occupies a priority slot, the same as any other
   priority message. -/
   tombstone : Bool := false
+  /-- Template tombstone the parent handler is written on. The queued `label`
+  also carries the generation, so two incarnations do not compare equal. -/
+  baseLabel : String := ""
   deriving DecidableEq, Repr, Inhabited
 
 structure Parked where
@@ -510,15 +513,27 @@ def findTr (I : Impl) (template state label : String) : Option Transition :=
   I.transitions.findSome? fun tr =>
     if tr.template == template && tr.fromState == state && tr.label == label then some tr else none
 
+/-- `findTr` on the message label. A tombstone also matches `baseLabel`,
+so a handler written for the template's `tombstone` accepts every generation. -/
+def findDeliver (I : Impl) (template state : String) (m : Msg) : Option Transition :=
+  match findTr I template state m.label with
+  | some tr => some tr
+  | none =>
+    if m.tombstone && m.baseLabel != "" && m.baseLabel != m.label then
+      findTr I template state m.baseLabel
+    else none
+
 def aliveCount (w : World) (template : String) : Nat :=
   w.roster.foldl (fun n id =>
     if tname id == template && (w.st id).life == .alive then n + 1 else n) 0
 
 /-- Population of `name` at root population `N`. A core is one instance. A
-per-peer root — no supervisor, or a core supervisor — has `N` instances. A
-per-peer child of a per-peer supervisor has that supervisor's population, one
-child per parent, not a fresh `N`. `fuel` is the template count, so a cycle
-stops. The chain is the product of those factors. -/
+per-peer root with `slots = 0` — no supervisor, or a core supervisor — has
+`N` instances. A pool (`slots = n`) under a core has `n` instances, and a
+pool under a per-peer supervisor has that supervisor's population times `n`.
+A per-peer child with `slots = 0` has its per-peer supervisor's population,
+one child per parent, not a fresh `N`. `fuel` is the template count, so a
+cycle stops. The chain is the product of those factors. -/
 def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
   match fuel with
   | 0 => 0
@@ -529,7 +544,14 @@ def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
       match t.multiplicity with
       | .one => 1
       | .perPeer =>
-        if t.supervisor == "" then N
+        if t.slots != 0 then
+          match templateOf D t.supervisor with
+          | none => 0
+          | some sup =>
+            match sup.multiplicity with
+            | .one => t.slots
+            | .perPeer => population D t.supervisor N fuel * t.slots
+        else if t.supervisor == "" then N
         else
           match templateOf D t.supervisor with
           | none => 0
@@ -539,9 +561,10 @@ def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
             | .perPeer => population D t.supervisor N fuel
 
 /-- How many tombstones can sit on one instance of `parent` at once.
-A per-peer parent has one instance of each child template. A core is the
-supervisor of every instance, and that count is `population`: the product
-along the supervision tree, not a flat `N` of labels. -/
+A per-peer parent has one instance of each child template, or `slots` of a
+pool child. A core is the supervisor of every instance, and that count is
+`population`: the product along the supervision tree, times `slots` for a
+pool, not a flat `N` of labels. -/
 def simultaneousTombstones (D : Description) (parent : String) (N : Nat) : Nat :=
   match templateOf D parent with
   | none => 0
@@ -550,15 +573,15 @@ def simultaneousTombstones (D : Description) (parent : String) (N : Nat) : Nat :
       if t.supervisor == parent && t.tombstone != "" then
         match sup.multiplicity with
         | .one => n + population D t.name N D.templates.length
-        | .perPeer => n + 1
+        | .perPeer => n + (if t.slots == 0 then 1 else t.slots)
       else n) 0
 
 /-- Slots a priority lane must have so it does not overflow: every child that
 can tombstone at once, plus the other priority senders (self-schedules and
 cell wakes), plus tombstones from dead predecessors still sitting on the lane.
 `otherSenders` is the static second count. `queued` is those leftover
-tombstones; the static check passes `0`, and `maySpawnRoot` passes the live
-count. A replacement is refused once the sum exceeds the capacity. -/
+tombstones. The static check passes `0`. A spawn is not refused when the
+sum exceeds the capacity: the later tombstone enqueue crashes the roster. -/
 def prioDemand (D : Description) (parent : String) (N otherSenders : Nat) (queued : Nat := 0) : Nat :=
   simultaneousTombstones D parent N + otherSenders + queued
 
@@ -697,12 +720,40 @@ def afterHead (k : Cont) : Cont :=
 def withTokens (D : Description) (template : String) (a : Actor) : Actor :=
   { a with tokens := fun dst => budget D template dst }
 
+/-- Messages still queued from any generation of `name` at `key`, on hosts of
+template `dst`. A new generation is charged for them: the key's budget is one
+account, not a fresh account per incarnation. -/
+def queuedFromKey (w : World) (name : String) (key : Nat) (dst : String) : Nat :=
+  let fromKey : Msg → Bool := fun m =>
+    match m.sender with
+    | .peer s k _ => s == name && k == key
+    | .core _ => false
+  w.roster.foldl (fun n host =>
+    if tname host != dst then n
+    else
+      n + ((w.st host).box.filter fromKey).length +
+        ((w.st host).parked.filter fun p => fromKey p.msg).length) 0
+
+/-- `budget` minus mail from earlier generations of this key. The first
+generation is charged nothing. -/
+def withKeyTokens (D : Description) (w : World) (template : String) (key : Nat) (a : Actor) : Actor :=
+  { a with tokens := fun dst => budget D template dst - queuedFromKey w template key dst }
+
+def bornActor (D : Description) (w : World) (template : String) (key : Nat) (initial : String) : Actor :=
+  withKeyTokens D w template key
+    { life := .alive, typestate := initial, phase := .idle, box := [], prio := [],
+      parked := [], tokens := fun _ => 0 }
+
 /-- Every transition the reader takes clears dirty and records the value. -/
 def readCells (D : Description) (w : World) (reader : InstId) : World :=
   (cellLabels D (tname reader)).foldl (fun w label =>
     let c := w.cell (tname reader) label
     let w := setCell w (tname reader) label { c with dirty := false }
     setObserved w reader label c.value) w
+
+def admitBorn (I : Impl) (w : World) (id : InstId) (a : Actor) : World :=
+  let w := { w with roster := w.roster ++ [id] }
+  readCells I.desc (setActor w id a) id
 
 /-- Deliver `m` to a live actor. A call with no `acceptsCall` transition is refused
 (`none`) so the message is not dropped. A tombstone with no transition stays
@@ -711,7 +762,7 @@ def deliver (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) : Option 
   let w := readCells I.desc w id
   if a.life ≠ .alive then none
   else
-    match findTr I (tname id) a.typestate m.label with
+    match findDeliver I (tname id) a.typestate m with
     | none =>
       -- A call, and a tombstone, stay queued when this state has no transition.
       -- A non-call that is not a tombstone is consumed.
@@ -1032,18 +1083,29 @@ theorem isChild_peer (D : Description) (supName childName : String) (k : Nat)
 def hasChild (D : Description) (w : World) (id : InstId) : Bool :=
   w.roster.any fun c => isChild D id c && (w.st c).life == .alive
 
-/-- The tombstone label the parent wired for this child template. -/
+/-- The tombstone label the parent wired for this child template.
+A peer's label carries its generation, so a stale tombstone is not the
+live incarnation's. The parent's transition is on the base label; delivery
+accepts either spelling. -/
 def tombstoneLabel (D : Description) (child : InstId) : String :=
-  match templateOf D (tname child) with
-  | some t => t.tombstone
-  | none => ""
+  let base :=
+    match templateOf D (tname child) with
+    | some t => t.tombstone
+    | none => ""
+  match child with
+  | .peer _ _ g => s!"{base}#{g}"
+  | .core _ => base
 
 /-- One tombstone per child. The label is the child template's wired label, so
 two templates do not share a message and two instances of one template do not
 collapse into one wake. -/
 def tombstoneMsg (D : Description) (parent : Actor) (child : InstId) : Msg :=
+  let base :=
+    match templateOf D (tname child) with
+    | some t => t.tombstone
+    | none => ""
   { label := tombstoneLabel D child, sender := child, callFrom := none,
-    reliable := true, mid := parent.nextMid, tombstone := true }
+    reliable := true, mid := parent.nextMid, tombstone := true, baseLabel := base }
 
 /-- The supervisor's live incarnation, or the canonical id when none is alive. -/
 def liveSupervisor (D : Description) (w : World) (child : InstId) : Option InstId :=
@@ -1214,31 +1276,47 @@ def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
       enqueueTombstone D w child
     else w) w
 
-/-- A per-peer parent births one child at its own key. The child template must
-name this parent. A live child is left as it is: a second copy is not created
-and the effect does not crash. A dead child is restarted at a fresh generation
-of the same key; the dead id stays on the roster. A parent that is not alive
-admits nobody. A core has no such effect. There is no flat `N` cap. -/
+/-- Lowest slot in `0 ..< n` with no live `name`. Structural in the fuel. -/
+def freeSlot (w : World) (name : String) (n : Nat) : Option Nat :=
+  let rec go (fuel : Nat) : Option Nat :=
+    match fuel with
+    | 0 => none
+    | fuel + 1 =>
+      let k := n - (fuel + 1)
+      if aliveAt w name k then go fuel else some k
+  go n
+
+/-- A per-peer parent births one child at its own key. A core births one pool
+child in a free slot below `slots`. A live child is left as it is. A dead
+child is restarted at a fresh generation of the same slot; the dead id stays
+on the roster, and mail that generation still has queued is charged to the
+new one's tokens. A parent that is not alive admits nobody. A spawn the
+template does not allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
-  match parent with
-  | .core _ => none
-  | .peer _ k _ =>
-    match templateOf I.desc child with
-    | none => none
-    | some t =>
-      if t.multiplicity == .perPeer && t.supervisor == tname parent then
-        if (w.st parent).life == .alive then
+  match templateOf I.desc child with
+  | none => none
+  | some t =>
+    if t.multiplicity == .perPeer && t.supervisor == tname parent && (w.st parent).life == .alive then
+      match parent with
+      | .core _ =>
+        if t.slots != 0 then
+          match freeSlot w child t.slots with
+          | some k =>
+            let id := InstId.peer child k (maxGen w child k)
+            some (admitBorn I w id (bornActor I.desc w child k t.initial))
+          | none => some w
+        else none
+      | .peer _ k _ =>
+        if t.slots == 0 then
           match findLive w child k with
           | some _ => some w
           | none =>
             let id := InstId.peer child k (maxGen w child k)
-            let born := withTokens I.desc child
-              { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [],
-                parked := [], tokens := fun _ => 0 }
-            let w := { w with roster := w.roster ++ [id] }
-            some (readCells I.desc (setActor w id born) id)
-        else some w
-      else none
+            some (admitBorn I w id (bornActor I.desc w child k t.initial))
+        else none
+    else if t.multiplicity == .perPeer && t.supervisor == tname parent then
+      some w
+    else none
 
 /-- Run one effect. An actor that is not alive does not run: while it is shutting
 down the only enabled step is the seal in `execHead`. -/
@@ -1707,22 +1785,109 @@ def effSends (dst : String) (e : Eff) (tailN : Nat) : Nat :=
   | _ => tailN
 end
 
-/-- Bulk sends still stored on a continuation, counting every outcome branch. -/
+/-- Bulk sends still stored on a continuation, counting every outcome branch.
+The call's own message is not in these lists: it was already issued. -/
 def contSends (dst : String) (k : Cont) : Nat :=
   max (sendsTo dst k.rest)
     (max (sendsTo dst k.onNotAdmitted)
       (max (sendsTo dst k.onTimedOut) (sendsTo dst k.onTimeout)))
 
-/-- Bulk sends still in the continuation, counted toward the token floor.
-A waiting actor's other outcomes are on the continuation, not only in `rest`. -/
+/-- Typestate each outcome lands in. `here` is the reply, admitted, and data path. -/
+structure BranchAt where
+  here : String
+  notAdmitted : String := ""
+  timedOut : String := ""
+  timeout : String := ""
+  full : String := ""
+  gone : String := ""
+
+/-- The typestate a replacing branch is checked in. Empty keeps `here`. -/
+def focus (a : BranchAt) (s : String) : BranchAt :=
+  { a with here := if s == "" then a.here else s }
+
+def branchAt (tr : Transition) : BranchAt where
+  here := tr.toState
+  notAdmitted := tr.toNotAdmitted
+  timedOut := tr.toTimedOut
+  timeout := tr.toTimeout
+  full := tr.toFull
+  gone := tr.toGone
+
+def contAt (k : Cont) : BranchAt where
+  here := k.toState
+  notAdmitted := k.toNotAdmitted
+  timedOut := k.toTimedOut
+  timeout := k.toTimeout
+  full := k.toFull
+  gone := k.toGone
+
+/-- Tokens a state must still hold toward `dst`: the budget minus what that
+state itself may have in flight. -/
+def landFloor (D : Description) (template state dst : String) : Nat :=
+  budget D template dst - debt D template state dst
+
+mutual
+/-- Maximum of `sends + floor(landing)` over every path. A replacing branch
+does not also run the tail, and it lands in its own typestate. -/
+def pathReserve (D : Description) (template dst : String) (at_ : BranchAt) : List Eff → Nat
+  | [] => landFloor D template at_.here dst
+  | e :: es => effReserve D template dst at_ e (pathReserve D template dst at_ es)
+
+def effReserve (D : Description) (template dst : String) (at_ : BranchAt) (e : Eff) (tail : Nat) : Nat :=
+  match e with
+  | .send d _ _ => (if d == dst then 1 else 0) + tail
+  | .trySend d _ _ onFull onGone =>
+    let own := if d == dst then 1 else 0
+    max (own + tail)
+      (max (pathReserve D template dst (focus at_ at_.full) onFull)
+        (pathReserve D template dst (focus at_ at_.gone) onGone))
+  | .call d _ _ onNotAdmitted onTimedOut =>
+    let own := if d == dst then 1 else 0
+    max (own + tail)
+      (max (pathReserve D template dst (focus at_ at_.notAdmitted) onNotAdmitted)
+        (own + pathReserve D template dst (focus at_ at_.timedOut) onTimedOut))
+  | .peer onTimeout =>
+    max tail (pathReserve D template dst (focus at_ at_.timeout) onTimeout)
+  | _ => tail
+end
+
+/-- Bulk sends still in the continuation. A parked call uses `contSends`, and
+the `TimedOut` alternative also counts the call's own message: that message
+stays queued when the deadline fires after admission. -/
 def pending (a : Actor) (dst : String) : Nat :=
   match a.phase with
   | .run k | .awaitEffect k => sendsTo dst k.rest
   | .parked _ false k => sendsTo dst k.rest
-  | .parked _ true k => max (sendsTo dst k.rest) (sendsTo dst k.onNotAdmitted)
+  | .parked target true k =>
+    let own := if tname target == dst then 1 else 0
+    max (sendsTo dst k.rest)
+      (max (sendsTo dst k.onNotAdmitted)
+        (max (own + sendsTo dst k.onTimedOut) (sendsTo dst k.onTimeout)))
   | .awaitReply _ k => max (sendsTo dst k.rest) (sendsTo dst k.onTimedOut)
   | .awaitPeer k => max (sendsTo dst k.rest) (sendsTo dst k.onTimeout)
   | .idle | .crashed => 0
+
+/-- What the ingress gate reserves: the same maximum `sends + floor(landing)`
+that `sendsOk` checks, over the paths still open in this phase. Idle reserves
+the current typestate's floor. -/
+def tokenHold (D : Description) (template dst : String) (a : Actor) : Nat :=
+  match a.phase with
+  | .idle | .crashed => landFloor D template a.typestate dst
+  | .run k | .awaitEffect k => pathReserve D template dst (contAt k) k.rest
+  | .awaitPeer k =>
+    max (pathReserve D template dst (contAt k) k.rest)
+      (pathReserve D template dst (focus (contAt k) k.toTimeout) k.onTimeout)
+  | .awaitReply _ k =>
+    max (pathReserve D template dst (contAt k) k.rest)
+      (pathReserve D template dst (focus (contAt k) k.toTimedOut) k.onTimedOut)
+  | .parked _ false k => pathReserve D template dst (contAt k) k.rest
+  | .parked target true k =>
+    let own := if tname target == dst then 1 else 0
+    let at_ := contAt k
+    max (pathReserve D template dst at_ k.rest)
+      (max (pathReserve D template dst (focus at_ at_.notAdmitted) k.onNotAdmitted)
+        (max (own + pathReserve D template dst (focus at_ at_.timedOut) k.onTimedOut)
+          (pathReserve D template dst (focus at_ at_.timeout) k.onTimeout)))
 
 /-- Idle, parked, waiting, or running. A message for a running actor waits in
 the box until the continuation finishes. A crashed actor does not take ingress. -/
@@ -1838,8 +2003,7 @@ ingress. The allowance is `ingressLegal` evaluated at `w.N`. -/
 def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Option World :=
   let a := w.st dst
   let cap := capBulk I.desc w.N dst
-  let floor := budget I.desc (tname dst) (tname dst) - debt I.desc (tname dst) a.typestate (tname dst)
-  let need := floor + pending a (tname dst) + 1
+  let need := tokenHold I.desc (tname dst) (tname dst) a + 1
   if a.life ≠ .alive || ingressOpen a.phase = false then none
   else if hasIngress I.desc (tname dst) label = false then none
   else if cap ≤ a.box.length then none
@@ -1943,14 +2107,13 @@ theorem ingress_ty_eq (I : Impl) (w w' : World) (dst : InstId) (label : String) 
 
 /-- A successful ingress is the charged, appended world, and the guards that
 make the charge safe have already held. The actor may be parked, waiting, or
-running; the token floor includes the sends still in that continuation. -/
+running; the reservation is the maximum of `sends + floor(landing)` over the
+paths still open. -/
 theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
     (w.st dst).life = .alive ∧ ingressOpen (w.st dst).phase = true ∧
       loneTerminableB I.desc (tname dst) = false ∧
-      budget I.desc (tname dst) (tname dst) -
-        debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
-        pending (w.st dst) (tname dst) + 1 ≤ (w.st dst).tokens (tname dst) ∧
+      tokenHold I.desc (tname dst) (tname dst) (w.st dst) + 1 ≤ (w.st dst).tokens (tname dst) ∧
       w' = setActor w dst { chargeSender (w.st dst) (tname dst) with
         box := (w.st dst).box ++
           [{ label := label, sender := dst, callFrom := none, reliable := true, mid := (w.st dst).nextMid }],
@@ -1985,14 +2148,10 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
               | true => simp [hb] at hterm
               | false => rfl
             · have hlt : ¬((w.st dst).tokens (tname dst) <
-                  budget I.desc (tname dst) (tname dst) -
-                    debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
-                    pending (w.st dst) (tname dst) + 1) := by
+                  tokenHold I.desc (tname dst) (tname dst) (w.st dst) + 1) := by
                 intro hbad
                 have hdec : decide ((w.st dst).tokens (tname dst) <
-                    budget I.desc (tname dst) (tname dst) -
-                      debt I.desc (tname dst) (w.st dst).typestate (tname dst) +
-                      pending (w.st dst) (tname dst) + 1) = true :=
+                    tokenHold I.desc (tname dst) (tname dst) (w.st dst) + 1) = true :=
                   decide_eq_true_iff.mpr hbad
                 simp [hdec] at htok
               simpa [Nat.not_lt] using hlt
@@ -2050,32 +2209,33 @@ def tombstoneRoom (D : Description) (w : World) (t : Template) : Bool :=
       | .perPeer => true
 
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
-  t.multiplicity == .perPeer && rootOf D t && decide (aliveCount w template < w.N) &&
-    supervisorLive D w t && tombstoneRoom D w t
+  t.multiplicity == .perPeer && t.slots == 0 && rootOf D t &&
+    decide (aliveCount w template < w.N) && supervisorLive D w t
 
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
   | none => none
   | some t =>
     if maySpawnRoot I.desc w template t then
-      let a := withTokens I.desc template
+      let base : Actor :=
         { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
           tokens := fun _ => 0 }
       if t.subtree == "" then
-        let id := InstId.peer template (w.nextIx template) 0
+        let k := w.nextIx template
+        let id := InstId.peer template k 0
         let w := { w with roster := w.roster ++ [id], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n }
-        some (readCells I.desc (setActor w id a) id)
+        some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
       else
         match openSubtreeKey I.desc w t.subtree template with
         | some k =>
           let id := InstId.peer template k (maxGen w template k)
           let w := { w with roster := w.roster ++ [id] }
-          some (readCells I.desc (setActor w id a) id)
+          some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
         | none =>
           let k := w.nextKey t.subtree
           let id := InstId.peer template k (maxGen w template k)
           let w := { w with roster := w.roster ++ [id], nextKey := fun s => if s = t.subtree then k + 1 else w.nextKey s }
-          some (readCells I.desc (setActor w id a) id)
+          some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
     else none
 
 inductive Action where
@@ -2257,6 +2417,27 @@ def effReplies : Eff → Nat
   | .peer onTimeout => replyCount onTimeout
   | _ => 0
 end
+
+mutual
+/-- One count per path. A branch replaces the tail, so the tail's counts are
+only the admitted or data path. -/
+def pathReplies : List Eff → List Nat
+  | [] => [0]
+  | e :: es => effReplyPaths e (pathReplies es)
+
+def effReplyPaths (e : Eff) (tails : List Nat) : List Nat :=
+  match e with
+  | .reply => tails.map (· + 1)
+  | .trySend _ _ _ onFull onGone => tails ++ pathReplies onFull ++ pathReplies onGone
+  | .call _ _ _ onNotAdmitted onTimedOut =>
+    tails ++ pathReplies onNotAdmitted ++ pathReplies onTimedOut
+  | .peer onTimeout => tails ++ pathReplies onTimeout
+  | _ => tails
+end
+
+/-- Every path replies exactly `n` times. A sum across alternatives is not enough. -/
+def repliesMatch (n : Nat) (es : List Eff) : Bool :=
+  (pathReplies es).all (· == n)
 
 mutual
 /-- `terminate` occurs on some path before the first `reply`. A reply ends the
@@ -6987,32 +7168,34 @@ theorem spawnChild_core_life (I : Impl) (w w' : World) (parent : InstId) (child 
     (h : spawnChild I w parent child = some w') :
     (w'.st (InstId.core name)).life = (w.st (InstId.core name)).life := by
   unfold spawnChild at h
-  cases parent with
-  | core _ => simp at h
-  | peer parentName k g =>
-    cases ht : templateOf I.desc child with
-    | none => simp [ht] at h
-    | some t =>
-      simp only [ht] at h
-      by_cases hsup : (t.multiplicity == .perPeer && t.supervisor == tname (InstId.peer parentName k g)) = true
-      · simp only [hsup, ite_true] at h
-        by_cases hlive : ((w.st (InstId.peer parentName k g)).life == .alive) = true
-        · simp only [hlive, ite_true] at h
-          cases hf : findLive w child k with
-          | some _ =>
-            simp [hf] at h
-            cases h
-            rfl
-          | none =>
-            simp [hf] at h
+  split at h
+  · simp at h
+  · split at h
+    · split at h
+      · split at h
+        · split at h
+          · next k _ =>
             cases h
             have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
               intro h; cases h
-            simp [setActor, cellsSt, hpeer]
-        · simp only [hlive, ite_false] at h
-          cases h
-          rfl
-      · simp [hsup] at h
+            simp [admitBorn, setActor, cellsSt, hpeer]
+          · cases h
+            rfl
+        · simp at h
+      · next _ k _ =>
+        split at h
+        · split at h
+          · cases h
+            rfl
+          · cases h
+            have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
+              intro h; cases h
+            simp [admitBorn, setActor, cellsSt, hpeer]
+        · simp at h
+    · split at h
+      · cases h
+        rfl
+      · simp at h
 
 theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (name : String) (ha : a.life = (w.st id).life)

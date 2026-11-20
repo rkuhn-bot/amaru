@@ -47,22 +47,10 @@ def effWake (reader : String) : Eff → List String
   | _ => []
 end
 
-def sendsOk (D : Description) (template srcState dstState : String) (prog : List Eff) : Bool :=
+def sendsOk (D : Description) (template : String) (tr : Transition) : Bool :=
   D.templates.all fun t =>
-    sendsTo t.name prog + floorState D template dstState t.name ≤ floorState D template srcState t.name
-
-/-- Typestate each outcome lands in. `here` is the reply, admitted, and data path. -/
-structure BranchAt where
-  here : String
-  notAdmitted : String := ""
-  timedOut : String := ""
-  timeout : String := ""
-  full : String := ""
-  gone : String := ""
-
-/-- The typestate a replacing branch is checked in. Empty keeps `here`. -/
-def focus (a : BranchAt) (s : String) : BranchAt :=
-  { a with here := if s == "" then a.here else s }
+    pathReserve D template t.name (branchAt tr) tr.program ≤
+      floorState D template tr.fromState t.name
 
 mutual
 def effectsOk (D : Description) (template : String) (at_ : BranchAt) : List Eff → Bool
@@ -132,14 +120,6 @@ def bulkScopeOf (D : Description) (name : String) (es : List Eff) : Bool :=
 def callOutcomesOk (D : Description) (template : String) (at_ : BranchAt) (es : List Eff) : Bool :=
   effectsOk D template at_ es
 
-def branchAt (tr : Transition) : BranchAt where
-  here := tr.toState
-  notAdmitted := tr.toNotAdmitted
-  timedOut := tr.toTimedOut
-  timeout := tr.toTimeout
-  full := tr.toFull
-  gone := tr.toGone
-
 /-- Empty names the transition's `toState`, which is checked on its own. -/
 def stateNamed (t : Template) (s : String) : Bool :=
   s == "" || t.states.elem s
@@ -152,13 +132,13 @@ def spawnScope (D : Description) (src : String) : List Eff → Bool
 
 def spawnEffect (D : Description) (src : String) : Eff → Bool
   | .spawn child =>
-    match templateOf D child with
-    | some ct =>
-      ct.supervisor == src && ct.multiplicity == .perPeer &&
-        match templateOf D src with
-        | some p => p.multiplicity == .perPeer
-        | none => false
-    | none => false
+    match templateOf D child, templateOf D src with
+    | some ct, some p =>
+      if p.multiplicity == .perPeer then
+        ct.supervisor == src && ct.multiplicity == .perPeer && ct.slots == 0
+      else
+        ct.supervisor == src && ct.multiplicity == .perPeer && ct.slots != 0
+    | _, _ => false
   | .trySend _ _ _ onFull onGone => spawnScope D src onFull && spawnScope D src onGone
   | .call _ _ _ onNotAdmitted onTimedOut =>
     spawnScope D src onNotAdmitted && spawnScope D src onTimedOut
@@ -174,13 +154,13 @@ def transitionOk (I : Impl) (tr : Transition) : Bool :=
     (t.states.elem tr.fromState) && (t.states.elem tr.toState) && tr.release == 1 &&
       stateNamed t tr.toNotAdmitted && stateNamed t tr.toTimedOut &&
       stateNamed t tr.toTimeout && stateNamed t tr.toFull && stateNamed t tr.toGone &&
-      sendsOk I.desc tr.template tr.fromState tr.toState tr.program &&
+      sendsOk I.desc tr.template tr &&
       effectsOk I.desc tr.template at_ tr.program &&
       callOutcomesOk I.desc tr.template at_ tr.program &&
       spawnScope I.desc tr.template tr.program &&
       (if tr.acceptsCall then
-        replyCount tr.program == 1 && !terminateBeforeReply tr.program
-      else replyCount tr.program == 0) &&
+        repliesMatch 1 tr.program && !terminateBeforeReply tr.program
+      else repliesMatch 0 tr.program) &&
       (if hasTerminate tr.program then t.terminable else true) &&
       bulkScopeOf I.desc tr.template tr.program
 
@@ -431,46 +411,47 @@ theorem targetsAll_edge (I : Impl) (h : LocalOk I) (e : Edge) (he : e ∈ I.desc
 /-! Reasons a wiring fails `localOkB`. The boolean stays the decision; these
 lines are what `check` prints. Each line names the obligation that failed. -/
 
-def floorGap (D : Description) (template srcState dstState label : String) (prog : List Eff) : List String :=
+def floorGap (D : Description) (tr : Transition) : List String :=
   D.templates.filterMap fun dst =>
-    let sent := sendsTo dst.name prog
-    let held := floorState D template srcState dst.name
-    let need := sent + floorState D template dstState dst.name
+    let need := pathReserve D tr.template dst.name (branchAt tr) tr.program
+    let held := floorState D tr.template tr.fromState dst.name
     if need ≤ held then none
-    else some s!"fail: transition {template} {srcState} -> {dstState} [{label}] needs {need} slot(s) toward {dst.name} and {srcState} holds {held}"
+    else some s!"fail: transition {tr.template} {tr.fromState} -> {tr.toState} [{tr.label}] needs {need} slot(s) toward {dst.name} and {tr.fromState} holds {held}"
 
-def programGap (D : Description) (template toState label : String) : List Eff → List String
+def programGap (D : Description) (template label : String) (at_ : BranchAt) : List Eff → List String
   | [] => []
   | .send d l _ :: es =>
-    if hasEdge D template toState d .send .blocking l then programGap D template toState label es
-    else [s!"fail: transition {template} [{label}] sends {l} to {d} from {toState}, which is not a blocking send edge"]
+    if hasEdge D template at_.here d .send .blocking l then programGap D template label at_ es
+    else [s!"fail: transition {template} [{label}] sends {l} to {d} from {at_.here}, which is not a blocking send edge"]
   | .trySend d l _ onFull onGone :: es =>
-    if hasEdge D template toState d .trySend .nonBlocking l then
+    if hasEdge D template at_.here d .trySend .nonBlocking l then
       if D.edges.any fun e => e.ingress && e.src == template && e.dst == d && e.label == l then
         [s!"fail: transition {template} [{label}] try-sends {l}, which is an ingress label delivered by the environment"]
-      else programGap D template toState label onFull ++ programGap D template toState label onGone ++
-        programGap D template toState label es
-    else [s!"fail: transition {template} [{label}] try-sends {l} to {d} from {toState}, which is not a non-blocking trySend edge"]
+      else programGap D template label (focus at_ at_.full) onFull ++
+        programGap D template label (focus at_ at_.gone) onGone ++
+        programGap D template label at_ es
+    else [s!"fail: transition {template} [{label}] try-sends {l} to {d} from {at_.here}, which is not a non-blocking trySend edge"]
   | .call d l _ onNotAdmitted onTimedOut :: es =>
-    if hasEdge D template toState d .call .blocking l then
-      programGap D template toState label onNotAdmitted ++ programGap D template toState label onTimedOut ++
-        programGap D template toState label es
-    else [s!"fail: transition {template} [{label}] calls {l} on {d} from {toState}, which is not a blocking call edge"]
+    if hasEdge D template at_.here d .call .blocking l then
+      programGap D template label (focus at_ at_.notAdmitted) onNotAdmitted ++
+        programGap D template label (focus at_ at_.timedOut) onTimedOut ++
+        programGap D template label at_ es
+    else [s!"fail: transition {template} [{label}] calls {l} on {d} from {at_.here}, which is not a blocking call edge"]
   | .cell d l _ :: es =>
-    if hasEdge D template toState d .cell .nonBlocking l then programGap D template toState label es
-    else [s!"fail: transition {template} [{label}] writes cell {l} on {d} from {toState}, which is not a non-blocking cell edge"]
+    if hasEdge D template at_.here d .cell .nonBlocking l then programGap D template label at_ es
+    else [s!"fail: transition {template} [{label}] writes cell {l} on {d} from {at_.here}, which is not a non-blocking cell edge"]
   | .peer onTimeout :: es =>
-    programGap D template toState label onTimeout ++ programGap D template toState label es
-  | _ :: es => programGap D template toState label es
+    programGap D template label (focus at_ at_.timeout) onTimeout ++ programGap D template label at_ es
+  | _ :: es => programGap D template label at_ es
 
 def replyGap (tr : Transition) : List String :=
   if tr.acceptsCall then
-    (if replyCount tr.program == 1 then []
-     else [s!"fail: transition {tr.template} [{tr.label}] accepts a call but does not reply once"]) ++
+    (if repliesMatch 1 tr.program then []
+     else [s!"fail: transition {tr.template} [{tr.label}] accepts a call but does not reply once on every path"]) ++
     (if terminateBeforeReply tr.program then
       [s!"fail: transition {tr.template} [{tr.label}] terminates before its reply"]
      else [])
-  else if replyCount tr.program == 0 then []
+  else if repliesMatch 0 tr.program then []
   else [s!"fail: transition {tr.template} [{tr.label}] replies without accepting a call"]
 
 /-- Effects in a subtree member's program that leave the subtree. -/
@@ -505,8 +486,8 @@ def transitionIssues (I : Impl) (tr : Transition) : List String :=
      else [s!"fail: transition {tr.template} [{tr.label}] enters undeclared state {tr.toState}"]) ++
     (if tr.release == 1 then []
      else [s!"fail: transition {tr.template} [{tr.label}] releases {tr.release} slot(s); a bulk receive releases 1"]) ++
-    floorGap I.desc tr.template tr.fromState tr.toState tr.label tr.program ++
-    programGap I.desc tr.template tr.toState tr.label tr.program ++
+    floorGap I.desc tr ++
+    programGap I.desc tr.template tr.label (branchAt tr) tr.program ++
     replyGap tr ++
     (if stateNamed t tr.toNotAdmitted && stateNamed t tr.toTimedOut &&
         stateNamed t tr.toTimeout && stateNamed t tr.toFull && stateNamed t tr.toGone then []

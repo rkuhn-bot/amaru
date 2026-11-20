@@ -95,13 +95,15 @@ theorem sub_local : localOkB subImpl = false := by decide
 theorem sub_prioSized : prioSized subDesc "P" 1 (prioLabels subImpl "P").length = true ∧
     prioSizeFails subImpl 1 = [] := by decide
 
-/-- Four tombstones fit. A fifth spawn is refused: `prioSized` counts the four
-still queued, and the world does not crash. -/
+/-- Four tombstones fit. A fifth root spawn is admitted: `maySpawnRoot` does not
+consult the lane. The new child's `terminate` then crashes on the full lane. -/
 theorem respawn_overflow :
     ((runAt subImpl 1 ((List.range 4).flatMap cycle)).map fun w =>
       ((w.st Pc).prio.length, capPrio subDesc 1 Pc)) = some (4, 4) ∧
     crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle)) = false ∧
-    runAt subImpl 1 ((List.range 4).flatMap cycle ++ cycle 4) = none ∧
+    (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])).isSome = true ∧
+    crashedB (runAt subImpl 1 ((List.range 4).flatMap cycle ++ [.spawn "A"])) = false ∧
+    ((runAt subImpl 1 ((List.range 4).flatMap cycle ++ (cycle 4).take 4)).map (·.crashed)) = some true ∧
     prioSized subDesc "P" 1 (prioLabels subImpl "P").length 4 = false := by decide
 
 /-- A tombstone that arrives in `seen` stays queued. `LocalOk` requires the label
@@ -109,7 +111,7 @@ in every declared state of the parent. -/
 def tombActs : List Action := cycle 0 ++ [.recvPrio Pc] ++ cycle 1 ++ [.recvPrio Pc]
 theorem tombstone_later_state :
     ((runAt subImpl 1 (cycle 0 ++ [.recvPrio Pc] ++ cycle 1)).map fun w =>
-      ((w.st Pc).typestate, (w.st Pc).prio.map (·.label))) = some ("seen", ["dead/A"]) ∧
+      ((w.st Pc).typestate, (w.st Pc).prio.map (·.label))) = some ("seen", ["dead/A#1"]) ∧
     runAt subImpl 1 tombActs = none ∧
     findTr subImpl "P" "seen" "dead/A" = none := by decide
 
@@ -191,13 +193,13 @@ def treeSnap (w : Option World) : Option (List Nat × List String) :=
 supervises them, and `terminate` marks the grandchild too. One tombstone, to `Mgr`. -/
 theorem terminate_marks_grandchild :
     treeSnap (runAt treeImpl 1 (treeActs.take 7)) = some ([1, 1, 1], []) ∧
-    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], ["dead/Conn"]) ∧
+    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], ["dead/Conn#0"]) ∧
     isChild treeDesc C0 H0 = true ∧ isChild treeDesc H0 K0 = true := by decide
 
 /-- After the seals, all three are dead. -/
 theorem tree_sealed :
     treeSnap (runAt treeImpl 1 (treeActs ++ [.exec C0, .exec H0, .exec K0])) =
-      some ([3, 3, 3], ["dead/Conn"]) := by decide
+      some ([3, 3, 3], ["dead/Conn#0"]) := by decide
 
 /-- A per-peer supervisor of its own subtree passes `GraphOk`. -/
 theorem tree_graph_ok : subtreeFails treeDesc = [] ∧ checkBool treeDesc = true := by decide
@@ -282,11 +284,12 @@ theorem dead_sender_refunded :
     deadSnap (runAt deadImpl 1 deadActs) = some (3, 1, "idle", 0, 1) ∧
     (runAt deadImpl 1 (deadActs ++ [.recvBulk Hh])) = none := by decide
 
-/-- A dead supervisor admits no new child. The spawn is disabled, and the world
-does not crash. -/
+/-- A dead supervisor admits no new child. The prefix is a live world, and the
+spawn itself is disabled. -/
 theorem dead_supervisor_refused :
-    runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y"]) = none ∧
-    crashedB (runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y"])) = false := by decide
+    (runAt deadImpl 1 (deadActs ++ [.exec Qc])).isSome = true ∧
+    crashedB (runAt deadImpl 1 (deadActs ++ [.exec Qc])) = false ∧
+    runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y"]) = none := by decide
 
 end Deadlock.Helen6c
 

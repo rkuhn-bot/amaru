@@ -17,7 +17,8 @@ and its own typestate. Counts and `LocalOk` range over every outcome branch.
 A per-peer stage may supervise its own subtree. A parent restarts a dead
 child at a fresh generation of the same key. A dead supervisor admits no
 child. `prioSized` counts tombstones still queued from dead predecessors,
-and `maySpawnRoot` refuses the spawn when that count does not fit. A
+and a spawn is not refused when that count does not fit: the tombstone
+enqueue crashes. A
 tombstone with no transition in the parent's current state stays queued.
 A shutting-down sender's parked entries are removed at the mark.
 

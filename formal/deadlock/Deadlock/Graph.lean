@@ -661,14 +661,24 @@ def supervisorInSubtree (D : Description) (t : Template) : Bool :=
       (s.multiplicity == .perPeer && s.subtree == t.subtree && s.name != t.name)
 
 /-- A nonempty subtree is a per-peer cohort. Its supervisor, when it names one,
-is a multiplicity-one core or a per-peer stage of the same subtree. The step
-relation does not require every member to be terminable, and it does not
-require a `timeoutKills` role: any stage may `terminate`, and the tombstone
-goes to the immediate supervisor. `timeoutKills` on a template with no subtree
-is still rejected: the flag names a subtree kill the template does not belong to. -/
+is a multiplicity-one core or a per-peer stage of the same subtree. A pool
+(`slots` > 0) may name a core supervisor and no subtree: the core births it
+by slot. The step relation does not require every member to be terminable,
+and it does not require a `timeoutKills` role: any stage may `terminate`, and
+the tombstone goes to the immediate supervisor. `timeoutKills` on a template
+with no subtree is still rejected: the flag names a subtree kill the template
+does not belong to. -/
 def subtreeFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
-    if t.subtree == "" then
+    if t.slots != 0 && (t.multiplicity != .perPeer || t.supervisor == "") then
+      some s!"fail: pool {t.name} is a per-peer template with a supervisor"
+    else if t.slots != 0 && t.subtree == "" then
+      match templateOf D t.supervisor with
+      | some s =>
+        if s.multiplicity == .one then none
+        else some s!"fail: pool {t.name} is supervised by {t.supervisor}, which is not a core"
+      | none => some s!"fail: pool {t.name} names unknown supervisor {t.supervisor}"
+    else if t.subtree == "" then
       if t.supervisor != "" then some s!"fail: {t.name} names a supervisor without a subtree"
       else if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
       else if templatePure D t.name then some (pureKillMsg t.name)

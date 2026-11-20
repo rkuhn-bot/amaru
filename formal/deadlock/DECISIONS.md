@@ -84,10 +84,13 @@ enqueue onto a full lane. It is not a silent escape from a stuck parked send.
 
 `prioSized` counts the children that can tombstone at once, the other
 priority senders, and the tombstones still queued from dead predecessors.
-`maySpawnRoot` passes that last count and refuses the spawn when the lane
-cannot hold another. A parent restarts a dead child at a fresh generation
-of the same subtree key. The dead id is not reused. A supervisor that is
-dead or shutting down admits no new child.
+It does not bound restarts. `maySpawnRoot` does not consult that count:
+pure-stage `AddStage` does not refuse a spawn, and a tombstone that does
+not fit crashes the roster. A parent restarts a dead child at a fresh
+generation of the same key. The dead id is not reused. A supervisor that is
+dead or shutting down admits no new child. A core births a pool of `slots`
+children, indexed by slot and generation, and that `slots` multiplies the
+population and the tombstone count.
 
 ## 2026-11-20 — What deadlock freedom is about
 

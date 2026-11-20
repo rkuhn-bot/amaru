@@ -160,6 +160,10 @@ structure Template where
   /-- Label the supervisor handles when this child terminates. One label per
   child template, chosen when the parent is wired. Empty means no tombstone. -/
   tombstone : String := ""
+  /-- How many of this template a core supervisor may have alive at once.
+  `0` keeps the single child per parent key. A positive value is a pool:
+  children are indexed by slot below this bound and by generation. -/
+  slots : Nat := 0
   deriving DecidableEq, Repr, Inhabited, BEq
 
 structure Edge where
