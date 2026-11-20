@@ -37,6 +37,23 @@ permanent pure stage, which is a multiplicity-one core, may also execute
 `terminate`, and its effect is the same as `crashed`: the whole system
 terminates.
 
+## 2026-11-20 — A full priority lane crashes
+
+A priority enqueue onto a full lane crashes the roster. Tombstones,
+self-schedules, and cell wakes all count toward `capPrio`. A label that is
+already pending is not a new enqueue: cell wakes and self-schedules keep that
+dedup, and a wake that does enqueue counts like any other entry. The lane
+never grows past its capacity, never blocks, and never drops the message.
+
+`crashed` is a terminal state. It has no proof burden. It is reachable: five
+tombstones on a lane of capacity 4 end there.
+
+A lane does not overflow when `prioSized` holds. That asks `capPrio` to be at
+least the children that can tombstone at once plus the other priority senders.
+Under full-duplex sizing the child count is `population`, the product along
+the supervision tree. `prioSizeFails` is that check. It is not wired into
+`LocalOk` yet; the checker will report it later.
+
 ## 2026-11-20 — What deadlock freedom is about
 
 `deadlock_freedom` is about parked sends. A run is deadlocked when a send sits

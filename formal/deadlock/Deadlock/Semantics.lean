@@ -322,8 +322,8 @@ structure Msg where
   reliable : Bool := true
   /-- Identity the caller stamped on this call. A reply matches this id. -/
   callId : Option Nat := none
-  /-- A supervision tombstone. It occupies the parent's priority lane and does not
-  spend the lane's ordinary label budget. -/
+  /-- A supervision tombstone. It occupies a priority slot, the same as any other
+  priority message. -/
   tombstone : Bool := false
   deriving DecidableEq, Repr, Inhabited
 
@@ -513,6 +513,33 @@ def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
             match sup.multiplicity with
             | .one => N
             | .perPeer => population D t.supervisor N fuel
+
+/-- How many tombstones can sit on one instance of `parent` at once.
+A per-peer parent has one instance of each child template. A core is the
+supervisor of every instance, and that count is `population`: the product
+along the supervision tree, not a flat `N` of labels. -/
+def simultaneousTombstones (D : Description) (parent : String) (N : Nat) : Nat :=
+  match templateOf D parent with
+  | none => 0
+  | some sup =>
+    D.templates.foldl (fun n t =>
+      if t.supervisor == parent && t.tombstone != "" then
+        match sup.multiplicity with
+        | .one => n + population D t.name N D.templates.length
+        | .perPeer => n + 1
+      else n) 0
+
+/-- Slots a priority lane must have so it does not overflow: every child that
+can tombstone at once, plus the other priority senders (self-schedules and
+cell wakes). `otherSenders` is that second count. The checker will report a
+template that fails this; it is not part of `LocalOk` yet. -/
+def prioDemand (D : Description) (parent : String) (N otherSenders : Nat) : Nat :=
+  simultaneousTombstones D parent N + otherSenders
+
+def prioSized (D : Description) (parent : String) (N otherSenders : Nat) : Bool :=
+  match templateOf D parent with
+  | none => false
+  | some t => decide (prioDemand D parent N otherSenders ≤ t.priorityCapacity.eval N)
 
 /-- The instance a name denotes, whether or not it is alive. A missing template,
 or a core addressing a per-peer role, does not resolve. -/
@@ -762,23 +789,38 @@ def performReply (w : World) (sender : InstId) (k : Cont) : World :=
 /-- Every priority message, including a tombstone, consumes the lane budget. -/
 def prioLoad (ms : List Msg) : Nat := ms.length
 
-/-- One wake per label on the priority lane. A full lane leaves the dirty bit set;
-the next transition the reader does still read-and-clears. Wakes are not bulk
-occupancy and are not charged. -/
+/-- One wake per label on the priority lane. The caller enqueues only when the
+label is not already pending. Wakes are not bulk occupancy and are not charged. -/
 def upsertPrio (prio : List Msg) (m : Msg) : List Msg :=
   if prio.any (fun p => p.label == m.label) then prio else prio ++ [m]
 
+/-- A permanent core's `terminate`, and a priority lane with no room left. Every
+live or shutting-down actor on the roster dies in this step, in the crashed
+phase. Mail stays queued: the host is dead before anything dequeues it, and a
+crashed world takes no further step. -/
+def crashActor (a : Actor) : Actor :=
+  if a.life == .alive || a.life == .shuttingDown then
+    { a with life := .dead, phase := .crashed }
+  else a
+
+def crashWorld (w : World) : World :=
+  { w with st := fun i => if decide (i ∈ w.roster) then crashActor (w.st i) else w.st i }
+
+/-- Append one priority message. A full lane crashes the roster: the message is
+not added, not dropped, and the sender does not block. -/
+def offerPrio (D : Description) (w : World) (host : InstId) (msg : Msg) : World :=
+  let a := w.st host
+  if decide (prioLoad a.prio >= capPrio D w.N host) then crashWorld w
+  else setActor w host { a with prio := a.prio ++ [msg], nextMid := a.nextMid + 1 }
+
 def tryWake (D : Description) (w : World) (dstId : InstId) (label : String) (writer : InstId) : World :=
   let target := w.st dstId
-  let cap := capPrio D w.N dstId
   -- A cell wake is a superseding write: it is not a reliable delivery.
+  -- A label already pending is not a new enqueue. A new wake on a full lane crashes.
   let wake : Msg :=
     { label := label, sender := writer, callFrom := none, reliable := false, mid := target.nextMid }
-  if target.life == .alive && prioLoad target.prio < cap && !(target.prio.any (fun p => p.label == label)) then
-    setActor w dstId
-      { target with prio := upsertPrio target.prio wake, nextMid := target.nextMid + 1 }
-  else
-    w
+  if target.life != .alive || target.prio.any (fun p => p.label == label) then w
+  else offerPrio D w dstId wake
 
 def readersOf (w : World) (dst : String) : List InstId :=
   w.roster.filter fun id => tname id == dst && (w.st id).life == .alive
@@ -929,17 +971,6 @@ collapse into one wake. -/
 def tombstoneMsg (D : Description) (parent : Actor) (child : InstId) : Msg :=
   { label := tombstoneLabel D child, sender := child, callFrom := none,
     reliable := true, mid := parent.nextMid, tombstone := true }
-
-/-- A permanent core's `terminate`. Every live or shutting-down actor on the
-roster dies in this step, in the crashed phase. Mail stays queued: the host is
-dead before anything dequeues it, and a crashed world takes no further step. -/
-def crashActor (a : Actor) : Actor :=
-  if a.life == .alive || a.life == .shuttingDown then
-    { a with life := .dead, phase := .crashed }
-  else a
-
-def crashWorld (w : World) : World :=
-  { w with st := fun i => if decide (i ∈ w.roster) then crashActor (w.st i) else w.st i }
 
 /-- Hand the parent the child's tombstone. A missing parent is not a delivery:
 the template named no supervisor. A parent that is not alive, a child with no
@@ -1158,14 +1189,15 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
         let cap := capPrio I.desc w.N id
         let msg : Msg :=
           { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
-        -- Re-arming a label already queued does not grow the lane, and does not
-        -- accept a new message. A new label past the lane capacity is the overflow crash.
+        -- Re-arming a label already queued does not grow the lane. A new label
+        -- past the lane capacity crashes the roster. The lane does not grow,
+        -- block, or drop the message.
         if a.prio.any (fun p => p.label == label) then
           setActor w id (proceed a k')
         else if prioLoad a.prio < cap then
           setActor w id (proceed { a with prio := upsertPrio a.prio msg, nextMid := a.nextMid + 1 } k')
         else
-          setActor w id { a with phase := .crashed }
+          crashWorld w
       | .cell dst label value =>
         let previous := w.cell dst label
         let written := max previous.value value
@@ -6260,29 +6292,6 @@ theorem reply_core_life (w : World) (sender : InstId) (k : Cont) (name : String)
       · rw [hi]; simp [setActor, proceed_keeps_life, hph]
       · simp [setActor, hi, hph]
 
-theorem tryWake_core_life (D : Description) (w : World) (dstId : InstId) (label : String)
-    (writer : InstId) (name : String) :
-    ((tryWake D w dstId label writer).st (InstId.core name)).life =
-      (w.st (InstId.core name)).life := by
-  generalize i : InstId.core name = id
-  by_cases hif : ((w.st dstId).life == .alive &&
-      decide (prioLoad (w.st dstId).prio < capPrio D w.N dstId) &&
-      !((w.st dstId).prio.any fun p => p.label == label)) = true
-  · simp [tryWake, hif, setActor]
-    by_cases hi : id = dstId <;> simp [hi]
-  · simp [tryWake, hif]
-
-theorem wake_core_life (D : Description) (w : World) (dst label : String) (writer : InstId)
-    (name : String) :
-    ((wakeReaders D w dst label writer).st (InstId.core name)).life =
-      (w.st (InstId.core name)).life := by
-  unfold wakeReaders
-  induction readersOf w dst generalizing w with
-  | nil => rfl
-  | cons j js ih =>
-    rw [List.foldl_cons]
-    exact (ih _).trans (tryWake_core_life D w j label writer name)
-
 theorem deliver_life (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
     (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) :
     a1.life = a.life ∧ ∀ i, (w1.st i).life = (w.st i).life := by
@@ -6731,6 +6740,52 @@ theorem crashWorld_prev (w : World) (i : InstId)
     · simpa [hgo] using h
   · simpa [hmem] using h
 
+/-- A cell wake that leaves a core alive did not create that life. A full lane
+crashes the roster instead of dropping the wake. -/
+theorem tryWake_core_life (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer : InstId) (name : String)
+    (h : ((tryWake D w dstId label writer).st (InstId.core name)).life = .alive) :
+    (w.st (InstId.core name)).life = .alive := by
+  unfold tryWake offerPrio at h
+  by_cases hskip : ((w.st dstId).life != .alive ||
+      (w.st dstId).prio.any (fun p => p.label == label)) = true
+  · simp [hskip] at h
+    exact h
+  · have hgo : ((w.st dstId).life != .alive ||
+        (w.st dstId).prio.any (fun p => p.label == label)) = false := by
+      simpa [Bool.not_eq_true] using hskip
+    simp only [hgo, ite_false] at h
+    by_cases hfull : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = true
+    · simp only [hfull, ite_true] at h
+      exact crashWorld_prev w (InstId.core name) h
+    · have hroom : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = false := by
+        simpa [Bool.not_eq_true] using hfull
+      simp only [hroom, ite_false] at h
+      by_cases hi : InstId.core name = dstId
+      · rw [hi] at h ⊢
+        simp [setActor] at h
+        exact h
+      · simpa [setActor, hi] using h
+
+theorem wake_core_life (D : Description) (w : World) (dst label : String) (writer : InstId)
+    (name : String)
+    (h : ((wakeReaders D w dst label writer).st (InstId.core name)).life = .alive) :
+    (w.st (InstId.core name)).life = .alive := by
+  unfold wakeReaders at h
+  suffices ∀ (ids : List InstId) (w0 : World),
+      ((ids.foldl (fun w id => tryWake D w id label writer) w0).st (InstId.core name)).life = .alive →
+      (w0.st (InstId.core name)).life = .alive from
+    this (readersOf w dst) w h
+  intro ids
+  induction ids with
+  | nil =>
+    intro _ h0
+    exact h0
+  | cons j js ih =>
+    intro w0 h0
+    rw [List.foldl_cons] at h0
+    exact tryWake_core_life D w0 j label writer name (ih _ h0)
+
 /-- If `exec` leaves a core alive, it was already alive. A core's own lone
 `terminate` is the only life change, and that one ends dead. -/
 theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
@@ -6892,8 +6947,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
             (proceed { a with prio := upsertPrio a.prio msg, nextMid := a.nextMid + 1 } (afterHead k)) name
             (by simp [proceed_keeps_life, ha, msg])
           exact hset.symm.trans hl
-        · have hset := set_core_life w id { a with phase := .crashed } name (by simp [ha])
-          exact hset.symm.trans hl
+        · exact crashWorld_prev w (InstId.core name) hl
     | cell dst label value =>
       simp [execRun, hliveB, hk] at hl
       let c : Cell := { value := max (w.cell dst label).value value, dirty := true }
@@ -6902,10 +6956,10 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
           (by simp [setCell, c, proceed_keeps_life])
         simpa [setCell, c] using hset.symm.trans hl
       · have hstep := wake_core_life I.desc
-          (setActor (setCell w dst label c) id (proceed (w.st id) (afterHead k))) dst label id name
+          (setActor (setCell w dst label c) id (proceed (w.st id) (afterHead k))) dst label id name hl
         have hset := set_core_life (setCell w dst label c) id (proceed (w.st id) (afterHead k)) name
           (by simp [setCell, c, proceed_keeps_life])
-        simpa [setCell, c] using hset.symm.trans (hstep.symm.trans hl)
+        simpa [setCell, c] using hset.symm.trans hstep
     | internal =>
       simp [execRun, hliveB, hk] at hl
       exact (set_core_life w id { a with phase := .awaitEffect (afterHead k) } name (by simp [ha])).symm.trans hl
@@ -7112,5 +7166,68 @@ theorem init_core_mem (I : Impl) (N : Nat) (name : String)
   · rw [hst] at hl
     rw [ite_eq_right hc] at hl
     simp [absentActor] at hl
+
+/-- Five children, one core parent, a priority lane of capacity 4. -/
+def overflowTpl (name : String) (mult : Multiplicity) (sup tomb : String) : Template where
+  name := name
+  multiplicity := mult
+  capacity := .ofNat 1
+  priorityCapacity := .ofNat 4
+  priorityBound := .ofNat 4
+  states := ["idle"]
+  initial := "idle"
+  terminable := false
+  untimedPeer := false
+  mustFit := true
+  subtree := "net"
+  supervisor := sup
+  tombstone := tomb
+
+def overflowDesc : Description where
+  name := "overflow"
+  freshNames := true
+  templates := overflowTpl "parent" .one "" "" ::
+    (List.range 5).map fun n => overflowTpl s!"c{n}" .perPeer "parent" s!"t{n}"
+  edges := []
+  compatibility := .all
+  steps := []
+
+def overflowIds : List InstId :=
+  .core "parent" :: (List.range 5).map fun n => .peer s!"c{n}" 0
+
+def overflowActor : Actor where
+  life := .alive
+  typestate := "idle"
+  phase := .idle
+  box := []
+  prio := []
+  parked := []
+  tokens := fun _ => 0
+
+def overflowWorld : World where
+  N := 1
+  roster := overflowIds
+  nextIx := fun _ => 0
+  st := fun i => if decide (i ∈ overflowIds) then overflowActor else absentActor
+  cell := fun _ _ => cleanCell
+  observed := fun _ _ => 0
+
+/-- Enqueue one tombstone from each of the five children. The fifth finds a
+lane of capacity 4 already full. -/
+def overflowRun : World :=
+  (List.range 5).foldl (fun w n => enqueueTombstone overflowDesc w (.peer s!"c{n}" 0)) overflowWorld
+
+def worldCrashedB (w : World) : Bool :=
+  w.roster.any fun id => (w.st id).life == .dead && (w.st id).phase == .crashed
+
+theorem worldCrashed_of_b (w : World) (h : worldCrashedB w = true) : WorldCrashed w := by
+  unfold worldCrashedB at h
+  simp [List.any_eq_true, Bool.and_eq_true, beq_iff_eq] at h
+  obtain ⟨id, hmem, hlife, hph⟩ := h
+  exact ⟨id, hmem, hlife, hph⟩
+
+/-- Five tombstones on a lane of capacity 4 end in `crashed`. -/
+theorem tombstones_exceed_capPrio : WorldCrashed overflowRun :=
+  worldCrashed_of_b overflowRun (by decide)
 
 end Deadlock

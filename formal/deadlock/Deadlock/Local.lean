@@ -171,6 +171,16 @@ def prioOk (I : Impl) : Bool :=
     let labels := prioLabels I t.name
     labels.length ≤ t.priorityBound.b && t.priorityBound.a == 0
 
+/-- The static size under which a priority lane does not overflow: capacity
+covers every child that can tombstone at once plus the other priority senders.
+Full-duplex sizing makes the tombstone term `population`, a product along the
+supervision tree. Not part of `LocalOk`. The checker will report these lines
+later. -/
+def prioSizeFails (I : Impl) (N : Nat) : List String :=
+  I.desc.templates.filterMap fun t =>
+    if prioSized I.desc t.name N (prioLabels I t.name).length then none
+    else some s!"fail: priority lane {t.name} holds fewer slots than the tombstones and other priority senders it can receive at once"
+
 /-- Every program the semantics can fire is one of the steps the relation was closed under. -/
 def stepsCoverB (I : Impl) : Bool :=
   I.transitions.all fun tr =>

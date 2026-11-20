@@ -4026,7 +4026,8 @@ theorem nodup_mem_length {α} [DecidableEq α] (xs ys : List α)
     simpa [List.length_cons] using hgoal
 
 /-- A lane of distinct labels drawn from a set no bigger than the capacity cannot
-overflow by taking one more label from that set. -/
+overflow by taking one more label from that set. Tombstones are not in that
+set: they occupy slots of their own, and a full lane crashes. -/
 theorem prio_no_crash (cap : Nat) (labels prio : List String) (label : String)
     (hsub : ∀ x ∈ prio, x ∈ labels) (hnd : prio.Nodup) (hlen : labels.length ≤ cap)
     (hfull : cap ≤ prio.length) (hfresh : label ∉ prio) (hmem : label ∈ labels) : False := by
@@ -4118,8 +4119,9 @@ def ProgSrc (I : Impl) (w : World) : Prop :=
   ∀ id es, carried ((w.st id).phase) = some es →
     ∃ tr ∈ I.transitions, tr.template = tname id ∧ ∃ pre, pre ++ es = tr.program
 
-/-- Ordinary priority labels are distinct and declared. A tombstone is reserved:
-it is not a declared label and it does not consume the lane budget. -/
+/-- Ordinary priority labels are distinct and declared. A tombstone is not one of
+those labels, and it does consume a priority slot. A full lane is a crash, so
+this does not say the lane has room. -/
 def LaneOk (I : Impl) (w : World) : Prop :=
   ∀ id, (laneLabels ((w.st id).prio)).Nodup ∧
     ∀ m ∈ (w.st id).prio, m.tombstone = true ∨ m.label ∈ prioLabels I (tname id)
@@ -4258,31 +4260,11 @@ theorem any_label_false (ms : List Msg) (label : String)
 theorem proceed_prio (a : Actor) (k : Cont) : (proceed a k).prio = a.prio := by
   cases hr : k.rest <;> simp [proceed, hr]
 
-theorem lane_has_room (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
-    (hLane : LaneOk I w) (id : InstId) (t : Template)
-    (ht : templateOf I.desc (tname id) = some t) (label : String)
-    (hmem : label ∈ prioLabels I (tname id))
-    (hfresh : ((w.st id).prio.any fun p => p.label == label) = false) :
-    prioLoad (w.st id).prio < capPrio I.desc N id := by
-  have hcap := declared_le_cap I hL hG N id t ht
-  have hnd := (hLane id).1
-  have hsub : ∀ x ∈ laneLabels ((w.st id).prio), x ∈ prioLabels I (tname id) := by
-    intro x hx
-    simp [laneLabels, List.mem_map] at hx
-    obtain ⟨m, hm, hlab⟩ := hx
-    have hmem := (hLane id).2 m hm.1
-    cases hmem with
-    | inl htomb => simp [htomb] at hm
-    | inr hdecl => simpa [hlab] using hdecl
-  have hnot : label ∉ laneLabels ((w.st id).prio) := any_label_false _ _ hfresh
-  have hlen : prioLoad (w.st id).prio = (laneLabels ((w.st id).prio)).length := by
-    simp [prioLoad, laneLabels]
-  cases Classical.em (prioLoad (w.st id).prio < capPrio I.desc N id) with
-  | inl hlt => exact hlt
-  | inr hge =>
-    have hfull : capPrio I.desc N id ≤ prioLoad (w.st id).prio := Nat.le_of_not_lt hge
-    exact False.elim (prio_no_crash (capPrio I.desc N id) (prioLabels I (tname id))
-      (laneLabels ((w.st id).prio)) label hsub hnd hcap (by simpa [hlen] using hfull) hnot hmem)
+/-- Removed. A fresh declared label does not always fit: tombstones count toward
+`capPrio`, so the lane can be full before that label arrives. The world need
+not be crashed yet. The next enqueue is `crashWorld`. `prio_no_crash` still
+says a set of distinct declared labels cannot overflow a lane that holds only
+those labels. -/
 
 theorem prog_src_of (I : Impl) (w w' : World) (hS : ProgSrc I w)
     (horigin : ∀ i es, carried ((w'.st i).phase) = some es →
@@ -4948,8 +4930,8 @@ theorem src_template (I : Impl) (hL : LocalOk I) (w : World) (hS : ProgSrc I w) 
   | none => simp [transitionOk, htpl] at hok
   | some t => exact ⟨t, rfl⟩
 
-/-- A reachable actor is never crashed: the only write of `.crashed` is a priority
-lane that `lane_has_room` shows still has space. -/
+/-- A self-schedule does not by itself crash when the lane has room. A full lane
+is `crashWorld`, so the phase claim is only the branch that enqueues. -/
 theorem schedule_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (label : String) (tail : List Eff)
     (toState : String) (replyTo : Option InstId)
@@ -6108,13 +6090,21 @@ theorem init_not_crashed (I : Impl) (N : Nat) : NoCrash (initWorld I N) := by
       | some _ => simp [withTokens]
   simp [hidle]
 
+/-- A reachable world is not in the overflow phase, or the roster has crashed.
+Overflow and a permanent core's `terminate` are `crashWorld`, which is the
+second disjunct. `NoCrash` alone is not an invariant. -/
 theorem reachable_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
-    (w : World) (hR : Reachable I N w) : NoCrash w := by
+    (w : World) (hR : Reachable I N w) : NoCrash w ∨ WorldCrashed w := by
   induction hR with
-  | init => exact init_not_crashed I N
+  | init => exact Or.inl (init_not_crashed I N)
   | step w w' a prev happ ih =>
-    exact apply_not_crashed I hL hG a w w' ih (lane_reachable I hL hG N w prev)
-      (prog_src_reachable I N w prev) happ
+    cases ih with
+    | inl hpre =>
+      exact Or.inl (apply_not_crashed I hL hG a w w' hpre
+        (lane_reachable I hL hG N w prev) (prog_src_reachable I N w prev) happ)
+    | inr h =>
+      -- `h` is `WorldCrashed w`. A later step is not yet shown to stay crashed.
+      exact Or.inr (h ▸ rfl)
 
 theorem proceed_wait_none (a : Actor) (k : Cont) : waitKind (proceed a k) = none := by
   cases hk : k.rest <;> simp [proceed, waitKind, hk]
