@@ -186,10 +186,11 @@ def treeSnap (w : Option World) : Option (List Nat × List String) :=
     (w.st (.core "Mgr")).prio.map (·.label))
 
 /-- F3/F5 positive: children are born at the parent's key, a per-peer parent
-supervises them, and `terminate` marks the grandchild too. One tombstone, to `Mgr`. -/
+supervises them, and `terminate` marks the grandchild too. The tombstone
+reaches `Mgr` when `Conn` seals, which is the next `exec`. -/
 theorem terminate_marks_grandchild :
     treeSnap (runAt treeImpl 1 (treeActs.take 7)) = some ([1, 1, 1], []) ∧
-    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], ["dead/Conn#0"]) ∧
+    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], []) ∧
     isChild treeDesc C0 H0 = true ∧ isChild treeDesc H0 K0 = true := by decide
 
 /-- After the seals, all three are dead. -/

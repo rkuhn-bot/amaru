@@ -186,10 +186,11 @@ def treeSnap (w : Option World) : Option (List Nat × List String) :=
     (w.st (.core "Mgr")).prio.map (·.label))
 
 /-- F3/F5 positive: children are born at the parent's key, a per-peer parent
-supervises them, and `terminate` marks the grandchild too. One tombstone, to `Mgr`. -/
+supervises them, and `terminate` marks the grandchild too. The tombstone
+reaches `Mgr` when `Conn` seals, which is the next `exec`. -/
 private theorem r7_terminate_marks_grandchild :
     treeSnap (runAt treeImpl 1 (treeActs.take 7)) = some ([1, 1, 1], []) ∧
-    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], ["dead/Conn#0"]) ∧
+    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], []) ∧
     isChild treeDesc C0 H0 = true ∧ isChild treeDesc H0 K0 = true := by decide
 
 /-- After the seals, all three are dead. -/
@@ -587,14 +588,19 @@ theorem starved_frozen :
 
 /-! ## N5: pools. -/
 
-/-- While slot 0's tombstone is queued, a spawn does not reuse it. After the
-core consumes the tombstone, and before the old child seals, generation 1 is
-born in that slot (life 2 beside life 1). -/
-theorem slot_reused_before_seal :
+/-- Slot 0 stays occupied from the mark until its tombstone is consumed.
+The lane is empty until the seal, so a `recvPrio` before that seal is not
+enabled. After the seal the predecessor is dead and the tombstone is queued,
+and a spawn still does not reuse the slot. Consuming the tombstone births
+generation 1 beside that dead predecessor. -/
+theorem slot_held_until_consumed :
     ((runAt poolImpl 1 (birth ++ birth ++ (killSlot 0 0).take 3 ++ birth)).map poolLives) =
       some [2, 1, 0] ∧
-    ((runAt poolImpl 1 (birth ++ birth ++ (killSlot 0 0).take 3 ++ [.recvPrio Mc] ++ birth)).map poolLives) =
-      some [2, 1, 1] := by decide
+    (runAt poolImpl 1 (birth ++ birth ++ (killSlot 0 0).take 3 ++ [.recvPrio Mc] ++ birth)).isNone = true ∧
+    ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ birth)).map poolLives) =
+      some [3, 1, 0] ∧
+    ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ [.recvPrio Mc] ++ birth)).map poolLives) =
+      some [3, 1, 1] := by decide
 
 /-- A checked restart. The first spawn is the only one from `boot`. The
 re-spawn is the transition that consumes `dead/C`, so it is not a spawn that
@@ -699,7 +705,7 @@ end Deadlock.Helen8c
 #print axioms Deadlock.Helen8c.restart_starved
 #print axioms Deadlock.Helen8c.order_dependent
 #print axioms Deadlock.Helen8c.starved_frozen
-#print axioms Deadlock.Helen8c.slot_reused_before_seal
+#print axioms Deadlock.Helen8c.slot_held_until_consumed
 #print axioms Deadlock.Helen8c.restart_checked
 #print axioms Deadlock.Helen8c.pool_unaddressable_local
 #print axioms Deadlock.Helen8c.pool_route_fails
