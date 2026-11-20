@@ -724,7 +724,8 @@ def abortDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : Wor
 A life that is not alive is left alone. -/
 def markShutdown (w : World) (id : InstId) : World :=
   if (w.st id).life == .alive then
-    setActor w id { (w.st id) with life := .shuttingDown }
+    -- The phase stops here. Mail stays until the seal, and the actor accepts nothing.
+    setActor w id { (w.st id) with life := .shuttingDown, phase := .idle }
   else w
 
 /-- Mark `id` shutting down and hand its parent the tombstone. The parent
@@ -762,6 +763,12 @@ def crashActor (a : Actor) : Actor :=
 
 def crashWorld (w : World) : World :=
   { w with st := fun i => if decide (i ∈ w.roster) then crashActor (w.st i) else w.st i }
+
+/-- A permanent core has crashed the roster. The world is terminal. Invariants
+about live actors are not required of it. A priority-lane overflow, which
+leaves the actor alive, is not this state. -/
+def WorldCrashed (w : World) : Prop :=
+  ∃ id, id ∈ w.roster ∧ (w.st id).life = .dead ∧ (w.st id).phase = .crashed
 
 /-- A peer supervises nobody, so aborting its descendants is the identity. -/
 theorem abortDesc_peer (fuel : Nat) (D : Description) (w : World) (name : String) (ix : Nat) :
@@ -1173,12 +1180,15 @@ def callTimeout (w : World) (id : InstId) : Option World :=
     | _ => none
 
 /-- Internal effects and peer waits complete as an ordinary step. The peer
-result is the timeout: a normal value the typestate handles. -/
+result is the timeout: a normal value the typestate handles. A shutting-down
+or dead actor does not finish; its next step is the seal, or nothing. -/
 def finishWait (I : Impl) (w : World) (id : InstId) : Option World :=
-  match (w.st id).phase with
-  | .awaitEffect k => some (setActor w id (proceed (w.st id) k))
-  | .awaitPeer k => some (setActor w id (proceed (w.st id) k))
-  | _ => none
+  if (w.st id).life ≠ .alive then none
+  else
+    match (w.st id).phase with
+    | .awaitEffect k => some (setActor w id (proceed (w.st id) k))
+    | .awaitPeer k => some (setActor w id (proceed (w.st id) k))
+    | _ => none
 
 /-- A declared ingress edge: a non-blocking `trySend` the environment may deliver. -/
 def hasIngress (D : Description) (dst label : String) : Bool :=
@@ -1348,20 +1358,24 @@ theorem finish_proceed (I : Impl) (w w' : World) (id : InstId)
     (h : finishWait I w id = some w') :
     ∃ k, ((w.st id).phase = .awaitEffect k ∨ (w.st id).phase = .awaitPeer k) ∧
       w' = setActor w id (proceed (w.st id) k) := by
-  cases hph : (w.st id).phase with
-  | awaitEffect k =>
-    simp [finishWait, hph] at h
-    cases h
-    exact ⟨k, Or.inl rfl, rfl⟩
-  | awaitPeer k =>
-    simp [finishWait, hph] at h
-    cases h
-    exact ⟨k, Or.inr rfl, rfl⟩
-  | idle => simp [finishWait, hph] at h
-  | run _ => simp [finishWait, hph] at h
-  | parked _ _ _ => simp [finishWait, hph] at h
-  | awaitReply _ _ => simp [finishWait, hph] at h
-  | crashed => simp [finishWait, hph] at h
+  unfold finishWait at h
+  by_cases hlive : (w.st id).life = .alive
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | awaitEffect k =>
+      simp [hph] at h
+      cases h
+      exact ⟨k, Or.inl rfl, rfl⟩
+    | awaitPeer k =>
+      simp [hph] at h
+      cases h
+      exact ⟨k, Or.inr rfl, rfl⟩
+    | idle => simp [hph] at h
+    | run _ => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · simp [hlive] at h
 
 /-- Ingress appends one non-call to the target box and leaves every other box. -/
 theorem ingress_box (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)

@@ -309,21 +309,11 @@ theorem enqueue_ty (D : Description) (w : World) (sender dst : InstId) (msg : Ms
             simp [chargeSender, bumpToken]
   · simp [halive]
     by_cases hcall : isCall = true
-    · simp [hcall]
-      cases hlife : (w.st dst).life with
-      | dead =>
-        simp [hlife, issueCall]
-        apply tyOk_id
-        · exact hT
-        · simp [issueCall]
-        · simp [issueCall]
-      | alive => exact absurd hlife halive
-      | absent =>
-        simp [hlife, issueCall, finishCall]
-        apply tyOk_id
-        · exact hT
-        · cases hr : k.rest <;> simp [proceed, hr, issueCall, hty]
-        · cases hr : k.rest <;> simp [proceed, hr, issueCall]
+    · simp [hcall, issueCall, finishCall]
+      apply tyOk_id
+      · exact hT
+      · cases hr : k.rest <;> simp [proceed, hr, issueCall, hty]
+      · cases hr : k.rest <;> simp [proceed, hr, issueCall]
     · have hcf : isCall = false := by cases hbb : isCall <;> simp_all
       simp [hcf]
       exact tyOk_proceed D w sender k hT hty
@@ -1666,7 +1656,7 @@ theorem partner_mem (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) 
     simpa [targetStates, hmode] using hmem
     · intro g hg hs hd
       have hgG : g ∈ compatGroups I.desc.compatibility := by simp [compatGroups, hmode, hg]
-      have htup := hI.1.compat g hgG (hI.1.live g hgG)
+      have htup := (hI.1.live g hgG).1
       obtain ⟨a, ha, hag⟩ := tupleMem_pick g.allowed (roleTuple w g) htup
       have hlookS := lookup_roleTuple w g e.src (List.elem_iff.mp hs)
       have hss' : lookupRole (roleTuple w g) e.src = some e.srcState := by

@@ -173,7 +173,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
     · simp [contTy, afterHead, hty]
     · simp [programOk, afterHead, htail]
     · simp [waitEdge]
-    · exact idleOff_busy I w hS id _ rfl (by simp [hphase])
+    · exact idleOff_busy I w hS id _ rfl (by simp [hphase]) (by simp [hphase])
     · exact Or.inl rfl
   · subst he
     simp [execRun]
@@ -183,7 +183,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
     · simp [contTy, afterHead, hty]
     · simp [programOk, afterHead, htail]
     · simp [waitEdge]
-    · exact idleOff_busy I w hS id _ rfl (by simp [hphase])
+    · exact idleOff_busy I w hS id _ rfl (by simp [hphase]) (by simp [hphase])
     · exact Or.inl rfl
   · obtain ⟨d, l, n, he⟩ := he
     subst he
@@ -194,7 +194,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .send d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       exact sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)))
+        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase]) (by simp [hphase])) (Or.inl (proceed_parked _ _)))
     | some dstId =>
       simp [execRun, hr]
       apply enqueue_sem I w id dstId { label := l, sender := id, callFrom := none } false
@@ -203,7 +203,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       · simpa [afterHead] using htail
       · refine ⟨l, ?_⟩
         simpa [route_tname w I.desc id d dstId hr] using hhead.1
-      · exact alive_if_busy I w hS id (by simp [hphase])
+      · exact busy_alive I w hS id (by simp [hphase]) (by simp [hphase])
   · obtain ⟨d, l, n, he⟩ := he
     subst he
     have hhead := head_call _ _ _ d l n es hprog
@@ -213,7 +213,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .call d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       exact sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)))
+        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase]) (by simp [hphase])) (Or.inl (proceed_parked _ _)))
     | some dstId =>
       simp [execRun, hr]
       have hedge : ∃ label, hasEdge I.desc (tname id) (w.st id).typestate (tname dstId) .call .blocking label = true := by
@@ -224,7 +224,7 @@ theorem exec_basic_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff)
       · simp [afterHead, hty]
       · simpa [afterHead] using htail
       · exact hedge
-      · exact alive_if_busy I w hS id (by simp [hphase])
+      · exact busy_alive I w hS id (by simp [hphase]) (by simp [hphase])
 
 /-- The same heads, including a send or call that parks, preserve `MailInv`. -/
 theorem exec_basic_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (e : Eff) (es : List Eff)
@@ -311,7 +311,7 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
     have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
       (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
     refine ⟨sem_note I w id d id _ (sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _))), ?_⟩
+      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase]) (by simp [hphase])) (Or.inl (proceed_parked _ _))), ?_⟩
     exact mail_note w id d id _ (mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _)
       (proceed_keeps_life _ _))
   | some dstId =>
@@ -322,12 +322,12 @@ theorem exec_try_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (d l : Stri
       let k' := afterHead { k with rest := .trySend d l n :: es }
       refine ⟨try_room_sem I w id dstId msg k' hS (by simp [k', afterHead, hty])
           (by simpa [k', afterHead] using htail) hroom.1.1 hroom.1.2 hroom.2
-          (alive_if_busy I w hS id (by simp [hphase])),
+          (busy_alive I w hS id (by simp [hphase]) (by simp [hphase])),
         enqueue_mail w I.desc id dstId msg false k' hM hfree⟩
     · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .trySend d l n :: es })
         (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
       refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)), ?_⟩
+        (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase]) (by simp [hphase])) (Or.inl (proceed_parked _ _)), ?_⟩
       exact mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _) (proceed_keeps_life _ _)
 
 theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : String) (es : List Eff)
@@ -344,7 +344,7 @@ theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : 
   · have hp := proceed_ok I.desc id (w.st id) (afterHead { k with rest := .selfSchedule label :: es })
       (by simp [afterHead, hty]) (by simpa [afterHead] using htail)
     refine ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase])) (Or.inl (proceed_parked _ _)),
+      (idleOff_busy I w hS id _ hp.2.1 (by simp [hphase]) (by simp [hphase])) (Or.inl (proceed_parked _ _)),
       mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _) (proceed_keeps_life _ _)⟩
   · split
     · let bumped : Actor :=
@@ -356,26 +356,27 @@ theorem exec_sched_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (label : 
       have hp := proceed_ok I.desc id bumped (afterHead { k with rest := .selfSchedule label :: es })
         (by simp [bumped, afterHead, hty]) (by simpa [bumped, afterHead] using htail)
       refine ⟨sem_set I w id (proceed bumped _) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-        (idleOff_alive hp.2.1 (alive_if_busy I w hS id (by simp [hphase])))
+        (idleOff_alive hp.2.1 (busy_alive I w hS id (by simp [hphase]) (by simp [hphase])))
         (Or.inl (proceed_parked bumped _)),
         mail_set_free w id (proceed bumped _) hM hfree (proceed_not_parked _ _)
           (by simp [proceed_parked, bumped]) ((proceed_keeps_life _ _).trans (by simp [bumped]))⟩
     · refine ⟨sem_set I w id { (w.st id) with phase := .crashed } hS rfl rfl
         (by simp [contTy]) (by simp [programOk]) (by simp [waitEdge])
-        (idleOff_busy I w hS id _ rfl (by simp [hphase])) (Or.inl rfl),
+        (idleOff_busy I w hS id _ rfl (by simp [hphase]) (by simp [hphase])) (Or.inl rfl),
         mail_set_free w id { (w.st id) with phase := .crashed } hM hfree (by simp [notParked]) rfl rfl⟩
 
 theorem proceed_sender (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
     (replyTo : Option InstId) (hS : SemInv I w) (hM : MailInv w)
     (hty : (w.st id).typestate = k.toState)
     (htail : effectsOk I.desc (tname id) (w.st id).typestate es = true)
-    (hfree : notParked (w.st id).phase) (hbusy : (w.st id).phase ≠ .idle) :
+    (hfree : notParked (w.st id).phase) (hbusy : (w.st id).phase ≠ .idle)
+    (hnot : (w.st id).phase ≠ .crashed) :
     let k' : Cont := { rest := es, toState := k.toState, replyTo := replyTo }
     SemInv I (setActor w id (proceed (w.st id) k')) ∧ MailInv (setActor w id (proceed (w.st id) k')) := by
   intro k'
   have hp := proceed_ok I.desc id (w.st id) k' (by simp [k', hty]) (by simpa [k'] using htail)
   exact ⟨sem_set I w id _ hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 hbusy) (Or.inl (proceed_parked _ _)),
+      (idleOff_busy I w hS id _ hp.2.1 hbusy hnot) (Or.inl (proceed_parked _ _)),
     mail_set_free w id _ hM hfree (proceed_not_parked _ _) (proceed_parked _ _) (proceed_keeps_life _ _)⟩
 
 theorem exec_reply_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
@@ -390,7 +391,7 @@ theorem exec_reply_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : Lis
   simp [execRun, performReply, afterHead]
   cases hto : k.replyTo with
   | none =>
-    simpa [hto] using proceed_sender I w id k es none hS hM hty htail hfree (by simp [hphase])
+    simpa [hto] using proceed_sender I w id k es none hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
   | some caller =>
     cases hph : (w.st caller).phase with
     | awaitReply dst ck =>
@@ -413,7 +414,8 @@ theorem exec_reply_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : Lis
               (by simp [resumed, finishCall]; exact hpC.2.2.1)
               (by simp [resumed, finishCall]; exact hpC.2.2.2.1)
               (by simp [resumed, finishCall]; exact hpC.2.2.2.2)
-              (idleOff_busy I w hS caller _ (by simp [resumed, finishCall]; exact hpC.2.1) (by simp [hph]))
+              (idleOff_busy I w hS caller _ (by simp [resumed, finishCall]; exact hpC.2.1) (by simp [hph])
+              (by simp [hph]))
               (Or.inl (by simp [resumed, finishCall, proceed_parked]))
             have hM1 := mail_set_free w caller resumed hM hfreeC
               (by simp [resumed, finishCall]; exact proceed_not_parked _ _)
@@ -424,29 +426,30 @@ theorem exec_reply_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (es : Lis
             have both := proceed_sender I (setActor w caller resumed) id k es (some caller)
               hS1 hM1 (by simpa [hother] using hty) (by simpa [hother] using htail)
               (by simpa [hother] using hfree) (by simpa [hother, hphase])
+              (by simpa [hother, hphase])
             simpa [resumed, hother] using both
           · simp [hm]
-            exact proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+            exact proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
       · simpa [hto, hph, hd] using
-          proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+          proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
     | idle =>
       simpa [hto, hph] using
-        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
     | run _ =>
       simpa [hto, hph] using
-        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
     | parked _ _ _ =>
       simpa [hto, hph] using
-        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
     | awaitEffect _ =>
       simpa [hto, hph] using
-        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
     | awaitPeer _ =>
       simpa [hto, hph] using
-        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
     | crashed =>
       simpa [hto, hph] using
-        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase])
+        proceed_sender I w id k es (some caller) hS hM hty htail hfree (by simp [hphase]) (by simp [hphase])
 
 theorem tryWake_inv (I : Impl) (w : World) (dstId : InstId) (label : String) (writer : InstId)
     (hS : SemInv I w) (hM : MailInv w) :
@@ -515,7 +518,7 @@ theorem exec_cell_sem (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label
   have hp := proceed_ok I.desc id (w1.st id) { rest := es, toState := k.toState, replyTo := k.replyTo }
     (by simpa [hst, hty]) (by rw [hst]; simpa [hty] using htail)
   have hS1 := sem_set I w1 id stepped hScell hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-    (idleOff_busy I w1 hScell id _ hp.2.1 (by simpa [hst, hphase])) (Or.inl (proceed_parked _ _))
+    (idleOff_busy I w1 hScell id _ hp.2.1 (by simpa [hst, hphase]) (by simpa [hst, hphase])) (Or.inl (proceed_parked _ _))
   have hM1 := mail_set_free w1 id stepped hMcell (by simpa [hst] using hfree)
     (proceed_not_parked _ _) (proceed_parked _ _) (proceed_keeps_life _ _)
   split
@@ -1435,29 +1438,18 @@ theorem spawn_inv (I : Impl) (w : World) (template : String) (w' : World) (hS : 
 
 theorem finish_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w) (hM : MailInv w)
     (h : finishWait I w id = some w') : SemInv I w' ∧ MailInv w' := by
-  cases hph : (w.st id).phase with
-  | awaitEffect k =>
-    simp [finishWait, hph] at h
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
-    have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, hph] using hS.prog id
-    have hfree : notParked (w.st id).phase := by simp [notParked, hph]
-    exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree (by simp [hph])
-  | awaitPeer k =>
-    simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
-    have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, hph] using hS.prog id
-    have hfree : notParked (w.st id).phase := by simp [notParked, hph]
-    exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree (by simp [hph])
-  | idle => simp [finishWait, hph] at h
-  | run _ => simp [finishWait, hph] at h
-  | parked _ _ _ => simp [finishWait, hph] at h
-  | awaitReply _ _ => simp [finishWait, hph] at h
-  | crashed => simp [finishWait, hph] at h
+  obtain ⟨k, hph, hw⟩ := finish_proceed I w w' id h
+  subst hw
+  have hty : (w.st id).typestate = k.toState := by
+    rcases hph with hph | hph <;> simpa [contTy, hph] using hS.cont id
+  have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
+    rcases hph with hph | hph <;> simpa [programOk, hph] using hS.prog id
+  have hfree : notParked (w.st id).phase := by
+    rcases hph with hph | hph <;> simp [notParked, hph]
+  have hbusy : (w.st id).phase ≠ .idle := by
+    rcases hph with hph | hph <;> simp [hph]
+  exact proceed_sender I w id k k.rest k.replyTo hS hM hty hprog hfree hbusy
+    (by rcases hph with hph | hph <;> simp [hph])
 
 /-- Peer indices at or above `nextIx` have not been spawned. -/
 def OpenSlots (w : World) : Prop :=
@@ -1618,21 +1610,9 @@ theorem open_spawn (I : Impl) (w : World) (template : String) (w' : World) (hO :
 
 theorem open_finish (I : Impl) (w : World) (id : InstId) (w' : World) (hO : OpenSlots w)
     (h : finishWait I w id = some w') : OpenSlots w' := by
-  cases hph : (w.st id).phase with
-  | awaitEffect k =>
-    simp [finishWait, hph] at h
-    cases h
-    exact open_busy w id _ hO (by rw [hph]; intro hbad; cases hbad)
-  | awaitPeer k =>
-    simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    rw [← hw]
-    exact open_busy w id _ hO (by rw [hph]; intro hbad; cases hbad)
-  | idle => simp [finishWait, hph] at h
-  | run _ => simp [finishWait, hph] at h
-  | parked _ _ _ => simp [finishWait, hph] at h
-  | awaitReply _ _ => simp [finishWait, hph] at h
-  | crashed => simp [finishWait, hph] at h
+  obtain ⟨k, hph, hw⟩ := finish_proceed I w w' id h
+  subst hw
+  exact open_busy w id _ hO (by rcases hph with hph | hph <;> simp [hph])
 
 theorem deliver_st (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
     (a1 : Actor) (i : InstId) (h : deliver I w id a m = some (w1, a1)) : w1.st i = w.st i := by
@@ -1799,14 +1779,7 @@ theorem enqueue_open (w : World) (D : Description) (sender dst : InstId) (msg : 
   · simp [halive]
     by_cases hcall : isCall = true
     · simp [hcall]
-      cases hlife : (w.st dst).life with
-      | dead =>
-        simp [hlife]
-        exact open_busy w sender _ hO hs
-      | alive => exact absurd hlife halive
-      | absent =>
-        simp [hlife]
-        exact open_busy w sender _ hO hs
+      exact open_busy w sender _ hO hs
     · simp [hcall]
       exact open_busy w sender _ hO hs
 
@@ -1942,6 +1915,7 @@ theorem failWaiter_sem (I : Impl) (w : World) (dead i : InstId) (hS : SemInv I w
       cases hlife : (w.st i).life with
       | alive => rfl
       | absent => simp [hlife, bne] at hlive
+      | shuttingDown => simp [hlife, bne] at hlive
       | dead => simp [hlife, bne] at hlive
     cases hph : (w.st i).phase with
     | parked d b k =>
@@ -1986,6 +1960,7 @@ theorem open_failWaiter (I : Impl) (w : World) (dead i : InstId) (hO : OpenSlots
       cases hlife : (w.st i).life with
       | alive => rfl
       | absent => simp [hlife, bne] at hlive
+      | shuttingDown => simp [hlife, bne] at hlive
       | dead => simp [hlife, bne] at hlive
     cases hph : (w.st i).phase with
     | parked d b _ =>
@@ -2279,13 +2254,17 @@ theorem alive_of_parked (I : Impl) (w : World) (hS : SemInv I w) (s dst : InstId
   cases hlife : (w.st s).life with
   | alive => rfl
   | absent =>
-    exact False.elim ((by
-      have hidle := hS.idleOff s (by rw [hlife]; intro h; cases h)
-      simp [hidle] at hph) )
+    rcases hS.idleOff s (by rw [hlife]; intro h; cases h) with hidle | hc
+    · simp [hidle] at hph
+    · simp [hc] at hph
+  | shuttingDown =>
+    rcases hS.idleOff s (by rw [hlife]; intro h; cases h) with hidle | hc
+    · simp [hidle] at hph
+    · simp [hc] at hph
   | dead =>
-    exact False.elim ((by
-      have hidle := hS.idleOff s (by rw [hlife]; intro h; cases h)
-      simp [hidle] at hph) )
+    rcases hS.idleOff s (by rw [hlife]; intro h; cases h) with hidle | hc
+    · simp [hidle] at hph
+    · simp [hc] at hph
 
 /-- After waiters are failed and the dead sender is forgotten, clearing the member
 restores the mailbox invariant. -/
@@ -3061,13 +3040,23 @@ private theorem abortActor_inv (I : Impl) (hL : LocalOk I) (w : World) (id : Ins
           cases hlife : (w.st i).life with
           | alive => rfl
           | absent =>
-            have hidle := hS.idleOff i (by simp [hlife])
-            rw [hph] at hidle
-            cases hidle
+            rcases hS.idleOff i (by simp [hlife]) with hidle | hc
+            · rw [hph] at hidle
+              cases hidle
+            · rw [hph] at hc
+              cases hc
+          | shuttingDown =>
+            rcases hS.idleOff i (by simp [hlife]) with hidle | hc
+            · rw [hph] at hidle
+              cases hidle
+            · rw [hph] at hc
+              cases hc
           | dead =>
-            have hidle := hS.idleOff i (by simp [hlife])
-            rw [hph] at hidle
-            cases hidle
+            rcases hS.idleOff i (by simp [hlife]) with hidle | hc
+            · rw [hph] at hidle
+              cases hidle
+            · rw [hph] at hc
+              cases hc
         have hmem := hSRel.rostered i (by simpa [hlifeRel] using hlive)
         have hdrop := failFold_drops_await wRel id i wRel.roster k
           (by simp [hphRel, hph, hdst]) (by simpa [hlifeRel] using hlive) hmem
@@ -3153,6 +3142,7 @@ private theorem enqueueTombstone_inv (I : Impl) (w : World) (child : InstId)
         cases hl : (w.st parent).life with
         | alive => rfl
         | absent => simp [hl, bne] at hf
+        | shuttingDown => simp [hl, bne] at hf
         | dead => simp [hl, bne] at hf
       refine ⟨?_, ?_, ?_⟩
       · apply sem_set
@@ -3687,6 +3677,7 @@ theorem callTimeout_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w
       cases hl : (w.st id).life with
       | alive => rfl
       | absent => simp [hl, bne] at hgo
+      | shuttingDown => simp [hl, bne] at hgo
       | dead => simp [hl, bne] at hgo
     simp only [hgo, ite_false] at h
     cases hph : (w.st id).phase with
@@ -3703,8 +3694,13 @@ theorem callTimeout_inv (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w
         (detachHost_wait I.desc dst id (w.st dst) cid (hS.waited dst))
         (by
           intro hdead
-          exact detachHost_idle (w.st dst) id cid
-            (hS.idleOff dst (by rw [← hrest.2.1]; exact hdead)))
+          rcases hS.idleOff dst (by rw [← hrest.2.1]; exact hdead) with hidle | hc
+          · exact Or.inl (detachHost_idle (w.st dst) id cid hidle)
+          · exact Or.inr (by
+              unfold detachReply
+              split
+              · simp [detachBox, clearReplyPhase, hc]
+              · simp [detachBox, hc]))
         (Or.inl hrest.2.2)
       have hM1 := mail_scrub w dst host hM hrest.2.2 hrest.2.1
         (fun dst' c k' hk => (detachHost_park (w.st dst) id cid dst' c).mpr ⟨k', hk⟩)

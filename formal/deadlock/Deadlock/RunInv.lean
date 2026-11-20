@@ -30,13 +30,20 @@ def waitEdge (D : Description) (id : InstId) (a : Actor) : Prop :=
 
 structure SemInv (I : Impl) (w : World) : Prop where
   compat : CompatInv I.desc w
-  live : ∀ g ∈ compatGroups I.desc.compatibility, groupLive w g
+  /-- The role tuple stays in the allowed set, and every role is alive or has
+  halted. Halting freezes the typestate. A crashed roster is halted, so the
+  tuple is not re-proved from a live group. -/
+  live : ∀ g ∈ compatGroups I.desc.compatibility,
+    tupleMem g.allowed (roleTuple w g) = true ∧
+    ∀ r ∈ g.roles, (w.st (InstId.core r)).life = .alive ∨ Halted (w.st (InstId.core r)).life
   cont : ∀ id, contTy (w.st id)
   prog : ∀ id, programOk I.desc id (w.st id)
   waited : ∀ id, waitEdge I.desc id (w.st id)
-  /-- A kill fails only a live waiter. An actor that is not alive is already idle,
-  so it is not still parked on the member that dies. -/
-  idleOff : ∀ id, (w.st id).life ≠ .alive → (w.st id).phase = .idle
+  /-- Absent, shutting-down, and sealed actors are idle. A roster crashed by a
+  permanent core is dead in the crashed phase, which is the other way an actor
+  that is not alive can stand. -/
+  idleOff : ∀ id, (w.st id).life ≠ .alive →
+    (w.st id).phase = .idle ∨ (w.st id).phase = .crashed
   /-- A live actor is on the roster. A kill folds that roster to fail waiters. -/
   rostered : ∀ id, (w.st id).life = .alive → id ∈ w.roster
   /-- A parked entry lives on a roster actor. A kill folds that roster to drop the dead sender. -/

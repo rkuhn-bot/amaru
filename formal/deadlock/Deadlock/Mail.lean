@@ -893,21 +893,11 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
         · rfl
   · simp [halive]
     by_cases hcall : isCall = true
-    · simp [hcall]
-      cases hlife : (w.st dst).life with
-      | dead =>
-        simp [hlife, issueCall]
-        apply mail_call_miss w sender dst _ k hM hfree hlife
-        · simp
-        · simp
-        · simp
-      | alive => exact absurd hlife halive
-      | absent =>
-        simp [hlife, issueCall, finishCall]
-        apply mail_set_free w sender _ hM hfree
-        · exact proceed_not_parked _ _
-        · exact proceed_parked _ _
-        · exact proceed_keeps_life _ _
+    · simp [hcall, issueCall, finishCall]
+      apply mail_set_free w sender _ hM hfree
+      · exact proceed_not_parked _ _
+      · exact proceed_parked _ _
+      · exact proceed_keeps_life _ _
     · have hcf : isCall = false := by cases hbb : isCall <;> simp_all
       simp [hcf]
       apply mail_set_free w sender _ hM hfree

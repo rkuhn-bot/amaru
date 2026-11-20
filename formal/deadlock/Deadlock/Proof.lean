@@ -184,6 +184,8 @@ theorem enqueue_keeps_other_run (w : World) (D : Description) (sender dst : Inst
           · simp [hd, setActor_other, hs, hp]
   · simp [hlife]
     split <;> simp [setActor_other, hs, hp]
+  · simp [hlife]
+    split <;> simp [setActor_other, hs, hp]
 
 theorem tryWake_preserves_run (D : Description) (w : World) (dstId writer s : InstId) (label : String)
     (k : Cont) (hp : (w.st s).phase = .run k) :

@@ -133,8 +133,10 @@ structure OccInv (I : Impl) (w : World) : Prop where
   quiet : ∀ s d, s ∈ w.roster → (w.st s).life ≠ .alive →
     owed w.st d s w.roster ≤ budget I.desc (tname s) d
   clear : ∀ id, l1 I.desc (tname id) = true → (w.st id).parked = []
-  /-- A dead actor keeps no queue. Residual mail sits with a living host. -/
-  deadEmpty : ∀ id, (w.st id).life ≠ .alive → (w.st id).box = [] ∧ (w.st id).parked = []
+  /-- An absent or dead actor keeps no queue. A shutting-down actor still holds
+  its mail until the seal. Residual mail of a dead actor sits with a living host. -/
+  deadEmpty : ∀ id, (w.st id).life = .absent ∨ (w.st id).life = .dead →
+    (w.st id).box = [] ∧ (w.st id).parked = []
   /-- Per-peer mail stays on the sender's own key. A core mailbox holds mail from
   a live sender, or from a core: a multiplicity-one role is not spawned again. -/
   sameKey : ∀ host,
@@ -4642,15 +4644,12 @@ theorem enqueue_dead (w : World) (D : Description) (sender dst : InstId) (msg : 
     enqueueOrPark w D sender dst msg false k = setActor w sender (proceed (w.st sender) k) := by
   simp [enqueueOrPark, h]
 
-/-- A call aimed at a name that is not alive is not stored. A dead name parks until
-the deadline; an absent name takes `NotAdmitted` immediately. -/
+/-- A call aimed at a name that is not alive is not stored. The caller takes
+`NotAdmitted` immediately, whether the name is absent, shutting down, or dead. -/
 theorem enqueue_miss (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
     (h : (w.st dst).life ≠ .alive) :
     enqueueOrPark w D sender dst msg true k =
-      if (w.st dst).life = .dead then
-        setActor w sender { issueCall (w.st sender) with phase := .parked dst true k }
-      else
-        setActor w sender (finishCall (issueCall (w.st sender)) k .notAdmitted) := by
+      setActor w sender (finishCall (issueCall (w.st sender)) k .notAdmitted) := by
   simp [enqueueOrPark, h]
 
 theorem enqueue_room_self_call (w : World) (D : Description) (sender : InstId) (msg : Msg) (k : Cont)
@@ -6034,26 +6033,7 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
       exact occ_advance I w sender k hO hty hph
     | true =>
       rw [enqueue_miss w I.desc sender dst msg (afterHead k) hlive]
-      split
-      · let aS : Actor := { issueCall (w.st sender) with phase := .parked dst true (afterHead k) }
-        suffices OccInv I (setActor w sender aS) by simpa [aS] using this
-        apply occ_keep I w sender aS hO
-        · simp [aS]
-        · simp [aS]
-        · simp [aS]
-        · intro d; simp [aS]
-        · simp [aS]
-        · intro d
-          have hp : pending aS d = sendsTo d es := by
-            simp [aS, pending, contRest, afterHead, hk, List.tail_cons]
-          exact Nat.le_trans (Nat.le_add_right _ _)
-            (pending_drop (w.st sender) aS k e es (tname dst) label hint d hph hk
-              (by
-                rcases he with h | h
-                · exact Or.inl h
-                · exact Or.inr (Or.inl h))
-              hp)
-      · let aS : Actor := finishCall (issueCall (w.st sender)) (afterHead k) .notAdmitted
+      let aS : Actor := finishCall (issueCall (w.st sender)) (afterHead k) .notAdmitted
         suffices OccInv I (setActor w sender aS) by simpa [aS] using this
         apply occ_keep I w sender aS hO (finishCall_life _ _ _)
           (by cases hr : (afterHead k).rest <;> simp [aS, finishCall, proceed, hr])
@@ -7175,14 +7155,11 @@ theorem occ_drop_box (I : Impl) (w : World) (id : InstId) (m : Msg) (ms : List M
   · intro p hp
     exact (hO.sameKey id).2 p (by simpa [a1] using hp)
   · intro hdead
-    cases hlife : (w.st id).life with
-    | alive => exact absurd (by simpa [a1, hlife] using rfl) hdead
-    | absent =>
-      have hempty := (hO.deadEmpty id (by simp [hlife])).1
+    rcases hdead with hdead | hdead
+    · have hempty := (hO.deadEmpty id (Or.inl (by simpa [a1] using hdead))).1
       rw [hbox] at hempty
       simp at hempty
-    | dead =>
-      have hempty := (hO.deadEmpty id (by simp [hlife])).1
+    · have hempty := (hO.deadEmpty id (Or.inr (by simpa [a1] using hdead))).1
       rw [hbox] at hempty
       simp at hempty
   · intro hk m' hm'
@@ -7550,14 +7527,11 @@ theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : Li
       rw [hpark]
       exact List.mem_cons.mpr (Or.inr hq0))
   · intro hdead
-    cases hlife : (w.st id).life with
-    | alive => exact absurd (by simpa [a1, hlife] using rfl) hdead
-    | absent =>
-      have hempty := (hO.deadEmpty id (by simp [hlife])).2
+    rcases hdead with hdead | hdead
+    · have hempty := (hO.deadEmpty id (Or.inl (by simpa [a1] using hdead))).2
       rw [hpark] at hempty
       simp at hempty
-    | dead =>
-      have hempty := (hO.deadEmpty id (by simp [hlife])).2
+    · have hempty := (hO.deadEmpty id (Or.inr (by simpa [a1] using hdead))).2
       rw [hpark] at hempty
       simp at hempty
   · intro hk m hm
@@ -8069,6 +8043,10 @@ theorem failWaiter_credit_comm (w : World) (dead cred : InstId) (name : String) 
     have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
     simp [failWaiter, hskip, hskipc]
   | dead =>
+    have hskip : ((w.st i).life != .alive) = true := by simp [hlive]
+    have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
+    simp [failWaiter, hskip, hskipc]
+  | shuttingDown =>
     have hskip : ((w.st i).life != .alive) = true := by simp [hlive]
     have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
     simp [failWaiter, hskip, hskipc]
@@ -9794,17 +9772,11 @@ theorem enqueue_box_mem (w : World) (D : Description) (sender dst : InstId) (msg
         exact Or.inl hm
     | true =>
       rw [enqueue_miss w D sender dst msg k hlive] at hm
-      split at hm
-      · by_cases hmb : mb = sender
-        · simp [setActor, hmb, issueCall] at hm
-          exact Or.inl (by rw [← hmb] at hm; exact hm)
-        · simp [setActor, hmb] at hm
-          exact Or.inl hm
-      · by_cases hmb : mb = sender
-        · simp [setActor, hmb, finishCall, proceed_box, issueCall] at hm
-          exact Or.inl (by rw [← hmb] at hm; exact hm)
-        · simp [setActor, hmb] at hm
-          exact Or.inl hm
+      by_cases hmb : mb = sender
+      · simp [setActor, hmb, finishCall, proceed_box, issueCall] at hm
+        exact Or.inl (by rw [← hmb] at hm; exact hm)
+      · simp [setActor, hmb] at hm
+        exact Or.inl hm
 
 /-- A fresh enqueue adds at most the parked entry it was given. -/
 theorem enqueue_parked_mem (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
@@ -9901,17 +9873,11 @@ theorem enqueue_parked_mem (w : World) (D : Description) (sender dst : InstId) (
         exact Or.inl hp
     | true =>
       rw [enqueue_miss w D sender dst msg k hlive] at hp
-      split at hp
-      · by_cases hmb : mb = sender
-        · simp [setActor, hmb, issueCall] at hp
-          exact Or.inl (by rw [← hmb] at hp; exact hp)
-        · simp [setActor, hmb] at hp
-          exact Or.inl hp
-      · by_cases hmb : mb = sender
-        · simp [setActor, hmb, finishCall, proceed_parked, issueCall] at hp
-          exact Or.inl (by rw [← hmb] at hp; exact hp)
-        · simp [setActor, hmb] at hp
-          exact Or.inl hp
+      by_cases hmb : mb = sender
+      · simp [setActor, hmb, finishCall, proceed_parked, issueCall] at hp
+        exact Or.inl (by rw [← hmb] at hp; exact hp)
+      · simp [setActor, hmb] at hp
+        exact Or.inl hp
 
 /-- A phase change that keeps both mail lists does not move a member's message. -/
 theorem here_set (D : Description) (w : World) (id : InstId) (a : Actor) (hH : MailHere D w)

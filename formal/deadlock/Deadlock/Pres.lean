@@ -133,7 +133,7 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
     · intro g hg
       simp [compatGroups, hc] at hg
     · intro id _
-      exact init_phase I N id
+      exact Or.inl (init_phase I N id)
     · intro id hlive
       rw [initRoster]
       by_cases hmem : (coreRoster I.desc).contains id = true
@@ -163,13 +163,26 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
         simp [hmem, initActor, ht, withTokens, tname]
       rw [htup]
       exact init_tuple_mem I.desc g hempty hg
-    · intro g hg r hr
-      have hw := (compat_group_closed I.desc g hempty hg).1
-      obtain ⟨t, ht, _, _, hmem, _⟩ := core_ready I.desc g r hw hr
-      rw [init_base_st]
-      simp [hmem, initActor, ht, withTokens, tname]
+    · intro g hg
+      refine ⟨?_, ?_⟩
+      · have hw := (compat_group_closed I.desc g hempty hg).1
+        have htup : roleTuple (initWorld I N) g = initialTuple I.desc g := by
+          unfold roleTuple initialTuple
+          apply tuples_eq
+          intro r hr
+          obtain ⟨t, ht, _, _, hmem, _⟩ := core_ready I.desc g r hw hr
+          refine ⟨t, ht, ?_⟩
+          rw [init_base_st]
+          simp [hmem, initActor, ht, withTokens, tname]
+        rw [htup]
+        exact init_tuple_mem I.desc g hempty hg
+      · intro r hr
+        have hw := (compat_group_closed I.desc g hempty hg).1
+        obtain ⟨t, ht, _, _, hmem, _⟩ := core_ready I.desc g r hw hr
+        rw [init_base_st]
+        exact Or.inl (by simp [hmem, initActor, ht, withTokens, tname])
     · intro id _
-      exact init_phase I N id
+      exact Or.inl (init_phase I N id)
     · intro id hlive
       rw [initRoster]
       by_cases hmem : (coreRoster I.desc).contains id = true
@@ -200,6 +213,117 @@ theorem live_stable (w w' : World) (g : CompatGroup)
   rw [h r hr]
   exact hl r hr
 
+theorem crashActor_ty (a : Actor) : (crashActor a).typestate = a.typestate := by
+  unfold crashActor
+  split <;> rfl
+
+theorem crashWorld_ty (w : World) (i : InstId) :
+    ((crashWorld w).st i).typestate = (w.st i).typestate := by
+  simp only [crashWorld]
+  by_cases h : i ∈ w.roster
+  · simp [h, crashActor_ty]
+  · simp [h]
+
+theorem crash_go {a : Actor} (h : a.life = .alive ∨ a.life = .shuttingDown) :
+    crashActor a = { a with life := .dead, phase := .crashed, box := [], prio := [], parked := [] } := by
+  rcases h with h | h <;> simp [crashActor, h]
+
+theorem crash_stay {a : Actor} (ha : a.life ≠ .alive) (hs : a.life ≠ .shuttingDown) :
+    crashActor a = a := by
+  simp [crashActor, ha, hs]
+
+theorem crash_at (w : World) (i : InstId) (h : i ∈ w.roster) :
+    (crashWorld w).st i = crashActor (w.st i) := by
+  simp [crashWorld, h]
+
+theorem crash_off (w : World) (i : InstId) (h : i ∉ w.roster) :
+    (crashWorld w).st i = w.st i := by
+  simp [crashWorld, h]
+
+/-- A permanent core's crash leaves the compat tuple where it was and every
+crashed actor dead. The world is still a `SemInv`: a halted role is allowed,
+and a crashed phase is the idle-off clause for a dead actor. -/
+theorem crash_sem (I : Impl) (w : World) (hS : SemInv I w) : SemInv I (crashWorld w) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro g hg _hlive
+    have htup := roleTuple_stable w (crashWorld w) g (fun r _ => crashWorld_ty w (.core r))
+    rw [htup]
+    exact (hS.live g hg).1
+  · intro g hg
+    refine ⟨?_, ?_⟩
+    · have htup := roleTuple_stable w (crashWorld w) g (fun r _ => crashWorld_ty w (.core r))
+      rw [htup]
+      exact (hS.live g hg).1
+    · intro r hr
+      rcases (hS.live g hg).2 r hr with ha | hh
+      · have hmem : InstId.core r ∈ w.roster := hS.rostered _ ha
+        rw [crash_at w (InstId.core r) hmem, crash_go (Or.inl ha)]
+        exact Or.inr (Or.inr rfl)
+      · by_cases hmem : InstId.core r ∈ w.roster
+        · rcases hh with hshut | hdead
+          · rw [crash_at w (InstId.core r) hmem, crash_go (Or.inr hshut)]
+            exact Or.inr (Or.inr rfl)
+          · rw [crash_at w (InstId.core r) hmem, crash_stay (by rw [hdead]; intro h; cases h)
+              (by rw [hdead]; intro h; cases h)]
+            exact Or.inr (Or.inr hdead)
+        · rw [crash_off w (InstId.core r) hmem]
+          exact Or.inr hh
+  · intro i
+    by_cases hmem : i ∈ w.roster
+    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+      · rw [crash_at w i hmem, crash_go hgo]
+        simp [contTy]
+      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
+          (by intro h; exact hgo (Or.inr h))]
+        exact hS.cont i
+    · rw [crash_off w i hmem]
+      exact hS.cont i
+  · intro i
+    by_cases hmem : i ∈ w.roster
+    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+      · rw [crash_at w i hmem, crash_go hgo]
+        simp [programOk]
+      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
+          (by intro h; exact hgo (Or.inr h))]
+        exact hS.prog i
+    · rw [crash_off w i hmem]
+      exact hS.prog i
+  · intro i
+    by_cases hmem : i ∈ w.roster
+    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+      · rw [crash_at w i hmem, crash_go hgo]
+        simp [waitEdge]
+      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
+          (by intro h; exact hgo (Or.inr h))]
+        exact hS.waited i
+    · rw [crash_off w i hmem]
+      exact hS.waited i
+  · intro i hn
+    by_cases hmem : i ∈ w.roster
+    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+      · rw [crash_at w i hmem, crash_go hgo] at hn ⊢
+        simp at hn
+        exact Or.inr rfl
+      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
+          (by intro h; exact hgo (Or.inr h))] at hn ⊢
+        exact hS.idleOff i hn
+    · rw [crash_off w i hmem] at hn ⊢
+      exact hS.idleOff i hn
+  · intro i hlive
+    by_cases hmem : i ∈ w.roster
+    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+      · rw [crash_at w i hmem, crash_go hgo] at hlive
+        simp at hlive
+      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
+          (by intro h; exact hgo (Or.inr h))] at hlive
+        exact hS.rostered i hlive
+    · rw [crash_off w i hmem] at hlive
+      exact hS.rostered i hlive
+  · intro i hmiss
+    have hmiss0 : i ∉ w.roster := by simpa [crashWorld] using hmiss
+    simp only [crashWorld, hmiss0]
+    exact hS.offEmpty i hmiss0
+
 /-- Typestates and lives of group roles are unchanged, and every actor satisfies
 the local continuation obligations. -/
 theorem sem_stable (I : Impl) (w w' : World) (hS : SemInv I w)
@@ -210,7 +334,8 @@ theorem sem_stable (I : Impl) (w w' : World) (hS : SemInv I w)
     (hcont : ∀ id, contTy (w'.st id))
     (hprog : ∀ id, programOk I.desc id (w'.st id))
     (hwait : ∀ id, waitEdge I.desc id (w'.st id))
-    (hoff : ∀ id, (w'.st id).life ≠ .alive → (w'.st id).phase = .idle)
+    (hoff : ∀ id, (w'.st id).life ≠ .alive →
+      (w'.st id).phase = .idle ∨ (w'.st id).phase = .crashed)
     (hroster : ∀ id, (w'.st id).life = .alive → id ∈ w'.roster)
     (hempty : ∀ id, id ∉ w'.roster → (w'.st id).parked = []) : SemInv I w' := by
   refine ⟨?_, ?_, hcont, hprog, hwait, hoff, hroster, hempty⟩
@@ -222,12 +347,21 @@ theorem sem_stable (I : Impl) (w w' : World) (hS : SemInv I w)
     rw [roleTuple_stable w w' g (ht g hg)]
     exact hS.compat g hg hold
   · intro g hg
-    exact live_stable w w' g (hl g hg) (hS.live g hg)
+    refine ⟨?_, ?_⟩
+    · rw [roleTuple_stable w w' g (ht g hg)]
+      exact (hS.live g hg).1
+    · intro r hr
+      rcases (hS.live g hg).2 r hr with ha | hh
+      · exact Or.inl ((hl g hg r hr).trans ha)
+      · exact Or.inr (by
+          have heq := hl g hg r hr
+          rw [← heq] at hh
+          exact hh)
 
 theorem sem_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I w)
     (hty : a.typestate = (w.st id).typestate) (hlife : a.life = (w.st id).life)
     (hcont : contTy a) (hprog : programOk I.desc id a)     (hwait : waitEdge I.desc id a)
-    (hoff : a.life ≠ .alive → a.phase = .idle)
+    (hoff : a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed)
     (hown : a.parked = (w.st id).parked ∨ id ∈ w.roster) :
     SemInv I (setActor w id a) := by
   apply sem_stable I w (setActor w id a) hS
@@ -277,25 +411,44 @@ theorem sem_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I 
       rw [setActor_other w id i a h]
       exact hS.offEmpty i hmiss
 
-/-- A non-idle actor is alive: an actor that is not alive is idle. -/
+/-- A non-idle actor is alive, or it is the crashed phase of a dead roster. -/
 theorem alive_if_busy (I : Impl) (w : World) (hS : SemInv I w) (id : InstId)
-    (h : (w.st id).phase ≠ .idle) : (w.st id).life = .alive := by
+    (h : (w.st id).phase ≠ .idle) :
+    (w.st id).life = .alive ∨ (w.st id).phase = .crashed := by
   cases hlife : (w.st id).life with
-  | alive => rfl
-  | absent => exact False.elim (h (hS.idleOff id (by rw [hlife]; intro he; cases he)))
-  | dead => exact False.elim (h (hS.idleOff id (by rw [hlife]; intro he; cases he)))
+  | alive => exact Or.inl rfl
+  | absent =>
+    rcases hS.idleOff id (by rw [hlife]; intro he; cases he) with hidle | hc
+    · exact absurd hidle h
+    · exact Or.inr hc
+  | shuttingDown =>
+    rcases hS.idleOff id (by rw [hlife]; intro he; cases he) with hidle | hc
+    · exact absurd hidle h
+    · exact Or.inr hc
+  | dead =>
+    rcases hS.idleOff id (by rw [hlife]; intro he; cases he) with hidle | hc
+    · exact absurd hidle h
+    · exact Or.inr hc
+
+/-- A non-idle, non-crashed actor is alive. -/
+theorem busy_alive (I : Impl) (w : World) (hS : SemInv I w) (id : InstId)
+    (h : (w.st id).phase ≠ .idle) (hc : (w.st id).phase ≠ .crashed) : (w.st id).life = .alive := by
+  rcases alive_if_busy I w hS id h with ha | hbad
+  · exact ha
+  · exact absurd hbad hc
 
 theorem idleOff_alive {a : Actor} {life : Life} (hl : a.life = life) (ha : life = .alive) :
-    a.life ≠ .alive → a.phase = .idle := by
+    a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed := by
   intro h
   exact absurd (hl.trans ha) h
 
-theorem idleOff_life {a : Actor} (ha : a.life = .alive) : a.life ≠ .alive → a.phase = .idle :=
+theorem idleOff_life {a : Actor} (ha : a.life = .alive) :
+    a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed :=
   idleOff_alive rfl ha
 
 theorem idleOff_same (I : Impl) (w : World) (hS : SemInv I w) (id : InstId) (a : Actor)
     (hl : a.life = (w.st id).life) (hp : a.phase = (w.st id).phase) :
-    a.life ≠ .alive → a.phase = .idle := by
+    a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed := by
   intro h
   have hold : (w.st id).life ≠ .alive := by
     rw [← hl]
@@ -304,13 +457,17 @@ theorem idleOff_same (I : Impl) (w : World) (hS : SemInv I w) (id : InstId) (a :
   exact hS.idleOff id hold
 
 theorem idleOff_busy (I : Impl) (w : World) (hS : SemInv I w) (id : InstId) (a : Actor)
-    (hl : a.life = (w.st id).life) (hbusy : (w.st id).phase ≠ .idle) :
-    a.life ≠ .alive → a.phase = .idle := by
+    (hl : a.life = (w.st id).life) (hbusy : (w.st id).phase ≠ .idle)
+    (hnot : (w.st id).phase ≠ .crashed) :
+    a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed := by
   intro h
-  exact absurd (hl.trans (alive_if_busy I w hS id hbusy)) h
+  rcases alive_if_busy I w hS id hbusy with ha | hc
+  · exact absurd (hl.trans ha) h
+  · exact absurd hc hnot
 
-theorem idleOff_now (a : Actor) (hp : a.phase = .idle) : a.life ≠ .alive → a.phase = .idle :=
-  fun _ => hp
+theorem idleOff_now (a : Actor) (hp : a.phase = .idle) :
+    a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed :=
+  fun _ => Or.inl hp
 
 theorem resume_life (a : Actor) (b : Bool) (dst : InstId) :
     (resumeSender a b dst).life = a.life := by
@@ -329,15 +486,17 @@ theorem resume_life (a : Actor) (b : Bool) (dst : InstId) :
 theorem idleOff_resume (I : Impl) (w : World) (hS : SemInv I w) (id : InstId) (b : Bool)
     (dst : InstId) :
     (resumeSender (w.st id) b dst).life ≠ .alive →
-      (resumeSender (w.st id) b dst).phase = .idle := by
+      (resumeSender (w.st id) b dst).phase = .idle ∨
+        (resumeSender (w.st id) b dst).phase = .crashed := by
   intro h
   by_cases hidle : (w.st id).phase = .idle
-  · simp [resumeSender, hidle]
-  · have halive := alive_if_busy I w hS id hidle
-    have hne : (w.st id).life ≠ .alive := by
-      rw [← resume_life (w.st id) b dst]
-      exact h
-    exact absurd halive hne
+  · exact Or.inl (by simp [resumeSender, hidle])
+  · rcases alive_if_busy I w hS id hidle with ha | hc
+    · have hne : (w.st id).life ≠ .alive := by
+        rw [← resume_life (w.st id) b dst]
+        exact h
+      exact absurd ha hne
+    · exact Or.inr (by simp [resumeSender, hc])
 
 theorem bump_keeps (a : Actor) (d : String) (delta : Int) :
     (bumpToken a d delta).typestate = a.typestate ∧ (bumpToken a d delta).life = a.life ∧
@@ -394,7 +553,7 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
     (hlife : a.life = (w.st (.core r)).life) (htm : tr.template = r)
     (hmem : tr ∈ I.transitions) (hcont : contTy a) (hprog : programOk I.desc (.core r) a)
     (hwait : waitEdge I.desc (.core r) a)
-    (hoff : a.life ≠ .alive → a.phase = .idle)
+    (hoff : a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed)
     (hown : a.parked = (w.st (.core r)).parked ∨ InstId.core r ∈ w.roster) :
     SemInv I (setActor w (.core r) a) := by
   obtain ⟨step, hstep, htmpl, hfroms, htos, _hlab⟩ := stepsCover_of_local I hL tr hmem
@@ -441,17 +600,39 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
         rw [setActor_other w (.core r) (.core role) a hid] at hliver
         exact hliver
       exact hS.compat g hg hold
-  · intro g hg role hrole
-    by_cases hq : role = r
-    · subst hq
-      rw [setActor_self, hlife]
-      exact hS.live g hg role hrole
-    · have hid : InstId.core role ≠ InstId.core r := by
-        intro he
-        cases he
-        exact hq rfl
-      rw [setActor_other w (.core r) (.core role) a hid]
-      exact hS.live g hg role hrole
+  · intro g hg
+    refine ⟨?_, ?_⟩
+    · by_cases hin : r ∈ g.roles
+      · rw [roleTuple_update w r a g, hto]
+        have hallowed := (hS.live g hg).1
+        have hlook : lookupRole (roleTuple w g) r = some tr.fromState := by
+          rw [← hfrom]
+          exact lookup_roleTuple w g r hin
+        have hbr := step_in_closure I.desc g step hempty hg hstep
+        have hrole : g.roles.elem step.template = true := by
+          rw [htmpl, htm]
+          exact List.elem_iff.mpr hin
+        have hf : lookupRole (roleTuple w g) step.template = some step.fromState := by
+          simpa [htmpl, htm, hfroms] using hlook
+        have hclosed := step_on_observed g step (roleTuple w g) hbr hallowed hrole hf
+        simpa [htmpl, htm, htos] using hclosed
+      · rw [roleTuple_other w (.core r) a g (fun role hrole he => hin (by cases he; exact hrole))]
+        exact (hS.live g hg).1
+    · intro role hrole
+      by_cases hq : role = r
+      · subst hq
+        rw [setActor_self]
+        rcases (hS.live g hg).2 role hrole with ha | hh
+        · exact Or.inl (hlife.trans ha)
+        · exact Or.inr (by
+            rw [← hlife] at hh
+            exact hh)
+      · have hid : InstId.core role ≠ InstId.core r := by
+          intro he
+          cases he
+          exact hq rfl
+        rw [setActor_other w (.core r) (.core role) a hid]
+        exact (hS.live g hg).2 role hrole
   · intro i
     by_cases h : i = .core r
     · rw [h, setActor_self]; exact hcont
@@ -538,33 +719,23 @@ theorem ingress_sem (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
 
 theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
     (h : finishWait I w id = some w') : SemInv I w' := by
-  cases hph : (w.st id).phase with
-  | awaitEffect k =>
-    simp [finishWait, hph] at h
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
-    have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, hph] using hS.prog id
-    have hp := proceed_ok I.desc id (w.st id) k hty hprog
-    exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 (by simp [hph]))
-      (Or.inr (hS.rostered id (alive_if_busy I w hS id (by simp [hph]))))
-  | awaitPeer k =>
-    simp [finishWait, hph] at h
-    rcases h with ⟨_, hw⟩
-    cases hw
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
-    have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
-      simpa [programOk, hph] using hS.prog id
-    have hp := proceed_ok I.desc id (w.st id) k hty hprog
-    exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-      (idleOff_busy I w hS id _ hp.2.1 (by simp [hph]))
-      (Or.inr (hS.rostered id (alive_if_busy I w hS id (by simp [hph]))))
-  | idle => simp [finishWait, hph] at h
-  | run _ => simp [finishWait, hph] at h
-  | parked _ _ _ => simp [finishWait, hph] at h
-  | awaitReply _ _ => simp [finishWait, hph] at h
-  | crashed => simp [finishWait, hph] at h
+  obtain ⟨k, hph, hw⟩ := finish_proceed I w w' id h
+  subst hw
+  have hbusy : (w.st id).phase ≠ .idle := by
+    rcases hph with hph | hph <;> simp [hph]
+  have hty : (w.st id).typestate = k.toState := by
+    rcases hph with hph | hph <;> simpa [contTy, hph] using hS.cont id
+  have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
+    rcases hph with hph | hph <;> simpa [programOk, hph] using hS.prog id
+  have hp := proceed_ok I.desc id (w.st id) k hty hprog
+  have hnot : (w.st id).phase ≠ .crashed := by
+    rcases hph with hph | hph <;> simp [hph]
+  exact sem_set I w id (proceed (w.st id) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+    (idleOff_busy I w hS id _ hp.2.1 hbusy hnot)
+    (Or.inr (hS.rostered id (by
+      rcases alive_if_busy I w hS id hbusy with ha | hc
+      · exact ha
+      · exact absurd hc hnot)))
 
 theorem peer_ne_core (template : String) (ix : Nat) (r : String) :
     InstId.peer template ix ≠ InstId.core r := by
@@ -783,38 +954,21 @@ theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
   · simp [halive]
     by_cases hcall : isCall = true
     · simp [hcall]
-      cases hlife : (w.st dst).life with
-      | dead =>
-        simp [hlife, issueCall]
-        apply sem_set I w sender _ hS
-        · rfl
-        · rfl
-        · simp [contTy]
-          exact hty
-        · simp [programOk]
-          exact htail
-        · simp [waitEdge]
-          simpa [hcall] using hedge
-        · exact idleOff_life hsender
-        · exact Or.inr (hS.rostered sender hsender)
-      | alive => exact absurd hlife halive
-      | absent =>
-        simp [hlife]
-        have hp := proceed_ok I.desc sender (issueCall (w.st sender)) k
-          ((issueCall_keeps _).1.trans hty) (by simpa [issueCall] using htail)
-        apply sem_set I w sender _ hS
-        · simp [finishCall]
-          exact hp.1.trans (issueCall_keeps _).1
-        · simp [finishCall]
-          exact hp.2.1.trans (issueCall_keeps _).2.1
-        · simp [finishCall]
-          exact hp.2.2.1
-        · simp [finishCall]
-          exact hp.2.2.2.1
-        · simp [finishCall]
-          exact hp.2.2.2.2
-        · exact idleOff_life ((hp.2.1.trans (issueCall_keeps _).2.1).trans hsender)
-        · exact Or.inr (hS.rostered sender hsender)
+      have hp := proceed_ok I.desc sender (issueCall (w.st sender)) k
+        ((issueCall_keeps _).1.trans hty) (by simpa [issueCall] using htail)
+      apply sem_set I w sender _ hS
+      · simp [finishCall]
+        exact hp.1.trans (issueCall_keeps _).1
+      · simp [finishCall]
+        exact hp.2.1.trans (issueCall_keeps _).2.1
+      · simp [finishCall]
+        exact hp.2.2.1
+      · simp [finishCall]
+        exact hp.2.2.2.1
+      · simp [finishCall]
+        exact hp.2.2.2.2
+      · exact idleOff_life ((hp.2.1.trans (issueCall_keeps _).2.1).trans hsender)
+      · exact Or.inr (hS.rostered sender hsender)
     · have hcf : isCall = false := by cases hbb : isCall <;> simp_all
       simp [hcf]
       have hp := proceed_ok I.desc sender (w.st sender) k hty htail
