@@ -14105,7 +14105,12 @@ theorem terminate_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
       (hM.once id) hstep
     simpa [releaseWorld, base, dead] using hrel
   · rename_i t ht htm hdesc hpk
-    exact subtree_kill_tag I hL hG N w hR hT hown t ht
+    -- A committing member aborts its own descendants and then itself. The
+    -- parent's tombstone is a plain priority message, so the call tags of that
+    -- enqueue follow from the world the aborts left.
+    simp only [terminateStage]
+    apply tombstone_tag I.desc _ id
+    · skip
 
 theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w) (id : InstId) (w' : World)
