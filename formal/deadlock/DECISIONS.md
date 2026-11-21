@@ -35,7 +35,7 @@ typestate choice, not an environment kill action.
 The `terminate` effect is currently allowed only for terminable templates. A
 permanent pure stage, which is a multiplicity-one core, may also execute
 `terminate`, and its effect is the same as `crashed`: the whole system
-terminates.
+terminates. The 2026-11-21 decision replaces that split for cores.
 
 ## 2026-11-20 — A full priority lane crashes
 
@@ -79,8 +79,9 @@ guarantee plus the caller-side outcome totality is the final form of
 and `LocalOk` implementation is not stuck on a parked send, or a step has
 crashed the roster. `crashWorld` sets `World.crashed`. Spawn, ingress,
 stutter, and every runtime action are then disabled, so the run stops.
-Crash is a reachable outcome: a permanent core's `terminate`, and a priority
-enqueue onto a full lane. It is not a silent escape from a stuck parked send.
+Crash is a reachable outcome: a core's `terminate`, and a priority enqueue
+onto a full lane. It is not a silent escape from a stuck parked send. Every
+core may terminate; see 2026-11-21.
 
 A parent restarts a dead child at a fresh generation of the same key. The
 dead id is not reused. A supervisor that is dead or shutting down admits no
@@ -174,3 +175,50 @@ counters, a duplicate-free roster, and the empty off-roster lane from the
 initial world through every enabled step. `tmb_seal_room` is the numeric
 fact those worlds instantiate. Refunds still go to the live generation, and
 the tombstone is still queued at the seal.
+
+## 2026-11-21 — A core terminate crashes the node
+
+Roland, 2026-11-21: "all cores may terminate and any such termination crashes
+the node i.e. ends the run. Such a crash is operationally undesirable but in
+this work we should count it as acceptable behaviour."
+
+This resolves N39. It replaces the split in the 2026-11-19 note, where only a
+non-terminable core crashed and a terminable core shut itself down.
+
+Every multiplicity-one template is a core. Its `terminate` is `crashWorld`,
+the same end pure-stage takes when a top-level stage terminates
+(`Effect::Terminate` with supervisor `BLACKHOLE` stops the simulation). There
+is no per-core shutdown. `terminable` is not a property of a core:
+`coreFlagFails` rejects a multiplicity-one template that sets it. The flag
+stays meaningful for a per-peer template. A lone terminable per-peer still
+shuts only itself down, and a per-peer stage in a subtree still seals its
+descendants and arms one tombstone.
+
+`LocalOk` allows `terminate` on a core. A per-peer program may `terminate`
+only when the template is terminable. That is the old gate, kept for peers.
+A core program is not muted by the flag. The mute rule is what keeps a lone
+terminable per-peer from leaving reliable mail in a run that continues.
+
+`permanentTarget` accepts any multiplicity-one target, the same subtree, or a
+pool child of the calling core. The old `terminable = false` conjunct excluded
+a core that could shut down and leave the sender running. A core no longer
+does that. Dropping the conjunct does not admit a new `GraphOk` target,
+because a core that sets the flag is already rejected. A reliable send or
+call to a terminable per-peer outside its subtree is still rejected.
+`callTermFails` uses the same cut. `pureTermFails` still requires a pure
+untimed per-peer to be terminable. A core is not that peer: a pure core is
+rejected by `subtreeEntry` (`pureKillMsg`), and demanding `terminable` there
+would contradict the flag check.
+
+N32 is open. Helen's E4 (`Outlive.lean`) is mail from a non-terminable
+per-peer child left in two cores after the per-peer root terminates. That
+root is per-peer, so its `terminate` is still the subtree seal, not a core
+crash. The cores in that run do not terminate. This decision does not move
+that mail, does not crash that run, and does not choose a fix.
+
+`FairRun.lossTpl` is a terminable core. Its `terminate` used to clear a
+mailbox (`loss_not_delivered`). That step is now `crashWorld`. `FairRun` does
+not build, and this change does not repair it. `TermStep.crash` no longer
+carries `terminable = false`, and `lone` and `cascade` require
+`multiplicity = .perPeer`. Modules that still split the old constructors are
+left as they are.

@@ -747,7 +747,7 @@ theorem freeSlot_fresh (w : World) (parent : InstId) (name : String) (n k : Nat)
 /-! Wired supervisors. -/
 
 theorem subtreeFails_entry (D : Description) :
-    subtreeFails D = D.templates.filterMap (subtreeEntry D) := rfl
+    subtreeFails D = D.templates.filterMap (subtreeEntry D) ++ coreFlagFails D := rfl
 
 
 /-! Priority-lane release. -/
@@ -5025,13 +5025,13 @@ theorem hold_terminate (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a :
   rcases execRun_terminate I w id a k hlive hk with hcrash | hrest
   · simpa [hcrash] using hold_crash I w hH
   rcases hrest with hshut | hrest
-  · obtain ⟨_, _, _, _, _, _, heq⟩ := hshut
+  · obtain ⟨_, _, _, _, _, _, _, heq⟩ := hshut
     simpa [heq] using hold_marked I w (shutdownActor I.desc w id) hH
       (shutdown_marked I.desc w id) hpre
   rcases hrest with htree | hcascade
   · obtain ⟨_, _, _, _, heq⟩ := htree
     simpa [heq] using hold_terminate_stage I w hH id a hpre
-  · obtain ⟨_, _, _, _, _, _, heq⟩ := hcascade
+  · obtain ⟨_, _, _, _, _, _, _, heq⟩ := hcascade
     simpa [heq] using hold_terminate_stage I w hH id a hpre
 
 /-- `exec` of an actor that is already shutting down seals it, and the seal
@@ -10240,16 +10240,16 @@ theorem term_frame (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
   | fall =>
     clear hw
     exact frame_crash w
-  | crash _ _ _ _ =>
+  | crash _ _ _ =>
     clear hw
     exact frame_crash w
-  | lone _ _ _ _ _ _ =>
+  | lone _ _ _ _ _ _ _ =>
     clear hw
     exact shutdown_frame I.desc w id
   | tree _ _ _ _ =>
     clear hw
     exact stage_frame I.desc w id a
-  | cascade _ _ _ _ _ _ =>
+  | cascade _ _ _ _ _ _ _ =>
     clear hw
     exact stage_frame I.desc w id a
 
@@ -11455,11 +11455,11 @@ theorem exec_wired (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (a
       | terminate =>
         rcases execRun_terminate I w id a k hlive ⟨es, hk⟩ with hcrash | hshut | htree | hcascade
         · exact hcrash ▸ wired_crash I.desc w hW
-        · rcases hshut with ⟨_, _, _, _, _, _, heq⟩
+        · rcases hshut with ⟨_, _, _, _, _, _, _, heq⟩
           exact heq ▸ wired_stable I.desc w _ hW fun i => shutdown_parent I.desc w id i
         · rcases htree with ⟨_, _, _, _, heq⟩
           exact heq ▸ wired_stable I.desc w _ hW fun i => terminate_parent I.desc w id a i
-        · rcases hcascade with ⟨_, _, _, _, _, _, heq⟩
+        · rcases hcascade with ⟨_, _, _, _, _, _, _, heq⟩
           exact heq ▸ wired_stable I.desc w _ hW fun i => terminate_parent I.desc w id a i
   · have hgo : (a.life == .alive) = false := by
       cases hb : a.life == .alive with
@@ -11564,7 +11564,9 @@ theorem tombstone_label_ne (D : Description) (hG : GraphOk D) (w : World) (hW : 
     tombstoneLabel D child ≠ "" := by
   obtain ⟨t, ht, hsup⟩ := hW child p hpar
   have hmap : D.templates.filterMap (subtreeEntry D) = [] := by
-    simpa [subtreeFails_entry] using hG.subtrees
+    have h := hG.subtrees
+    rw [subtreeFails_entry] at h
+    exact (List.append_eq_nil_iff.mp h).1
   have hentry := filterMap_none (subtreeEntry D) D.templates hmap t
     (templateOf_mem D (tname child) t ht).1
   have hne := subtreeEntry_tombstone D t (tname p) hentry hsup

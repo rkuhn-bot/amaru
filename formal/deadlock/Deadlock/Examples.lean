@@ -269,7 +269,7 @@ def muxDesc : Description where
 
 theorem mux_pass : render muxDesc = "pass" := by decide
 
-/-- A call from a permanent core into the connection names a terminable role
+/-- A call from a core into the connection names a terminable role
 outside the caller's subtree. The checker rejects it. -/
 def muxCrossDesc : Description where
   name := "mux-cross"

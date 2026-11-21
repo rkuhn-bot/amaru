@@ -95,9 +95,10 @@ One `exec` step, by the head effect:
 - `internal` becomes `awaitEffect`. `peer` becomes `awaitPeer`. The data
   path is `finish`. The timeout is `callTimeout`, which runs `onTimeout`
   into its own typestate.
-- `terminate` is the shutdown below. A permanent core crashes the roster.
-  A stage in a supervision tree marks itself and its descendants. A lone
-  terminable with no child and no parked call shuts only itself down.
+- `terminate` is the shutdown below. Every core crashes the roster.
+  A per-peer stage in a supervision tree marks itself and its descendants.
+  A lone terminable per-peer with no child and no parked call shuts only
+  itself down.
 
 `route` resolves a multiplicity-one name to its live core. A pool
 (`slots` > 0) is the live occupant of the addressed slot, and `hint` is
@@ -151,9 +152,11 @@ the slot has never been born, when its tombstone has been consumed, or in
 the transition that consumes it. Until then the spawn is a no-op, the same
 as a full pool, and a root spawn into that slot is not enabled. A core pool
 and a per-peer parent use the same rule. A sibling is not a descendant, and
-nothing here clears a sibling's mailbox. A lone terminable with no child
-and no parked call is `shutdownActor` of itself. A permanent core's
+nothing here clears a sibling's mailbox. A lone terminable per-peer with no
+child and no parked call is `shutdownActor` of itself. Every core's
 `terminate`, and a priority enqueue onto a full lane, are `crashWorld`.
+There is no per-core shutdown. `terminable` is rejected on a multiplicity-one
+template.
 
 `markShutdown` sets `shuttingDown` and `idle`, and `releaseOutbound` drops
 that sender's parked entries on other hosts at the mark, not at the seal.

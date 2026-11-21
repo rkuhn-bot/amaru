@@ -33,12 +33,14 @@ def unknownLabelImpl : Impl where
 
 theorem unknown_label_fails : labelHandled unknownLabelImpl = false := by decide
 
+/-- A reliable send to a terminable per-peer outside the sender's subtree. -/
 def terminableTargetDesc : Description where
   name := "terminable-target"
   freshNames := true
   templates :=
     [tpl "boss" 1 ["idle"] "idle" true,
-     { tpl "worker" 1 ["idle"] "idle" true with terminable := true }]
+     { tpl "worker" 1 ["idle"] "idle" true with
+         multiplicity := .perPeer, terminable := true }]
   edges := [sendEdge "boss" "idle" "worker" "Stop" 1]
   compatibility := .all
   steps := []
@@ -48,6 +50,34 @@ def terminableTargetImpl : Impl where
   transitions := []
 
 theorem terminable_target_fails : permanentTarget terminableTargetImpl = false := by decide
+
+/-- A core that sets `terminable` is rejected. The flag is a per-peer shutdown. -/
+def coreFlagDesc : Description where
+  name := "core-flag"
+  freshNames := true
+  templates := [{ tpl "worker" 1 ["idle"] "idle" true with terminable := true }]
+  edges := []
+  compatibility := .all
+  steps := []
+
+theorem core_terminable_rejected : subtreeFails coreFlagDesc =
+    ["fail: core worker sets terminable; a core terminate crashes the node"] := by decide
+
+/-- A core may `terminate`. The effect crashes the node, and `LocalOk` allows it. -/
+def coreDieImpl : Impl where
+  desc := {
+    name := "core-die"
+    freshNames := true
+    templates := [tpl "node" 1 ["idle"] "idle" true]
+    edges := []
+    compatibility := .all
+    steps := [{ template := "node", fromState := "idle", toState := "idle", label := "Stop" }]
+  }
+  transitions := [plainTr "node" "idle" "Stop" "idle" [.terminate]]
+
+theorem core_terminate_local :
+    checkBool coreDieImpl.desc = true ∧ localOkB coreDieImpl = true := by
+  decide
 
 def perPeerTargetDesc : Description where
   name := "per-peer-target"

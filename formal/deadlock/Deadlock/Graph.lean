@@ -612,9 +612,11 @@ def callTermFails (D : Description) : List String :=
       match templateOf D e.dst with
       | none => some s!"fail: call {e.label} targets unknown template {e.dst}"
       | some t =>
-        -- A call may enter a terminable role inside that role's subtree, or a
-        -- pool child of the calling core. Anything else must be a permanent core.
-        if t.terminable && !sameSubtree D e.src e.dst && !coreSupervisedPool D e.src e.dst then
+        -- A call may enter a terminable per-peer inside that peer's subtree, or a
+        -- pool child of the calling core. A core is not a terminable target: the
+        -- flag is rejected, and the core's terminate crashes the node.
+        if t.terminable && t.multiplicity != .one && !sameSubtree D e.src e.dst &&
+            !coreSupervisedPool D e.src e.dst then
           some s!"fail: call {e.label} targets terminable template {e.dst}"
         else none
 
@@ -778,8 +780,16 @@ theorem subtreeEntry_tombstone (D : Description) (t : Template) (name : String)
             · simp at h
             · exact missingTombstone_ne t name h hsup
 
+/-- `terminable` names a per-peer shutdown. A multiplicity-one template that
+sets it is rejected: every core may terminate, and that step crashes the node. -/
+def coreFlagFails (D : Description) : List String :=
+  D.templates.filterMap fun t =>
+    if t.multiplicity == .one && t.terminable then
+      some s!"fail: core {t.name} sets terminable; a core terminate crashes the node"
+    else none
+
 def subtreeFails (D : Description) : List String :=
-  D.templates.filterMap (subtreeEntry D)
+  D.templates.filterMap (subtreeEntry D) ++ coreFlagFails D
 
 def pureTermMsg (name : String) : String :=
   s!"fail: template {name} is an untimed peer end and is not terminable; a permanent mailbox would stall with the peer"
@@ -790,11 +800,14 @@ def cellPureMsg (dst label : String) : String :=
 def interiorMsg (src dst : String) : String :=
   s!"fail: {src} depends on {dst}, whose untimed peer wait is interior and no timed peer in the cohort can end the chain"
 
-/-- A pure untimed template is not a permanent core. Nothing forces it to leave
-the peer wait, so reliable mail on it would never be received. -/
+/-- A pure untimed per-peer is terminable. Nothing forces it to leave the peer
+wait, so reliable mail on it would never be received. A core is not this peer:
+`subtreeEntry` rejects a pure core, and a core may not set `terminable`. -/
 def pureTermFails (D : Description) : List String :=
   D.templates.filterMap fun t =>
-    if templatePure D t.name && !t.terminable then some (pureTermMsg t.name) else none
+    if t.multiplicity != .one && templatePure D t.name && !t.terminable then
+      some (pureTermMsg t.name)
+    else none
 
 /-- A pure untimed template is not a cell reader. A wake would sit on the
 priority lane for as long as the peer stays silent. -/
@@ -816,7 +829,7 @@ def interiorFails (D : Description) : List String :=
         if t.untimedPeer && !timedCohortEnds D e.dst then some (interiorMsg e.src e.dst) else none
 
 /-- Untimed peer waits are allowed. `peerFails` rejects three placements: a pure
-untimed template that is not terminable, a cell wake of a pure untimed template,
+untimed per-peer that is not terminable, a cell wake of a pure untimed template,
 and a blocking send or call onto an untimed template that no subtree kill can
 end. The last of those is the interior wait. A timed peer whose timeout kills
 the subtree is the cut that makes the dependency legal. -/

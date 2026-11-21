@@ -40,15 +40,17 @@ spawn, and the run stops. The claim is deadlock-free or crashed. `LocalOk`
 does not remove the crash. Under `GraphOk` and `LocalOk` the steps that
 still crash a world a run can reach are:
 
-- `terminate` of a permanent core
-- the `terminate` fall-through, a stage the shutdown cases do not classify
+- `terminate` of a core, every multiplicity-one template
+- the `terminate` fall-through, a per-peer the shutdown cases do not classify
 - a missing template at a step that looks the template up and crashes
 
-Those three are obligations, not a proved absence. A `LocalOk` program's
-`terminate` is expected to meet one of the classified shutdown cases, and a
-step is expected to look up a template the description declares. This note
-does not prove those sites unreachable. A design that reaches one of them
-crashes.
+Those three are obligations, not a proved absence. A `LocalOk` program on a
+per-peer `terminate`s only when that template is terminable, and that step is
+one of the classified shutdowns. A core may `terminate`, and that step is the
+crash above. It is an acceptable end of the run. A step is expected to look
+up a template the description declares. This note does not prove the
+fall-through or the missing template unreachable. A design that reaches one
+of them crashes.
 
 A seal whose recorded parent is shutting down or dead drops the tombstone:
 pure-stage has already discarded that queue in `terminate_stage`. An empty
@@ -190,9 +192,10 @@ That end must not sit inside a chain another actor depends on for liveness,
 unless some timed wait in the chain can end it. `peerFails` is that check,
 and `GraphOk.peers` is `peerFails D = []`:
 
-- `pureTermFails`: a pure untimed template (`templatePure`) is terminable. A
-  permanent mailbox would stall with the peer. `permanent_finishable` is why
-  `finish` stays enabled on a non-terminable actor.
+- `pureTermFails`: a pure untimed per-peer (`templatePure`) is terminable. A
+  permanent mailbox would stall with the peer. A core is not that peer.
+  `subtreeEntry` rejects a pure core, and a core may not set `terminable`.
+  `permanent_finishable` is why `finish` stays enabled on a non-terminable actor.
 - `cellPureFails`: a pure untimed template is not a cell reader. A wake would
   sit on the priority lane while `finish` is disabled.
 - `interiorFails`: a blocking send or a call onto an untimed template is
@@ -282,14 +285,15 @@ program might write, and asked for a later `recvBulk`, `recvPrio`, or `exec`.
 Two fair runs fail that statement. Both are closed by the statement and the
 checker, not by a change to the step relation.
 
-**No live reader.** Let `R` be `perPeer`, or a `one` template that has already
-taken a killing `terminate`. Let `W` be a non-terminable `one` whose program
-contains `.cell R L 1`. `W` runs that effect. The cell goes from 0 to 1 and
-`dirty` becomes true. `readersOf` is empty, so `wakeReaders` enqueues nothing.
-No instance of `R` is ever alive to take `recvPrio`. `Fair.prio` holds because
-`recvPrio` of a reader that does not exist is never enabled. A dead or
-never-spawned reader has nothing to be fresh about, so `CellFresh` quantifies
-only over instances that are alive at the write and stay alive.
+**No live reader.** Let `R` be `perPeer` and already terminated, or never
+spawned. Let `W` be a core whose program contains `.cell R L 1`. `W` runs
+that effect. The cell goes from 0 to 1 and `dirty` becomes true. `readersOf`
+is empty, so `wakeReaders` enqueues nothing. No instance of `R` is alive to
+take `recvPrio`. `Fair.prio` holds because `recvPrio` of a reader that does
+not exist is never enabled. A core reader that `terminate`s crashes the node,
+so there is no later write in that run. A dead or never-spawned reader has
+nothing to be fresh about, so `CellFresh` quantifies only over instances that
+are alive at the write and stay alive.
 
 **Undeclared label.** `readCells` stores `observed` only for `cellLabels`, the
 labels of edges with `effect = cell` and `dst` equal to the reader's template.
@@ -416,14 +420,15 @@ def LocalOk (I : Impl) : Prop := localOkB I = true
 
 `localOkB` is the conjunction of: every transition passes `transitionOk`,
 `callTotal`, `targetsAll`, `occShape`, `dstClosed`, `prioOk`,
-`compatFails I.desc = []`, and `stepsCoverB`. A terminable template's
-programs contain no bulk `send`, `trySend`, or `call` (`noBulkSend` inside
-`transitionOk`). `prioOk` bounds the declared priority labels by
-`priorityBound`. Inside `transitionOk`, `effectsOk` requires every
-`.cell R L _` effect to be a non-blocking cell edge from the transition's
-template and target state into `R` with label `L`. The same shape is
-`cellEffectFails` on a description's `cellEffects` list, and that list is part
-of `structLines`, so `GraphOk.struct` rejects an undeclared cell write.
+`compatFails I.desc = []`, and `stepsCoverB`. A terminable per-peer's programs
+contain no bulk `send`, `trySend`, or `call` (`noBulkSend` inside
+`transitionOk`). A core is not muted, and its program may `terminate`.
+`prioOk` bounds the declared priority labels by `priorityBound`. Inside
+`transitionOk`, `effectsOk` requires every `.cell R L _` effect to be a
+non-blocking cell edge from the transition's template and target state into
+`R` with label `L`. The same shape is `cellEffectFails` on a description's
+`cellEffects` list, and that list is part of `structLines`, so `GraphOk.struct`
+rejects an undeclared cell write.
 
 ### `Assumptions`
 
@@ -458,17 +463,21 @@ refuse it.
 
 ## Restrictions that are still in force
 
-**BulkFree for a terminable template.** `BulkFree` says a terminable actor's
+**BulkFree for a terminable per-peer.** `BulkFree` says a terminable per-peer's
 carried continuation satisfies `noBulkSend`. `LocalOk` checks the same thing
-on every listed program of a terminable template. A terminable actor may
-terminate while a shared stage still holds its earlier sends; it may not
-bulk-send as part of the program it is running. This is narrower than a rule
-that would forbid every send by a terminable template.
+on every listed program of a terminable per-peer. A core is not in that class.
+A terminable per-peer may terminate while a shared stage still holds its
+earlier sends; it may not bulk-send as part of the program it is running.
+This is narrower than a rule that would forbid every send by a terminable
+per-peer.
 
 **callTermFails.** `GraphOk.lifecycle` is `callTermFails D = []`: no call edge
-targets a terminable template. A killing `terminate` is refused while a parked
-call is present. The two together are why a callee that is owed a reply cannot
-be the actor that exits.
+targets a terminable per-peer outside that peer's subtree, except a pool child
+of the calling core. A core is not a terminable target. `coreFlagFails` rejects
+the flag, and a call to a core is allowed because the core's `terminate`
+crashes the node rather than leaving the caller waiting. A killing `terminate`
+is refused while a parked call is present. The two together are why a per-peer
+callee that is owed a reply cannot be the actor that exits.
 
 **Compatibility is sufficient, not necessary.** The group list is untrusted.
 `compatFails = []` checks that each group is well-formed, contains the initial

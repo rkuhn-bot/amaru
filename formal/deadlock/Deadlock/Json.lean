@@ -219,6 +219,9 @@ private def decodeTemplate (v : JVal) : Except String Template := do
   let priorityBound ← decodeAffine (← field v "priorityBound")
   let states ← (← asArr (← field v "states") "states").mapM fun s => asString s "state"
   let initial ← asString (← field v "initial") "initial"
+  -- Parsed, then checked. `true` on a multiplicity-one template fails
+  -- `coreFlagFails`: a core terminate crashes the node, so the flag is not a
+  -- core property. It stays the per-peer shutdown.
   let terminable ← decodeBoolField v "terminable" false
   let untimedPeer ← decodeBoolField v "untimedPeer" false
   let mustFit ← decodeBoolField v "mustFit" true

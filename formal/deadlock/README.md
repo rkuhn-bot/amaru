@@ -399,8 +399,7 @@ for a send the actor did not itself perform.
 
 ## Checker rules
 
-`lake exe check` fails unless all of the following hold. These are unchanged
-by the semantic rework, and the old examples keep their verdicts.
+`lake exe check` fails unless all of the following hold.
 
 - Templates and edge endpoints exist; states contain `initial`; names are unique.
 - `send` and `call` are blocking. `trySend`, `reply`, `selfSchedule`, `cell`,
@@ -408,11 +407,13 @@ by the semantic rework, and the old examples keep their verdicts.
 - `scope` matches multiplicity.
 - `freshNames` is true. Priority bound `≤` priority capacity. Every `call`
   has `repliesInDequeue`. A call with `repliesInDequeue: false` is
-  `lost-reply.json`. An `untimedPeer` template is allowed. It is rejected when
+  `lost-reply.json`. An `untimedPeer` per-peer is allowed. It is rejected when
   it is not terminable, when a cell wakes it, or when a blocking send or call
-  targets it and no template in its cohort has a timed peer.
-- **No call targets a terminable template** (`callTermFails`, part of
-  `GraphOk.lifecycle`). An admitted call sits in the callee's box and the
+  targets it and no template in its cohort has a timed peer. A core is not an
+  untimed peer end, and it may not set `terminable`.
+- **No call targets a terminable per-peer outside its subtree**
+  (`callTermFails`, part of `GraphOk.lifecycle`), except a pool child of the
+  calling core. A call to a core is allowed. An admitted call sits in the callee's box and the
   caller is in `awaitReply`; it is not a parked entry. Killing `terminate`
   refunds that box with a credit only, and `releaseParked` skips `isCall`
   entries and does not read the box, so the caller would stay in `awaitReply`
@@ -440,6 +441,8 @@ repository does not contain that exporter.
   sizes; `priorityBound` is how many distinct priority labels the role may
   hold. Each is `a*N+b`. `states` and `initial` are the typestate. `subtree`
   and `timeoutKills` name a per-peer cohort that dies in one kill.
+  `terminable` is a per-peer shutdown. On `"multiplicity": "one"` the checker
+  rejects `true`: a core may `terminate`, and that step crashes the node.
 - `edges` — the wiring. `occupancy` is the credit that edge contributes.
   `ingressLegal`, when present, is the same affine form, evaluated at the
   world's `N` by the step relation.

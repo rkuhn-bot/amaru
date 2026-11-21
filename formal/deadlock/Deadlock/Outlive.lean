@@ -2,7 +2,7 @@
 Mail from a non-terminable child outlives the child.
 
 `X` is a non-terminable per-peer child of the terminable root `R`. It sends
-one `M` to each of the permanent cores `K` and `H`. `R`'s `terminate` seals
+one `M` to each of the cores `K` and `H`. `R`'s `terminate` seals
 `X` in that step and does not remove those messages. After four such births
 both cores hold a `Ping` plus four `M`s, which is their whole capacity. The
 next `X` parks on `K`. Each core then runs `Ping`, whose program is a blocking

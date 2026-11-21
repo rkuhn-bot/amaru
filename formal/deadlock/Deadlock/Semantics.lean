@@ -1044,10 +1044,10 @@ label is not already pending. Wakes are not bulk occupancy and are not charged. 
 def upsertPrio (prio : List Msg) (m : Msg) : List Msg :=
   if prio.any (fun p => p.label == m.label) then prio else prio ++ [m]
 
-/-- A permanent core's `terminate`, and a priority lane with no room left. Every
-live or shutting-down actor on the roster dies in this step, in the crashed
-phase. Mail stays queued: the host is dead before anything dequeues it, and a
-crashed world takes no further step. -/
+/-- A core's `terminate`, and a priority lane with no room left. Every live or
+shutting-down actor on the roster dies in this step, in the crashed phase.
+Mail stays queued: the host is dead before anything dequeues it, and a crashed
+world takes no further step. -/
 def crashActor (a : Actor) : Actor :=
   if a.life == .alive || a.life == .shuttingDown then
     { a with life := .dead, phase := .crashed }
@@ -1439,14 +1439,15 @@ def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : 
         shutdownActor D w child
       else w) w
 
-/-- A permanent core's `terminate`, or a priority-lane overflow, has crashed the
-roster. `crashWorld` sets `w.crashed` and every later action is disabled, so
-the world is absorbing. The liveness claim is deadlock-free or crashed: a fair
-run of a checked implementation is not stuck, or a step has already crashed
-the roster. `tombstone_offer_room` is the numeric half: under `prioSized`,
-one more tombstone fits when the ones already queued are strictly under the
-slot bound and the other priority messages are within the static sender count.
-A self-schedule or a cell wake that does not fit still crashes. -/
+/-- A core's `terminate`, or a priority-lane overflow, has crashed the roster.
+`crashWorld` sets `w.crashed` and every later action is disabled, so the world
+is absorbing. The liveness claim is deadlock-free or crashed: a fair run of a
+checked implementation is not stuck, or a step has already crashed the roster.
+A core terminate is one of those crashes, and it is acceptable.
+`tombstone_offer_room` is the numeric half: under `prioSized`, one more
+tombstone fits when the ones already queued are strictly under the slot bound
+and the other priority messages are within the static sender count. A
+self-schedule or a cell wake that does not fit still crashes. -/
 def WorldCrashed (w : World) : Prop :=
   ∃ id, id ∈ w.roster ∧ (w.st id).life = .dead ∧ (w.st id).phase = .crashed
 
@@ -1629,14 +1630,15 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
         | some w' => setActor w' id (proceed (w'.st id) k')
         | none => crashWorld w
       | .terminate =>
-        -- A permanent core crashes the whole roster. Any stage in a supervision
-        -- tree may terminate, terminable or not: every descendant shuts down and
-        -- the immediate supervisor receives one tombstone. A lone terminable with
-        -- no child and no parked call shuts only itself down. Anything else,
-        -- including a missing template, crashes the roster. Siblings are left alone.
+        -- Every core crashes the node. pure-stage stops the simulation when a
+        -- top-level stage terminates. A per-peer stage in a subtree shuts its
+        -- descendants down and the immediate supervisor receives one tombstone.
+        -- A lone terminable per-peer with no child and no parked call shuts only
+        -- itself down. Anything else, including a missing template, crashes the
+        -- roster. Siblings are left alone. There is no per-core shutdown.
         match templateOf I.desc (tname id) with
         | some t =>
-          if t.multiplicity == .one && !t.terminable then
+          if t.multiplicity == .one then
             crashWorld w
           else if t.multiplicity == .perPeer && t.subtree != "" then
             terminateStage I.desc w id a
@@ -1651,19 +1653,20 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
   else w
 
 /-- What one `terminate` effect does when the actor is alive.
-`fall` is every terminate that does not shut a terminable actor down: a missing
-template, a permanent core, or a lone actor that still has a parked call. The
-roster crashes. `lone` marks one childless actor shutting down. `cascade` marks
-that actor's descendants shutting down and notifies its parent. -/
+`fall` is every terminate that does not crash a core and does not shut a
+per-peer down: a missing template, or a lone per-peer that still has a parked
+call. The roster crashes. `crash` is every core. `lone` marks one childless
+per-peer shutting down. `cascade` marks that per-peer's descendants shutting
+down and notifies its parent. -/
 inductive TermStep (I : Impl) (w : World) (id : InstId) (a : Actor) : World → Prop where
   | fall : TermStep I w id a (crashWorld w)
   | crash (t : Template) :
       templateOf I.desc (tname id) = some t →
       t.multiplicity = .one →
-      t.terminable = false →
       TermStep I w id a (crashWorld w)
   | lone (t : Template) :
       templateOf I.desc (tname id) = some t →
+      t.multiplicity = .perPeer →
       t.subtree = "" →
       t.terminable = true →
       hasParkedCall a.parked = false →
@@ -1676,14 +1679,16 @@ inductive TermStep (I : Impl) (w : World) (id : InstId) (a : Actor) : World → 
       TermStep I w id a (terminateStage I.desc w id a)
   | cascade (t : Template) :
       templateOf I.desc (tname id) = some t →
+      t.multiplicity = .perPeer →
       t.subtree = "" →
       t.terminable = true →
       hasParkedCall a.parked = false →
       hasChild I.desc w id = true →
       TermStep I w id a (terminateStage I.desc w id a)
 
-/-- Classify `terminate`. A member commits even when a call is parked.
-A permanent core, and every other fall-through, crashes the roster. -/
+/-- Classify `terminate`. Every core crashes the roster. A per-peer in a
+subtree shuts its descendants down. A lone terminable per-peer shuts itself
+down when it has no parked call. Every other fall-through crashes. -/
 theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (hlive : a.life = .alive) (hk : ∃ tail, k.rest = .terminate :: tail) :
     TermStep I w id a (execRun I w id a k) := by
@@ -1695,29 +1700,23 @@ theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Con
     exact TermStep.fall
   | some t =>
     simp only [execRun, hgo, hk, ht, ite_true]
-    by_cases hcrash : (t.multiplicity == .one && !t.terminable) = true
-    · simp [hcrash]
-      have hparts := (Bool.and_eq_true _ _).mp hcrash
+    by_cases hcore : (t.multiplicity == .one) = true
+    · simp [hcore]
       have hone : t.multiplicity = .one := by
         cases hm : t.multiplicity with
         | one => rfl
         | perPeer =>
-          simp [hm, show (Multiplicity.perPeer == Multiplicity.one) = false from rfl] at hparts
-      have hnt : t.terminable = false := by
-        have hn : (!t.terminable) = true := hparts.2
-        cases htm : t.terminable with
-        | false => rfl
-        | true => simp [htm] at hn
-      exact TermStep.crash t ht hone hnt
-    · rw [ite_eq_right hcrash]
+          simp [hm, show (Multiplicity.perPeer == Multiplicity.one) = false from rfl] at hcore
+      exact TermStep.crash t ht hone
+    · rw [ite_eq_right hcore]
+      have hper : t.multiplicity = .perPeer := by
+        cases hm : t.multiplicity with
+        | perPeer => rfl
+        | one =>
+          simp [hm, show (Multiplicity.one == Multiplicity.one) = true from rfl] at hcore
       by_cases htree : (t.multiplicity == .perPeer && t.subtree != "") = true
       · simp only [htree, ite_true]
         have hparts := (Bool.and_eq_true _ _).mp htree
-        have hper : t.multiplicity = .perPeer := by
-          cases hm : t.multiplicity with
-          | perPeer => rfl
-          | one =>
-            simp [hm, show (Multiplicity.one == Multiplicity.perPeer) = false from rfl] at hparts
         have hsub : t.subtree ≠ "" := by
           have hb : (t.subtree != "") = true := hparts.2
           simpa [bne, beq_iff_eq] using hb
@@ -1737,7 +1736,7 @@ theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Con
             cases hc : hasChild I.desc w id with
             | false => rfl
             | true => simp [hc] at hchB
-          exact TermStep.lone t ht hsub htm hpk hch
+          exact TermStep.lone t ht hper hsub htm hpk hch
         · rw [ite_eq_right hlone]
           by_cases hkids : (t.terminable && t.subtree == "" && !hasParkedCall a.parked &&
               hasChild I.desc w id) = true
@@ -1749,35 +1748,37 @@ theorem exec_term_step (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Con
               cases hp : hasParkedCall a.parked with
               | false => rfl
               | true => simp [hp] at hpkB
-            exact TermStep.cascade t ht hsub htm hpk hch
+            exact TermStep.cascade t ht hper hsub htm hpk hch
           · rw [ite_eq_right hkids]
             exact TermStep.fall
 
-/-- An alive `terminate` crashes the roster, shuts one childless actor down, or
-aborts every descendant and notifies the immediate supervisor. A stage in a
-supervision tree does not have to be marked terminable. -/
+/-- An alive `terminate` crashes the roster, shuts one childless per-peer down,
+or aborts every descendant and notifies the immediate supervisor. A core always
+crashes. A stage in a supervision tree does not have to be marked terminable. -/
 theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (hlive : a.life = .alive) (hk : ∃ tail, k.rest = .terminate :: tail) :
     execRun I w id a k = crashWorld w ∨
-      (∃ t, templateOf I.desc (tname id) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
+      (∃ t, templateOf I.desc (tname id) = some t ∧ t.multiplicity = .perPeer ∧
+        t.subtree = "" ∧ t.terminable = true ∧
         hasParkedCall a.parked = false ∧ hasChild I.desc w id = false ∧
         execRun I w id a k = shutdownActor I.desc w id) ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧ t.multiplicity = .perPeer ∧ t.subtree ≠ "" ∧
         execRun I w id a k = terminateStage I.desc w id a) ∨
-      (∃ t, templateOf I.desc (tname id) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
+      (∃ t, templateOf I.desc (tname id) = some t ∧ t.multiplicity = .perPeer ∧
+        t.subtree = "" ∧ t.terminable = true ∧
         hasParkedCall a.parked = false ∧ hasChild I.desc w id = true ∧
         execRun I w id a k = terminateStage I.desc w id a) := by
   have hstep := exec_term_step I w id a k hlive hk
   generalize hw : execRun I w id a k = wR at hstep
   cases hstep with
   | fall => exact Or.inl rfl
-  | crash _ _ _ _ => exact Or.inl rfl
-  | lone t ht hsub htm hpk hch =>
-    exact Or.inr (Or.inl ⟨t, ht, hsub, htm, hpk, hch, rfl⟩)
+  | crash _ _ _ => exact Or.inl rfl
+  | lone t ht hper hsub htm hpk hch =>
+    exact Or.inr (Or.inl ⟨t, ht, hper, hsub, htm, hpk, hch, rfl⟩)
   | tree t ht hm hsub =>
     exact Or.inr (Or.inr (Or.inl ⟨t, ht, hm, hsub, rfl⟩))
-  | cascade t ht hsub htm hpk hch =>
-    exact Or.inr (Or.inr (Or.inr ⟨t, ht, hsub, htm, hpk, hch, rfl⟩))
+  | cascade t ht hper hsub htm hpk hch =>
+    exact Or.inr (Or.inr (Or.inr ⟨t, ht, hper, hsub, htm, hpk, hch, rfl⟩))
 
 /-- An actor that is shutting down seals on `exec`: the mailbox is cleared and
 the life becomes `dead`. A live actor runs. Anyone else has no `exec`. -/
@@ -2156,24 +2157,26 @@ def terminableB (D : Description) (name : String) : Bool :=
   | some t => t.terminable
   | none => false
 
-/-- A terminable role with an empty subtree. It has no siblings, so it stays mute. -/
+/-- A terminable per-peer with an empty subtree. It has no siblings, so it stays
+mute. A core is not in this class: its `terminate` crashes the node. -/
 def loneTerminableName (D : Description) (name : String) : Prop :=
-  ∃ t, templateOf D name = some t ∧ t.terminable = true ∧ t.subtree = ""
+  ∃ t, templateOf D name = some t ∧ t.multiplicity = .perPeer ∧ t.terminable = true ∧ t.subtree = ""
 
 /-- A terminable role that dies with the rest of a named subtree. -/
 def subtreeMemberName (D : Description) (name : String) : Prop :=
   ∃ t, templateOf D name = some t ∧ t.terminable = true ∧ t.subtree ≠ ""
 
-/-- `true` when `name` is terminable and belongs to no subtree. -/
+/-- `true` when `name` is a terminable per-peer and belongs to no subtree. -/
 def loneTerminableB (D : Description) (name : String) : Bool :=
   match templateOf D name with
-  | some t => t.terminable && t.subtree == ""
+  | some t => t.multiplicity == .perPeer && t.terminable && t.subtree == ""
   | none => false
 
-/-- A core that is not part of any subtree: one instance, and not terminable. -/
+/-- A multiplicity-one template. Its `terminate` crashes the node. The
+`terminable` flag is not meaningful on a core. -/
 def permanentCore (D : Description) (name : String) : Bool :=
   match templateOf D name with
-  | some t => t.multiplicity == .one && !t.terminable
+  | some t => t.multiplicity == .one
   | none => false
 
 /-- `true` when `name` is a per-peer role, so a kill of its key removes it. -/
@@ -2183,8 +2186,8 @@ def perPeerB (D : Description) (name : String) : Bool :=
   | none => false
 
 /-- A per-peer member talks only to a per-peer role of its own subtree.
-A permanent core is not per-peer, so a call to one is not enabled. A lone
-terminable is not a subtree member and is not covered here: it stays mute. -/
+A core is not per-peer, so a call to one is not enabled. A lone terminable
+per-peer is not a subtree member and is not covered here: it stays mute. -/
 abbrev subtreeTalk (D : Description) (src dst : String) : Bool :=
   sameSubtree D src dst && perPeerB D dst
 
@@ -7682,16 +7685,16 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
         | fall =>
           intro h
           exact crashWorld_prev w (InstId.core name) h
-        | crash _ _ _ _ =>
+        | crash _ _ _ =>
           intro h
           exact crashWorld_prev w (InstId.core name) h
-        | lone _ _ _ _ _ _ =>
+        | lone _ _ _ _ _ _ _ =>
           intro h
           exact shutdownActor_prev I.desc w id (InstId.core name) h
         | tree _ _ _ _ =>
           intro h
           exact terminateStage_core_prev I.desc w id a name h
-        | cascade _ _ _ _ _ _ =>
+        | cascade _ _ _ _ _ _ _ =>
           intro h
           exact terminateStage_core_prev I.desc w id a name h
       exact H hl

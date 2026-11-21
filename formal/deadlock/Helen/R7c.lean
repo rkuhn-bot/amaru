@@ -116,7 +116,7 @@ theorem tombstone_later_state :
 uses this list. The resolving route is `respawn_key_split`, on a child. -/
 def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.recvPrio Pc, .spawn "A"]
 
-/-- A permanent core's `terminate` crashes the roster, and nothing runs after that. -/
+/-- A core's `terminate` crashes the roster, and nothing runs after that. -/
 def ingP : Edge := { ing "P" "idle" with occupancy := { a := 0, b := 1 } }
 
 def crashDesc : Description :=
@@ -226,7 +226,7 @@ theorem respawn_child_fresh :
 
 /-! ## 3. F2 positive and the supervisor-not-alive crash. -/
 
-def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true, priorityCapacity := { a := 2, b := 1 } }
+def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with priorityCapacity := { a := 2, b := 1 } }
 def tX : Template := { tpl "X" 2 ["idle", "sent"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
   timeoutKills := true, supervisor := some "Q", tombstone := "dead/X" }
@@ -287,19 +287,19 @@ theorem dead_local : LocalOk deadImpl := by
   unfold LocalOk
   decide
 
-/-- X births H at its own key and the send parks: H's box holds nothing and
-one sender is parked, so X's balance is 0. `Q`'s terminate seals H and refunds
-that sender. The parked list is empty and the balance is back to 1. -/
-theorem dead_sender_refunded :
+/-- X births H at its own key and the send parks. `Q` is a core, so the
+`terminate` that handles `dead/Y` crashes the node. There is no per-core
+shutdown that would seal H and refund that sender. -/
+theorem core_terminate_crashes :
     deadSnap (runAt deadImpl 1 (deadActs.take 6)) = some (1, 1, "idle", 1, 0) ∧
-    deadSnap (runAt deadImpl 1 deadActs) = some (3, 3, "idle", 0, 1) := by decide
+    crashedB (runAt deadImpl 1 deadActs) = true ∧
+    ((runAt deadImpl 1 deadActs).map (·.crashed)) = some true := by decide
 
-/-- A dead supervisor admits no new child. The prefix is a live world, and the
-spawn itself is disabled. -/
-theorem dead_supervisor_refused :
-    (runAt deadImpl 1 (deadActs ++ [.exec Qc])).isSome = true ∧
-    crashedB (runAt deadImpl 1 (deadActs ++ [.exec Qc])) = false ∧
-    runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y"]) = none := by decide
+/-- After that crash every later action is disabled. -/
+theorem core_terminate_absorbing :
+    runAt deadImpl 1 (deadActs ++ [.exec Qc]) = none ∧
+    runAt deadImpl 1 (deadActs ++ [.spawn "Y"]) = none ∧
+    runAt deadImpl 1 (deadActs ++ [.stutter]) = none := by decide
 
 
 /-! ## R7: original R6c statements, API-adapted (`.peer n k` → `.peer n key gen`), refuted -/
@@ -332,12 +332,12 @@ theorem orig_respawn_child_crashes_refuted :
     crashedB (runAt treeImpl 1 [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0,
       .ingress H0 "Go", .recvBulk H0, .exec H0, .ingress H0 "Go", .recvBulk H0, .exec H0]) ≠ true := by decide
 
-/-- Original: the spawn under a dead `Q` and Y#1's terminate crash. Now the spawn itself
-is disabled (the prefix before it is a real world). -/
+/-- The old suffix ran after a dead `Q`. `Q`'s terminate now crashes the node,
+so that suffix is not a run. -/
 theorem orig_dead_supervisor_crash_refuted :
-    crashedB (runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y", .ingress (.peer "Y" 0 1) "Go",
-      .recvBulk (.peer "Y" 0 1), .exec (.peer "Y" 0 1)])) ≠ true ∧
-    (runAt deadImpl 1 (deadActs ++ [.exec Qc])).isSome = true := by decide
+    crashedB (runAt deadImpl 1 deadActs) = true ∧
+    runAt deadImpl 1 (deadActs ++ [.exec Qc, .spawn "Y", .ingress (.peer "Y" 0 1) "Go",
+      .recvBulk (.peer "Y" 0 1), .exec (.peer "Y" 0 1)]) = none := by decide
 
 /-! ## R7: `respawn_overflow` on a design that passes `LocalOk` (P handles `dead/A` in `seen`). -/
 

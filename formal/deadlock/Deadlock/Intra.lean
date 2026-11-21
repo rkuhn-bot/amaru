@@ -136,12 +136,13 @@ theorem mux_chain_local : localOkB muxChain = true := by decide
 
 theorem mux_chain_issues : localIssues muxChain = [] := by decide
 
-/-- A terminable role with an empty subtree is still not allowed to send. -/
+/-- A terminable per-peer with an empty subtree is still not allowed to send. -/
 def loneSend : Impl where
   desc :=
     { name := "lone-send"
       freshNames := true
-      templates := [{ tpl "a" 2 ["idle"] "idle" false with terminable := true }]
+      templates := [{ tpl "a" 2 ["idle"] "idle" false with
+        multiplicity := .perPeer, terminable := true }]
       edges := [sendEdge "a" "idle" "a" "M" 0]
       compatibility := .all
       steps := [{ template := "a", fromState := "idle", toState := "idle", label := "M" }] }

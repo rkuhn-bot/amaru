@@ -104,14 +104,15 @@ def effMute : Eff → Bool
   | _ => true
 end
 
-/-- What a continuation may still do. A lone terminable stays mute. A subtree
-member may send to a per-peer sibling and call one. Anything else is
-unconstrained here. -/
+/-- What a continuation may still do. A lone terminable per-peer stays mute. A
+subtree member may send to a per-peer sibling and call one. A core is not
+muted: its `terminate` crashes the node, so the run does not continue with
+mail that actor just sent. -/
 def bulkScopeOf (D : Description) (name : String) (es : List Eff) : Bool :=
   match templateOf D name with
   | none => true
   | some t =>
-    if !t.terminable then true
+    if t.multiplicity == .one || !t.terminable then true
     else if t.subtree == "" then noBulkSend es
     else memberProgramOk D name es
 
@@ -167,7 +168,7 @@ def transitionOk (I : Impl) (tr : Transition) : Bool :=
       (if tr.acceptsCall then
         repliesMatch 1 tr.program && !terminateBeforeReply tr.program
       else repliesMatch 0 tr.program) &&
-      (if hasTerminate tr.program then t.terminable else true) &&
+      (if hasTerminate tr.program then t.multiplicity == .one || t.terminable else true) &&
       bulkScopeOf I.desc tr.template tr.program
 
 def callSites : List Transition → List (String × String)
@@ -299,16 +300,18 @@ def labelHandled (I : Impl) : Bool :=
             (e.effect != .call || tr.acceptsCall)
     else true
 
-/-- A reliable send or call leaves the sender's subtree only toward a
-non-terminable multiplicity-one core. Inside the subtree the target may be a
-terminable member: the subtree kill credits or fails that message. -/
+/-- A reliable send or call leaves the sender's subtree only toward a core.
+A core's `terminate` crashes the node, so the sender is not left running
+against a target that shut down. Inside the subtree the target may be a
+terminable member: the subtree kill credits or fails that message. A pool
+child of the calling core is the same refund. -/
 def permanentTarget (I : Impl) : Bool :=
   I.desc.edges.all fun e =>
     if (e.effect == .send || e.effect == .call) && e.reliability == .reliable then
       match templateOf I.desc e.dst with
       | none => false
       | some t =>
-        (t.multiplicity == .one && t.terminable == false) ||
+        t.multiplicity == .one ||
           sameSubtree I.desc e.src e.dst || coreSupervisedPool I.desc e.src e.dst
     else true
 
@@ -630,10 +633,10 @@ def transitionIssues (I : Impl) (tr : Transition) : List String :=
      else if peerPoolProgram I.desc tr.template tr.program then
        ["fail: slots must be 0 under a per-peer parent"]
      else [s!"fail: transition {tr.template} [{tr.label}] spawns a stage it does not supervise"]) ++
-    (if hasTerminate tr.program && !t.terminable then
+    (if hasTerminate tr.program && !(t.multiplicity == .one || t.terminable) then
       [s!"fail: transition {tr.template} [{tr.label}] terminates, and {tr.template} is not terminable"]
      else []) ++
-    (if t.terminable && t.subtree == "" && !(noBulkSend tr.program) then
+    (if t.terminable && t.multiplicity != .one && t.subtree == "" && !(noBulkSend tr.program) then
       [s!"fail: transition {tr.template} [{tr.label}] sends from terminable role {tr.template}"]
      else []) ++
     (if t.terminable && t.subtree != "" then scopeGap I.desc tr.template tr.label tr.program else [])
@@ -701,9 +704,9 @@ def permanentIssues (I : Impl) : List String :=
       match templateOf I.desc e.dst with
       | none => some s!"fail: reliable {e.label} targets unknown template {e.dst}"
       | some t =>
-        if (t.multiplicity == .one && t.terminable == false) ||
+        if t.multiplicity == .one ||
             sameSubtree I.desc e.src e.dst || coreSupervisedPool I.desc e.src e.dst then none
-        else some s!"fail: reliable {e.label} from {e.src} to {e.dst} is neither a permanent core nor inside the subtree"
+        else some s!"fail: reliable {e.label} from {e.src} to {e.dst} is neither a core nor inside the subtree"
     else none
 
 def schedIssues (I : Impl) : List String :=
