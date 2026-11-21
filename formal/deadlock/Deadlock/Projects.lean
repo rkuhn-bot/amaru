@@ -556,10 +556,10 @@ theorem frame_crash (w : World) : Frame w (crashWorld w) := by
   refine ⟨?_, crashWorld_ty w i⟩
   by_cases hm : i ∈ w.roster
   · rw [crash_at w i hm] at hl
-    by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+    by_cases hgo : (w.st i).life = .alive
     · rw [crash_go hgo] at hl
       cases hl
-    · rw [crash_stay (fun he => hgo (Or.inl he)) (fun he => hgo (Or.inr he))] at hl
+    · rw [crash_stay (fun he => hgo he)] at hl
       exact hl
   · rw [crash_off w i hm] at hl
     exact hl
@@ -646,26 +646,19 @@ theorem frame_releaseWorld (D : Description) (w : World) (id : InstId) (a : Acto
   have hC5 := cont_after (releaseOutbound w3 id) id _ hC4 hdead
   exact frame_trans (frame_trans hF4 (frame_halt _ id _ (by simp))) (release_frame id a.parked _ hC5).1
 
-theorem frame_mark (w : World) (id : InstId) : Frame w (markShutdown w id) := by
-  unfold markShutdown
-  split
-  · exact frame_trans (frame_halt w id _ (by simp)) (frame_outbound _ id)
-  · exact frame_refl w
-
-theorem frame_shutdown (D : Description) (w : World) (id : InstId) : Frame w (shutdownActor D w id) := by
-  unfold shutdownActor
-  dsimp only
-  split
-  · exact frame_trans (frame_mark w id) (frame_same (same_arm _ id))
-  · exact frame_mark w id
-
 theorem frame_seal (D : Description) (w : World) (id : InstId) (a : Actor) (hC : ∀ i, contTy (w.st i)) :
     Frame w (sealActor D w id a) := by
   unfold sealActor
-  dsimp only
-  split
-  · exact frame_trans (frame_releaseWorld D w id a hC) (frame_tomb D _ id)
-  · exact frame_releaseWorld D w id a hC
+  exact frame_trans (frame_releaseWorld D w id a hC) (frame_tomb D _ id)
+
+theorem frame_shutdown (D : Description) (w : World) (id : InstId)
+    (hC : ∀ i, contTy (w.st i)) : Frame w (shutdownActor D w id) := by
+  unfold shutdownActor
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · rw [ite_eq_left hlive]
+    exact frame_seal D w id (w.st id) hC
+  · rw [ite_eq_right hlive]
+    exact frame_refl w
 
 /-- Sealing a branch is a frame. The invariant carries `contTy` to each nested seal. -/
 theorem frame_sealBranch (I : Impl) (fuel : Nat) (D : Description) (w : World) (id : InstId)
@@ -723,7 +716,8 @@ theorem frame_drop (I : Impl) (D : Description) (w : World) (id : InstId) (h : I
 
 theorem frame_terminate (I : Impl) (D : Description) (w : World) (id : InstId) (a : Actor)
     (h : Inv I w) : Frame w (terminateStage D w id a) :=
-  frame_trans (frame_drop I D w id h) (frame_shutdown D _ id)
+  frame_trans (frame_drop I D w id h)
+    (frame_shutdown D (dropDescendants D w id) id (dropDescendants_inv I D w id h).1.cont)
 
 theorem frame_abort (I : Impl) (D : Description) (w : World) (parent : InstId) (h : Inv I w) :
     Frame w (abortChildren D w parent) := by
@@ -748,7 +742,9 @@ theorem frame_abort (I : Impl) (D : Description) (w : World) (parent : InstId) (
         · exact shutdownActor_inv I D _ c (dropDescendants_inv I D _ c ha)
         · exact ha
       · split
-        · exact frame_trans hf (frame_trans (frame_drop I D _ c ha) (frame_shutdown D _ c))
+        · exact frame_trans hf (frame_trans (frame_drop I D acc c ha)
+            (frame_shutdown D (dropDescendants D acc c) c
+              (dropDescendants_inv I D acc c ha).1.cont))
         · exact hf
   exact (hfold w.roster w h (frame_refl w)).2
 
@@ -1077,14 +1073,20 @@ theorem exec_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w : World)
       exact good_frame hG (frame_keep w id _ rfl rfl)
     | abort =>
       simp only [execRun, hgo, hk, ite_true]
-      exact good_frame hG (frame_abort I I.desc w id h)
+      exact good_frame hG (frame_trans (frame_abort I I.desc w id h)
+        (frame_set (abortChildren I.desc w id) id
+          (proceed ((abortChildren I.desc w id).st id) (afterHead k)) (fun hl => by
+            have hlife : ((abortChildren I.desc w id).st id).life = .alive :=
+              (proceed_life _ _).symm.trans hl
+            have htyW := (frame_abort I I.desc w id h id hlife).2
+            exact ⟨hlife, proceed_keeps_ty _ _ (htyW.trans hty')⟩)))
     | terminate =>
       have hstep := exec_term_step I w id (w.st id) k ha ⟨es, hk⟩
       generalize execRun I w id (w.st id) k = wR at hstep ⊢
       cases hstep with
       | fall => exact good_frame hG (frame_crash w)
       | crash _ _ _ => exact good_frame hG (frame_crash w)
-      | lone _ _ _ _ _ _ _ => exact good_frame hG (frame_shutdown I.desc w id)
+      | lone _ _ _ _ _ _ _ => exact good_frame hG (frame_shutdown I.desc w id h.1.cont)
       | tree _ _ _ _ => exact good_frame hG (frame_terminate I I.desc w id _ h)
       | cascade _ _ _ _ _ _ _ => exact good_frame hG (frame_terminate I I.desc w id _ h)
     | spawn child =>

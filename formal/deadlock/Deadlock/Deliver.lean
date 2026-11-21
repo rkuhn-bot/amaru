@@ -552,8 +552,8 @@ def lostHost (w : World) (id : InstId) : Prop := Halted (w.st id).life
 /-- A reliable message is later consumed by `recvBulk` or `recvPrio`, matched by
 the id the storing actor assigned, or its target had begun shutting down or
 had terminated while the message was still queued. The loss is per message and
-is witnessed at a state that still holds the message: the host enters
-`shuttingDown` or `dead` before the message is dequeued. `callTimeout` detaches
+is witnessed at a state that still holds the message: the host is
+`dead` before the message is dequeued. `callTimeout` detaches
 a call by clearing `callFrom` and does not dequeue, so it is not a taking step.
 Only `recvBulk` and `recvPrio` take a message. A route that does not resolve is
 failed by `noteStale` before the message is stored, so it is not an obligation

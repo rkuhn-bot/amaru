@@ -8487,10 +8487,6 @@ theorem failWaiter_credit_comm (w : World) (dead cred : InstId) (name : String) 
     have hskip : ((w.st i).life != .alive) = true := by simp [hlive]
     have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
     simp [failWaiter, hskip, hskipc]
-  | shuttingDown =>
-    have hskip : ((w.st i).life != .alive) = true := by simp [hlive]
-    have hskipc : (((creditSender w name cred).st i).life != .alive) = true := by rw [hL.1, hskip]
-    simp [failWaiter, hskip, hskipc]
   | alive =>
     have hgo : ((w.st i).life != .alive) = false := by simp [hlive]
     have hgo' : (((creditSender w name cred).st i).life != .alive) = false := by rw [hL.1, hgo]

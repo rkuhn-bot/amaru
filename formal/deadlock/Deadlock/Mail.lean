@@ -56,7 +56,7 @@ theorem not_queued (w : World) (id : InstId) (hM : MailInv w) (hf : notParked (w
   · rw [heq] at hk
     simp [notParked, hk] at hf
   · rw [heq] at hh
-    rcases hh with h | h <;> simp [hlive] at h
+    simp [Halted, hlive] at hh
 
 theorem mail_copy (w w' : World) (hM : MailInv w) (h : ∀ i, w'.st i = w.st i) : MailInv w' := by
   refine ⟨?_, ?_, ?_, ?_⟩

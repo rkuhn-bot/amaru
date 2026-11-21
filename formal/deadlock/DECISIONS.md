@@ -555,3 +555,19 @@ received the tombstones is the lane the continuation keeps.
 by `.internal`, the abort step leaves the parent running that `.internal`
 with the child dead and the tombstone queued, and `finish` then `recvPrio`
 takes the tombstone.
+
+## 2026-11-21 — Abort after a tombstone crash leaves the parent running
+
+The continuation above is unconditional. `enqueueTombstone` still crashes
+the roster when the label is empty or the lane is full, and that crash is
+inside `abortChildren`, before `proceed`. `crashWorld` has already set the
+parent `dead` and `.crashed`. `proceed` keeps the dead life and, when the
+tail is nonempty, writes `.run`.
+
+`Deadlock/AbortCrash.lean` is that step. The child template's tombstone is
+`""`. The pre-state is a `SemInv` and a `MailInv`, every non-absent actor is
+on the roster, and the parent stands on the landing of its only transition.
+The post-state is crashed, the parent is dead, and its phase is `.run` of
+`.internal`. `idleOff` allows a dead actor only `.idle` or `.crashed`, so
+the post-state is not a `SemInv`. `exec_run_inv` is false for this world.
+No further change to the step relation was made.

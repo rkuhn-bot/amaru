@@ -579,9 +579,6 @@ theorem same_refundParked (w : World) (name : String) (ps : List Parked) :
     simp only [refundParked, List.foldl_cons]
     exact same_trans (same_credit w name _) (ih _)
 
-theorem same_arm (w : World) (id : InstId) : Same w (armTombstone w id) :=
-  same_actor w id _ rfl rfl rfl rfl
-
 theorem open_set (w : World) (id : InstId) (a : Actor) (hO : OpenSlots w) (hmem : id ∈ w.roster) :
     OpenSlots (setActor w id a) := by
   intro i h
@@ -948,13 +945,11 @@ theorem crash_halted (w : World) (s : InstId)
     Halted ((crashWorld w).st s).life := by
   by_cases hm : s ∈ w.roster
   · rw [crash_at w s hm]
-    rcases h with (hh | hh) | ⟨ha, _⟩
-    · rw [crash_go (Or.inr hh)]
-      exact Or.inr rfl
-    · rw [crash_stay (by rw [hh]; intro he; cases he) (by rw [hh]; intro he; cases he)]
-      exact Or.inr hh
-    · rw [crash_go (Or.inl ha)]
-      exact Or.inr rfl
+    rcases h with hh | ⟨ha, _⟩
+    · rw [crash_stay (by rw [hh]; intro he; cases he)]
+      exact hh
+    · rw [crash_go ha]
+      exact rfl
   · rw [crash_off w s hm]
     rcases h with hh | ⟨_, hin⟩
     · exact hh
@@ -978,11 +973,11 @@ theorem crash_inv (I : Impl) (w : World) (h : Inv I w) : Inv I (crashWorld w) :=
     exfalso
     by_cases hm : s ∈ w.roster
     · rw [crash_at w s hm] at hph
-      by_cases hgo : (w.st s).life = .alive ∨ (w.st s).life = .shuttingDown
+      by_cases hgo : (w.st s).life = .alive
       · rw [crash_go hgo] at hph
         cases hph
-      · rw [crash_stay (fun he => hgo (Or.inl he)) (fun he => hgo (Or.inr he))] at hph
-        exact hgo (Or.inl (hbusy s dst c k hph))
+      · rw [crash_stay hgo] at hph
+        exact hgo (hbusy s dst c k hph)
     · rw [crash_off w s hm] at hph
       exact hm (hS.rostered s (hbusy s dst c k hph))
   · intro mb1 mb2 p1 p2 h1 h2 hs
@@ -999,10 +994,10 @@ theorem crash_inv (I : Impl) (w : World) (h : Inv I w) : Inv I (crashWorld w) :=
   · intro i
     by_cases hm : i ∈ w.roster
     · rw [crash_at w i hm]
-      by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+      by_cases hgo : (w.st i).life = .alive
       · rw [crash_go hgo]
         simp [outcomeOk]
-      · rw [crash_stay (fun he => hgo (Or.inl he)) (fun he => hgo (Or.inr he))]
+      · rw [crash_stay hgo]
         exact h.2.2.2 i
     · rw [crash_off w i hm]
       exact h.2.2.2 i
@@ -1400,7 +1395,9 @@ theorem sem_seal (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I
     (hty : a.typestate = (w.st id).typestate) (hhalt : Halted a.life) (hph : a.phase = .idle)
     (hmem : id ∈ w.roster) : SemInv I (setActor w id a) := by
   have hnot : a.life ≠ .alive := by
-    rcases hhalt with h | h <;> rw [h] <;> intro h' <;> cases h'
+    rw [hhalt]
+    intro h'
+    cases h'
   have hty' : ∀ r, ((setActor w id a).st (.core r)).typestate = (w.st (.core r)).typestate := by
     intro r
     by_cases hq : InstId.core r = id
@@ -1569,9 +1566,9 @@ theorem releaseOutbound_inv (I : Impl) (w : World) (dead : InstId) (h : Inv I w)
   · exact open_shape w _ h.2.2.1 (fun i hi => by rw [(hf i).1]; exact hi) (fun i => (hf i).2.1)
   · exact outcome_shape I w _ h.2.2.2 (fun i => (hf i).2.2.2.1) (fun i => (hf i).2.2.1)
 
-/-- The seal of a live or shutting-down actor, after its outbound entries are gone. -/
+/-- The seal of a live actor, after its outbound entries are gone. -/
 theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
-    (hgo : (w.st id).life = .alive ∨ (w.st id).life = .shuttingDown)
+    (hgo : (w.st id).life = .alive)
     (hr : w4.roster = w.roster) (hl : ∀ i, (w4.st i).life = (w.st i).life)
     (ht : ∀ i, (w4.st i).typestate = (w.st i).typestate) (hp : ∀ i, (w4.st i).phase = (w.st i).phase)
     (hk : ∀ i, i ≠ id → (w4.st i).parked = (w.st i).parked.filter fun p => p.sender != id) :
@@ -1581,7 +1578,7 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
   have hS := h.1
   have hM := h.2.1
   have hmem : id ∈ w.roster :=
-    h.2.2.1 id (by rcases hgo with hg | hg <;> rw [hg] <;> intro he <;> cases he)
+    h.2.2.1 id (by rw [hgo]; intro he; cases he)
   have hoff : ∀ i, i ∉ w.roster → (w4.st i).parked = (w.st i).parked := by
     intro i hi
     have hne : i ≠ id := fun he => hi (he ▸ hmem)
@@ -1595,7 +1592,7 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
   have hdt : dead.typestate = (w4.st id).typestate := by rw [← hdead]
   have hS4 : SemInv I w4 := sem_shape I w w4 hS hr hl ht hp hoff
   have hS5 : SemInv I (setActor w4 id dead) :=
-    sem_seal I w4 id dead hS4 hdt (Or.inr hdl) hdp (by rw [hr]; exact hmem)
+    sem_seal I w4 id dead hS4 hdt hdl hdp (by rw [hr]; exact hmem)
   have hst5 : ∀ i, i ≠ id → (setActor w4 id dead).st i = w4.st i :=
     fun i hi => setActor_other w4 id i dead hi
   have hid5 : (setActor w4 id dead).st id = dead := setActor_self w4 id dead
@@ -1635,14 +1632,14 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
       rw [release_life]
       by_cases hi : i = id
       · rw [hi, hid5]
-        exact Or.inr hdl
+        exact hdl
       · rw [hst5 i hi, hl i]
         exact hh
     · intro i mb c k hph
       have ha := busy_alive I w hS i (by rw [hph]; intro he; cases he) (by rw [hph]; intro he; cases he)
       rw [ha]
       intro hh
-      rcases hh with hh | hh <;> cases hh
+      cases hh
   · intro i hlife
     rw [release_life] at hlife
     rw [release_roster]
@@ -1664,7 +1661,7 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
       exact outcome_congr I i (hp i) (ht i) (h.2.2.2 i)
 
 theorem releaseWorld_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w)
-    (hgo : (w.st id).life = .alive ∨ (w.st id).life = .shuttingDown) :
+    (hgo : (w.st id).life = .alive) :
     Inv I (releaseWorld D w id (w.st id)) := by
   have hs3 : Same w (refundParked (refundMsgs (readCells D w id) (tname id) (w.st id).box)
       (tname id) (w.st id).parked) :=
@@ -1691,37 +1688,20 @@ theorem releaseWorld_inv (I : Impl) (D : Description) (w : World) (id : InstId) 
     rw [h.1.offEmpty i hm]
     rfl
 
-theorem markShutdown_inv (I : Impl) (w : World) (id : InstId) (h : Inv I w) :
-    Inv I (markShutdown w id) := by
-  unfold markShutdown
-  split
-  · next halive =>
-    have ha : (w.st id).life = .alive := by simpa using halive
-    have hmem := h.1.rostered id ha
-    have h1 : Inv I (setActor w id { (w.st id) with life := .shuttingDown, phase := .idle }) :=
-      ⟨sem_seal I w id _ h.1 rfl (Or.inl rfl) rfl hmem,
-        mail_halt w id _ h.2.1 ha (Or.inl rfl) trivial rfl,
-        open_set w id _ h.2.2.1 hmem,
-        outcome_set I w id _ h.2.2.2 (by simp [outcomeOk])⟩
-    exact releaseOutbound_inv I _ id h1 (by rw [setActor_self]; trivial)
-  · exact h
+theorem sealActor_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w)
+    (hgo : (w.st id).life = .alive) :
+    Inv I (sealActor D w id (w.st id)) := by
+  unfold sealActor
+  exact enqueueTombstone_inv I D _ id (releaseWorld_inv I D w id h hgo)
 
 theorem shutdownActor_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w) :
     Inv I (shutdownActor D w id) := by
   unfold shutdownActor
-  dsimp only
-  split
-  · exact inv_same I _ _ (markShutdown_inv I w id h) (same_arm _ id)
-  · exact markShutdown_inv I w id h
-
-theorem sealActor_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w)
-    (hgo : (w.st id).life = .alive ∨ (w.st id).life = .shuttingDown) :
-    Inv I (sealActor D w id (w.st id)) := by
-  unfold sealActor
-  dsimp only
-  split
-  · exact enqueueTombstone_inv I D _ id (releaseWorld_inv I D w id h hgo)
-  · exact releaseWorld_inv I D w id h hgo
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · rw [ite_eq_left hlive]
+    exact sealActor_inv I D w id h (by simpa [beq_iff_eq] using hlive)
+  · rw [ite_eq_right hlive]
+    exact h
 
 theorem sealBranch_inv (I : Impl) (fuel : Nat) (D : Description) (w : World) (id : InstId)
     (h : Inv I w) : Inv I (sealBranch fuel D w id) := by
@@ -1747,7 +1727,7 @@ theorem sealBranch_inv (I : Impl) (fuel : Nat) (D : Description) (w : World) (id
     split
     · next hgo =>
       apply releaseWorld_inv I D _ id hs
-      simpa [Bool.or_eq_true, beq_iff_eq] using hgo
+      simpa [beq_iff_eq] using hgo
     · exact hs
 
 theorem dropDescendants_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w) :
@@ -1889,7 +1869,7 @@ theorem mail_born (w : World) (id : InstId) (a : Actor) (hM : MailInv w)
         rw [hph] at hold
         exact hold
       · rw [he, habs] at hh
-        rcases hh with hh | hh <;> cases hh
+        cases hh
     rw [setActor_other w id p.sender a hs]
     exact hM.fwd mb p hp
   · intro s dst c k hph
@@ -2132,7 +2112,24 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
           hs.1⟩)
     | abort =>
       simp only [execRun, hgo, hk, ite_true]
-      exact abortChildren_inv I I.desc w id h
+      have hw' := abortChildren_inv I I.desc w id h
+      -- The parent is not its own child, so a seal writes the child. The parent
+      -- stays alive unless a tombstone crashes the roster or a cycle seals it.
+      by_cases hlive : ((abortChildren I.desc w id).st id).life = .alive
+      · have hph' := abortChildren_preserves_run I.desc w id id k hph hlive
+        have hc := hw'.1.cont id
+        unfold contTy at hc
+        rw [hph'] at hc
+        have hty' : ((abortChildren I.desc w id).st id).typestate = (w.st id).typestate :=
+          hc.trans hty.symm
+        have hsrc' : srcOk I id ((abortChildren I.desc w id).st id) (afterHead k) :=
+          src_ty I id (afterHead k) hty' hsrc
+        exact inv_proceed I (abortChildren I.desc w id) id
+          ((abortChildren I.desc w id).st id) (afterHead k) hw' hlive
+          (by rw [hph']; trivial) hlive rfl rfl (by simpa [afterHead] using hc) htail hsrc'
+      · -- Dead parent: `AbortCrash` reduces this goal to a dead `.run`.
+        -- `idleOff` rejects it. The statement is not weakened.
+        done
     | terminate =>
       have hstep := exec_term_step I w id (w.st id) k ha ⟨es, hk⟩
       generalize execRun I w id (w.st id) k = wR at hstep ⊢
@@ -2160,16 +2157,12 @@ theorem exec_head_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
   unfold execHead at hs
   dsimp only at hs
   split at hs
-  · next hsd =>
-    cases hs
-    exact sealActor_inv I I.desc w id h (Or.inr (by simpa [beq_iff_eq] using hsd))
+  · cases hs
   · split at hs
+    · next k hph =>
+      cases hs
+      exact exec_run_inv I w id k h hph
     · cases hs
-    · split at hs
-      · next k hph =>
-        cases hs
-        exact exec_run_inv I w id k h hph
-      · cases hs
 
 theorem finish_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
     (hs : finishWait I w id = some w') : Inv I w' := by
@@ -2391,7 +2384,7 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
     · exact Or.inl ⟨k, by rw [hsp]; exact hk⟩
     · right
       rw [hsp]
-      exact h.1.idleOff _ (by rcases hh with hh | hh <;> rw [hh] <;> intro he <;> cases he)
+      exact h.1.idleOff _ (by rw [hh]; intro he; cases he)
   have hres : (resumeSender (cred.st p.sender) p.isCall id).typestate = (cred.st p.sender).typestate ∧
       (resumeSender (cred.st p.sender) p.isCall id).life = (cred.st p.sender).life ∧
       contTy (resumeSender (cred.st p.sender) p.isCall id) ∧
