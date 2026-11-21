@@ -4,9 +4,12 @@ One tombstone per child slot, for a world that already satisfies `Hold`.
 `tmb_seal_room` is that numeric fact: a pending seal has room on the live
 parent's lane when the slot account is inside `prioSized`. `Hold` is proved
 for the initial world, for a self-schedule, for every scheduler spawn,
-and for a per-peer child born at its parent's key. An empty subtree's key
-comes from `IxPast` or `RootPast`, and the fresh id's lane is empty because
-it was off the roster. A pool slot is not covered yet.
+for a per-peer child born at its parent's key, and for a pool slot taken
+from `freeSlot`. An empty subtree's key comes from `IxPast` or `RootPast`,
+and the fresh id's lane is empty because it was off the roster. `exec` of a
+send, a try-send, and a call keeps it. A reply, a cell wake, a child spawn,
+and `callTimeout` are still open, and so is carrying `IxPast`, `RootPast`,
+and the off-roster empty lane through every step.
 `no_tombstone_overflow` is not restated: this file does not claim that every
 reachable world stays inside the lane.
 -/
@@ -8115,5 +8118,289 @@ theorem hold_child_pool (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.d
   have hadmit : admitBorn I w id born = w' := by
     simp [admitBorn, w', placePeer, id, born, parentO, next]
   simpa [hadmit, id, born, parentO] using hHold
+
+/-! The phase a continuation reaches is one the static check already allowed. -/
+
+theorem resumed_declared (I : Impl) (template : String) (k : Cont)
+    (h : ContDeclared I template k) : phaseDeclared I template (resumed k) := by
+  cases hr : k.rest with
+  | nil => simp [resumed, hr, phaseDeclared]
+  | cons _ _ =>
+    simp [resumed, hr, phaseDeclared]
+    exact h
+
+theorem mail_phase_other (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) (hne : i ≠ sender) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).phase = (w.st i).phase := by
+  unfold enqueueOrPark
+  by_cases hdead : (w.st dst).life ≠ .alive
+  · cases isCall with
+    | true => simp [hdead, hne, setActor]
+    | false => simp [hdead, hne, setActor]
+  · by_cases hroom : (decide ((w.st dst).parked = []) &&
+        decide ((w.st dst).box.length < capBulk D w.N dst)) = true
+    · by_cases hsame : decide (sender = dst) = true
+      · cases isCall with
+        | true => simp [hdead, hroom, hsame, hne, setActor]
+        | false => simp [hdead, hroom, hsame, hne, setActor]
+      · have hdir : ¬ dst = sender := by
+          intro heq
+          exact hsame (decide_eq_true_iff.mpr heq.symm)
+        cases isCall with
+        | true =>
+          by_cases hd : i = dst
+          · simp [hdead, hroom, hsame, hd, setActor, hdir]
+          · simp [hdead, hroom, hsame, hd, hne, setActor]
+        | false =>
+          by_cases hd : i = dst
+          · simp [hdead, hroom, hsame, hd, setActor, hdir]
+          · simp [hdead, hroom, hsame, hd, hne, setActor]
+    · by_cases hsame : decide (sender = dst) = true
+      · simp [hdead, hroom, hsame, hne, setActor]
+      · have hdir : ¬ dst = sender := by
+          intro heq
+          exact hsame (decide_eq_true_iff.mpr heq.symm)
+        by_cases hd : i = dst
+        · simp [hdead, hroom, hsame, hd, setActor, hdir]
+        · simp [hdead, hroom, hsame, hd, hne, setActor]
+
+theorem mail_sender_phase (I : Impl) (w : World) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (hdec : ContDeclared I (tname sender) k) :
+    phaseDeclared I (tname sender)
+      ((enqueueOrPark w I.desc sender dst msg isCall k).st sender).phase := by
+  unfold enqueueOrPark
+  by_cases hdead : (w.st dst).life ≠ .alive
+  · cases isCall with
+    | true =>
+      simp [hdead, setActor]
+      exact finish_declared I (tname sender) (issueCall (w.st sender)) k .notAdmitted hdec
+    | false =>
+      simp [hdead, setActor, proceed_resumed]
+      exact resumed_declared I (tname sender) k hdec
+  · by_cases hroom : (decide ((w.st dst).parked = []) &&
+        decide ((w.st dst).box.length < capBulk I.desc w.N dst)) = true
+    · by_cases hsame : decide (sender = dst) = true
+      · cases isCall with
+        | true =>
+          simp [hdead, hroom, hsame, setActor, phaseDeclared]
+          exact hdec
+        | false =>
+          simp [hdead, hroom, hsame, setActor, proceed_resumed]
+          exact resumed_declared I (tname sender) k hdec
+      · cases isCall with
+        | true =>
+          simp [hdead, hroom, hsame, setActor, phaseDeclared]
+          exact hdec
+        | false =>
+          simp [hdead, hroom, hsame, setActor, proceed_resumed]
+          exact resumed_declared I (tname sender) k hdec
+    · by_cases hsame : decide (sender = dst) = true
+      · simp [hdead, hroom, hsame, setActor, phaseDeclared]
+        exact hdec
+      · simp [hdead, hroom, hsame, setActor, phaseDeclared]
+        exact hdec
+
+theorem hold_send (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (dst label : String) (hint : Nat) (es : List Eff) (hpre : w.crashed = false)
+    (ha : a = w.st id) (hlive : a.life = .alive)
+    (hk : k.rest = .send dst label hint :: es) (hdec : ContDeclared I (tname id) k) :
+    Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  have htail := ContDeclared.after I (tname id) k _ _ hk hdec
+  cases hroute : route w I.desc id dst hint with
+  | none =>
+    have hrun : execRun I w id a k = setActor (noteStale w id dst) id (proceed a k') := by
+      simp [execRun, hgo, hk, hroute, k']
+    have hN := hold_note I w hH id dst hpre
+    have hph : id ∈ (noteStale w id dst).roster →
+        phaseDeclared I (tname id) (proceed ((noteStale w id dst).st id) k').phase := by
+      intro _
+      simpa [noteStale_st, ha, proceed_resumed] using resumed_declared I (tname id) k' htail
+    have hP := hold_proceed I (noteStale w id dst) hN id k' (by simp [noteStale, hpre]) hph
+    have hP' : Hold I (setActor (noteStale w id dst) id (proceed a k')) := by
+      simpa [noteStale_st, ← ha] using hP
+    exact hrun.symm ▸ hP'
+  | some dstId =>
+    let msg : Msg := { label := label, sender := id, callFrom := none }
+    have hrun : execRun I w id a k = enqueueOrPark w I.desc id dstId msg false k' := by
+      simp [execRun, hgo, hk, hroute, k', msg]
+    have hph : ∀ i, i ∈ w.roster →
+        phaseDeclared I (tname i) ((enqueueOrPark w I.desc id dstId msg false k').st i).phase := by
+      intro i hi
+      by_cases hwho : i = id
+      · rw [hwho]
+        exact mail_sender_phase I w id dstId msg false k' htail
+      · rw [mail_phase_other w I.desc id dstId msg false k' i hwho]
+        exact hH.phase i hi
+    exact hrun.symm ▸ hold_mail I w hH id dstId msg false k' hpre hph
+
+theorem cont_full (I : Impl) (template : String) (k : Cont) (dst label : String) (hint : Nat)
+    (onFull onGone es : List Eff) (hk : k.rest = .trySend dst label hint onFull onGone :: es)
+    (hdec : ContDeclared I template k) :
+    ContDeclared I template
+      { afterHead k with rest := onFull, toState := pickState (afterHead k).toState (afterHead k).toFull } := by
+  have h := ContDeclared.tryFull I template k dst label hint onFull onGone es hk hdec
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · simpa using h.rest
+  · simpa using h.na
+  · simpa using h.to
+  · simpa using h.timeout
+
+theorem cont_gone (I : Impl) (template : String) (k : Cont) (dst label : String) (hint : Nat)
+    (onFull onGone es : List Eff) (hk : k.rest = .trySend dst label hint onFull onGone :: es)
+    (hdec : ContDeclared I template k) :
+    ContDeclared I template
+      { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone } := by
+  have h := ContDeclared.tryGone I template k dst label hint onFull onGone es hk hdec
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · simpa using h.rest
+  · simpa using h.na
+  · simpa using h.to
+  · simpa using h.timeout
+
+theorem hold_try (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (dst label : String) (hint : Nat) (onFull onGone es : List Eff)
+    (hpre : w.crashed = false) (ha : a = w.st id) (hlive : a.life = .alive)
+    (hk : k.rest = .trySend dst label hint onFull onGone :: es)
+    (hdec : ContDeclared I (tname id) k) : Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  let kFull := { k' with rest := onFull, toState := pickState k'.toState k'.toFull }
+  let kGone := { k' with rest := onGone, toState := pickState k'.toState k'.toGone }
+  have hF := cont_full I (tname id) k dst label hint onFull onGone es hk hdec
+  have hG := cont_gone I (tname id) k dst label hint onFull onGone es hk hdec
+  have hphF : id ∈ w.roster → phaseDeclared I (tname id) (proceed a kFull).phase := by
+    intro _
+    simpa [ha, proceed_resumed, kFull, k'] using resumed_declared I (tname id) _ hF
+  have hphG : id ∈ w.roster → phaseDeclared I (tname id) (proceed a kGone).phase := by
+    intro _
+    simpa [ha, proceed_resumed, kGone, k'] using resumed_declared I (tname id) _ hG
+  cases hroute : route w I.desc id dst hint with
+  | none =>
+    have hrun : execRun I w id a k =
+        setActor (noteStale w id dst) id (proceed a kGone) := by
+      simp [execRun, hgo, hk, hroute, k', kGone]
+    have hN := hold_note I w hH id dst hpre
+    have hph : id ∈ (noteStale w id dst).roster →
+        phaseDeclared I (tname id) (proceed ((noteStale w id dst).st id) kGone).phase := by
+      intro _
+      simpa [noteStale_st, ha, proceed_resumed, kGone, k'] using
+        resumed_declared I (tname id) _ hG
+    have hP := hold_proceed I (noteStale w id dst) hN id kGone (by simp [noteStale, hpre]) hph
+    have hP' : Hold I (setActor (noteStale w id dst) id (proceed a kGone)) := by
+      simpa [noteStale_st, ← ha] using hP
+    exact hrun.symm ▸ hP'
+  | some dstId =>
+    let target := w.st dstId
+    let cap := capBulk I.desc w.N dstId
+    by_cases hliveB : (target.life == .alive) = true
+    · by_cases hempty : decide (target.parked = []) = true
+      · by_cases hlen : decide (target.box.length < cap) = true
+        · let msg : Msg := { label := label, sender := id, callFrom := none, reliable := false }
+          have hroom : (target.life == .alive && decide (target.parked = []) &&
+              decide (target.box.length < cap)) = true := by
+            simp [hliveB, hempty, hlen]
+          have hrun : execRun I w id a k = enqueueOrPark w I.desc id dstId msg false k' := by
+            simp [execRun, hgo, hk, hroute, hroom, k', msg, target, cap]
+          have htail := ContDeclared.after I (tname id) k _ _ hk hdec
+          have hph : ∀ i, i ∈ w.roster →
+              phaseDeclared I (tname i) ((enqueueOrPark w I.desc id dstId msg false k').st i).phase := by
+            intro i hi
+            by_cases hwho : i = id
+            · rw [hwho]
+              exact mail_sender_phase I w id dstId msg false k' htail
+            · rw [mail_phase_other w I.desc id dstId msg false k' i hwho]
+              exact hH.phase i hi
+          exact hrun.symm ▸ hold_mail I w hH id dstId msg false k' hpre hph
+        · have hlenF : decide (target.box.length < cap) = false := by
+            cases hbit : decide (target.box.length < cap) with
+            | false => rfl
+            | true => exact absurd hbit hlen
+          have hrun : execRun I w id a k = setActor w id (proceed a kFull) := by
+            simp [execRun, hgo, hk, hroute, hliveB, hempty, hlenF, k', kFull, target, cap]
+          have hph : id ∈ w.roster →
+              phaseDeclared I (tname id) (proceed (w.st id) kFull).phase := by
+            intro hmem
+            simpa [ha] using hphF hmem
+          have hP := hold_proceed I w hH id kFull hpre hph
+          have hP' : Hold I (setActor w id (proceed a kFull)) := by simpa [← ha] using hP
+          exact hrun.symm ▸ hP'
+      · have hemptyF : decide (target.parked = []) = false := by
+          cases hbit : decide (target.parked = []) with
+          | false => rfl
+          | true => exact absurd hbit hempty
+        have hrun : execRun I w id a k = setActor w id (proceed a kFull) := by
+          simp [execRun, hgo, hk, hroute, hliveB, hemptyF, k', kFull, target, cap]
+        have hph : id ∈ w.roster →
+            phaseDeclared I (tname id) (proceed (w.st id) kFull).phase := by
+          intro hmem
+          simpa [ha] using hphF hmem
+        have hP := hold_proceed I w hH id kFull hpre hph
+        have hP' : Hold I (setActor w id (proceed a kFull)) := by simpa [← ha] using hP
+        exact hrun.symm ▸ hP'
+    · have hdeadT : (target.life == .alive) = false := by
+        cases hbit : target.life == .alive with
+        | false => rfl
+        | true => exact absurd hbit hliveB
+      have hrun : execRun I w id a k = setActor w id (proceed a kGone) := by
+        simp [execRun, hgo, hk, hroute, hdeadT, k', kGone, target, cap]
+      have hph : id ∈ w.roster →
+          phaseDeclared I (tname id) (proceed (w.st id) kGone).phase := by
+        intro hmem
+        simpa [ha] using hphG hmem
+      have hP := hold_proceed I w hH id kGone hpre hph
+      have hP' : Hold I (setActor w id (proceed a kGone)) := by simpa [← ha] using hP
+      exact hrun.symm ▸ hP'
+
+theorem hold_call (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (dst label : String) (hint : Nat) (onNotAdmitted onTimedOut es : List Eff)
+    (hpre : w.crashed = false) (ha : a = w.st id) (hlive : a.life = .alive)
+    (hk : k.rest = .call dst label hint onNotAdmitted onTimedOut :: es)
+    (hdec : ContDeclared I (tname id) k) : Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  let kWait := { k' with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
+  have hwait := ContDeclared.callWait I (tname id) k dst label hint onNotAdmitted onTimedOut es hk hdec
+  cases hres : resolveId I.desc w id dst hint with
+  | none =>
+    have hrun : execRun I w id a k =
+        setActor (noteStale w id dst) id (finishCall (issueCall a) kWait .notAdmitted) := by
+      simp [execRun, hgo, hk, hres, k', kWait]
+    let done := finishCall (issueCall a) kWait .notAdmitted
+    have hN := hold_note I w hH id dst hpre
+    have hl : done.life = ((noteStale w id dst).st id).life := by
+      simpa [done, noteStale_st, ha] using
+        (finish_keep (issueCall a) kWait .notAdmitted).1.trans (issue_keep a).1
+    have hp : done.prio = ((noteStale w id dst).st id).prio := by
+      simpa [done, noteStale_st, ha] using
+        (finish_keep (issueCall a) kWait .notAdmitted).2.1.trans (issue_keep a).2.1
+    have hpe : done.pendingTombstone = ((noteStale w id dst).st id).pendingTombstone := by
+      simpa [done, noteStale_st, ha] using
+        (finish_keep (issueCall a) kWait .notAdmitted).2.2.trans (issue_keep a).2.2
+    have hpa : done.parent = ((noteStale w id dst).st id).parent := by
+      simpa [done, noteStale_st, ha] using
+        (finish_parent (issueCall a) kWait .notAdmitted).trans (issue_parent a)
+    have hph : id ∈ (noteStale w id dst).roster →
+        phaseDeclared I (tname id) done.phase := by
+      intro _
+      exact finish_declared I (tname id) (issueCall a) kWait .notAdmitted
+        (by simpa [kWait, k'] using hwait)
+    have hS := hold_set I (noteStale w id dst) hN id done hl hp hpe hpa hph (by simp [noteStale, hpre])
+    exact hrun.symm ▸ hS
+  | some dstId =>
+    let msg : Msg := { label := label, sender := id, callFrom := some id }
+    have hrun : execRun I w id a k = enqueueOrPark w I.desc id dstId msg true kWait := by
+      simp [execRun, hgo, hk, hres, k', kWait, msg]
+    have hph : ∀ i, i ∈ w.roster →
+        phaseDeclared I (tname i)
+          ((enqueueOrPark w I.desc id dstId msg true kWait).st i).phase := by
+      intro i hi
+      by_cases hwho : i = id
+      · rw [hwho]
+        exact mail_sender_phase I w id dstId msg true kWait (by simpa [kWait, k'] using hwait)
+      · rw [mail_phase_other w I.desc id dstId msg true kWait i hwho]
+        exact hH.phase i hi
+    exact hrun.symm ▸ hold_mail I w hH id dstId msg true kWait hpre hph
 
 end Deadlock
