@@ -7588,4 +7588,532 @@ theorem hold_child_peer (I : Impl) (w : World) (hH : Hold I w) (parent : InstId)
     simp [admitBorn, w', placePeer, id, born, parentO, next, k]
   simpa [hadmit, id, born, parentO, k] using hHold
 
+/-! A pool reuses a key only after the previous occupant has sealed and the
+tombstone has been consumed. The keys still open are distinct and sit in
+`0 ..< slots`, so one more birth fits. -/
+
+theorem name_unique_list (ts : List Template) (hnd : (ts.map (·.name)).Nodup)
+    (a b : Template) (ha : a ∈ ts) (hb : b ∈ ts) (hn : a.name = b.name) : a = b := by
+  induction ts with
+  | nil => cases ha
+  | cons t ts ih =>
+    have hpair := List.nodup_cons.mp hnd
+    cases ha with
+    | head =>
+      cases hb with
+      | head => rfl
+      | tail _ hb =>
+        exact absurd (List.mem_map.mpr ⟨b, hb, hn.symm⟩) hpair.1
+    | tail _ ha =>
+      cases hb with
+      | head =>
+        exact absurd (List.mem_map.mpr ⟨a, ha, hn⟩) hpair.1
+      | tail _ hb =>
+        exact ih hpair.2 ha hb
+
+theorem name_unique (D : Description) (hG : GraphOk D) (a b : Template)
+    (ha : a ∈ D.templates) (hb : b ∈ D.templates) (hn : a.name = b.name) : a = b :=
+  name_unique_list D.templates (names_nodup D hG) a b ha hb hn
+
+theorem core_piece_bound (pname : String) (N : Nat) (c : Template) (name : String) (k : Nat)
+    (h : (name, k) ∈ tmb_piece (.core pname) N c) :
+    name = c.name ∧ k < (if c.slots == 0 then N else c.slots) := by
+  unfold tmb_piece at h
+  by_cases hkeep : (supNamed c.supervisor (tname (.core pname)) && c.tombstone != "") = true
+  · simp only [hkeep, ite_true, List.mem_map, List.mem_range] at h
+    obtain ⟨i, hi, heq⟩ := h
+    cases heq
+    exact ⟨rfl, hi⟩
+  · have hf : (supNamed c.supervisor (tname (.core pname)) && c.tombstone != "") = false := by
+      cases hbit : supNamed c.supervisor (tname (.core pname)) && c.tombstone != ""
+      · rfl
+      · exact absurd hbit hkeep
+    simp [hf] at h
+
+theorem legal_core_lt (D : Description) (hG : GraphOk D) (pname : String) (N k : Nat)
+    (t : Template) (name : String) (ht : templateOf D name = some t) (hslots : t.slots ≠ 0)
+    (h : (name, k) ∈ legalSlots D (.core pname) N) : k < t.slots := by
+  have hflat : legalSlots D (.core pname) N = D.templates.flatMap (tmb_piece (.core pname) N) := by
+    unfold legalSlots tmb_piece
+    rfl
+  rw [hflat] at h
+  obtain ⟨c, hc, hmem⟩ := List.mem_flatMap.mp h
+  have ⟨hname, hk⟩ := core_piece_bound pname N c name k hmem
+  have ⟨htmem, htname⟩ := templateOf_mem D name t ht
+  have hcEq : c = t := name_unique D hG c t hc htmem (hname.symm.trans htname.symm)
+  rw [hcEq] at hk
+  have hs : (t.slots == 0) = false := by
+    cases hbb : t.slots == 0 with
+    | false => rfl
+    | true => exact absurd ((beq_iff_eq).mp hbb) hslots
+  simpa [hs] using hk
+
+theorem nodup_filter {α : Type} (p : α → Bool) (xs : List α) (h : xs.Nodup) :
+    (xs.filter p).Nodup := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih =>
+    have hpair := List.nodup_cons.mp h
+    simp only [List.filter_cons]
+    by_cases hp : p x = true
+    · rw [ite_eq_left hp]
+      refine List.nodup_cons.mpr ⟨?_, ih hpair.2⟩
+      intro hmem
+      exact hpair.1 (List.mem_filter.mp hmem).1
+    · have hf : p x = false := by
+        cases hbit : p x with
+        | false => rfl
+        | true => exact absurd hbit hp
+      rw [ite_eq_right (by rw [hf]; decide)]
+      exact ih hpair.2
+
+theorem nodup_map_inj {α β : Type} (f : α → β) (xs : List α) (h : xs.Nodup)
+    (hinj : ∀ a b, a ∈ xs → b ∈ xs → f a = f b → a = b) : (xs.map f).Nodup := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih =>
+    have hpair := List.nodup_cons.mp h
+    simp only [List.map_cons]
+    refine List.nodup_cons.mpr ⟨?_, ih hpair.2 (fun a b ha hb => hinj a b
+      (List.mem_cons_of_mem x ha) (List.mem_cons_of_mem x hb))⟩
+    intro hmem
+    obtain ⟨y, hy, heq⟩ := List.mem_map.mp hmem
+    have hyx : y = x := hinj y x (List.mem_cons_of_mem x hy) List.mem_cons_self heq
+    exact hpair.1 (hyx ▸ hy)
+
+theorem nodup_append_of {α : Type} (xs ys : List α) (hx : xs.Nodup) (hy : ys.Nodup)
+    (h : ∀ a, a ∈ xs → a ∈ ys → False) : (xs ++ ys).Nodup := by
+  induction xs with
+  | nil => simpa using hy
+  | cons x xs ih =>
+    have hpair := List.nodup_cons.mp hx
+    rw [List.cons_append]
+    refine List.nodup_cons.mpr ⟨?_, ih hpair.2 (fun a ha hm => h a (List.mem_cons_of_mem x ha) hm)⟩
+    intro hmem
+    cases List.mem_append.mp hmem with
+    | inl hxs => exact hpair.1 hxs
+    | inr hys => exact h x List.mem_cons_self hys
+
+theorem nodup_singleton {α : Type} (a : α) : [a].Nodup :=
+  List.nodup_cons.mpr ⟨(fun h => List.not_mem_nil h), List.nodup_nil⟩
+
+def peerKey : InstId → Nat
+  | .peer _ k _ => k
+  | .core _ => 0
+
+theorem named_peer (D : Description) (w : World) (parent : InstId) (name : String) (c : InstId)
+    (h : namedChild D w parent name c = true) :
+    ∃ k g, c = InstId.peer name k g ∧ childOpen D w parent c = true := by
+  unfold namedChild at h
+  cases c with
+  | core _ => simp at h
+  | peer n k g =>
+    have hpair := (Bool.and_eq_true _ _).mp h
+    have hn : n = name := by simpa [beq_iff_eq] using hpair.2
+    subst hn
+    exact ⟨k, g, rfl, hpair.1⟩
+
+theorem open_parts (D : Description) (w : World) (parent c : InstId)
+    (h : childOpen D w parent c = true) :
+    isChild w parent c = true ∧ lifeHold (w.st c) = true ∧ notifies D c = true := by
+  unfold childOpen at h
+  have h1 := (Bool.and_eq_true _ _).mp h
+  have h0 := (Bool.and_eq_true _ _).mp h1.1
+  exact ⟨h0.1, h0.2, h1.2⟩
+
+theorem life_occupant (a : Actor) (h : lifeHold a = true) : occupant a = true := by
+  unfold lifeHold at h
+  cases hlive : a.life == .alive with
+  | true => simp [occupant, hlive]
+  | false =>
+    simp only [hlive, Bool.false_or] at h
+    have hsh := (Bool.and_eq_true _ _).mp h
+    simp [occupant, hsh.1]
+
+theorem tomb_msg (ms : List Msg) (s : String × Nat) (h : s ∈ tombSlots ms) :
+    ∃ m g, m ∈ ms ∧ m.tombstone = true ∧ m.sender = InstId.peer s.1 s.2 g := by
+  induction ms with
+  | nil => simp [tombSlots] at h
+  | cons m ms ih =>
+    cases htom : m.tombstone with
+    | false =>
+      have htail : s ∈ tombSlots ms := by
+        simpa [tombSlots, List.filterMap_cons, htom] using h
+      obtain ⟨m', g, hm, ht, hs⟩ := ih htail
+      exact ⟨m', g, List.mem_cons_of_mem m hm, ht, hs⟩
+    | true =>
+      cases hsend : m.sender with
+      | core _ =>
+        have htail : s ∈ tombSlots ms := by
+          simpa [tombSlots, List.filterMap_cons, htom, hsend] using h
+        obtain ⟨m', g, hm, ht, hs⟩ := ih htail
+        exact ⟨m', g, List.mem_cons_of_mem m hm, ht, hs⟩
+      | peer n k g =>
+        have hmem : s ∈ (n, k) :: tombSlots ms := by
+          simpa [tombSlots, List.filterMap_cons, htom, hsend] using h
+        cases List.mem_cons.mp hmem with
+        | inl heq =>
+          subst heq
+          exact ⟨m, g, List.mem_cons_self, htom, hsend⟩
+        | inr htail =>
+          obtain ⟨m', g', hm, ht, hs⟩ := ih htail
+          exact ⟨m', g', List.mem_cons_of_mem m hm, ht, hs⟩
+
+theorem queued_of_tomb (w : World) (parent : InstId) (name : String) (k : Nat)
+    (h : (name, k) ∈ namedTombs ((w.st parent).prio) name) :
+    slotTombstoneQueued w parent name k = true := by
+  have hslot : (name, k) ∈ tombSlots ((w.st parent).prio) := (List.mem_filter.mp h).1
+  obtain ⟨m, g, hm, ht, hs⟩ := tomb_msg _ _ hslot
+  unfold slotTombstoneQueued
+  refine _root_.List.any_eq_true.mpr ⟨m, hm, ?_⟩
+  simp [ht, hs]
+
+theorem pool_open_lt (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc)
+    (hnd : w.roster.Nodup) (parent : InstId) (pname child : String) (t : Template) (k : Nat)
+    (hpar : parent = InstId.core pname) (ht : templateOf I.desc child = some t)
+    (hslots : t.slots ≠ 0) (hfree : freeSlot w parent child t.slots = some k) :
+    namedOpen I.desc w parent child < t.slots := by
+  have hpair := freeSlot_fresh w parent child t.slots k hfree
+  have hk : k < t.slots := freeSlot_lt w parent child t.slots k hfree
+  have hidx : slotIndexed I.desc parent child = true := by
+    have hs : (t.slots != 0) = true := by
+      simpa [bne, beq_iff_eq] using hslots
+    simp [slotIndexed, hpar, ht, hs]
+  let ids := w.roster.filter (namedChild I.desc w parent child)
+  let kids := ids.map peerKey
+  let tombs := namedTombs ((w.st parent).prio) child
+  let tkeys := tombs.map (·.2)
+  have hids : ids.Nodup := nodup_filter _ w.roster hnd
+  have hkids : kids.Nodup := by
+    refine nodup_map_inj peerKey ids hids ?_
+    intro a b ha hb heq
+    have haN := (List.mem_filter.mp ha).2
+    have hbN := (List.mem_filter.mp hb).2
+    obtain ⟨ka, ga, haId, haOpen⟩ := named_peer I.desc w parent child a haN
+    obtain ⟨kb, gb, hbId, hbOpen⟩ := named_peer I.desc w parent child b hbN
+    have hka : peerKey a = ka := by simp [haId, peerKey]
+    have hkb : peerKey b = kb := by simp [hbId, peerKey]
+    have hkeys : ka = kb := by rw [← hka, ← hkb]; exact heq
+    have hpartsA := open_parts I.desc w parent a haOpen
+    have hpartsB := open_parts I.desc w parent b hbOpen
+    have hoccA := life_occupant _ hpartsA.2.1
+    have hoccB := life_occupant _ hpartsB.2.1
+    have hslot : sameSlot a b = true := by
+      simp [sameSlot, haId, hbId, hkeys]
+    exact hH.occ a b (List.mem_filter.mp ha).1 (List.mem_filter.mp hb).1 hoccA hoccB hslot
+  have htombs : tombs.Nodup :=
+    nodup_filter _ (tombSlots ((w.st parent).prio)) (hH.lane parent).tombNodup
+  have hfst : ∀ s, s ∈ tombs → s.1 = child := by
+    intro s hs
+    exact (beq_iff_eq).mp (List.mem_filter.mp hs).2
+  have htkeys : tkeys.Nodup := by
+    refine nodup_map_inj (·.2) tombs htombs ?_
+    intro a b ha hb heq
+    have ha1 := hfst a ha
+    have hb1 := hfst b hb
+    cases a with
+    | mk na ka =>
+      cases b with
+      | mk nb kb =>
+        simp at ha1 hb1 heq
+        simp [ha1, hb1, heq]
+  have hdis : ∀ a, a ∈ kids → a ∈ tkeys → False := by
+    intro key hkids htkeys
+    obtain ⟨c, hc, hkey⟩ := List.mem_map.mp hkids
+    have hcN := (List.mem_filter.mp hc).2
+    obtain ⟨ck, cg, hcId, hcOpen⟩ := named_peer I.desc w parent child c hcN
+    have hparts := open_parts I.desc w parent c hcOpen
+    have hck : peerKey c = ck := by simp [hcId, peerKey]
+    have hkeyC : key = ck := by rw [← hkey, hck]
+    have hfresh := hH.fresh parent c (List.mem_filter.mp hc).1 hparts.1 hparts.2.1 hparts.2.2
+    have hno : slotTombstoneQueued w parent child ck = false := by
+      simpa [hcId] using hfresh
+    obtain ⟨s, hs, hsk⟩ := List.mem_map.mp htkeys
+    have hs1 := hfst s hs
+    have hqueued := queued_of_tomb w parent child key (by
+      have hsEq : s = (child, key) := by
+        cases s with
+        | mk n sk =>
+          simp at hs1 hsk
+          simp [hs1, hsk]
+      simpa [hsEq] using hs)
+    rw [hkeyC] at hqueued
+    simp [hqueued] at hno
+  have hkeys : (kids ++ tkeys).Nodup := nodup_append_of kids tkeys hkids htkeys hdis
+  have hmem : ∀ key, key ∈ kids ++ tkeys → key ∈ (List.range t.slots).erase k := by
+    intro key hkey
+    cases List.mem_append.mp hkey with
+    | inl hkids =>
+      obtain ⟨c, hc, hpk⟩ := List.mem_map.mp hkids
+      have hcN := (List.mem_filter.mp hc).2
+      obtain ⟨ck, cg, hcId, hcOpen⟩ := named_peer I.desc w parent child c hcN
+      have hparts := open_parts I.desc w parent c hcOpen
+      have hck : key = ck := by
+        have hpk' : peerKey c = ck := by simp [hcId, peerKey]
+        rw [← hpk, hpk']
+      have hleg := hH.legalLife parent c (List.mem_filter.mp hc).1 hparts.1 hparts.2.1 hparts.2.2
+      have hslot : (child, ck) ∈ legalSlots I.desc parent w.N := by
+        simpa [hcId, hidx] using hleg
+      have hlt := legal_core_lt I.desc hG pname w.N ck t child ht hslots (by simpa [hpar] using hslot)
+      have hoccC := life_occupant _ hparts.2.1
+      have htaken : slotOccupied w child ck = true := by
+        unfold slotOccupied
+        refine _root_.List.any_eq_true.mpr ⟨c, (List.mem_filter.mp hc).1, ?_⟩
+        rw [hcId]
+        have hn : (child == child) = true := (beq_iff_eq).mpr rfl
+        have hkB : (ck == ck) = true := (beq_iff_eq).mpr rfl
+        cases hlifeC : (w.st (InstId.peer child ck cg)).life with
+        | alive => simp [hlifeC, hn, hkB]
+        | shuttingDown => simp [hlifeC, hn, hkB]
+        | dead =>
+          unfold occupant at hoccC
+          simp [hcId, hlifeC] at hoccC
+        | absent =>
+          unfold occupant at hoccC
+          simp [hcId, hlifeC] at hoccC
+      have hne : key ≠ k := by
+        intro heq
+        have htaken' : slotOccupied w child k = true := by simpa [← hck, heq] using htaken
+        simp [htaken'] at hpair
+      exact mem_erase_ne hne (List.mem_range.mpr (by simpa [hck] using hlt))
+    | inr htomb =>
+      obtain ⟨s, hs, hsk⟩ := List.mem_map.mp htomb
+      have hs1 := hfst s hs
+      have hpairS : s = (child, key) := by
+        cases s with
+        | mk n sk =>
+          simp at hs1 hsk
+          simp [hs1, hsk]
+      have hqueued := queued_of_tomb w parent child key (by simpa [hpairS] using hs)
+      have hleg := hH.legalTomb parent child key hqueued hidx
+      have hlt := legal_core_lt I.desc hG pname w.N key t child ht hslots (by simpa [hpar] using hleg)
+      have hne : key ≠ k := by
+        intro heq
+        rw [heq] at hqueued
+        simp [hqueued] at hpair
+      exact mem_erase_ne hne (List.mem_range.mpr hlt)
+  have hlen := nodup_mem_length _ _ hkeys hmem
+  have herase := erase_len k (List.range t.slots) (List.mem_range.mpr hk)
+  have hopen : namedOpen I.desc w parent child = (kids ++ tkeys).length := by
+    simp [namedOpen, ids, kids, tombs, tkeys, List.length_map, List.length_append]
+  have hrange : (List.range t.slots).length = t.slots := by simp
+  rw [hopen]
+  exact Nat.lt_of_succ_le (by
+    have hsum : (kids ++ tkeys).length + 1 ≤ ((List.range t.slots).erase k).length + 1 :=
+      Nat.add_le_add_right hlen 1
+    simpa [herase, hrange] using hsum)
+
+theorem hold_child_pool (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc)
+    (hnd : w.roster.Nodup) (parent : InstId) (pname child : String) (t : Template) (k : Nat)
+    (ht : templateOf I.desc child = some t) (hmul : t.multiplicity = .perPeer)
+    (hsup : supNamed t.supervisor pname = true) (hpar : parent = InstId.core pname)
+    (hslots : t.slots ≠ 0) (hfree : freeSlot w parent child t.slots = some k)
+    (halive : (w.st parent).life = .alive) (hpre : w.crashed = false)
+    (hoff : (w.st (InstId.peer child k (maxGen w child k))).prio = []) :
+    Hold I (admitBorn I w (InstId.peer child k (maxGen w child k))
+      { bornActor I.desc w child k t.initial with parent := some parent }) := by
+  let id := InstId.peer child k (maxGen w child k)
+  let parentO : Option InstId := some parent
+  let next : World → World := fun u => u
+  let born := { bornActor I.desc w child k t.initial with parent := parentO }
+  let w' := placePeer I w child k t.initial parentO next
+  have hlt := pool_open_lt I w hH hG hnd parent pname child t k hpar ht hslots hfree
+  have hfresh := freeSlot_fresh w parent child t.slots k hfree
+  have hnext : ∀ (u : World) (i : InstId),
+      (next u).st i = u.st i ∧ (next u).roster = u.roster ∧ (next u).N = u.N ∧
+        (next u).crashed = u.crashed := by
+    intro u i
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  have hst : ∀ i, w'.st i = if i = id then born else w.st i := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    intro i
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next]
+    rw [hw', show (readCells I.desc planted id).st i = planted.st i from cellsSt I.desc planted id i]
+    by_cases h : i = id
+    · simp [planted, setActor, h]
+    · simp [planted, setActor, h, mid, (hnext base i).1, base]
+  have hros : w'.roster = w.roster ++ [id] := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next]
+    rw [hw', show (readCells I.desc planted id).roster = planted.roster from
+      cellsRoster I.desc planted id]
+    simp [planted, setActor, mid, (hnext base id).2.1, base]
+  have hnew : id ∉ w.roster := gen_fresh w child k
+  have hparent : born.parent = some parent := by simp [born, parentO]
+  have hlive : born.life = .alive := by simp [born, bornActor, withKeyTokens]
+  have hbornPrio : born.prio = (w.st id).prio := by
+    have hp : born.prio = [] := by simp [born, bornActor, withKeyTokens]
+    simpa [hp, id, hoff]
+  have hprios : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio := by
+    intro i hne
+    have h := hst i
+    simp [hne] at h
+    rw [h]
+  have hst' : ∀ i, w'.st i = if i = id then w'.st id else w.st i := by
+    intro i
+    by_cases hi : i = id
+    · have hborn : w'.st id = born := by simpa [hi] using hst id
+      simp [hi, hborn]
+    · simp [hi, hst i]
+  have hself : w'.st id = born := by simpa using hst id
+  have hne : id ≠ parent := by
+    intro heq
+    simp [id, hpar] at heq
+  have hcensus : ∀ par nm, namedOpen I.desc w' par nm ≤ nameBudget I.desc par w.N nm := by
+    intro par nm
+    by_cases hthis : par = parent
+    · rw [hthis]
+      by_cases hnm : nm = child
+      · rw [hnm]
+        by_cases hnote : notifies I.desc id = true
+        · have hchild := isChild_recorded w' parent id (by rw [hself]) hne
+          have hlifeB : lifeHold (w'.st id) = true := by
+            rw [lifeHold, hself, hlive]
+            simp
+          have hopen : childOpen I.desc w' parent id = true := by
+            unfold childOpen
+            rw [hchild, hlifeB, hnote]
+            rfl
+          have hbit : namedChild I.desc w' parent child id = true := by
+            unfold namedChild
+            rw [hopen]
+            simp [id]
+          have hparentPrio : (w'.st parent).prio = (w.st parent).prio := hprios parent hne.symm
+          have hcount := census_born I.desc w w' id parent child hst' hros hnew hbit hparentPrio
+          have hkeep : (t.tombstone != "") = true := by
+            simpa only [id, notifies, tname, ht] using hnote
+          have hname : tname parent = pname := by simp [hpar, tname]
+          have hbudget : nameBudget I.desc parent w.N child = t.slots := by
+            have hkB : tmb_keep parent t = true := by
+              unfold tmb_keep
+              rw [hname]
+              exact (Bool.and_eq_true _ _).mpr ⟨hsup, hkeep⟩
+            have hs : (t.slots == 0) = false := by
+              cases hbb : t.slots == 0 with
+              | false => rfl
+              | true => exact absurd ((beq_iff_eq).mp hbb) hslots
+            rw [hpar] at hkB
+            rw [hpar]
+            simp [nameBudget, ht, tmb_leg, hkB, hs]
+          rw [hcount, hbudget]
+          exact Nat.succ_le_of_lt hlt
+        · have hbit : namedChild I.desc w' parent child id = false := by
+            have hnf : notifies I.desc id = false := by
+              cases hn : notifies I.desc id with
+              | false => rfl
+              | true => exact absurd hn hnote
+            unfold namedChild childOpen
+            rw [hnf]
+            simp only [Bool.and_false, Bool.false_and]
+          have hparentPrio : (w'.st parent).prio = (w.st parent).prio := hprios parent hne.symm
+          have hcount := census_born_other I.desc w w' id parent child hst' hros hnew hbit
+            hparentPrio
+          simpa [hcount] using hH.census parent child
+      · have hbit : namedChild I.desc w' parent nm id = false := by
+          have hbb : (child == nm) = false := by
+            rw [beq_comm]
+            cases hbeq : (nm == child) with
+            | false => rfl
+            | true => exact absurd ((beq_iff_eq).mp hbeq) hnm
+          unfold namedChild
+          simp [id, hbb]
+        have hparentPrio : (w'.st parent).prio = (w.st parent).prio := hprios parent hne.symm
+        have hcount := census_born_other I.desc w w' id parent nm hst' hros hnew hbit hparentPrio
+        simpa [hcount] using hH.census parent nm
+    · have hbit : namedChild I.desc w' par nm id = false := by
+        have hchild : isChild w' par id = false := by
+          unfold isChild
+          rw [hself, hparent]
+          have hbb : (parent == par) = false := by
+            cases hbeq : (parent == par) with
+            | false => rfl
+            | true => exact absurd ((beq_iff_eq).mp hbeq).symm hthis
+          simp only [hbb, Bool.false_and]
+        unfold namedChild childOpen
+        rw [hchild]
+        simp only [Bool.false_and]
+      have hprio : (w'.st par).prio = (w.st par).prio := by
+        by_cases heq : par = id
+        · rw [heq, hself]
+          exact hbornPrio
+        · exact hprios par heq
+      have hcount := census_born_other I.desc w w' id par nm hst' hros hnew hbit hprio
+      simpa [hcount] using hH.census par nm
+  have hocc : ∀ c, c ∈ w.roster → occupant (w.st c) = true →
+      sameSlot (InstId.peer child k (maxGen w child k)) c = false := by
+    intro c hc hoccB
+    cases c with
+    | core _ => simp [sameSlot]
+    | peer n key g =>
+      by_cases hboth : (n == child && key == k) = true
+      · exfalso
+        have hparts := (Bool.and_eq_true _ _).mp hboth
+        have hname : n = child := by simpa [beq_iff_eq] using hparts.1
+        have hkey : key = k := by simpa [beq_iff_eq] using hparts.2
+        have hslot : slotOccupied w child k = true := by
+          unfold slotOccupied
+          refine _root_.List.any_eq_true.mpr ⟨.peer n key g, hc, ?_⟩
+          have hn : (n == child) = true := by rw [hname]; exact (beq_iff_eq).mpr rfl
+          have hkB : (key == k) = true := by rw [hkey]; exact (beq_iff_eq).mpr rfl
+          cases hlifeC : (w.st (.peer n key g)).life with
+          | alive => simp [hlifeC, hn, hkB]
+          | shuttingDown => simp [hlifeC, hn, hkB]
+          | dead =>
+            unfold occupant at hoccB
+            simp [hlifeC] at hoccB
+          | absent =>
+            unfold occupant at hoccB
+            simp [hlifeC] at hoccB
+        simp [hslot] at hfresh
+      · cases hn : child == n <;> cases hkB : k == key
+        · simp only [sameSlot, hn, Bool.false_and]
+        · simp only [sameSlot, hn, Bool.false_and]
+        · simp only [sameSlot, hkB, Bool.and_false]
+        · exfalso
+          have hn' : (n == child) = true := by rw [beq_comm]; exact hn
+          have hk' : (key == k) = true := by rw [beq_comm]; exact hkB
+          apply hboth
+          simp [hn', hk']
+  have hfit : ∀ par, parentO = some par →
+      notifies I.desc (InstId.peer child k (maxGen w child k)) = true →
+      slotIndexed I.desc par child = true → (child, k) ∈ legalSlots I.desc par w.N := by
+    intro par hsome hnote _
+    have heq : parent = par := by simpa [parentO] using hsome
+    rw [← heq, hpar]
+    have ⟨hmemT, hnameT⟩ := templateOf_mem I.desc child t ht
+    have htomb : t.tombstone ≠ "" := by
+      have hlab : (t.tombstone != "") = true := by
+        simpa only [notifies, tname, ht] using hnote
+      simpa [bne, beq_iff_eq] using hlab
+    have hsupS : t.supervisor = some pname := by
+      cases hts : t.supervisor with
+      | none => simp [supNamed, hts] at hsup
+      | some n =>
+        have hn : n = pname := by simpa [supNamed, hts, beq_iff_eq] using hsup
+        simp [hn]
+    have hs : (t.slots == 0) = false := by
+      cases hbb : t.slots == 0 with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hbb) hslots
+    have hkB : k < (if t.slots == 0 then w.N else t.slots) := by
+      simp [hs]
+      exact freeSlot_lt w parent child t.slots k hfree
+    simpa [hpar] using legal_mem_core I.desc pname child w.N k t hmemT hnameT hsupS htomb hkB
+  have hfreeQ : ∀ par, parentO = some par →
+      slotTombstoneQueued w par child k = false := by
+    intro par hsome
+    have heq : parent = par := by simpa [parentO] using hsome
+    simpa [heq] using hfresh.2
+  have hHold := hold_place I w hH child k t.initial parentO next hpre hnext
+    ⟨t, ht, hmul⟩ hocc hfit hfreeQ (by simpa [w'] using hcensus)
+  have hadmit : admitBorn I w id born = w' := by
+    simp [admitBorn, w', placePeer, id, born, parentO, next]
+  simpa [hadmit, id, born, parentO] using hHold
+
 end Deadlock
