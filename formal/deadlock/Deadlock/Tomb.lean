@@ -6477,6 +6477,127 @@ theorem queued_sender (ms : List Msg) (child : String) (k : Nat)
       obtain ⟨m0, g, hm, ht, hs⟩ := ih htail
       exact ⟨m0, g, List.mem_cons_of_mem _ hm, ht, hs⟩
 
+theorem may_root_parts (D : Description) (w : World) (template : String) (t : Template)
+    (name : String) (ht : templateOf D template = some t)
+    (hmay : maySpawnRoot D w template t = true) (hsup : t.supervisor = some name) :
+    t.multiplicity = .perPeer ∧ t.slots = 0 ∧ rootOutstanding w name template < w.N := by
+  simp only [maySpawnRoot, hsup, Bool.and_eq_true, decide_eq_true_iff] at hmay
+  obtain ⟨⟨⟨⟨hmul, hslots⟩, _⟩, _⟩, hlt⟩ := hmay
+  refine ⟨?_, ?_, hlt⟩
+  · cases hm : t.multiplicity with
+    | perPeer => rfl
+    | one =>
+      exfalso
+      rw [hm] at hmul
+      rw [show (Multiplicity.one == Multiplicity.perPeer) = false from rfl] at hmul
+      exact Bool.noConfusion hmul
+  · simpa [beq_iff_eq] using hslots
+
+/-- A supervised root born under its core adds at most one to that core's
+count for its own template, and nothing to any other count. The allowance is
+`N` when the child notifies and `0` when it does not. -/
+theorem census_supervised (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
+    (born : Actor) (template : String) (t : Template) (name : String) (k : Nat)
+    (ht : templateOf I.desc template = some t) (hslots : t.slots = 0)
+    (hsup : t.supervisor = some name) (hlt : rootOutstanding w name template < w.N)
+    (hst : ∀ i, w'.st i = if i = id then born else w.st i)
+    (hros : w'.roster = w.roster ++ [id]) (hnew : id ∉ w.roster)
+    (hid : id = InstId.peer template k (maxGen w template k))
+    (hparent : born.parent = some (.core name)) (hlive : born.life = .alive)
+    (hbornPrio : born.prio = (w.st id).prio)
+    (hprios : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio) :
+    ∀ par nm, namedOpen I.desc w' par nm ≤ nameBudget I.desc par w.N nm := by
+  have hst' : ∀ i, w'.st i = if i = id then w'.st id else w.st i := by
+    intro i
+    by_cases hi : i = id
+    · have hborn : w'.st id = born := by simpa [hi] using hst id
+      simp [hi, hborn]
+    · simp [hi, hst i]
+  have hself : w'.st id = born := by simpa using hst id
+  intro par nm
+  by_cases hpar : par = InstId.core name
+  · rw [hpar]
+    have hparentPrio : (w'.st (.core name)).prio = (w.st (.core name)).prio := by
+      have hne : InstId.core name ≠ id := by
+        intro heq
+        simp [hid] at heq
+      exact hprios (.core name) hne
+    by_cases hnm : nm = template
+    · rw [hnm]
+      by_cases hnote : notifies I.desc id = true
+      · have hne : id ≠ InstId.core name := by
+          intro heq
+          simp [hid] at heq
+        have hchild := isChild_recorded w' (.core name) id (by rw [hself]; exact hparent) hne
+        have hlife : lifeHold (w'.st id) = true := by
+          rw [lifeHold, hself, hlive]
+          simp
+        have hopen : childOpen I.desc w' (.core name) id = true := by
+          unfold childOpen
+          rw [hchild, hlife, hnote]
+          rfl
+        have hbit : namedChild I.desc w' (.core name) template id = true := by
+          unfold namedChild
+          rw [hopen, hid]
+          simp
+        have hcount := census_born I.desc w w' id (.core name) template hst' hros hnew hbit hparentPrio
+        have hroot := named_le_root I w hH name template
+        have hkeep : (t.tombstone != "") = true := by
+          have hn := hnote
+          rw [hid, notifies, tname, ht] at hn
+          exact hn
+        have hbudget : nameBudget I.desc (.core name) w.N template = w.N := by
+          have hk : tmb_keep (.core name) t = true := by
+            unfold tmb_keep
+            simp only [supNamed, hsup, tname]
+            rw [(beq_iff_eq).mpr (rfl : name = name), hkeep, Bool.true_and]
+          have hs : (t.slots == 0) = true := (beq_iff_eq).mpr hslots
+          simp only [nameBudget, ht, tmb_leg, hk, hs]
+          rfl
+        rw [hcount, hbudget]
+        exact Nat.succ_le_of_lt (Nat.lt_of_le_of_lt hroot hlt)
+      · have hbit : namedChild I.desc w' (.core name) template id = false := by
+          have hnf : notifies I.desc id = false := by
+            cases hn : notifies I.desc id with
+            | false => rfl
+            | true => exact absurd hn hnote
+          unfold namedChild childOpen
+          rw [hnf]
+          simp only [Bool.and_false, Bool.false_and]
+        have hcount := census_born_other I.desc w w' id (.core name) template hst' hros hnew hbit
+          hparentPrio
+        simpa [hcount] using hH.census (.core name) template
+    · have hbit : namedChild I.desc w' (.core name) nm id = false := by
+        unfold namedChild
+        rw [hid]
+        have hbb : (template == nm) = false := by
+          rw [beq_comm]
+          cases hbeq : (nm == template) with
+          | false => rfl
+          | true => exact absurd ((beq_iff_eq).mp hbeq) hnm
+        simp only [hbb, Bool.and_false]
+      have hcount := census_born_other I.desc w w' id (.core name) nm hst' hros hnew hbit hparentPrio
+      simpa [hcount] using hH.census (.core name) nm
+  · have hbit : namedChild I.desc w' par nm id = false := by
+      have hchild : isChild w' par id = false := by
+        unfold isChild
+        rw [hself, hparent]
+        have hbb : (InstId.core name == par) = false := by
+          cases hbeq : (InstId.core name == par) with
+          | false => rfl
+          | true => exact absurd ((beq_iff_eq).mp hbeq).symm hpar
+        simp only [hbb, Bool.false_and]
+      unfold namedChild childOpen
+      rw [hchild]
+      simp only [Bool.false_and]
+    have hprio : (w'.st par).prio = (w.st par).prio := by
+      by_cases heq : par = id
+      · rw [heq, hself]
+        exact hbornPrio
+      · exact hprios par heq
+    have hcount := census_born_other I.desc w w' id par nm hst' hros hnew hbit hprio
+    simpa [hcount] using hH.census par nm
+
 theorem filter_snoc_off {α : Type} (p : α → Bool) (xs : List α) (a : α) (ha : p a = false) :
     ((xs ++ [a]).filter p).length = (xs.filter p).length := by
   induction xs with
