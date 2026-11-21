@@ -1431,15 +1431,15 @@ theorem spawnChild_mask (I : Impl) (w : World) (parent : InstId) (child : String
     simp only [maskWorld_st, maskActor_life, freeSlot_mask, maxGen_mask, born_mask, blocked_mask]
     split
     · rfl
-    · split
+    · next ht t =>
+      split
       · split
         · split
           · next k _hk =>
             simp only [Option.map]
-            have hkeep := born_kept I.desc w child k t.initial (InstId.core pname)
+            have hkeep := born_kept I.desc w child k ht.initial (InstId.core pname)
             rw [admit_mask I w _ _ hkeep]
-            have hkeepM := born_kept I.desc (maskWorld w) child k t.initial (InstId.core pname)
-            rw [admit_mask I (maskWorld w) _ _ hkeepM, maskWorld_idem]
+            rw [admit_mask I (maskWorld w) _ _ hkeep, maskWorld_idem]
           · simp [maskWorld_idem]
         · rfl
       · split
@@ -1450,17 +1450,16 @@ theorem spawnChild_mask (I : Impl) (w : World) (parent : InstId) (child : String
     simp only [maskWorld_st, maskActor_life, freeSlot_mask, maxGen_mask, born_mask, blocked_mask]
     split
     · rfl
-    · split
+    · next ht t =>
+      split
       · split
         · split
           · simp [maskWorld_idem]
           · simp only [Option.map]
             have hkeep :=
-              born_kept I.desc w child pkey t.initial (InstId.peer pname pkey pgen)
+              born_kept I.desc w child pkey ht.initial (InstId.peer pname pkey pgen)
             rw [admit_mask I w _ _ hkeep]
-            have hkeepM :=
-              born_kept I.desc (maskWorld w) child pkey t.initial (InstId.peer pname pkey pgen)
-            rw [admit_mask I (maskWorld w) _ _ hkeepM, maskWorld_idem]
+            rw [admit_mask I (maskWorld w) _ _ hkeep, maskWorld_idem]
         · rfl
       · split
         · simp [maskWorld_idem]
@@ -1575,5 +1574,382 @@ theorem execHead_mask (I : Impl) (w : World) (id : InstId) :
       · next k _hk =>
         exact congrArg some (execRun_mask I w id (w.st id) k)
       · rfl
+
+theorem mask_box (a : Actor) (ms : List Msg) :
+    maskActor { a with box := ms } = maskActor { maskActor a with box := ms } := by
+  have hs : tyRead { a with box := ms } = tyRead a := by simp [tyRead]
+  cases ht : tyRead a with
+  | true => rw [maskActor_keep a ht]
+  | false =>
+    rw [maskActor_clear a ht]
+    have h1 : tyRead { a with box := ms } = false := hs.trans ht
+    have h2 : tyRead { { a with typestate := "" } with box := ms } = false := by
+      simp only [tyRead] at ht ⊢
+      exact ht
+    rw [maskActor_clear _ h1, maskActor_clear _ h2]
+
+theorem detachBox_mask (a : Actor) (caller : InstId) :
+    maskActor (detachBox a caller) = maskActor (detachBox (maskActor a) caller) := by
+  simp only [detachBox, maskActor_box]
+  exact mask_box a (a.box.map (detachMsg caller))
+
+theorem clearReply_anchored (caller : InstId) (ph : Phase) :
+    phaseAnchored (clearReplyPhase caller ph) = phaseAnchored ph := by
+  cases ph <;> simp [clearReplyPhase, phaseAnchored]
+
+theorem detachReply_mask (a : Actor) (caller : InstId) (cid : Nat) :
+    maskActor (detachReply a caller cid) = maskActor (detachReply (maskActor a) caller cid) := by
+  unfold detachReply
+  simp only [maskActor_oweId, maskActor_phase]
+  by_cases h : (a.oweId == some cid) = true
+  · rw [if_pos h, if_pos h]
+    cases hanch : phaseAnchored a.phase with
+    | true =>
+      cases hph : a.phase with
+      | idle =>
+        simp only [clearReplyPhase, hph]
+        cases ht : tyRead a with
+        | true => rw [maskActor_keep a ht]
+        | false =>
+          rw [maskActor_clear a ht]
+          have h1 : tyRead { a with phase := .idle } = false := by
+            simp only [tyRead, hph] at ht ⊢
+            exact ht
+          have h2 : tyRead { { a with typestate := "" } with phase := .idle } = false := by
+            simp only [tyRead, hph] at ht ⊢
+            exact ht
+          rw [maskActor_clear _ h1, maskActor_clear _ h2]
+      | crashed =>
+        simp only [clearReplyPhase, hph]
+        cases ht : tyRead a with
+        | true => rw [maskActor_keep a ht]
+        | false =>
+          rw [maskActor_clear a ht]
+          have h1 : tyRead { a with phase := .crashed } = false := by
+            simp only [tyRead, hph] at ht ⊢
+            exact ht
+          have h2 : tyRead { { a with typestate := "" } with phase := .crashed } = false := by
+            simp only [tyRead, hph] at ht ⊢
+            exact ht
+          rw [maskActor_clear _ h1, maskActor_clear _ h2]
+      | run k => simp [phaseAnchored, hph] at hanch
+      | parked d c k => simp [phaseAnchored, hph] at hanch
+      | awaitReply d k => simp [phaseAnchored, hph] at hanch
+      | awaitEffect k => simp [phaseAnchored, hph] at hanch
+      | awaitPeer k => simp [phaseAnchored, hph] at hanch
+    | false =>
+      simpa [maskActor_life, maskActor_box, maskActor_prio, maskActor_parked, maskActor_tokens,
+        maskActor_nextMid, maskActor_waitId, maskActor_nextCall, maskActor_oweId, maskActor_lastCall,
+        maskActor_pending, maskActor_parent] using
+        mask_phase a (clearReplyPhase caller a.phase) (by rw [clearReply_anchored]; exact hanch)
+  · rw [if_neg h, if_neg h, maskActor_idem]
+
+theorem detach_mask (a : Actor) (caller : InstId) (cid : Nat) :
+    maskActor (detachReply (detachBox a caller) caller cid) =
+      maskActor (detachReply (detachBox (maskActor a) caller) caller cid) := by
+  have hbox := detachBox_mask a caller
+  have h1 := detachReply_mask (detachBox a caller) caller cid
+  have h2 := detachReply_mask (detachBox (maskActor a) caller) caller cid
+  rw [h1, hbox]
+  exact h2.symm
+
+theorem refundParkedCall_mask (w : World) (caller dst : InstId) :
+    maskWorld (refundParkedCall w caller dst) =
+      maskWorld (refundParkedCall (maskWorld w) caller dst) := by
+  unfold refundParkedCall
+  simp only [maskWorld_st, maskActor_parked]
+  by_cases hempty : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty = true
+  · simp [hempty, maskWorld_idem]
+  · have hfalse : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty = false := by
+      cases h : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty with
+      | false => rfl
+      | true => exact absurd h hempty
+    simp only [hfalse]
+    rw [if_neg (by decide : ¬ (false = true))]
+    conv => rhs; rw [if_neg (by decide : ¬ (false = true))]
+    have hstep : ∀ v (_x : Parked), maskWorld (creditSender v (tname dst) caller) =
+        maskWorld (creditSender (maskWorld v) (tname dst) caller) := by
+      intro v _x
+      rw [credit_mask, credit_mask, maskWorld_idem]
+    have hstart := mask_setActor w dst
+      { (w.st dst) with parked := (w.st dst).parked.filter fun p => !(p.sender == caller && p.isCall) }
+    rw [foldl_mask _ _ _ hstep, hstart, mask_repark]
+
+theorem receiveIngress_mask (I : Impl) (w : World) (dst : InstId) (label : String) :
+    (receiveIngress I w dst label).map maskWorld =
+      (receiveIngress I (maskWorld w) dst label).map maskWorld := by
+  unfold receiveIngress
+  simp only [maskWorld_st, maskWorld_N, maskActor_life, maskActor_phase, maskActor_box,
+    maskActor_tokens, maskActor_nextMid]
+  split
+  · rfl
+  · next hopen =>
+    have hdec : (decide ((w.st dst).life ≠ .alive) ||
+        decide (ingressOpen (w.st dst).phase = false)) = false := by
+      simpa using hopen
+    have hlive : (w.st dst).life = .alive := by
+      simp only [Bool.or_eq_false_iff, decide_eq_false_iff_not] at hdec
+      cases hlife : (w.st dst).life with
+      | alive => rfl
+      | shuttingDown =>
+        exact absurd (by rw [hlife]; intro h; cases h) hdec.1
+      | dead =>
+        exact absurd (by rw [hlife]; intro h; cases h) hdec.1
+      | absent =>
+        exact absurd (by rw [hlife]; intro h; cases h) hdec.1
+    have hhold : tokenHold I.desc (tname dst) (tname dst) (maskActor (w.st dst)) =
+        tokenHold I.desc (tname dst) (tname dst) (w.st dst) := by
+      cases ht : tyRead (w.st dst) with
+      | true => rw [maskActor_keep _ ht]
+      | false =>
+        rw [maskActor_clear _ ht]
+        have hph : phaseAnchored (w.st dst).phase = false := by
+          simp [tyRead, hlive] at ht
+          exact ht
+        exact tokenHold_running I.desc (tname dst) (tname dst) (w.st dst) "" hph
+    simp only [hhold]
+    split
+    · rfl
+    · split
+      · rfl
+      · split
+        · rfl
+        · split
+          · rfl
+          · simp only [Option.map]
+            rw [mask_setActor, mask_setActor, maskWorld_idem]
+            congr 1
+            apply congrArg (setActor (maskWorld w) dst)
+            cases ht : tyRead (w.st dst) with
+            | true => rw [maskActor_keep _ ht]
+            | false =>
+              rw [maskActor_clear _ ht]
+              have hph : phaseAnchored (w.st dst).phase = false := by
+                simp [tyRead, hlive] at ht
+                exact ht
+              have h1 : tyRead { chargeSender (w.st dst) (tname dst) with
+                  box := (w.st dst).box ++
+                    [{ label := label, sender := dst, callFrom := none, mid := (w.st dst).nextMid }],
+                  nextMid := (w.st dst).nextMid + 1 } = false := by
+                simp [tyRead, chargeSender, bumpToken, hph]
+              have h2 : tyRead { chargeSender { (w.st dst) with typestate := "" } (tname dst) with
+                  box := (w.st dst).box ++
+                    [{ label := label, sender := dst, callFrom := none, mid := (w.st dst).nextMid }],
+                  nextMid := (w.st dst).nextMid + 1 } = false := by
+                simp [tyRead, chargeSender, bumpToken, hph]
+              rw [maskActor_clear _ h1, maskActor_clear _ h2]
+              simp [chargeSender, bumpToken]
+
+theorem finishWait_mask (I : Impl) (w : World) (id : InstId) :
+    (finishWait I w id).map maskWorld = (finishWait I (maskWorld w) id).map maskWorld := by
+  unfold finishWait
+  simp only [maskWorld_st, maskActor_life, maskActor_phase]
+  split
+  · rfl
+  · split
+    · next k _hk =>
+      simp only [Option.map]
+      exact congrArg some (mask_set_proceed w id (w.st id) k)
+    · next k _hk =>
+      simp only [Option.map]
+      exact congrArg some (mask_set_proceed w id (w.st id) k)
+    · rfl
+
+theorem callTimeout_mask (w : World) (id : InstId) :
+    (callTimeout w id).map maskWorld = (callTimeout (maskWorld w) id).map maskWorld := by
+  unfold callTimeout
+  simp only [maskWorld_st, maskActor_life, maskActor_phase, maskActor_waitId]
+  split
+  · rfl
+  · split
+    · next dst k _hph =>
+      simp only [Option.map]
+      by_cases hself : id = dst
+      · subst hself
+        rw [mask_setActor, mask_setActor]
+        conv =>
+          rhs
+          rw [mask_setActor, mask_setActor]
+        rw [setActor_self, setActor_self, detach_mask, maskWorld_idem]
+        have hfin : finishCall (detachReply (detachBox (w.st id) id) id (w.st id).waitId) k .timedOut =
+            finishCall (detachReply (detachBox (maskActor (w.st id)) id) id (w.st id).waitId) k .timedOut := by
+          rw [← finish_erase, detach_mask, finish_erase]
+        simp [hfin]
+      · rw [mask_setActor, mask_setActor]
+        conv =>
+          rhs
+          rw [mask_setActor, mask_setActor]
+        rw [setActor_other w dst id _ hself, setActor_other (maskWorld w) dst id _ hself, maskWorld_st,
+          detach_mask, finish_erase, maskWorld_idem]
+    · next dst k _hph =>
+      simp only [Option.map]
+      rw [mask_setActor]
+      conv =>
+        rhs
+        rw [mask_setActor]
+      rw [refundParkedCall_mask]
+      have hst := congrArg (fun u : World => u.st id) (refundParkedCall_mask w id dst)
+      simp only [maskWorld_st] at hst
+      have hfin : finishCall ((refundParkedCall w id dst).st id) k .notAdmitted =
+          finishCall ((refundParkedCall (maskWorld w) id dst).st id) k .notAdmitted := by
+        rw [← finish_erase, hst, finish_erase]
+      simp [hfin]
+    · next k _hph =>
+      simp only [Option.map]
+      exact congrArg some (mask_set_proceed w id (w.st id)
+        { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout })
+    · rfl
+
+theorem survives_mask (w : World) (sender host : InstId) :
+    survivesSender (maskWorld w) sender host = survivesSender w sender host := by
+  simp [survivesSender, maskWorld_st, maskActor_life, sealedTogether, descends_mask, maskWorld_roster]
+
+theorem slotMail_mask (D : Description) (w : World) (name : String) (key : Nat) :
+    slotMailHeld D (maskWorld w) name key = slotMailHeld D w name key := by
+  unfold slotMailHeld slotCoreMail subtreeCoreMail actorHoldsSlotMail actorHoldsSubtreeMail
+  simp only [maskWorld_roster, maskWorld_st, maskActor_box, maskActor_prio, maskActor_parked,
+    survives_mask]
+
+theorem rootOut_mask (D : Description) (w : World) (supervisor name : String) :
+    rootOutstanding D (maskWorld w) supervisor name = rootOutstanding D w supervisor name := by
+  unfold rootOutstanding
+  simp only [maskWorld_roster, maskWorld_st, maskActor_life, tombQueued_mask]
+
+theorem loneOut_mask (D : Description) (w : World) (name : String) :
+    loneOutstanding D (maskWorld w) name = loneOutstanding D w name := by
+  unfold loneOutstanding
+  simp only [maskWorld_roster, maskWorld_st, maskActor_life, slotMail_mask]
+
+theorem maySpawn_mask (D : Description) (w : World) (template : String) (t : Template) :
+    maySpawnRoot D (maskWorld w) template t = maySpawnRoot D w template t := by
+  unfold maySpawnRoot supervisorLive
+  simp only [maskWorld_st, maskActor_life, maskWorld_N, rootOut_mask, loneOut_mask]
+
+theorem freshKey_mask (D : Description) (w : World) (sub : String) :
+    freshKey D (maskWorld w) sub = freshKey D w sub := by
+  unfold freshKey
+  simp [maskWorld_roster, maskWorld_nextKey]
+
+theorem born_parent (D : Description) (w : World) (template : String) (key : Nat) (initial : String)
+    (parent : Option InstId) :
+    maskActor { bornActor D w template key initial with parent := parent } =
+      { bornActor D w template key initial with parent := parent } := by
+  apply maskActor_keep
+  simp [bornActor, withKeyTokens, tyRead, phaseAnchored]
+
+theorem read_born (I : Impl) (w : World) (id : InstId) (a : Actor) (ha : maskActor a = a) :
+    maskWorld (readCells I.desc (setActor w id a) id) =
+      readCells I.desc (setActor (maskWorld w) id a) id := by
+  rw [readCells_mask, mask_setActor, ha]
+
+theorem mask_nextKey (w : World) (k : String → Nat) :
+    maskWorld { w with nextKey := k } = { maskWorld w with nextKey := k } := by
+  unfold maskWorld
+  rfl
+
+theorem mask_nextIx (w : World) (k : String → Nat) :
+    maskWorld { w with nextIx := k } = { maskWorld w with nextIx := k } := by
+  unfold maskWorld
+  rfl
+
+theorem placePeer_mask (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World)
+    (hnext : ∀ u, maskWorld (next u) = next (maskWorld u)) :
+    maskWorld (placePeer I w template k initial parent next) =
+      maskWorld (placePeer I (maskWorld w) template k initial parent next) := by
+  unfold placePeer
+  simp only [maxGen_mask, born_mask]
+  have hkeep := born_parent I.desc w template k initial parent
+  let id := InstId.peer template k (maxGen w template k)
+  have hbase : maskWorld (next { w with roster := w.roster ++ [id] }) =
+      maskWorld (next { maskWorld w with roster := (maskWorld w).roster ++ [id] }) := by
+    rw [hnext, hnext, mask_extend, mask_extend, maskWorld_idem, maskWorld_roster]
+  rw [read_born I (next { w with roster := w.roster ++ [id] }) id _ hkeep,
+    read_born I (next { maskWorld w with roster := (maskWorld w).roster ++ [id] }) id _ hkeep, hbase]
+
+theorem spawn_mask (I : Impl) (w : World) (template : String) :
+    (spawn I w template).map maskWorld = (spawn I (maskWorld w) template).map maskWorld := by
+  unfold spawn
+  simp only [maySpawn_mask, freshKey_mask, maskWorld_nextIx]
+  split
+  · rfl
+  · next t _ht =>
+    split
+    · split
+      · simp only [Option.map]
+        apply congrArg some
+        apply placePeer_mask
+        intro u
+        rw [mask_nextKey]
+        rfl
+      · split
+        · simp only [Option.map]
+          apply congrArg some
+          apply placePeer_mask
+          intro u
+          rw [mask_nextIx]
+          rfl
+        · simp only [Option.map]
+          apply congrArg some
+          apply placePeer_mask
+          intro u
+          rw [mask_nextKey]
+          rfl
+    · rfl
+
+theorem option_isSome_map {α β : Type} (f : α → β) (o1 o2 : Option α)
+    (h : o1.map f = o2.map f) : o1.isSome = o2.isSome := by
+  cases o1 <;> cases o2 <;> simp [Option.map] at h <;> rfl
+
+theorem runtimeBusy_mask (I : Impl) (w : World) :
+    runtimeBusy I (maskWorld w) = runtimeBusy I w := by
+  unfold runtimeBusy
+  simp only [maskWorld_roster]
+  have h : ∀ id, ((receiveBulk I w id).isSome || (receivePrio I w id).isSome ||
+      (execHead I w id).isSome || (finishWait I w id).isSome || (callTimeout w id).isSome) =
+      ((receiveBulk I (maskWorld w) id).isSome || (receivePrio I (maskWorld w) id).isSome ||
+        (execHead I (maskWorld w) id).isSome || (finishWait I (maskWorld w) id).isSome ||
+        (callTimeout (maskWorld w) id).isSome) := by
+    intro id
+    have hb := option_isSome_map maskWorld _ _ (receiveBulk_mask I w id)
+    have hp := option_isSome_map maskWorld _ _ (receivePrio_mask I w id)
+    have he := option_isSome_map maskWorld _ _ (execHead_mask I w id)
+    have hf := option_isSome_map maskWorld _ _ (finishWait_mask I w id)
+    have hc := option_isSome_map maskWorld _ _ (callTimeout_mask w id)
+    simp [hb, hp, he, hf, hc]
+  induction w.roster with
+  | nil => rfl
+  | cons id ids ih => simp [List.any_cons, h id, ih]
+
+theorem stepWorld_mask (I : Impl) (a : Action) (w : World) :
+    (stepWorld I a w).map maskWorld = (stepWorld I a (maskWorld w)).map maskWorld := by
+  unfold stepWorld
+  cases a with
+  | recvBulk s => exact receiveBulk_mask I w s
+  | recvPrio s => exact receivePrio_mask I w s
+  | exec s => exact execHead_mask I w s
+  | finish s => exact finishWait_mask I w s
+  | spawn template => exact spawn_mask I w template
+  | ingress dst label => exact receiveIngress_mask I w dst label
+  | callTimeout s => exact callTimeout_mask w s
+  | stutter =>
+    simp only [runtimeBusy_mask]
+    split
+    · rfl
+    · exact congrArg some (maskWorld_idem w).symm
+
+theorem apply_mask (I : Impl) (a : Action) (w : World) :
+    (apply I a w).map maskWorld = (apply I a (maskWorld w)).map maskWorld := by
+  unfold apply
+  simp only [maskWorld_crashed]
+  cases hc : w.crashed with
+  | true => rfl
+  | false => exact stepWorld_mask I a w
+
+/-- A step reads `typestate` only on an alive idle or crashed actor. Clearing it
+everywhere else leaves the step unchanged. -/
+theorem typestate_read_only_idle (I : Impl) (a : Action) (w : World) :
+    (apply I a w).map maskWorld = (apply I a (maskWorld w)).map maskWorld :=
+  apply_mask I a w
 
 end Deadlock
