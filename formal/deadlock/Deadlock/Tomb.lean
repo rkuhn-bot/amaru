@@ -6417,6 +6417,66 @@ theorem census_born_other (D : Description) (w w' : World) (id par : InstId) (na
     simp [namedTombs, hprio]
   rw [namedOpen, namedOpen, hros, hfilter, htombs]
 
+/-- A key past every member of a nonempty subtree is not `sameSlot` as any
+roster actor. -/
+theorem fresh_sameSlot (D : Description) (w : World) (sub template : String) (k : Nat)
+    (hsub : sub ≠ "") (htree : templateSubtree D template = sub)
+    (hk : k = freshKey D w sub) (c : InstId) (hc : c ∈ w.roster) :
+    sameSlot (InstId.peer template k (maxGen w template k)) c = false := by
+  cases c with
+  | core _ => simp [sameSlot]
+  | peer n k' g =>
+    by_cases hn : (n == template) = true
+    · have hname : n = template := by simpa [beq_iff_eq] using hn
+      have hsub' : templateSubtree D n = sub := by simpa [hname] using htree
+      have hlt := freshKey_gt D w sub n k' g hsub hsub' hc
+      rw [← hk] at hlt
+      have hnameB : (template == n) = true := by rw [beq_comm]; exact hn
+      have hkb : (k == k') = false := by
+        cases hbb : k == k'
+        · rfl
+        · have heq : k = k' := by simpa [beq_iff_eq] using hbb
+          omega
+      simp only [sameSlot, hnameB, hkb, Bool.and_false]
+    · have hnf : (n == template) = false := by
+        cases hbb : n == template
+        · rfl
+        · exact absurd hbb hn
+      have hnameB : (template == n) = false := by rw [beq_comm]; exact hnf
+      simp only [sameSlot, hnameB, Bool.false_and]
+
+theorem queued_sender (ms : List Msg) (child : String) (k : Nat)
+    (hq : (ms.any fun m =>
+      m.tombstone &&
+        match m.sender with
+        | .peer n key _ => n == child && key == k
+        | .core _ => false) = true) :
+    ∃ m g, m ∈ ms ∧ m.tombstone = true ∧ m.sender = InstId.peer child k g := by
+  induction ms with
+  | nil => simp [List.any_nil] at hq
+  | cons m ms ih =>
+    rw [List.any_cons] at hq
+    cases hhead : (m.tombstone &&
+        match m.sender with
+        | .peer n key _ => n == child && key == k
+        | .core _ => false) with
+    | true =>
+      cases ht : m.tombstone <;> cases hs : m.sender <;> simp [ht, hs, Bool.and_eq_true] at hhead
+      rename_i n key g
+      have hn : n = child := by simpa [beq_iff_eq] using hhead.1
+      have hk : key = k := by simpa [beq_iff_eq] using hhead.2
+      exact ⟨m, g, List.mem_cons_self, ht, by simp [hs, hn, hk]⟩
+    | false =>
+      have htail : (ms.any fun m =>
+          m.tombstone &&
+            match m.sender with
+            | .peer n key _ => n == child && key == k
+            | .core _ => false) = true := by
+        rw [hhead, Bool.false_or] at hq
+        exact hq
+      obtain ⟨m0, g, hm, ht, hs⟩ := ih htail
+      exact ⟨m0, g, List.mem_cons_of_mem _ hm, ht, hs⟩
+
 theorem filter_snoc_off {α : Type} (p : α → Bool) (xs : List α) (a : α) (ha : p a = false) :
     ((xs ++ [a]).filter p).length = (xs.filter p).length := by
   induction xs with
