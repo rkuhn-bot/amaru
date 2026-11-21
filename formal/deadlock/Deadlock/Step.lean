@@ -99,32 +99,37 @@ theorem resolve_tname (D : Description) (w : World) (sender : InstId) (dst : Str
           · cases h
             rfl
 
-/-- Every outcome typestate a continuation carries is empty or its own `toState`.
-`proceed` writes `k.toState` on both arms, so an outcome that named a different
-typestate is a different state. -/
-def contLands (k : Cont) : Prop :=
-  pickState k.toState k.toNotAdmitted = k.toState ∧ pickState k.toState k.toTimedOut = k.toState ∧
-    pickState k.toState k.toTimeout = k.toState ∧ pickState k.toState k.toFull = k.toState ∧
-    pickState k.toState k.toGone = k.toState
+/-- Outcome typestate fields of `k` are the ones `tr` declares. `toState` and
+`rest` are not part of the match: `pickState` and `selectCall` rewrite those
+and leave the fields. -/
+def fieldMatch (tr : Transition) (k : Cont) : Prop :=
+  k.toNotAdmitted = tr.toNotAdmitted ∧ k.toTimedOut = tr.toTimedOut ∧
+    k.toTimeout = tr.toTimeout ∧ k.toFull = tr.toFull ∧ k.toGone = tr.toGone
 
-/-- The outcome programs a wait still carries are checked at their own branch,
-and every continuation lands in its own typestate. A parked call becomes an
-`awaitReply` on admission and a `NotAdmitted` on its deadline, so both of its
-outcomes are checked. -/
-def outcomeOk (D : Description) (id : InstId) (a : Actor) : Prop :=
+/-- `a` stands in a landing state of a transition of its template, and `k`
+carries that transition's outcome fields with `toState` equal to the typestate. -/
+def srcOk (I : Impl) (id : InstId) (a : Actor) (k : Cont) : Prop :=
+  ∃ tr, tr ∈ I.transitions ∧ tr.template = tname id ∧ landsAt tr a.typestate ∧
+    fieldMatch tr k ∧ k.toState = a.typestate
+
+/-- The outcome programs a wait still carries are checked at their own branch.
+A running actor, and one waiting on an effect, only needs the source witness.
+A parked call becomes an `awaitReply` on admission and a `NotAdmitted` on its
+deadline, so both of its outcomes are checked. -/
+def outcomeOk (I : Impl) (id : InstId) (a : Actor) : Prop :=
   match a.phase with
-  | .run k => contLands k
-  | .parked _ isCall k => contLands k ∧ (isCall = true →
-      effectsOk D (tname id) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
-      effectsOk D (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true)
-  | .awaitReply _ k => contLands k ∧
-      effectsOk D (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true
-  | .awaitEffect k => contLands k
-  | .awaitPeer k => contLands k ∧
-      effectsOk D (tname id) (focus (contAt k) (contAt k).timeout) k.onTimeout = true
+  | .run k => srcOk I id a k
+  | .parked _ isCall k => srcOk I id a k ∧ (isCall = true →
+      effectsOk I.desc (tname id) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
+      effectsOk I.desc (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true)
+  | .awaitReply _ k => srcOk I id a k ∧
+      effectsOk I.desc (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true
+  | .awaitEffect k => srcOk I id a k
+  | .awaitPeer k => srcOk I id a k ∧
+      effectsOk I.desc (tname id) (focus (contAt k) (contAt k).timeout) k.onTimeout = true
   | _ => True
 
-def OutcomeInv (D : Description) (w : World) : Prop := ∀ id, outcomeOk D id (w.st id)
+def OutcomeInv (I : Impl) (w : World) : Prop := ∀ id, outcomeOk I id (w.st id)
 
 /-- An id off the roster has never been spawned: its life is still `absent`. -/
 def OpenSlots (w : World) : Prop := ∀ id, (w.st id).life ≠ .absent → id ∈ w.roster
@@ -139,9 +144,133 @@ def OutcomesLand (I : Impl) : Prop :=
 theorem pick_named (fallback specific : String) (h : specific ≠ "") :
     pickState fallback specific = specific := by
   unfold pickState
-  by_cases hb : (specific == "") = true
-  · exact absurd (beq_iff_eq.mp hb) h
-  · rw [if_neg hb]
+  split
+  · next heq => exact absurd (beq_iff_eq.mp heq) h
+  · rfl
+
+/-- An outcome field is a landing state when it is nonempty, and `pickState`
+of the empty string stays on the fallback. -/
+theorem lands_pick_field (tr : Transition) (fallback specific : String)
+    (hl : landsAt tr fallback)
+    (hs : specific = tr.toNotAdmitted ∨ specific = tr.toTimedOut ∨ specific = tr.toTimeout ∨
+      specific = tr.toFull ∨ specific = tr.toGone) :
+    landsAt tr (pickState fallback specific) := by
+  unfold pickState
+  split
+  · exact hl
+  · next heq =>
+    have hne : specific ≠ "" := by
+      intro he
+      exact heq (beq_iff_eq.mpr he)
+    exact Or.inr ⟨hne, hs⟩
+
+theorem src_ty (I : Impl) (id : InstId) {a b : Actor} (k : Cont)
+    (ht : b.typestate = a.typestate) (h : srcOk I id a k) : srcOk I id b k := by
+  obtain ⟨tr, hm, htm, hl, hf, hk⟩ := h
+  exact ⟨tr, hm, htm, by rw [ht]; exact hl, hf, hk.trans ht.symm⟩
+
+theorem src_after (I : Impl) (id : InstId) (a : Actor) (k : Cont) (h : srcOk I id a k) :
+    srcOk I id a (afterHead k) := by
+  obtain ⟨tr, hm, htm, hl, hf, hk⟩ := h
+  refine ⟨tr, hm, htm, hl, ?_, ?_⟩
+  · unfold fieldMatch at hf ⊢
+    simpa [afterHead] using hf
+  · simpa [afterHead] using hk
+
+theorem src_lists (I : Impl) (id : InstId) (a : Actor) (k : Cont) (na to o : List Eff)
+    (h : srcOk I id a k) :
+    srcOk I id a { k with onNotAdmitted := na, onTimedOut := to, onTimeout := o } := by
+  obtain ⟨tr, hm, htm, hl, hf, hk⟩ := h
+  refine ⟨tr, hm, htm, hl, ?_, ?_⟩
+  · unfold fieldMatch at hf ⊢
+    simpa using hf
+  · simpa using hk
+
+theorem src_reply (I : Impl) (id : InstId) (a : Actor) (k : Cont) (r : Option InstId)
+    (h : srcOk I id a k) : srcOk I id a { k with replyTo := r } := by
+  obtain ⟨tr, hm, htm, hl, hf, hk⟩ := h
+  refine ⟨tr, hm, htm, hl, ?_, hk⟩
+  unfold fieldMatch at hf ⊢
+  exact hf
+
+/-- `pickState` of an outcome field stays inside the transition's landing set,
+and the updated continuation still carries that transition's fields. -/
+theorem src_pick (I : Impl) (id : InstId) (a : Actor) (k : Cont) (rest : List Eff) (specific : String)
+    (h : srcOk I id a k)
+    (hs : specific = k.toNotAdmitted ∨ specific = k.toTimedOut ∨ specific = k.toTimeout ∨
+      specific = k.toFull ∨ specific = k.toGone) :
+    let k' := { k with rest := rest, toState := pickState k.toState specific }
+    srcOk I id { a with typestate := k'.toState } k' := by
+  obtain ⟨tr, hm, htm, hl, hf, hk⟩ := h
+  refine ⟨tr, hm, htm, ?_, ?_, rfl⟩
+  · have hlk : landsAt tr k.toState := by rw [hk]; exact hl
+    have hs' : specific = tr.toNotAdmitted ∨ specific = tr.toTimedOut ∨ specific = tr.toTimeout ∨
+        specific = tr.toFull ∨ specific = tr.toGone := by
+      rcases hs with hs | hs | hs | hs | hs
+      · exact Or.inl (hs.trans hf.1)
+      · exact Or.inr (Or.inl (hs.trans hf.2.1))
+      · exact Or.inr (Or.inr (Or.inl (hs.trans hf.2.2.1)))
+      · exact Or.inr (Or.inr (Or.inr (Or.inl (hs.trans hf.2.2.2.1))))
+      · exact Or.inr (Or.inr (Or.inr (Or.inr (hs.trans hf.2.2.2.2))))
+    simpa using lands_pick_field tr k.toState specific hlk hs'
+  · unfold fieldMatch at hf ⊢
+    simpa using hf
+
+theorem src_select (I : Impl) (id : InstId) (a : Actor) (k : Cont) (r : CallResult)
+    (h : srcOk I id a k) :
+    srcOk I id { a with typestate := (selectCall k r).toState } (selectCall k r) := by
+  cases r with
+  | reply =>
+    obtain ⟨tr, hm, htm, hl, hf, hk⟩ := h
+    refine ⟨tr, hm, htm, ?_, ?_, ?_⟩
+    · simpa [selectCall, hk] using hl
+    · unfold fieldMatch at hf ⊢
+      simpa [selectCall] using hf
+    · simp [selectCall]
+  | notAdmitted =>
+    simpa [selectCall] using
+      src_pick I id a k k.onNotAdmitted k.toNotAdmitted h (Or.inl rfl)
+  | timedOut =>
+    simpa [selectCall] using
+      src_pick I id a k k.onTimedOut k.toTimedOut h (Or.inr (Or.inl rfl))
+
+/-- `proceed` writes `k.toState` on both arms. The pre-state need not equal it.
+An empty arm is idle and a nonempty arm runs `k`, so `waitEdge` holds. -/
+theorem proceed_any (D : Description) (id : InstId) (a : Actor) (k : Cont)
+    (hprog : effectsOk D (tname id) (contAt k) k.rest = true) :
+    (proceed a k).typestate = k.toState ∧ (proceed a k).life = a.life ∧
+      contTy (proceed a k) ∧ programOk D id (proceed a k) ∧
+      waitEdge D id (proceed a k) ∧ notParked (proceed a k).phase ∧
+      (proceed a k).parked = a.parked := by
+  cases hk : k.rest with
+  | nil => simp [proceed, hk, contTy, programOk, waitEdge, notParked]
+  | cons _ _ =>
+    simp [proceed, hk, contTy, programOk, waitEdge, notParked]
+    rw [← hk]
+    exact hprog
+
+theorem finish_preds (D : Description) (id : InstId) (a : Actor) (k : Cont) (r : CallResult)
+    (hprog : effectsOk D (tname id) (contAt (selectCall k r)) (selectCall k r).rest = true) :
+    (finishCall a k r).typestate = (selectCall k r).toState ∧
+      (finishCall a k r).life = a.life ∧
+      (finishCall a k r).parked = a.parked ∧
+      contTy (finishCall a k r) ∧ programOk D id (finishCall a k r) ∧
+      waitEdge D id (finishCall a k r) ∧ notParked (finishCall a k r).phase := by
+  rcases proceed_any D id a (selectCall k r) hprog with ⟨htyP, hlifeP, hcont, hprogP, hwait, hfree, hpkP⟩
+  have hph : (finishCall a k r).phase = (proceed a (selectCall k r)).phase := by simp [finishCall]
+  have hty : (finishCall a k r).typestate = (proceed a (selectCall k r)).typestate := by simp [finishCall]
+  have hlife : (finishCall a k r).life = (proceed a (selectCall k r)).life := by simp [finishCall]
+  have hpk : (finishCall a k r).parked = (proceed a (selectCall k r)).parked := by simp [finishCall]
+  refine ⟨hty.trans htyP, hlife.trans hlifeP, hpk.trans hpkP, ?_, ?_, ?_, by rw [hph]; exact hfree⟩
+  · unfold contTy at hcont ⊢
+    rw [hph, hty]
+    exact hcont
+  · unfold programOk at hprogP ⊢
+    rw [hph]
+    exact hprogP
+  · unfold waitEdge at hwait ⊢
+    rw [hph, hty]
+    exact hwait
 
 theorem lands_toState (I : Impl) (hO : OutcomesLand I) (tr : Transition) (htr : tr ∈ I.transitions)
     (s : String) (hs : landsAt tr s) : s = tr.toState := by
@@ -195,7 +324,7 @@ theorem row_mem (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (g : CompatGro
     simpa [hfix] using ih
 
 def Inv (I : Impl) (w : World) : Prop :=
-  SemInv I w ∧ MailInv w ∧ OpenSlots w ∧ OutcomeInv I.desc w
+  SemInv I w ∧ MailInv w ∧ OpenSlots w ∧ OutcomeInv I w
 
 def Step (I : Impl) (w w' : World) : Prop :=
   ∃ a, apply I a w = some w'
@@ -219,26 +348,41 @@ theorem waitEdge_congr (D : Description) (id : InstId) {a b : Actor}
   rw [hp, ht]
   exact h
 
-theorem outcome_congr (D : Description) (id : InstId) {a b : Actor}
-    (hp : a.phase = b.phase) (h : outcomeOk D id b) : outcomeOk D id a := by
+theorem outcome_congr (I : Impl) (id : InstId) {a b : Actor}
+    (hp : a.phase = b.phase) (ht : a.typestate = b.typestate) (h : outcomeOk I id b) :
+    outcomeOk I id a := by
   unfold outcomeOk at h ⊢
   rw [hp]
-  exact h
+  revert h
+  cases b.phase with
+  | run k =>
+    intro h
+    exact src_ty I id k ht h
+  | parked d c k =>
+    intro h
+    exact ⟨src_ty I id k ht h.1, h.2⟩
+  | awaitReply d k =>
+    intro h
+    exact ⟨src_ty I id k ht h.1, h.2⟩
+  | awaitEffect k =>
+    intro h
+    exact src_ty I id k ht h
+  | awaitPeer k =>
+    intro h
+    exact ⟨src_ty I id k ht h.1, h.2⟩
+  | idle => intro h; exact h
+  | crashed => intro h; exact h
 
-theorem outcome_proceed (D : Description) (id : InstId) (a : Actor) (k : Cont) (h : contLands k) :
-    outcomeOk D id (proceed a k) := by
+/-- Same `toState`: `srcOk` of the actor that is entered is `srcOk` of the result,
+because `proceed` writes that `toState`. -/
+theorem outcome_proceed (I : Impl) (id : InstId) (a : Actor) (k : Cont) (h : srcOk I id a k) :
+    outcomeOk I id (proceed a k) := by
   cases hk : k.rest with
   | nil => simp [proceed, hk, outcomeOk]
   | cons _ _ =>
     simp only [proceed, hk, outcomeOk]
-    exact h
-
-theorem lands_pick (k : Cont) (r : List Eff) (s : String) (hs : pickState k.toState s = k.toState)
-    (h : contLands k) : contLands { k with rest := r, toState := pickState k.toState s } := by
-  unfold contLands at h ⊢
-  dsimp only
-  rw [hs]
-  exact h
+    obtain ⟨tr, hm, htm, hl, hf, hto⟩ := h
+    exact ⟨tr, hm, htm, by rw [hto]; exact hl, hf, rfl⟩
 
 theorem contAt_pick (k : Cont) (r : List Eff) (s : String) :
     contAt { k with rest := r, toState := pickState k.toState s } = focus (contAt k) s := by
@@ -312,15 +456,16 @@ theorem open_shape (w w' : World) (hO : OpenSlots w) (hr : ∀ i, i ∈ w.roster
   intro i h
   exact hr i (hO i (by rw [← hl i]; exact h))
 
-theorem outcome_shape (D : Description) (w w' : World) (hO : OutcomeInv D w)
-    (hp : ∀ i, (w'.st i).phase = (w.st i).phase) : OutcomeInv D w' :=
-  fun i => outcome_congr D i (hp i) (hO i)
+theorem outcome_shape (I : Impl) (w w' : World) (hO : OutcomeInv I w)
+    (hp : ∀ i, (w'.st i).phase = (w.st i).phase)
+    (ht : ∀ i, (w'.st i).typestate = (w.st i).typestate) : OutcomeInv I w' :=
+  fun i => outcome_congr I i (hp i) (ht i) (hO i)
 
 theorem inv_same (I : Impl) (w w' : World) (h : Inv I w) (hs : Same w w') : Inv I w' :=
   ⟨sem_shape I w w' h.1 hs.roster hs.life hs.ty hs.phase (fun i _ => hs.parked i),
     mail_shape w w' h.2.1 hs.life hs.phase hs.parked,
     open_shape w w' h.2.2.1 (fun i hi => by rw [hs.roster]; exact hi) hs.life,
-    outcome_shape I.desc w w' h.2.2.2 hs.phase⟩
+    outcome_shape I w w' h.2.2.2 hs.phase hs.ty⟩
 
 theorem same_actor (w : World) (id : InstId) (a : Actor) (hl : a.life = (w.st id).life)
     (ht : a.typestate = (w.st id).typestate) (hp : a.phase = (w.st id).phase)
@@ -369,8 +514,8 @@ theorem open_set (w : World) (id : InstId) (a : Actor) (hO : OpenSlots w) (hmem 
   · rw [setActor_other w id i a hi] at h
     exact hO i h
 
-theorem outcome_set (D : Description) (w : World) (id : InstId) (a : Actor) (hO : OutcomeInv D w)
-    (ha : outcomeOk D id a) : OutcomeInv D (setActor w id a) := by
+theorem outcome_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OutcomeInv I w)
+    (ha : outcomeOk I id a) : OutcomeInv I (setActor w id a) := by
   intro i
   by_cases hi : i = id
   · rw [hi, setActor_self]
@@ -384,37 +529,136 @@ theorem inv_set_free (I : Impl) (w : World) (id : InstId) (a : Actor) (h : Inv I
     (hlife : a.life = .alive) (hty : a.typestate = (w.st id).typestate)
     (hnew : notParked a.phase) (hlist : a.parked = (w.st id).parked)
     (hcont : contTy a) (hprog : programOk I.desc id a) (hwait : waitEdge I.desc id a)
-    (hout : outcomeOk I.desc id a) : Inv I (setActor w id a) :=
+    (hout : outcomeOk I id a) : Inv I (setActor w id a) :=
   ⟨sem_set I w id a h.1 hty (hlife.trans halive.symm) hcont hprog hwait (idleOff_life hlife)
       (Or.inl hlist),
     mail_set_free w id a h.2.1 hfree hnew hlist (hlife.trans halive.symm),
     open_set w id a h.2.2.1 (h.1.rostered id halive),
-    outcome_set I.desc w id a h.2.2.2 hout⟩
+    outcome_set I w id a h.2.2.2 hout⟩
 
-/-- A live actor that is not parked resumes a checked continuation. -/
+/-- A live actor that is not parked resumes a checked continuation whose
+`toState` is the typestate it already holds. -/
 theorem inv_proceed (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (h : Inv I w)
     (halive : (w.st id).life = .alive) (hfree : notParked (w.st id).phase)
     (hlife : a.life = .alive) (hty : a.typestate = (w.st id).typestate)
     (hlist : a.parked = (w.st id).parked) (hk : (w.st id).typestate = k.toState)
-    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true) (hland : contLands k) :
+    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true) (hs : srcOk I id a k) :
     Inv I (setActor w id (proceed a k)) := by
   have hp := proceed_ok I.desc id a k (hty.trans hk) hprog
   exact inv_set_free I w id (proceed a k) h halive hfree ((proceed_keeps_life a k).trans hlife)
     (hp.1.trans hty) (proceed_not_parked a k) ((proceed_keeps_parked a k).trans hlist) hp.2.2.1
-    hp.2.2.2.1 hp.2.2.2.2 (outcome_proceed I.desc id a k hland)
+    hp.2.2.2.1 hp.2.2.2.2 (outcome_proceed I id a k hs)
 
-theorem select_state (k : Cont) (r : CallResult) (h : contLands k) :
-    (selectCall k r).toState = k.toState := by
-  cases r with
-  | reply => rfl
-  | notAdmitted => exact h.1
-  | timedOut => exact h.2.1
+/-- A role that is not a core may move to any typestate: no compatibility group names it. -/
+theorem sem_noncore (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I w)
+    (hcore : ∀ r, id ≠ .core r) (hcont : contTy a) (hprog : programOk I.desc id a)
+    (hwait : waitEdge I.desc id a) (hoff : a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed)
+    (hroster : id ∈ w.roster) : SemInv I (setActor w id a) := by
+  apply sem_stable I w (setActor w id a) hS
+  · intro _ _ r _
+    rw [setActor_other w id (.core r) a (Ne.symm (hcore r))]
+  · intro _ _ r _
+    rw [setActor_other w id (.core r) a (Ne.symm (hcore r))]
+  · intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self]; exact hcont
+    · rw [setActor_other w id i a hi]; exact hS.cont i
+  · intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self]; exact hprog
+    · rw [setActor_other w id i a hi]; exact hS.prog i
+  · intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self]; exact hwait
+    · rw [setActor_other w id i a hi]; exact hS.waited i
+  · intro i hdead
+    by_cases hi : i = id
+    · rw [hi, setActor_self] at hdead ⊢
+      exact hoff hdead
+    · rw [setActor_other w id i a hi] at hdead ⊢
+      exact hS.idleOff i hdead
+  · intro i hlive
+    by_cases hi : i = id
+    · rw [hi]
+      exact hroster
+    · rw [setActor_other w id i a hi] at hlive
+      exact hS.rostered i hlive
+  · intro i hmiss
+    have hne : i ≠ id := fun he => hmiss (by rw [he]; exact hroster)
+    rw [setActor_other w id i a hne]
+    exact hS.offEmpty i hmiss
 
-theorem lands_select (k : Cont) (r : CallResult) (h : contLands k) : contLands (selectCall k r) := by
-  cases r with
-  | reply => exact h
-  | notAdmitted => exact lands_pick k _ _ h.1 h
-  | timedOut => exact lands_pick k _ _ h.2.1 h
+/-- A move inside one transition's landing set. A core uses `sem_land`. A peer
+is not a group role, so any typestate keeps `SemInv`. -/
+theorem sem_enter (I : Impl) (w : World) (id : InstId) (a : Actor) (tr : Transition)
+    (s0 s1 : String) (hS : SemInv I w)
+    (hfrom : (w.st id).typestate = s0) (hto : a.typestate = s1)
+    (hlife : a.life = (w.st id).life) (htm : tr.template = tname id)
+    (hmem : tr ∈ I.transitions) (hs0 : landsAt tr s0) (hs1 : landsAt tr s1)
+    (hcont : contTy a) (hprog : programOk I.desc id a) (hwait : waitEdge I.desc id a)
+    (hoff : a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed)
+    (hlist : a.parked = (w.st id).parked) (hroster : id ∈ w.roster) :
+    SemInv I (setActor w id a) := by
+  cases id with
+  | core r =>
+    exact sem_land I w r a tr s0 s1 hS hfrom hto hlife (by simpa [tname] using htm) hmem hs0 hs1
+      hcont hprog hwait hoff (Or.inl hlist)
+  | peer n key g =>
+    exact sem_noncore I w _ a hS (fun r => peer_ne_core n key g r) hcont hprog hwait hoff hroster
+
+/-- Enter `k`, whose `toState` may differ from the typestate already held.
+Both states land on the same transition, and `k` carries that transition's fields. -/
+theorem inv_enter (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (tr : Transition)
+    (h : Inv I w) (halive : (w.st id).life = .alive) (hfree : notParked (w.st id).phase)
+    (hlife : a.life = .alive) (_hty : a.typestate = (w.st id).typestate)
+    (hlist : a.parked = (w.st id).parked) (hmem : tr ∈ I.transitions) (htm : tr.template = tname id)
+    (hs0 : landsAt tr (w.st id).typestate) (hs1 : landsAt tr k.toState) (hf : fieldMatch tr k)
+    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true) :
+    Inv I (setActor w id (proceed a k)) := by
+  rcases proceed_any I.desc id a k hprog with ⟨htyP, hlifeP, hcont, hprogP, hwait, hfreeP, hpkP⟩
+  have hS := sem_enter I w id (proceed a k) tr (w.st id).typestate k.toState h.1 rfl htyP
+    (hlifeP.trans (hlife.trans halive.symm)) htm hmem hs0 hs1 hcont hprogP hwait
+    (idleOff_life (hlifeP.trans hlife)) (hpkP.trans hlist) (h.1.rostered id halive)
+  refine ⟨hS,
+    mail_set_free w id (proceed a k) h.2.1 hfree hfreeP (hpkP.trans hlist) (hlifeP.trans (hlife.trans halive.symm)),
+    open_set w id (proceed a k) h.2.2.1 (h.1.rostered id halive), ?_⟩
+  apply outcome_set I w id (proceed a k) h.2.2.2
+  cases hk : k.rest with
+  | nil => simp [proceed, hk, outcomeOk]
+  | cons _ _ =>
+    simp only [proceed, hk, outcomeOk]
+    exact ⟨tr, hmem, htm, by simpa using hs1, hf, rfl⟩
+
+/-- Enter the continuation `pickState` builds from one outcome field of `k`. -/
+theorem inv_pick (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (rest : List Eff) (specific : String) (h : Inv I w)
+    (halive : (w.st id).life = .alive) (hfree : notParked (w.st id).phase)
+    (hlife : a.life = .alive) (hty : a.typestate = (w.st id).typestate)
+    (hlist : a.parked = (w.st id).parked) (hs : srcOk I id (w.st id) k)
+    (hspec : specific = k.toNotAdmitted ∨ specific = k.toTimedOut ∨ specific = k.toTimeout ∨
+      specific = k.toFull ∨ specific = k.toGone)
+    (hprog : effectsOk I.desc (tname id)
+        (contAt { k with rest := rest, toState := pickState k.toState specific }) rest = true) :
+    Inv I (setActor w id (proceed a { k with rest := rest, toState := pickState k.toState specific })) := by
+  obtain ⟨tr, hmem, htm, hl, hf, hk⟩ := hs
+  have hs' : specific = tr.toNotAdmitted ∨ specific = tr.toTimedOut ∨ specific = tr.toTimeout ∨
+      specific = tr.toFull ∨ specific = tr.toGone := by
+    rcases hspec with hspec | hspec | hspec | hspec | hspec
+    · exact Or.inl (hspec.trans hf.1)
+    · exact Or.inr (Or.inl (hspec.trans hf.2.1))
+    · exact Or.inr (Or.inr (Or.inl (hspec.trans hf.2.2.1)))
+    · exact Or.inr (Or.inr (Or.inr (Or.inl (hspec.trans hf.2.2.2.1))))
+    · exact Or.inr (Or.inr (Or.inr (Or.inr (hspec.trans hf.2.2.2.2))))
+  have hlk : landsAt tr k.toState := by rw [hk]; exact hl
+  have hfield : fieldMatch tr { k with rest := rest, toState := pickState k.toState specific } := by
+    unfold fieldMatch at hf ⊢
+    simpa using hf
+  have hprog' : effectsOk I.desc (tname id)
+      (contAt { k with rest := rest, toState := pickState k.toState specific })
+      ({ k with rest := rest, toState := pickState k.toState specific }).rest = true := by
+    simpa using hprog
+  exact inv_enter I w id a _ tr h halive hfree hlife hty hlist hmem htm hl
+    (lands_pick_field tr k.toState specific hlk hs') hfield hprog'
 
 theorem contAt_select_na (k : Cont) :
     contAt (selectCall k .notAdmitted) = focus (contAt k) (contAt k).notAdmitted :=
@@ -424,42 +668,66 @@ theorem contAt_select_to (k : Cont) :
     contAt (selectCall k .timedOut) = focus (contAt k) (contAt k).timedOut :=
   contAt_pick k _ _
 
-theorem outcome_finish (D : Description) (id : InstId) (a : Actor) (k : Cont) (r : CallResult)
-    (h : contLands k) : outcomeOk D id (finishCall a k r) :=
-  outcome_congr D id rfl (outcome_proceed D id a (selectCall k r) (lands_select k r h))
+theorem outcome_finish (I : Impl) (id : InstId) (a : Actor) (k : Cont) (r : CallResult)
+    (h : srcOk I id a k) : outcomeOk I id (finishCall a k r) := by
+  have hs := src_select I id a k r h
+  cases hr : (selectCall k r).rest with
+  | nil => simp [finishCall, proceed, hr, outcomeOk]
+  | cons _ _ =>
+    simp only [finishCall, proceed, hr, outcomeOk]
+    obtain ⟨tr, hm, htm, hl, hf, hto⟩ := hs
+    exact ⟨tr, hm, htm, hl, hf, hto⟩
 
-theorem outcome_await (D : Description) (id : InstId) (a : Actor) (dst : InstId) (k : Cont)
-    (hph : a.phase = .awaitReply dst k) (hl : contLands k)
-    (ht : effectsOk D (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
-    outcomeOk D id a := by
+theorem outcome_await (I : Impl) (id : InstId) (a : Actor) (dst : InstId) (k : Cont)
+    (hph : a.phase = .awaitReply dst k) (hs : srcOk I id a k)
+    (ht : effectsOk I.desc (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
+    outcomeOk I id a := by
   unfold outcomeOk
   rw [hph]
-  exact ⟨hl, ht⟩
+  exact ⟨hs, ht⟩
 
-theorem outcome_parked (D : Description) (id : InstId) (a : Actor) (dst : InstId) (c : Bool) (k : Cont)
-    (hph : a.phase = .parked dst c k) (hl : contLands k)
+theorem outcome_parked (I : Impl) (id : InstId) (a : Actor) (dst : InstId) (c : Bool) (k : Cont)
+    (hph : a.phase = .parked dst c k) (hs : srcOk I id a k)
     (hc : c = true →
-      effectsOk D (tname id) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
-      effectsOk D (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
-    outcomeOk D id a := by
+      effectsOk I.desc (tname id) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
+      effectsOk I.desc (tname id) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
+    outcomeOk I id a := by
   unfold outcomeOk
   rw [hph]
-  exact ⟨hl, hc⟩
+  exact ⟨hs, hc⟩
 
-/-- A live actor that is not parked leaves a call wait on one outcome's continuation. -/
+/-- A live actor that is not parked leaves a call wait. `.reply` keeps `toState`.
+`NotAdmitted` and `TimedOut` may land on the outcome's own typestate. -/
 theorem inv_finish (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (r : CallResult)
     (h : Inv I w) (halive : (w.st id).life = .alive) (hfree : notParked (w.st id).phase)
     (hlife : a.life = .alive) (hty : a.typestate = (w.st id).typestate)
-    (hlist : a.parked = (w.st id).parked) (hk : (w.st id).typestate = k.toState) (hland : contLands k)
+    (hlist : a.parked = (w.st id).parked) (hs : srcOk I id a k)
     (hprog : effectsOk I.desc (tname id) (contAt (selectCall k r)) (selectCall k r).rest = true) :
     Inv I (setActor w id (finishCall a k r)) := by
-  have hp := proceed_ok I.desc id a (selectCall k r)
-    (hty.trans (hk.trans (select_state k r hland).symm)) hprog
-  exact inv_set_free I w id (finishCall a k r) h halive hfree
-    ((proceed_keeps_life a _).trans hlife) (hp.1.trans hty) (proceed_not_parked a _)
-    ((proceed_keeps_parked a _).trans hlist) (contTy_congr rfl rfl hp.2.2.1)
-    (programOk_congr I.desc id rfl hp.2.2.2.1) (waitEdge_congr I.desc id rfl rfl hp.2.2.2.2)
-    (outcome_finish I.desc id a k r hland)
+  obtain ⟨tr, hmem, htm, hl, hf, hk⟩ := hs
+  rcases finish_preds I.desc id a k r hprog with ⟨htyF, hlifeF, hpkF, hcont, hprogF, hwait, hfreeF⟩
+  have hl0 : landsAt tr (w.st id).typestate := by
+    rw [← hty]
+    exact hl
+  have hl1 : landsAt tr (selectCall k r).toState := by
+    cases r with
+    | reply =>
+      rw [show (selectCall k .reply).toState = k.toState from rfl, hk]
+      exact hl
+    | notAdmitted =>
+      rw [show (selectCall k .notAdmitted).toState = pickState k.toState k.toNotAdmitted from rfl]
+      exact lands_pick_field tr k.toState k.toNotAdmitted (by rw [hk]; exact hl) (Or.inl hf.1)
+    | timedOut =>
+      rw [show (selectCall k .timedOut).toState = pickState k.toState k.toTimedOut from rfl]
+      exact lands_pick_field tr k.toState k.toTimedOut (by rw [hk]; exact hl) (Or.inr (Or.inl hf.2.1))
+  have hS := sem_enter I w id (finishCall a k r) tr (w.st id).typestate (selectCall k r).toState h.1
+    rfl htyF (hlifeF.trans (hlife.trans halive.symm)) htm hmem hl0 hl1
+    hcont hprogF hwait (idleOff_life (hlifeF.trans hlife)) (hpkF.trans hlist) (h.1.rostered id halive)
+  refine ⟨hS,
+    mail_set_free w id (finishCall a k r) h.2.1 hfree hfreeF (hpkF.trans hlist)
+      (hlifeF.trans (hlife.trans halive.symm)),
+    open_set w id _ h.2.2.1 (h.1.rostered id halive),
+    outcome_set I w id _ h.2.2.2 (outcome_finish I id a k r ⟨tr, hmem, htm, hl, hf, hk⟩)⟩
 
 theorem enqueue_roster (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (isCall : Bool)
     (k : Cont) : (enqueueOrPark w D sender dst msg isCall k).roster = w.roster := by
@@ -481,15 +749,18 @@ theorem enqueue_life (w : World) (D : Description) (sender dst : InstId) (msg : 
          simp [setActor, hi, issueCall, chargeSender, bumpToken]
        · simp [setActor, hi, hd])
 
-theorem enqueue_outcome (D D' : Description) (w : World) (sender dst : InstId) (msg : Msg)
-    (isCall : Bool) (k : Cont) (hO : OutcomeInv D w) (hland : contLands k)
+theorem enqueue_outcome (I : Impl) (D' : Description) (w : World) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (hO : OutcomeInv I w) (hs : srcOk I sender (w.st sender) k)
     (hcall : isCall = true →
-      effectsOk D (tname sender) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
-      effectsOk D (tname sender) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
-    OutcomeInv D (enqueueOrPark w D' sender dst msg isCall k) := by
+      effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
+      effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
+    OutcomeInv I (enqueueOrPark w D' sender dst msg isCall k) := by
+  have hsrc : ∀ a : Actor, a.typestate = (w.st sender).typestate → srcOk I sender a k :=
+    fun a ht => src_ty I sender k ht hs
   have hhost : ∀ stored : Actor, stored.phase = (w.st dst).phase →
-      OutcomeInv D (setActor w dst stored) :=
-    fun stored hp => outcome_set D w dst stored hO (outcome_congr D dst hp (hO dst))
+      stored.typestate = (w.st dst).typestate →
+      OutcomeInv I (setActor w dst stored) :=
+    fun stored hp ht => outcome_set I w dst stored hO (outcome_congr I dst hp ht (hO dst))
   unfold enqueueOrPark
   dsimp only
   by_cases halive : (w.st dst).life = .alive
@@ -501,38 +772,84 @@ theorem enqueue_outcome (D D' : Description) (w : World) (sender dst : InstId) (
       · subst hsame
         cases isCall
         · simp only [decide_true, ↓reduceIte, Bool.false_eq_true]
-          exact outcome_set D w sender _ hO (outcome_proceed D sender _ k hland)
+          exact outcome_set I w sender _ hO
+            (outcome_proceed I sender _ k (hsrc _ (by simp [chargeSender, bumpToken])))
         · simp only [decide_true, ↓reduceIte]
-          exact outcome_set D w sender _ hO
-            (outcome_await D sender _ sender k rfl hland (hcall rfl).2)
-      · have hs : decide (sender = dst) = false := by simp [hsame]
+          exact outcome_set I w sender _ hO
+            (outcome_await I sender _ sender k rfl
+              (hsrc _ (by simp [issueCall, chargeSender, bumpToken])) (hcall rfl).2)
+      · have hdec : decide (sender = dst) = false := by simp [hsame]
         cases isCall
-        · simp only [hs, ↓reduceIte, Bool.false_eq_true]
-          exact outcome_set D _ sender _ (hhost _ rfl) (outcome_proceed D sender _ k hland)
-        · simp only [hs, ↓reduceIte]
-          exact outcome_set D _ sender _ (hhost _ rfl)
-            (outcome_await D sender _ dst k rfl hland (hcall rfl).2)
+        · simp only [hdec, ↓reduceIte, Bool.false_eq_true]
+          exact outcome_set I _ sender _ (hhost _ rfl rfl)
+            (outcome_proceed I sender _ k (hsrc _ (by simp [chargeSender, bumpToken])))
+        · simp only [hdec, ↓reduceIte]
+          exact outcome_set I _ sender _ (hhost _ rfl rfl)
+            (outcome_await I sender _ dst k rfl
+              (hsrc _ (by simp [issueCall, chargeSender, bumpToken])) (hcall rfl).2)
     · rw [ite_eq_right hroom]
       by_cases hsame : sender = dst
       · subst hsame
         simp only [decide_true, ↓reduceIte]
-        exact outcome_set D w sender _ hO (outcome_parked D sender _ sender isCall k rfl hland hcall)
-      · have hs : decide (sender = dst) = false := by simp [hsame]
-        simp only [hs, ↓reduceIte, Bool.false_eq_true]
-        exact outcome_set D _ sender _ (hhost _ rfl)
-          (outcome_parked D sender _ dst isCall k rfl hland hcall)
+        exact outcome_set I w sender _ hO
+          (outcome_parked I sender _ sender isCall k rfl
+            (hsrc _ (by cases isCall <;> simp [issueCall, chargeSender, bumpToken])) hcall)
+      · have hdec : decide (sender = dst) = false := by simp [hsame]
+        simp only [hdec, ↓reduceIte, Bool.false_eq_true]
+        exact outcome_set I _ sender _ (hhost _ rfl rfl)
+          (outcome_parked I sender _ dst isCall k rfl
+            (hsrc _ (by cases isCall <;> simp [issueCall, chargeSender, bumpToken])) hcall)
   · rw [ite_eq_left halive]
     cases isCall
     · rw [ite_eq_right Bool.false_ne_true]
-      exact outcome_set D w sender _ hO (outcome_proceed D sender _ k hland)
+      exact outcome_set I w sender _ hO (outcome_proceed I sender _ k (hsrc _ rfl))
     · rw [ite_eq_left rfl]
-      exact outcome_set D w sender _ hO (outcome_finish D sender _ k .notAdmitted hland)
+      exact outcome_set I w sender _ hO
+        (outcome_finish I sender _ k .notAdmitted (hsrc _ (by simp [issueCall])))
+
+/-- `SemInv` for a mailbox write. A dead call target runs `NotAdmitted`, which may
+land on a different typestate of the same transition. -/
+theorem enqueue_sem_src (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (isCall : Bool)
+    (k : Cont) (hS : SemInv I w) (hs : srcOk I sender (w.st sender) k)
+    (htail : effectsOk I.desc (tname sender) (contAt k) k.rest = true)
+    (hedge : ∃ label, hasEdge I.desc (tname sender) (w.st sender).typestate (tname dst)
+      (if isCall then .call else .send) .blocking label = true)
+    (hsender : (w.st sender).life = .alive)
+    (hna : isCall = true → (w.st dst).life ≠ .alive →
+      effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true) :
+    SemInv I (enqueueOrPark w I.desc sender dst msg isCall k) := by
+  obtain ⟨tr, hmem, htm, hl, hf, hk⟩ := hs
+  by_cases hlive : (w.st dst).life = .alive
+  · exact enqueue_sem I w sender dst msg isCall k hS hk.symm htail hedge hsender
+      (fun _ hne => absurd hlive hne) hna
+  · cases isCall with
+    | false =>
+      exact enqueue_sem I w sender dst msg false k hS hk.symm htail hedge hsender
+        (fun hc => absurd hc Bool.false_ne_true) (fun hc => absurd hc Bool.false_ne_true)
+    | true =>
+      unfold enqueueOrPark
+      rw [ite_eq_left hlive, ite_eq_left rfl]
+      have hprog : effectsOk I.desc (tname sender) (contAt (selectCall k .notAdmitted))
+          (selectCall k .notAdmitted).rest = true := by
+        rw [contAt_select_na]
+        simpa [selectCall] using hna rfl hlive
+      rcases finish_preds I.desc sender (issueCall (w.st sender)) k .notAdmitted hprog with
+        ⟨htyF, hlifeF, hpkF, hcont, hprogF, hwait, _⟩
+      have hl1 : landsAt tr (selectCall k .notAdmitted).toState := by
+        rw [show (selectCall k .notAdmitted).toState = pickState k.toState k.toNotAdmitted from rfl]
+        exact lands_pick_field tr k.toState k.toNotAdmitted (by rw [hk]; exact hl) (Or.inl hf.1)
+      have hissue := issueCall_keeps (w.st sender)
+      exact sem_enter I w sender (finishCall (issueCall (w.st sender)) k .notAdmitted) tr
+        (w.st sender).typestate (selectCall k .notAdmitted).toState hS rfl htyF
+        (hlifeF.trans hissue.2.1) htm hmem hl hl1
+        hcont hprogF hwait (idleOff_life (hlifeF.trans (hissue.2.1.trans hsender)))
+        (hpkF.trans (by simp [issueCall])) (hS.rostered sender hsender)
 
 /-- The mailbox write of a send or call, given the running sender's `SemInv` result. -/
 theorem enqueue_inv (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (isCall : Bool)
     (k : Cont) (h : Inv I w) (hS : SemInv I (enqueueOrPark w I.desc sender dst msg isCall k))
     (hfree : notParked (w.st sender).phase) (hlive : (w.st sender).life = .alive)
-    (hland : contLands k)
+    (hs : srcOk I sender (w.st sender) k)
     (hcall : isCall = true →
       effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
       effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
@@ -540,7 +857,7 @@ theorem enqueue_inv (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
   ⟨hS, enqueue_mail w I.desc sender dst msg isCall k h.2.1 hfree hlive,
     open_shape w _ h.2.2.1 (fun i hi => by rw [enqueue_roster]; exact hi)
       (enqueue_life w I.desc sender dst msg isCall k),
-    enqueue_outcome I.desc I.desc w sender dst msg isCall k h.2.2.2 hland hcall⟩
+    enqueue_outcome I I.desc w sender dst msg isCall k h.2.2.2 hs hcall⟩
 
 theorem crash_parked (w : World) (i : InstId) : ((crashWorld w).st i).parked = (w.st i).parked := by
   by_cases hm : i ∈ w.roster
@@ -674,24 +991,24 @@ theorem resume_false_ok (D : Description) (sid : InstId) (a : Actor) (dst : Inst
   | crashed => simp [resumeSender, hph, notParked, hc, hg, hw]
 
 /-- A resumed sender keeps its checked outcomes. A call resumes only from a parked call. -/
-theorem outcome_resume (D : Description) (s : InstId) (a : Actor) (b : Bool) (dst : InstId)
-    (h : outcomeOk D s a) (hc : ∀ d c k, a.phase = .parked d c k → b = true → c = true) :
-    outcomeOk D s (resumeSender a b dst) := by
+theorem outcome_resume (I : Impl) (s : InstId) (a : Actor) (b : Bool) (dst : InstId)
+    (h : outcomeOk I s a) (hc : ∀ d c k, a.phase = .parked d c k → b = true → c = true) :
+    outcomeOk I s (resumeSender a b dst) := by
   cases hph : a.phase with
   | parked d c k =>
-    have hk : contLands k ∧ (c = true →
-        effectsOk D (tname s) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
-        effectsOk D (tname s) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) := by
+    have hk : srcOk I s a k ∧ (c = true →
+        effectsOk I.desc (tname s) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
+        effectsOk I.desc (tname s) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) := by
       unfold outcomeOk at h
       rw [hph] at h
       exact h
     cases b with
     | false =>
       simp only [resumeSender, hph, Bool.false_eq_true, ite_false]
-      exact outcome_proceed D s a k hk.1
+      exact outcome_proceed I s a k hk.1
     | true =>
       simp only [resumeSender, hph, ite_true]
-      exact outcome_await D s _ dst k rfl hk.1 (hk.2 (hc d c k hph rfl)).2
+      exact outcome_await I s _ dst k rfl (src_ty I s k rfl hk.1) (hk.2 (hc d c k hph rfl)).2
   | idle => simp only [resumeSender, hph]; exact h
   | run _ => simp only [resumeSender, hph]; exact h
   | awaitReply _ _ => simp only [resumeSender, hph]; exact h
@@ -759,8 +1076,8 @@ theorem release_roster (id : InstId) (ps : List Parked) (w : World) :
     · rw [release_step_go id p ps w hskip]
       exact ih _
 
-theorem release_outcome (D : Description) (id : InstId) (ps : List Parked) (w : World)
-    (hO : OutcomeInv D w) : OutcomeInv D (releaseFold id ps w) := by
+theorem release_outcome (I : Impl) (id : InstId) (ps : List Parked) (w : World)
+    (hO : OutcomeInv I w) : OutcomeInv I (releaseFold id ps w) := by
   induction ps generalizing w with
   | nil => exact hO
   | cons p ps ih =>
@@ -768,7 +1085,7 @@ theorem release_outcome (D : Description) (id : InstId) (ps : List Parked) (w : 
     · rw [release_step_skip id p ps w hskip]
       exact ih w hO
     · rw [release_step_go id p ps w hskip]
-      exact ih _ (outcome_set D w p.sender _ hO (outcome_resume D p.sender _ false id (hO _)
+      exact ih _ (outcome_set I w p.sender _ hO (outcome_resume I p.sender _ false id (hO _)
         (fun _ _ _ _ hb => by cases hb)))
 
 theorem release_spares_id (id : InstId) (ps : List Parked) (w : World) :
@@ -1173,7 +1490,7 @@ theorem releaseOutbound_inv (I : Impl) (w : World) (dead : InstId) (h : Inv I w)
     · rw [ite_eq_right hc]
       exact Or.inl rfl
   · exact open_shape w _ h.2.2.1 (fun i hi => by rw [(hf i).1]; exact hi) (fun i => (hf i).2.1)
-  · exact outcome_shape I.desc w _ h.2.2.2 (fun i => (hf i).2.2.2.1)
+  · exact outcome_shape I w _ h.2.2.2 (fun i => (hf i).2.2.2.1) (fun i => (hf i).2.2.1)
 
 /-- The seal of a live or shutting-down actor, after its outbound entries are gone. -/
 theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
@@ -1267,7 +1584,7 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
       rw [hdp]
       trivial
     · rw [hst5 i hi]
-      exact outcome_congr _ _ (hp i) (h.2.2.2 i)
+      exact outcome_congr I i (hp i) (ht i) (h.2.2.2 i)
 
 theorem releaseWorld_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w)
     (hgo : (w.st id).life = .alive ∨ (w.st id).life = .shuttingDown) :
@@ -1308,7 +1625,7 @@ theorem markShutdown_inv (I : Impl) (w : World) (id : InstId) (h : Inv I w) :
       ⟨sem_seal I w id _ h.1 rfl (Or.inl rfl) rfl hmem,
         mail_halt w id _ h.2.1 ha (Or.inl rfl) trivial rfl,
         open_set w id _ h.2.2.1 hmem,
-        outcome_set I.desc w id _ h.2.2.2 (by simp [outcomeOk])⟩
+        outcome_set I w id _ h.2.2.2 (by simp [outcomeOk])⟩
     exact releaseOutbound_inv I _ id h1 (by rw [setActor_self]; trivial)
   · exact h
 
@@ -1401,7 +1718,7 @@ theorem abortChildren_inv (I : Impl) (D : Description) (w : World) (parent : Ins
 theorem run_facts (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I w)
     (hph : (w.st id).phase = .run k) :
     (w.st id).typestate = k.toState ∧ effectsOk I.desc (tname id) (contAt k) k.rest = true ∧
-      contLands k ∧ notParked (w.st id).phase := by
+      srcOk I id (w.st id) k ∧ notParked (w.st id).phase := by
   have hc := h.1.cont id
   have hp := h.1.prog id
   have ho := h.2.2.2 id
@@ -1422,16 +1739,17 @@ theorem inv_note (I : Impl) (w : World) (s : InstId) (d : String) (id : InstId) 
 theorem reply_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff) (h : Inv I w)
     (hph : (w.st id).phase = .run k) (hk : k.rest = .reply :: es) (ha : (w.st id).life = .alive)
     (hty : (w.st id).typestate = k.toState) (hprog : effectsOk I.desc (tname id) (contAt k) es = true)
-    (hland : contLands k) : Inv I (performReply w id k) := by
+    (hs : srcOk I id (w.st id) k) : Inv I (performReply w id k) := by
   have hfree : notParked (w.st id).phase := by rw [hph]; trivial
   have hk' : (afterHead k).rest = es := after_rest k _ es hk
+  have hsrc : srcOk I id (w.st id) (afterHead k) := src_after I id (w.st id) k hs
   have hproc : ∀ w0 : World, Inv I w0 → w0.st id = w.st id →
       Inv I (setActor w0 id (proceed (w0.st id) (afterHead k))) := by
     intro w0 h0 hst
     rw [hst]
     exact inv_proceed I w0 id (w.st id) (afterHead k) h0 (by rw [hst]; exact ha)
       (by rw [hst]; exact hfree) ha (by rw [hst]) (by rw [hst]) (by rw [hst]; exact hty)
-      (by rw [hk']; exact hprog) hland
+      (by rw [hk']; exact hprog) hsrc
   unfold performReply
   dsimp only
   split
@@ -1446,15 +1764,13 @@ theorem reply_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff
           cases hcph
         have hcalive := busy_alive I w h.1 caller (by rw [hcph]; intro he; cases he)
           (by rw [hcph]; intro he; cases he)
-        have hc := h.1.cont caller
         have hp := h.1.prog caller
         have ho := h.2.2.2 caller
-        unfold contTy at hc
         unfold programOk at hp
         unfold outcomeOk at ho
-        rw [hcph] at hc hp ho
+        rw [hcph] at hp ho
         have h1 := inv_finish I w caller (w.st caller) ck .reply h hcalive (by rw [hcph]; trivial)
-          hcalive rfl rfl hc ho.1 hp
+          hcalive rfl rfl ho.1 (by simpa [selectCall] using hp)
         exact hproc _ h1 (setActor_other w caller id _ (Ne.symm hcid))
       · exact hproc w h rfl
     · exact hproc w h rfl
@@ -1462,13 +1778,13 @@ theorem reply_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff
 theorem cell_step_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label : String) (c : Cell)
     (b : Bool) (h : Inv I w) (ha : (w.st id).life = .alive) (hfree : notParked (w.st id).phase)
     (hty : (w.st id).typestate = k.toState)
-    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true) (hland : contLands k) :
+    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true) (hs : srcOk I id (w.st id) k) :
     Inv I (if b = true then setActor (setCell w dst label c) id (proceed ((setCell w dst label c).st id) k)
       else wakeReaders I.desc (setActor (setCell w dst label c) id
         (proceed ((setCell w dst label c).st id) k)) dst label id) := by
   have h1 : Inv I (setActor (setCell w dst label c) id (proceed ((setCell w dst label c).st id) k)) :=
     inv_proceed I (setCell w dst label c) id _ k (inv_same I w _ h (same_setCell w dst label c)) ha
-      hfree ha rfl rfl hty hprog hland
+      hfree ha rfl rfl hty hprog (src_ty I id k (by simp [setCell]) hs)
   split
   · exact h1
   · exact wakeReaders_inv I I.desc _ dst label id h1
@@ -1641,7 +1957,8 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
     simp only [execRun, hno, Bool.false_eq_true, ↓reduceIte]
     exact h
   have hgo : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using ha
-  obtain ⟨hty, hprog, hland, hfree⟩ := run_facts I w id k h hph
+  obtain ⟨hty, hprog, hsrc0, hfree⟩ := run_facts I w id k h hph
+  have hsrc : srcOk I id (w.st id) (afterHead k) := src_after I id (w.st id) k hsrc0
   cases hk : k.rest with
   | nil =>
     simp only [execRun, hgo, hk, ite_true]
@@ -1660,24 +1977,24 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact inv_note I w id d id _
-          (inv_proceed I w id (w.st id) (afterHead k) h ha hfree ha rfl rfl hty htail hland)
+          (inv_proceed I w id (w.st id) (afterHead k) h ha hfree ha rfl rfl hty htail hsrc)
       | some dstId =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact enqueue_inv I w id dstId _ false (afterHead k) h
           (enqueue_sem I w id dstId _ false (afterHead k) h.1 hty htail
             ⟨l, by rw [route_tname w I.desc id d n dstId hr, hty]; exact hs.1⟩ ha
             (fun hc => absurd hc Bool.false_ne_true) (fun hc => absurd hc Bool.false_ne_true))
-          hfree ha hland (fun hc => absurd hc Bool.false_ne_true)
+          hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true)
     | trySend d l n f g =>
       have hs := head_try I.desc (tname id) d l (contAt k) n f g es hpe
       have hgone : Inv I (setActor w id (proceed (w.st id) { afterHead k with
           rest := g, toState := pickState (afterHead k).toState (afterHead k).toGone })) :=
-        inv_proceed I w id (w.st id) _ h ha hfree ha rfl rfl (hty.trans hland.2.2.2.2.symm)
-          (by rw [contAt_pick]; exact hs.2.1) (lands_pick _ g _ hland.2.2.2.2 hland)
+        inv_pick I w id (w.st id) (afterHead k) g (afterHead k).toGone h ha hfree ha rfl rfl hsrc
+          (Or.inr (Or.inr (Or.inr (Or.inr rfl)))) (by rw [contAt_pick]; exact hs.2.1)
       have hfull : Inv I (setActor w id (proceed (w.st id) { afterHead k with
           rest := f, toState := pickState (afterHead k).toState (afterHead k).toFull })) :=
-        inv_proceed I w id (w.st id) _ h ha hfree ha rfl rfl (hty.trans hland.2.2.2.1.symm)
-          (by rw [contAt_pick]; exact hs.1) (lands_pick _ f _ hland.2.2.2.1 hland)
+        inv_pick I w id (w.st id) (afterHead k) f (afterHead k).toFull h ha hfree ha rfl rfl hsrc
+          (Or.inr (Or.inr (Or.inr (Or.inl rfl)))) (by rw [contAt_pick]; exact hs.1)
       cases hr : route w I.desc id d n with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
@@ -1689,48 +2006,53 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
           simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hc
           exact enqueue_inv I w id dstId _ false (afterHead k) h
             (try_room_sem I w id dstId _ (afterHead k) h.1 hty htail hc.1.1 hc.1.2 hc.2 ha)
-            hfree ha hland (fun hc => absurd hc Bool.false_ne_true)
+            hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true)
         · split
           · exact hfull
           · exact hgone
     | call d l n na to =>
       have hs := head_call I.desc (tname id) d l (contAt k) n na to es hpe
+      have hwait := src_lists I id (w.st id) (afterHead k) na to (afterHead k).onTimeout hsrc
       cases hr : resolveId I.desc w id d n with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact inv_note I w id d id _
           (inv_finish I w id (issueCall (w.st id)) { afterHead k with onNotAdmitted := na, onTimedOut := to }
-            .notAdmitted h ha hfree ha rfl rfl hty hland (by rw [contAt_select_na]; exact hs.2.1))
+            .notAdmitted h ha hfree ha rfl rfl (src_ty I id _ (by simp [issueCall]) hwait)
+            (by rw [contAt_select_na]; exact hs.2.1))
       | some dstId =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact enqueue_inv I w id dstId _ true { afterHead k with onNotAdmitted := na, onTimedOut := to } h
-          (enqueue_sem I w id dstId _ true { afterHead k with onNotAdmitted := na, onTimedOut := to } h.1
-            hty htail ⟨l, by rw [resolve_tname I.desc w id d n dstId hr, hty]; exact hs.1⟩ ha
-            (fun _ _ => select_state _ .notAdmitted hland) (fun _ _ => hs.2.1))
-          hfree ha hland (fun _ => ⟨hs.2.1, hs.2.2.1⟩)
+          (enqueue_sem_src I w id dstId _ true { afterHead k with onNotAdmitted := na, onTimedOut := to }
+            h.1 hwait htail ⟨l, by rw [resolve_tname I.desc w id d n dstId hr, hty]; exact hs.1⟩ ha
+            (fun _ _ => hs.2.1))
+          hfree ha hwait (fun _ => ⟨hs.2.1, hs.2.2.1⟩)
     | reply =>
       simp only [execRun, hgo, hk, ite_true]
-      exact reply_inv I w id k es h hph hk ha hty (head_rest _ _ _ _ _ hpe) hland
+      exact reply_inv I w id k es h hph hk ha hty (head_rest _ _ _ _ _ hpe) hsrc0
     | selfSchedule label =>
       simp only [execRun, hgo, hk, ite_true]
       split
-      · exact inv_proceed I w id (w.st id) (afterHead k) h ha hfree ha rfl rfl hty htail hland
+      · exact inv_proceed I w id (w.st id) (afterHead k) h ha hfree ha rfl rfl hty htail hsrc
       · split
         · exact inv_proceed I w id _ (afterHead k) h ha hfree (by exact ha) (by rfl) (by rfl) hty htail
-            hland
+            (src_ty I id (afterHead k) rfl hsrc)
         · exact crash_inv I w h
     | cell dst label value =>
       simp only [execRun, hgo, hk, ite_true]
-      exact cell_step_inv I w id (afterHead k) dst label _ _ h ha hfree hty htail hland
+      exact cell_step_inv I w id (afterHead k) dst label _ _ h ha hfree hty htail hsrc
     | internal =>
       simp only [execRun, hgo, hk, ite_true]
       exact inv_set_free I w id _ h ha hfree (by exact ha) (by rfl) (by trivial) (by rfl)
-        (by exact hty) (by exact htail) (by trivial) (by exact hland)
+        (by exact hty) (by exact htail) (by trivial) (by exact src_ty I id (afterHead k) rfl hsrc)
     | peer o =>
       have hs := head_peer I.desc (tname id) (contAt k) o es hpe
       simp only [execRun, hgo, hk, ite_true]
       exact inv_set_free I w id _ h ha hfree (by exact ha) (by rfl) (by trivial) (by rfl)
-        (by exact hty) (by exact htail) (by trivial) (by exact ⟨hland, hs.1⟩)
+        (by exact hty) (by exact htail) (by trivial)
+        (by exact ⟨src_ty I id _ rfl
+          (src_lists I id (w.st id) (afterHead k) (afterHead k).onNotAdmitted (afterHead k).onTimedOut o hsrc),
+          hs.1⟩)
     | abort =>
       simp only [execRun, hgo, hk, ite_true]
       exact abortChildren_inv I I.desc w id h
@@ -1753,7 +2075,8 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
         have hw' := spawnChild_inv I w w' id child h hsp
         have hst := spawnChild_other_st I w w' id child id hsp (h.1.rostered id ha)
         exact inv_proceed I w' id (w'.st id) (afterHead k) hw' (by rw [hst]; exact ha)
-          (by rw [hst]; exact hfree) (by rw [hst]; exact ha) rfl rfl (by rw [hst]; exact hty) htail hland
+          (by rw [hst]; exact hfree) (by rw [hst]; exact ha) rfl rfl (by rw [hst]; exact hty) htail
+          (src_ty I id (afterHead k) (by rw [hst]) hsrc)
 
 theorem exec_head_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
     (hs : execHead I w id = some w') : Inv I w' := by
@@ -1821,44 +2144,31 @@ theorem effects_of_transition (I : Impl) (hL : LocalOk I) (tr : Transition) (hm 
     simp only [transitionOk, ht, Bool.and_eq_true] at hok
     exact hok.1.1.1.1.1.2
 
-/-- A role that is not a core may move to any typestate: no compatibility group names it. -/
-theorem sem_noncore (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I w)
-    (hcore : ∀ r, id ≠ .core r) (hcont : contTy a) (hprog : programOk I.desc id a)
-    (hwait : waitEdge I.desc id a) (hoff : a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed)
-    (hroster : id ∈ w.roster) : SemInv I (setActor w id a) := by
-  apply sem_stable I w (setActor w id a) hS
-  · intro _ _ r _
-    rw [setActor_other w id (.core r) a (Ne.symm (hcore r))]
-  · intro _ _ r _
-    rw [setActor_other w id (.core r) a (Ne.symm (hcore r))]
-  · intro i
-    by_cases hi : i = id
-    · rw [hi, setActor_self]; exact hcont
-    · rw [setActor_other w id i a hi]; exact hS.cont i
-  · intro i
-    by_cases hi : i = id
-    · rw [hi, setActor_self]; exact hprog
-    · rw [setActor_other w id i a hi]; exact hS.prog i
-  · intro i
-    by_cases hi : i = id
-    · rw [hi, setActor_self]; exact hwait
-    · rw [setActor_other w id i a hi]; exact hS.waited i
-  · intro i hdead
-    by_cases hi : i = id
-    · rw [hi, setActor_self] at hdead ⊢
-      exact hoff hdead
-    · rw [setActor_other w id i a hi] at hdead ⊢
-      exact hS.idleOff i hdead
-  · intro i hlive
-    by_cases hi : i = id
-    · rw [hi]
-      exact hroster
-    · rw [setActor_other w id i a hi] at hlive
-      exact hS.rostered i hlive
-  · intro i hmiss
-    have hne : i ≠ id := fun he => hmiss (by rw [he]; exact hroster)
-    rw [setActor_other w id i a hne]
-    exact hS.offEmpty i hmiss
+theorem stateNamed_mem (t : Template) (s : String) (h : stateNamed t s = true) (hne : s ≠ "") :
+    t.states.elem s = true := by
+  unfold stateNamed at h
+  simp only [Bool.or_eq_true, beq_iff_eq] at h
+  rcases h with h | h
+  · exact absurd h hne
+  · exact h
+
+/-- A landing state of a checked transition is a declared state of its template. -/
+theorem lands_named (I : Impl) (hL : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions)
+    (s : String) (hs : landsAt tr s) : (statesOf I.desc tr.template).elem s = true := by
+  have hok := transitionOk_of_mem I hL tr hm
+  cases ht : templateOf I.desc tr.template with
+  | none => simp [transitionOk, ht] at hok
+  | some t =>
+    simp only [transitionOk, ht, Bool.and_eq_true] at hok
+    rw [statesOf, ht]
+    rcases hs with rfl | ⟨hne, hfield⟩
+    · exact hok.1.1.1.1.1.1.1.1.1.1.1.1.1.2
+    · rcases hfield with h | h | h | h | h
+      · exact stateNamed_mem t s (by rw [h]; exact hok.1.1.1.1.1.1.1.1.1.1.1.2) hne
+      · exact stateNamed_mem t s (by rw [h]; exact hok.1.1.1.1.1.1.1.1.1.1.2) hne
+      · exact stateNamed_mem t s (by rw [h]; exact hok.1.1.1.1.1.1.1.1.1.2) hne
+      · exact stateNamed_mem t s (by rw [h]; exact hok.1.1.1.1.1.1.1.1.2) hne
+      · exact stateNamed_mem t s (by rw [h]; exact hok.1.1.1.1.1.1.1.2) hne
 
 /-- What a delivery leaves: the world only reads cells, and the receiver is installed
 in a checked, unparked phase with the same life and parked list. -/
@@ -1869,9 +2179,9 @@ structure DeliverOk (I : Impl) (w : World) (id : InstId) (a a' : Actor) (w' : Wo
   free : notParked a'.phase
   st : ∀ i, w'.st i = w.st i
   roster : w'.roster = w.roster
-  out : outcomeOk I.desc id a'
+  out : outcomeOk I id a'
 
-theorem deliver_ok (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w : World) (id : InstId)
+theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
     (a : Actor) (m : Msg) (w' : World) (a' : Actor) (hS : SemInv I w)
     (hlife : a.life = (w.st id).life) (hty : a.typestate = (w.st id).typestate)
     (h : deliver I w id a m = some (w', a')) : DeliverOk I w id a a' w' := by
@@ -1911,7 +2221,6 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w : World)
         · cases h
         · cases h
           have hfm := findDeliver_mem I (tname id) a.typestate m tr htr
-          have hland := hO tr hfm.1
           have heff := effects_of_transition I hL tr hfm.1
           rw [hfm.2.1] at heff
           have hfrom : ∀ i, i = id → ((readCells I.desc w id).st i).typestate = tr.fromState := by
@@ -1926,14 +2235,16 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w : World)
             | peer n k g =>
               exact sem_noncore I _ _ _ hS1 (fun r => peer_ne_core n k g r) trivial trivial trivial
                 (idleOff_now _ rfl) hmem1
-          · refine ⟨?_, rfl, rfl, trivial, hst, hro, hland⟩
-            cases id with
-            | core r =>
-              exact sem_move I _ r _ tr hS1 hL (hfrom _ rfl) rfl (by rw [hst]; exact hlife) hfm.2.1
-                hfm.1 rfl heff trivial (idleOff_life halive) (Or.inr hmem1)
-            | peer n k g =>
-              exact sem_noncore I _ _ _ hS1 (fun r => peer_ne_core n k g r) rfl heff trivial
-                (idleOff_life halive) hmem1
+          · refine ⟨?_, rfl, rfl, trivial, hst, hro, ?_⟩
+            · cases id with
+              | core r =>
+                exact sem_move I _ r _ tr hS1 hL (hfrom _ rfl) rfl (by rw [hst]; exact hlife) hfm.2.1
+                  hfm.1 rfl heff trivial (idleOff_life halive) (Or.inr hmem1)
+              | peer n k g =>
+                exact sem_noncore I _ _ _ hS1 (fun r => peer_ne_core n k g r) rfl heff trivial
+                  (idleOff_life halive) hmem1
+            · unfold outcomeOk
+              refine ⟨tr, hfm.1, hfm.2.1, Or.inl rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, rfl⟩
 
 /-- The receiver installed after a delivery that took a message from its bulk or priority queue. -/
 theorem inv_deliver (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (h : Inv I w)
@@ -1946,7 +2257,7 @@ theorem inv_deliver (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (h : 
       (by rw [hd.parked, hd.st, hpk]) (by rw [hd.st]; exact hd.life.trans hlife)
   · exact open_set w1 id a1 (open_shape w w1 h.2.2.1 (fun i hi => by rw [hd.roster]; exact hi)
       (fun i => by rw [hd.st])) (by rw [hd.roster]; exact h.1.rostered id halive)
-  · exact outcome_set I.desc w1 id a1 (outcome_shape I.desc w w1 h.2.2.2 (fun i => by rw [hd.st]))
+  · exact outcome_set I w1 id a1 (outcome_shape I w w1 h.2.2.2 (fun i => by rw [hd.st]) (fun i => by rw [hd.st]))
       hd.out
 
 theorem resume_call_ok (D : Description) (sid : InstId) (a : Actor) (dst : InstId) (k : Cont)
@@ -1972,7 +2283,7 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
     (who : InstId) (h : Inv I w) (hS : SemInv I (setActor w1 id cur)) (hst : ∀ i, w1.st i = w.st i)
     (hro : w1.roster = w.roster) (hidle : (w.st id).phase = .idle) (halive : (w.st id).life = .alive)
     (hqueue : (w.st id).parked = p :: ps) (hcurPk : cur.parked = ps) (hcurPh : notParked cur.phase)
-    (hcurLife : cur.life = (w.st id).life) (hcurOut : outcomeOk I.desc id cur) :
+    (hcurLife : cur.life = (w.st id).life) (hcurOut : outcomeOk I id cur) :
     Inv I (setActor (creditSender (setActor w1 id cur) (tname id) who) p.sender
       (resumeSender ((creditSender (setActor w1 id cur) (tname id) who).st p.sender) p.isCall id)) := by
   have hM := h.2.1
@@ -1995,7 +2306,8 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
   have hcont : contTy (cred.st p.sender) := contTy_congr hsp hsty (h.1.cont _)
   have hprog : programOk I.desc p.sender (cred.st p.sender) := programOk_congr _ _ hsp (h.1.prog _)
   have hwait : waitEdge I.desc p.sender (cred.st p.sender) := waitEdge_congr _ _ hsp hsty (h.1.waited _)
-  have hout : outcomeOk I.desc p.sender (cred.st p.sender) := outcome_congr _ _ hsp (h.2.2.2 _)
+  have hout : outcomeOk I p.sender (cred.st p.sender) :=
+    outcome_congr I p.sender hsp hsty (h.2.2.2 _)
   have hstat : (∃ k, (cred.st p.sender).phase = .parked id p.isCall k) ∨
       ((cred.st p.sender).phase = .idle ∨ (cred.st p.sender).phase = .crashed) := by
     rcases hM.fwd id p hmemp with ⟨k, hk⟩ | hh
@@ -2019,8 +2331,8 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
       · rw [resume_off _ _ _ hoff]
         exact ⟨rfl, rfl, hcont, hprog, hwait,
           by rcases hoff with hp | hp <;> rw [hp] <;> trivial, rfl⟩
-  have hrout : outcomeOk I.desc p.sender (resumeSender (cred.st p.sender) p.isCall id) := by
-    apply outcome_resume I.desc p.sender _ p.isCall id hout
+  have hrout : outcomeOk I p.sender (resumeSender (cred.st p.sender) p.isCall id) := by
+    apply outcome_resume I p.sender _ p.isCall id hout
     intro d c k hph hb
     rcases hstat with ⟨k', hk'⟩ | hoff
     · rw [hk'] at hph
@@ -2075,8 +2387,8 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
     · rw [setActor_other cred p.sender i r hs]
       by_cases hii : i = id
       · rw [hii]
-        exact outcome_congr _ _ (by rw [hcr.phase, hbid]) hcurOut
-      · exact outcome_congr _ _ (by rw [hcr.phase, hbo i hii]) (h.2.2.2 i)
+        exact outcome_congr I id (by rw [hcr.phase, hbid]) (by rw [hcr.ty, hbid]) hcurOut
+      · exact outcome_congr I i (by rw [hcr.phase, hbo i hii]) (by rw [hcr.ty, hbo i hii]) (h.2.2.2 i)
 
 theorem sem_requeue (I : Impl) (w : World) (id : InstId) (a b : Actor) (hS : SemInv I (setActor w id a))
     (hl : b.life = a.life) (ht : b.typestate = a.typestate) (hp : b.phase = a.phase)
@@ -2098,7 +2410,7 @@ theorem sem_requeue (I : Impl) (w : World) (id : InstId) (a b : Actor) (hS : Sem
     have hne : i ≠ id := fun he => hi (by rw [he]; exact hmem)
     rw [setActor_other w id i b hne, setActor_other w id i a hne]
 
-theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w w' : World) (id : InstId)
+theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     (h : Inv I w) (hs : receiveBulk I w id = some w') : Inv I w' := by
   unfold receiveBulk at hs
   dsimp only at hs
@@ -2118,7 +2430,7 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w w'
         · cases hs
         · next w1 a1 hd =>
           cases hs
-          have hd' := deliver_ok I hL hO w id _ p.msg w1 a1 h.1 (by rfl) (by rfl) hd
+          have hd' := deliver_ok I hL w id _ p.msg w1 a1 h.1 (by rfl) (by rfl) hd
           exact resume_one I w w1 id a1 p ps _ h hd'.sem hd'.st hd'.roster hidle halive hpk hd'.parked
             hd'.free hd'.life hd'.out
     | cons m ms =>
@@ -2129,7 +2441,7 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w w'
         · cases hs
         · next w1 a1 hd =>
           cases hs
-          have hd' := deliver_ok I hL hO w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
+          have hd' := deliver_ok I hL w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
           exact inv_same I _ _ (inv_deliver I w w1 id _ a1 h hd' hidle halive rfl (by simp [hpk]))
             (same_credit _ _ _)
       | cons p ps =>
@@ -2138,17 +2450,17 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w w'
         · cases hs
         · next w1 a1 hd =>
           cases hs
-          have hd' := deliver_ok I hL hO w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
+          have hd' := deliver_ok I hL w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
           have hS2 : SemInv I (setActor w1 id { a1 with box := a1.box ++ [p.msg], parked := ps }) :=
             sem_requeue I w1 id a1 _ hd'.sem rfl rfl rfl (by rw [hd'.roster]; exact hmem)
           exact resume_one I w w1 id { a1 with box := a1.box ++ [p.msg], parked := ps } p ps _ h hS2 hd'.st
-            hd'.roster hidle halive hpk rfl hd'.free hd'.life (outcome_congr _ _ rfl hd'.out)
+            hd'.roster hidle halive hpk rfl hd'.free hd'.life (outcome_congr I id rfl rfl hd'.out)
 
-theorem receive_prio_inv (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w w' : World) (id : InstId)
+theorem receive_prio_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     (h : Inv I w) (hs : receivePrio I w id = some w') : Inv I w' := by
   obtain ⟨m, pre, suf, w1, a1, halive, hidle, _, _, hd, hw'⟩ := receivePrio_spec I w w' id hs
   subst hw'
-  have hd' := deliver_ok I hL hO w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
+  have hd' := deliver_ok I hL w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
   exact inv_deliver I w w1 id _ a1 h hd' hidle halive rfl rfl
 
 theorem clear_cont (caller : InstId) (k : Cont) : ∃ r, clearReplyCont caller k = { k with replyTo := r } := by
@@ -2158,43 +2470,132 @@ theorem clear_cont (caller : InstId) (k : Cont) : ∃ r, clearReplyCont caller k
   · exact ⟨k.replyTo, rfl⟩
 
 /-- Forgetting a reply obligation keeps every checked field of the continuation. -/
-theorem clear_preds (D : Description) (id caller : InstId) (a b : Actor)
+theorem clear_preds (I : Impl) (id caller : InstId) (a b : Actor)
     (hp : b.phase = clearReplyPhase caller a.phase) (ht : b.typestate = a.typestate)
-    (hc : contTy a) (hg : programOk D id a) (hw : waitEdge D id a) (ho : outcomeOk D id a) :
-    contTy b ∧ programOk D id b ∧ waitEdge D id b ∧ outcomeOk D id b := by
-  unfold contTy at hc ⊢
-  unfold programOk at hg ⊢
-  unfold waitEdge at hw ⊢
-  unfold outcomeOk at ho ⊢
-  rw [hp, ht]
-  revert hc hg hw ho
-  cases a.phase with
-  | idle => exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
-  | crashed => exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
+    (hc : contTy a) (hg : programOk I.desc id a) (hw : waitEdge I.desc id a) (ho : outcomeOk I id a) :
+    contTy b ∧ programOk I.desc id b ∧ waitEdge I.desc id b ∧ outcomeOk I id b := by
+  cases hph : a.phase with
+  | idle =>
+    have hb : b.phase = .idle := by rw [hp, hph]; rfl
+    exact ⟨by unfold contTy; rw [hb]; trivial, by unfold programOk; rw [hb]; trivial,
+      by unfold waitEdge; rw [hb]; trivial, by unfold outcomeOk; rw [hb]; trivial⟩
+  | crashed =>
+    have hb : b.phase = .crashed := by rw [hp, hph]; rfl
+    exact ⟨by unfold contTy; rw [hb]; trivial, by unfold programOk; rw [hb]; trivial,
+      by unfold waitEdge; rw [hb]; trivial, by unfold outcomeOk; rw [hb]; trivial⟩
   | run k =>
     obtain ⟨r, hr⟩ := clear_cont caller k
-    rw [show clearReplyPhase caller (Phase.run k) = Phase.run (clearReplyCont caller k) from rfl, hr]
-    exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
+    have hb : b.phase = .run { k with replyTo := r } := by
+      rw [hp, hph, show clearReplyPhase caller (Phase.run k) = Phase.run (clearReplyCont caller k) from rfl, hr]
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · unfold contTy at hc ⊢
+      rw [hph] at hc
+      rw [hb, ht]
+      exact hc
+    · unfold programOk at hg ⊢
+      rw [hph] at hg
+      rw [hb]
+      exact hg
+    · unfold waitEdge at hw ⊢
+      rw [hph] at hw
+      rw [hb, ht]
+      exact hw
+    · unfold outcomeOk at ho ⊢
+      rw [hph] at ho
+      rw [hb]
+      exact src_reply I id b k r (src_ty I id k ht ho)
   | parked d c k =>
     obtain ⟨r, hr⟩ := clear_cont caller k
-    rw [show clearReplyPhase caller (Phase.parked d c k) = Phase.parked d c (clearReplyCont caller k)
-      from rfl, hr]
-    exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
+    have hb : b.phase = .parked d c { k with replyTo := r } := by
+      rw [hp, hph,
+        show clearReplyPhase caller (Phase.parked d c k) =
+          Phase.parked d c (clearReplyCont caller k) from rfl, hr]
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · unfold contTy at hc ⊢
+      rw [hph] at hc
+      rw [hb, ht]
+      exact hc
+    · unfold programOk at hg ⊢
+      rw [hph] at hg
+      rw [hb]
+      exact hg
+    · unfold waitEdge at hw ⊢
+      rw [hph] at hw
+      rw [hb, ht]
+      exact hw
+    · unfold outcomeOk at ho ⊢
+      rw [hph] at ho
+      rw [hb]
+      exact ⟨src_reply I id b k r (src_ty I id k ht ho.1), ho.2⟩
   | awaitReply d k =>
     obtain ⟨r, hr⟩ := clear_cont caller k
-    rw [show clearReplyPhase caller (Phase.awaitReply d k) = Phase.awaitReply d (clearReplyCont caller k)
-      from rfl, hr]
-    exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
+    have hb : b.phase = .awaitReply d { k with replyTo := r } := by
+      rw [hp, hph,
+        show clearReplyPhase caller (Phase.awaitReply d k) =
+          Phase.awaitReply d (clearReplyCont caller k) from rfl, hr]
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · unfold contTy at hc ⊢
+      rw [hph] at hc
+      rw [hb, ht]
+      exact hc
+    · unfold programOk at hg ⊢
+      rw [hph] at hg
+      rw [hb]
+      exact hg
+    · unfold waitEdge at hw ⊢
+      rw [hph] at hw
+      rw [hb, ht]
+      exact hw
+    · unfold outcomeOk at ho ⊢
+      rw [hph] at ho
+      rw [hb]
+      exact ⟨src_reply I id b k r (src_ty I id k ht ho.1), ho.2⟩
   | awaitEffect k =>
     obtain ⟨r, hr⟩ := clear_cont caller k
-    rw [show clearReplyPhase caller (Phase.awaitEffect k) = Phase.awaitEffect (clearReplyCont caller k)
-      from rfl, hr]
-    exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
+    have hb : b.phase = .awaitEffect { k with replyTo := r } := by
+      rw [hp, hph,
+        show clearReplyPhase caller (Phase.awaitEffect k) =
+          Phase.awaitEffect (clearReplyCont caller k) from rfl, hr]
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · unfold contTy at hc ⊢
+      rw [hph] at hc
+      rw [hb, ht]
+      exact hc
+    · unfold programOk at hg ⊢
+      rw [hph] at hg
+      rw [hb]
+      exact hg
+    · unfold waitEdge at hw ⊢
+      rw [hph] at hw
+      rw [hb, ht]
+      exact hw
+    · unfold outcomeOk at ho ⊢
+      rw [hph] at ho
+      rw [hb]
+      exact src_reply I id b k r (src_ty I id k ht ho)
   | awaitPeer k =>
     obtain ⟨r, hr⟩ := clear_cont caller k
-    rw [show clearReplyPhase caller (Phase.awaitPeer k) = Phase.awaitPeer (clearReplyCont caller k)
-      from rfl, hr]
-    exact fun hc hg hw ho => ⟨hc, hg, hw, ho⟩
+    have hb : b.phase = .awaitPeer { k with replyTo := r } := by
+      rw [hp, hph,
+        show clearReplyPhase caller (Phase.awaitPeer k) =
+          Phase.awaitPeer (clearReplyCont caller k) from rfl, hr]
+    refine ⟨?_, ?_, ?_, ?_⟩
+    · unfold contTy at hc ⊢
+      rw [hph] at hc
+      rw [hb, ht]
+      exact hc
+    · unfold programOk at hg ⊢
+      rw [hph] at hg
+      rw [hb]
+      exact hg
+    · unfold waitEdge at hw ⊢
+      rw [hph] at hw
+      rw [hb, ht]
+      exact hw
+    · unfold outcomeOk at ho ⊢
+      rw [hph] at ho
+      rw [hb]
+      exact ⟨src_reply I id b k r (src_ty I id k ht ho.1), ho.2⟩
 
 theorem detach_phase (a : Actor) (caller : InstId) (cid : Nat) :
     (detachReply (detachBox a caller) caller cid).phase = clearReplyPhase caller a.phase ∨
@@ -2204,17 +2605,17 @@ theorem detach_phase (a : Actor) (caller : InstId) (cid : Nat) :
   · exact Or.inl rfl
   · exact Or.inr rfl
 
-theorem detach_preds (D : Description) (id caller : InstId) (a : Actor) (cid : Nat)
-    (hc : contTy a) (hg : programOk D id a) (hw : waitEdge D id a) (ho : outcomeOk D id a) :
+theorem detach_preds (I : Impl) (id caller : InstId) (a : Actor) (cid : Nat)
+    (hc : contTy a) (hg : programOk I.desc id a) (hw : waitEdge I.desc id a) (ho : outcomeOk I id a) :
     contTy (detachReply (detachBox a caller) caller cid) ∧
-      programOk D id (detachReply (detachBox a caller) caller cid) ∧
-      waitEdge D id (detachReply (detachBox a caller) caller cid) ∧
-      outcomeOk D id (detachReply (detachBox a caller) caller cid) := by
+      programOk I.desc id (detachReply (detachBox a caller) caller cid) ∧
+      waitEdge I.desc id (detachReply (detachBox a caller) caller cid) ∧
+      outcomeOk I id (detachReply (detachBox a caller) caller cid) := by
   have ht := (detachHost_rest a caller cid).1
   rcases detach_phase a caller cid with hp | hp
-  · exact clear_preds D id caller a _ hp ht hc hg hw ho
-  · exact ⟨contTy_congr hp ht hc, programOk_congr D id hp hg, waitEdge_congr D id hp ht hw,
-      outcome_congr D id hp ho⟩
+  · exact clear_preds I id caller a _ hp ht hc hg hw ho
+  · exact ⟨contTy_congr hp ht hc, programOk_congr I.desc id hp hg, waitEdge_congr I.desc id hp ht hw,
+      outcome_congr I id hp ht ho⟩
 
 theorem detach_off (a : Actor) (caller : InstId) (cid : Nat) (h : a.phase = .idle ∨ a.phase = .crashed) :
     (detachReply (detachBox a caller) caller cid).phase = .idle ∨
@@ -2235,7 +2636,7 @@ theorem detach_free (a : Actor) (caller : InstId) (cid : Nat) (h : notParked a.p
 theorem detach_inv (I : Impl) (w : World) (dst caller : InstId) (cid : Nat) (h : Inv I w) :
     Inv I (setActor w dst (detachReply (detachBox (w.st dst) caller) caller cid)) := by
   have hrest := detachHost_rest (w.st dst) caller cid
-  have hpre := detach_preds I.desc dst caller (w.st dst) cid (h.1.cont dst) (h.1.prog dst) (h.1.waited dst)
+  have hpre := detach_preds I dst caller (w.st dst) cid (h.1.cont dst) (h.1.prog dst) (h.1.waited dst)
     (h.2.2.2 dst)
   have hlife : ∀ i, ((setActor w dst (detachReply (detachBox (w.st dst) caller) caller cid)).st i).life =
       (w.st i).life := by
@@ -2253,7 +2654,7 @@ theorem detach_inv (I : Impl) (w : World) (dst caller : InstId) (cid : Nat) (h :
       (fun d c k hk => (detachHost_park (w.st dst) caller cid d c).mpr ⟨k, hk⟩)
       (fun d c k hk => (detachHost_park (w.st dst) caller cid d c).mp ⟨k, hk⟩)
   · exact open_shape w _ h.2.2.1 (fun i hi => hi) hlife
-  · exact outcome_set I.desc w dst _ h.2.2.2 hpre.2.2.2
+  · exact outcome_set I w dst _ h.2.2.2 hpre.2.2.2
 
 theorem refund_call_roster (w : World) (caller dst : InstId) :
     (refundParkedCall w caller dst).roster = w.roster := by
@@ -2317,7 +2718,9 @@ theorem callTimeout_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
           trivial
         · rw [setActor_other w dst id _ hid, hph]
           trivial
-      exact inv_finish I _ id _ k .timedOut hW hl1 hfree hl1 rfl rfl hk ho.1
+      exact inv_finish I _ id
+        ((setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)).st id) k .timedOut
+        hW hl1 hfree hl1 rfl rfl (src_ty I id k (hk.trans hc.symm) ho.1)
         (by rw [contAt_select_to]; exact ho.2)
     · next dst k hph =>
       cases hs
@@ -2334,27 +2737,35 @@ theorem callTimeout_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
           rw [hS.offEmpty _ hi]
           rfl
         · rfl
-      have hty : ((refundParkedCall w id dst).st id).typestate = k.toState := by
-        rw [(hf id).2.2.1]
-        exact hc
-      have hp := notAdmitted_ok I.desc id ((refundParkedCall w id dst).st id) k hty
-        (select_state k .notAdmitted ho.1) (ho.2 rfl).1
+      have hs1 : srcOk I id ((refundParkedCall w id dst).st id) k :=
+        src_ty I id k (hf id).2.2.1 ho.1
+      obtain ⟨tr, hmem, htm, hl, hfld, hk⟩ := hs1
+      have hprog : effectsOk I.desc (tname id) (contAt (selectCall k .notAdmitted))
+          (selectCall k .notAdmitted).rest = true := by
+        rw [contAt_select_na]
+        simpa [selectCall] using (ho.2 rfl).1
+      rcases finish_preds I.desc id ((refundParkedCall w id dst).st id) k .notAdmitted hprog with
+        ⟨htyF, hlifeF, hpkF, hcont, hprogF, hwait, hfreeF⟩
+      have hl1 : landsAt tr (selectCall k .notAdmitted).toState := by
+        simpa [selectCall] using
+          lands_pick_field tr k.toState k.toNotAdmitted (by rw [hk]; exact hl) (Or.inl hfld.1)
       have hlife : ((refundParkedCall w id dst).st id).life = .alive := (hf id).2.1.trans halive
       refine ⟨?_, ?_, ?_, ?_⟩
-      · exact sem_set I _ id _ hSR hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
-          (idleOff_life (hp.2.1.trans hlife)) (Or.inl (proceed_keeps_parked _ _))
-      · exact mail_not_admitted w id dst _ h.2.1 ⟨k, hph⟩ (proceed_not_parked _ _)
-          ((finishCall_life _ _ _).trans (hf id).2.1) (proceed_keeps_parked _ _)
+      · exact sem_enter I _ id (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted) tr
+          ((refundParkedCall w id dst).st id).typestate (selectCall k .notAdmitted).toState hSR rfl htyF
+          hlifeF htm hmem hl hl1 hcont hprogF hwait
+          (idleOff_life (hlifeF.trans hlife)) hpkF (by rw [hR]; exact hS.rostered id halive)
+      · exact mail_not_admitted w id dst _ h.2.1 ⟨k, hph⟩ hfreeF (hlifeF.trans (hf id).2.1) hpkF
       · exact open_set _ id _ (open_shape w _ h.2.2.1 (fun i hi => by rw [hR]; exact hi) (fun i => (hf i).2.1))
           (by rw [hR]; exact hS.rostered id halive)
-      · exact outcome_set I.desc _ id _ (outcome_shape I.desc w _ h.2.2.2 (fun i => (hf i).1))
-          (outcome_finish I.desc id _ k .notAdmitted ho.1)
+      · exact outcome_set I _ id _
+          (outcome_shape I w _ h.2.2.2 (fun i => (hf i).1) (fun i => (hf i).2.2.1))
+          (outcome_finish I id _ k .notAdmitted ⟨tr, hmem, htm, hl, hfld, hk⟩)
     · next k hph =>
       cases hs
       rw [hph] at hc ho
-      exact inv_proceed I w id (w.st id) _ h halive (by rw [hph]; trivial) halive rfl rfl
-        (by show _ = pickState k.toState k.toTimeout; rw [ho.1.2.2.1]; exact hc)
-        (by rw [contAt_pick]; exact ho.2) (lands_pick k _ _ ho.1.2.2.1 ho.1)
+      exact inv_pick I w id (w.st id) k k.onTimeout k.toTimeout h halive (by rw [hph]; trivial) halive
+        rfl rfl ho.1 (Or.inr (Or.inr (Or.inl rfl))) (by rw [contAt_pick]; exact ho.2)
     · cases hs
 
 theorem ingress_inv (I : Impl) (w w' : World) (dst : InstId) (label : String) (h : Inv I w)
@@ -2374,13 +2785,13 @@ theorem ingress_inv (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
           · cases hs
             exact inv_same I w _ h (same_actor w dst _ rfl rfl rfl rfl)
 
-theorem step_inv (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (w w' : World) (hstep : Step I w w')
+theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w')
     (h : Inv I w) : Inv I w' := by
   obtain ⟨a, ha⟩ := hstep
   have hs := (apply_step I a w w' ha).2
   cases a with
-  | recvBulk id => exact receive_bulk_inv I hL hO w w' id h hs
-  | recvPrio id => exact receive_prio_inv I hL hO w w' id h hs
+  | recvBulk id => exact receive_bulk_inv I hL w w' id h hs
+  | recvPrio id => exact receive_prio_inv I hL w w' id h hs
   | exec id => exact exec_head_inv I w w' id h hs
   | finish id => exact finish_inv I w w' id h hs
   | spawn template => exact spawn_inv I w w' template h hs
@@ -2412,7 +2823,7 @@ theorem open_init (I : Impl) (N : Nat) : OpenSlots (initWorld I N) := by
   · rw [ite_eq_right hc] at hl
     exact absurd rfl hl
 
-theorem outcome_init (I : Impl) (N : Nat) : OutcomeInv I.desc (initWorld I N) := by
+theorem outcome_init (I : Impl) (N : Nat) : OutcomeInv I (initWorld I N) := by
   intro id
   unfold outcomeOk
   rw [init_phase]
@@ -2421,11 +2832,11 @@ theorem outcome_init (I : Impl) (N : Nat) : OutcomeInv I.desc (initWorld I N) :=
 theorem inv_init (I : Impl) (N : Nat) (hL : LocalOk I) : Inv I (initWorld I N) :=
   ⟨semInv_init I N hL, mail_init I N, open_init I N, outcome_init I N⟩
 
-theorem inv_reachable (I : Impl) (N : Nat) (w : World) (hL : LocalOk I) (hO : OutcomesLand I)
+theorem inv_reachable (I : Impl) (N : Nat) (w : World) (hL : LocalOk I)
     (hR : Reachable I N w) : Inv I w := by
   induction hR with
   | init => exact inv_init I N hL
-  | step _ _ _ _ ha ih => exact step_inv I hL hO _ _ ⟨_, ha⟩ ih
+  | step _ _ _ _ ha ih => exact step_inv I hL _ _ ⟨_, ha⟩ ih
 
 theorem effect_beq (a b : EffectKind) : (a == b) = true ↔ a = b := by
   cases a <;> cases b <;> decide
