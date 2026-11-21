@@ -41,9 +41,9 @@ structure SemInv (I : Impl) (w : World) : Prop where
   cont : ∀ id, contTy (w.st id)
   prog : ∀ id, programOk I.desc id (w.st id)
   waited : ∀ id, waitEdge I.desc id (w.st id)
-  /-- Absent, shutting-down, and sealed actors are idle. A roster crashed by a
-  permanent core is dead in the crashed phase, which is the other way an actor
-  that is not alive can stand. -/
+  /-- Absent and dead actors are idle. A roster crashed by a permanent core is
+  dead in the crashed phase, which is the other way an actor that is not alive
+  can stand. -/
   idleOff : ∀ id, (w.st id).life ≠ .alive →
     (w.st id).phase = .idle ∨ (w.st id).phase = .crashed
   /-- A live actor is on the roster. A kill folds that roster to fail waiters. -/

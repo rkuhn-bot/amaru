@@ -52,7 +52,7 @@ up a template the description declares. This note does not prove the
 fall-through or the missing template unreachable. A design that reaches one
 of them crashes.
 
-A seal whose recorded parent is shutting down or dead drops the tombstone:
+A seal whose recorded parent is dead drops the tombstone:
 pure-stage has already discarded that queue in `terminate_stage`. An empty
 label on a live parent is not a reachable seal under `GraphOk`. A reachable
 self-schedule and a reachable cell wake fit the lane, so neither overflows
@@ -81,16 +81,16 @@ tombstone in that position was not waiting. `child_sub_respawn_enabled` and `poo
 the birth after the receivers have taken the mail. `child_sub_refused` and
 `pool_sub_refused` do not survive, and they are not a closure of that class.
 A scheduler root takes a fresh key. A core-supervised root occupies one of
-the `N` population slots while it is alive, shutting down, or its tombstone
+the `N` population slots while it is alive, or its tombstone
 is still queued. `rootOutstanding` is that count. The tombstone cannot be
 received while the root's in-flight mail remains, so the slot stays occupied
 through the drain without a separate mail term. An unsupervised root has no
 tombstone. `loneOutstanding` counts it while it is alive, or while
 `slotMailHeld` says a surviving receiver still holds subtree mail — bulk
 box, priority lane, or a parked send, from any member at that key, on a host
-that is alive or shutting down and is not sealed with the sender. Shutting
-down alone does not hold it. A shutting-down root that still holds a
-descendant's mail does, until its own seal clears that mailbox.
+that is alive and is not sealed with the sender. The seal clears the root's
+own mailbox in the same step, so a dead root holds the slot only through mail
+a surviving receiver still has.
 `may_root_parts` and `may_free_parts` say an enabled spawn has that count
 strictly below `N`. The restart check in `LocalOk` is still only the
 tombstone, because the mail is not a typestate fact. The one attempt it
@@ -111,10 +111,10 @@ two unsupervised roots fill `N = 2` while their mail sits on the cores, and
 the third spawn is not enabled. `outlive_stuck` is that the old run is
 refused.
 
-A slot that is still shutting down is occupied too. The tombstone is queued
-at the seal, so the predecessor is dead before the parent is notified.
+A slot is occupied while its actor is alive. The tombstone is queued in the
+same step as the seal, so the predecessor is dead before the parent is notified.
 `no_tombstone_overflow` is that account for a reachable world. Under
-`GraphOk` and `LocalOk`, a pending seal of a shutting child does not fill a
+`GraphOk` and `LocalOk`, sealing a child does not fill a
 live parent's lane. The offer stays
 strictly below `capPrio`. `LocalOk` supplies `prioSized`, through
 `tmb_prio_sized`, and `hold_reach` supplies `Hold`. The run that overflowed
@@ -129,8 +129,8 @@ or there is room under `capPrio`. An undeclared label is outside that claim.
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head
 consumed by `recvBulk` or `recvPrio`, matched by the id the storing actor
-assigned when it accepted the message, or the target had begun shutting down
-or had terminated while the message was still queued. A try-drop send and a
+assigned when it accepted the message, or the target had terminated while
+the message was still queued. A try-drop send and a
 superseding cell wake are not obligations. An admitted call leaves
 `awaitReply`.
 `Assumptions` is only `rust_refines`.
@@ -152,12 +152,11 @@ consumes the head. So a reliable message whose target stays alive is delivered
 once deadlock freedom has brought the target back to receiving
 (`idle_when_free`) and the stage's own step has terminated. `Fair.bulk` and
 `Fair.prio` are what take the enabled receive. Nothing here is an axiom.
-The loss half stays: mail still queued when the target shuts down or
-terminates may be dropped, and the sender still does not block. The loss is
-that the target had begun shutting down or had terminated while the message
-was still queued. It is not a subtree kill. It does not delete the loss
-case, and it does not promise delivery for every target that was not
-shutting down at the moment of enqueue. The proof text in `Deliver.lean`
+The loss half stays: mail still queued when the target terminates may be
+dropped, and the sender still does not block. The loss is that the target
+had terminated while the message was still queued. It is not a subtree kill.
+It does not delete the loss case, and it does not promise delivery for every
+target that was alive at the moment of enqueue. The proof text in `Deliver.lean`
 is not yet restated against this wording.
 
 `loss_fair` and `loss_not_delivered` are the run without that check. A

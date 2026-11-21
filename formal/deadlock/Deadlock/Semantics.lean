@@ -815,8 +815,8 @@ def resolveId (D : Description) (w : World) (sender : InstId) (dst : String)
           | none => some (.peer dst k 0)
 
 /-- A live target only. A pool is the live occupant of `slot`. Any other
-per-peer role is the live occupant of the sender's subtree key. Shutting-down,
-dead, and never-spawned targets do not resolve. -/
+per-peer role is the live occupant of the sender's subtree key. Dead and
+never-spawned targets do not resolve. -/
 def route (w : World) (D : Description) (sender : InstId) (dst : String)
     (slot : Nat := 0) : Option InstId :=
   match templateOf D dst with
@@ -1885,7 +1885,12 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
       | .internal => setActor w id { a with phase := .awaitEffect k' }
       | .peer onTimeout =>
         setActor w id { a with phase := .awaitPeer { k' with onTimeout := onTimeout } }
-      | .abort => abortChildren I.desc w id
+      | .abort =>
+        -- The children are sealed, and their tombstones are queued, in this step.
+        -- The parent then takes the continuation: `offerPrio` has already written
+        -- the lane onto `w'.st id`, so `proceed` must start from that actor.
+        let w' := abortChildren I.desc w id
+        setActor w' id (proceed (w'.st id) k')
       | .spawn child =>
         match spawnChild I w id child with
         | some w' => setActor w' id (proceed (w'.st id) k')
@@ -7752,7 +7757,10 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
       exact (set_core_life w id { a with phase := .awaitPeer _ } name (by simp [ha])).symm.trans hl
     | abort =>
       simp [execRun, hliveB, hk] at hl
-      exact abortChildren_prev I.desc w id (InstId.core name) hl
+      have hset := set_core_life (abortChildren I.desc w id) id
+        (proceed ((abortChildren I.desc w id).st id) (afterHead k)) name
+        (by simp [proceed_keeps_life])
+      exact abortChildren_prev I.desc w id (InstId.core name) (hset.symm.trans hl)
     | spawn child =>
       simp [execRun, hliveB, hk] at hl
       cases hs : spawnChild I w id child with

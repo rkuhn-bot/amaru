@@ -190,7 +190,7 @@ structure OccInv (I : Impl) (w : World) : Prop where
       (owed w.st d s w.roster : Int) ≤ (budget I.desc (tname s) d : Int)
   clear : w.crashed = false → ∀ id, l1 I.desc (tname id) = true → (w.st id).parked = []
   /-- An absent or dead actor keeps no queue, unless the world has crashed.
-  A shutting-down actor still holds its mail until the seal. -/
+  The seal clears the mailbox in the step that kills the actor. -/
   deadEmpty : w.crashed = false →
     ∀ id, (w.st id).life = .absent ∨ (w.st id).life = .dead →
       (w.st id).box = [] ∧ (w.st id).parked = []

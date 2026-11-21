@@ -84,8 +84,9 @@ onto a full lane. It is not a silent escape from a stuck parked send. Every
 core may terminate; see 2026-11-21.
 
 A parent restarts a dead child at a fresh generation of the same key. The
-dead id is not reused. A supervisor that is dead or shutting down admits no
-new child. A core births a pool of `slots` children, indexed by slot and
+dead id is not reused. A supervisor that is not alive admits no new child.
+The shutting-down half of the earlier wording is superseded by the
+2026-11-21 20:20 fusion. A core births a pool of `slots` children, indexed by slot and
 generation, and that `slots` multiplies the population and the tombstone
 count. The restart bound is the later decision on this page.
 
@@ -117,8 +118,10 @@ Tombstones count toward `capPrio`. An enqueue that does not fit is
 slot has never been born, or when its tombstone has already been consumed, or
 in the transition that consumes that tombstone. Until then the spawn is not
 enabled: `Eff.spawn` is a no-op, the same as a full pool, and a root spawn by
-a core into that slot returns no world. A slot that is still shutting down
-is occupied: the tombstone is not queued until the seal.
+a core into that slot returns no world. A slot is occupied while it is
+alive, or while its tombstone is queued. The 2026-11-21 20:20 fusion
+supersedes the shutting-down occupation: the seal queues the tombstone in
+that same step.
 
 The tombstone is queued when the child seals, after it is dead. Pure-stage's
 `terminate_stage` finishes the child before the parent is notified, and the
@@ -141,7 +144,7 @@ and it keeps each label once, so the sender term is the larger of the
 single-path count and the number of distinct labels. `prioSizeFails` is part
 of `LocalOk`. That bound is the lane's static account.
 `no_tombstone_overflow` is that account for a reachable seal: under
-`GraphOk` and `LocalOk`, a pending seal of a shutting child does not fill a
+`GraphOk` and `LocalOk`, sealing a child does not fill a
 live parent's lane. `LocalOk` supplies `prioSized`. A reachable self-schedule
 or cell wake fits the same lane, so it does not crash there. An undeclared
 label is outside that claim. pure-stage still panics when a lane has no room.
@@ -163,10 +166,11 @@ The semantics follow that rule. A scheduler root takes a fresh subtree key.
 A per-peer child is born at its parent's key, and a restart under that same
 live parent is a new generation. The child records the parent incarnation.
 The seal delivers the tombstone to that incarnation, and drops it when the
-incarnation is shutting down or dead. An empty tombstone on a live parent is
+incarnation is dead. An empty tombstone on a live parent is
 not a reachable seal under `GraphOk`. A root under no supervisor is bounded by how many are
-alive. A root under a core is bounded by how many are alive, shutting down,
-or still have a tombstone queued. `supervisor` is an `Option`: `none` does
+alive. A root under a core is bounded by how many are alive or still have a
+tombstone queued. The 2026-11-21 20:20 fusion supersedes the shutting-down
+disjunct. `supervisor` is an `Option`: `none` does
 not match a template, including one whose name is empty.
 
 `no_tombstone_overflow` is that seal for a reachable world. `hold_reach` is
@@ -237,8 +241,10 @@ the next generation is the next occupant. A scheduler root takes a fresh
 key from `freshKey` — a new slot, with no previous occupant.
 `slotCoreMail` is a bulk message, a priority message, or a parked send still
 sitting on a core, whose sender is any generation of that slot.
-`slotRespawnBlocked` is that mail, or the slot still alive or shutting
-down, or its tombstone still queued. `spawnChild` is then a no-op, the
+`slotRespawnBlocked` was that mail, or the slot still alive or shutting
+down, or its tombstone still queued. The 11:46 entry drops the mail term
+for a supervised slot, and the 2026-11-21 20:20 fusion drops the
+shutting-down term. `spawnChild` is then a no-op, the
 same as a full pool. `freeSlot` skips such a pool index. `spawn` of a root
 is unchanged: the key is fresh.
 
@@ -340,12 +346,13 @@ population is the account that stops that. `N` is how many roots may occupy
 a slot at once. A root keeps the slot while any member of its subtree at
 that key, any generation, still has mail on a core — bulk box, priority
 lane, or a parked send. That is the same holding as a queued tombstone.
-`rootOutstanding` is the core-supervised count, and it still includes a root
-that is alive, shutting down, or waiting on its tombstone. `loneOutstanding`
-is the unsupervised count: alive, or still holding subtree mail. An
-unsupervised root has no tombstone. Shutting down alone does not hold its
-slot. A shutting-down root that still holds a descendant's mail does, until
-its own seal clears that mailbox. Fresh keys are unchanged.
+`rootOutstanding` is the core-supervised count, and it includes a root that
+is alive or waiting on its tombstone. `loneOutstanding` is the unsupervised
+count: alive, or still holding subtree mail. An unsupervised root has no
+tombstone. The seal clears that root's own mailbox in the same step, so a
+dead root holds the slot only through mail a surviving receiver still has.
+The 2026-11-21 20:20 fusion supersedes the shutting-down clauses of this
+entry. Fresh keys are unchanged.
 
 A core-supervised pool is the same unit on a different account. Its
 population is `slots`, not `N`, so it does not go through `rootOutstanding`.
@@ -377,11 +384,12 @@ every member at that key, any generation. A template with no subtree holds
 for its own senders. The message may be bulk, priority, or a parked send
 still on the host.
 
-A host counts while its life is alive or shutting down, unless it is sealed
-together with the sender. Sealed together means the host is the sender, or
-it sits under the sender on the recorded parent chain. `terminateStage`
-seals those descendants in the same step (`dropDescendants`, `sealBranch`,
-`releaseWorld`) and seals the sender itself at its later seal.
+A host counts while its life is alive, unless it is sealed together with the
+sender. Sealed together means the host is the sender, or it sits under the
+sender on the recorded parent chain. `terminateStage` seals those
+descendants and the sender in the same step (`dropDescendants`,
+`sealBranch`, `releaseWorld`, then `shutdownActor`). The 2026-11-21 20:20
+fusion supersedes the shutting-down host and the later seal.
 `releaseWorld` empties that actor's mailbox and does not clear a sibling, a
 parent, or a core. Mail on a host that dies in that seal does not hold the
 slot. At a later spawn check those hosts are already dead, so the life
@@ -392,10 +400,9 @@ until that sibling consumes it or seals on its own.
 `rootOutstanding`, and `loneOutstanding` all used it. A same-key respawn was
 a no-op while the mail remained. A fresh-key root still occupies a
 population slot while it remains, and that half is what `loneOutstanding`
-keeps. Shutting down alone does not hold an unsupervised root. Mail on the
-root itself is sealed with the sender and does not count. A shutting-down
-root that still holds a descendant's mail does count, until its own seal
-clears that mailbox.
+keeps. Mail on the root itself is sealed with the sender and does not count.
+The 2026-11-21 20:20 fusion supersedes the shutting-down root: the seal
+clears that mailbox in the terminate step.
 
 `child_sub_refused` and `pool_sub_refused` were the one-script witnesses
 that a supervised respawn did not birth the next generation. They do not
@@ -533,3 +540,18 @@ the spawn in the handler is not refused for mail. An alive sibling that
 still holds the message withholds `ChildDied`; the refund is `creditLive`
 when that sibling consumes it, which is before the handler can spawn the
 next generation.
+
+## 2026-11-21 — Abort advances the parent's continuation
+
+Helen, round 16, at `05e42f884`. `Eff.abort` sealed the live children and
+left the parent in `.run` with `.abort` still at the head. The tombstones
+sat on the parent's lane, and the parent never reached a step that could
+receive them.
+
+The effect seals the children and then continues the parent. `proceed` is
+applied to the actor `abortChildren` returned, so the lane that just
+received the tombstones is the lane the continuation keeps.
+`Deadlock/AbortCont.lean` is a checked parent: `Stop` is `.abort` followed
+by `.internal`, the abort step leaves the parent running that `.internal`
+with the child dead and the tombstone queued, and `finish` then `recvPrio`
+takes the tombstone.
