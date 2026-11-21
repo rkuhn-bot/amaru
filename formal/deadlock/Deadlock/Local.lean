@@ -124,27 +124,33 @@ def callOutcomesOk (D : Description) (template : String) (at_ : BranchAt) (es : 
 def stateNamed (t : Template) (s : String) : Bool :=
   s == "" || t.states.elem s
 
-mutual
-/-- `Eff.spawn` names a per-peer child this template supervises. -/
-def spawnScope (D : Description) (src : String) : List Eff → Bool
-  | [] => true
-  | e :: es => spawnEffect D src e && spawnScope D src es
+/-- Fuel keeps the walk structural, so the checker reduces. Running out of fuel
+rejects the program: a spawn the walk did not see is not accepted. -/
+def spawnScopeFuel (D : Description) (src : String) : Nat → List Eff → Bool
+  | 0, _ => false
+  | _ + 1, [] => true
+  | n + 1, .spawn child :: es =>
+    (match templateOf D child, templateOf D src with
+      | some ct, some p =>
+        supNamed ct.supervisor src && ct.multiplicity == .perPeer &&
+          if p.multiplicity == .perPeer then ct.slots == 0 else ct.slots != 0
+      | _, _ => false) &&
+      spawnScopeFuel D src n es
+  | n + 1, .trySend _ _ _ onFull onGone :: es =>
+    spawnScopeFuel D src n onFull && spawnScopeFuel D src n onGone && spawnScopeFuel D src n es
+  | n + 1, .call _ _ _ onNotAdmitted onTimedOut :: es =>
+    spawnScopeFuel D src n onNotAdmitted && spawnScopeFuel D src n onTimedOut &&
+      spawnScopeFuel D src n es
+  | n + 1, .peer onTimeout :: es =>
+    spawnScopeFuel D src n onTimeout && spawnScopeFuel D src n es
+  | n + 1, _ :: es => spawnScopeFuel D src n es
 
-def spawnEffect (D : Description) (src : String) : Eff → Bool
-  | .spawn child =>
-    match templateOf D child, templateOf D src with
-    | some ct, some p =>
-      if p.multiplicity == .perPeer then
-        supNamed ct.supervisor src && ct.multiplicity == .perPeer && ct.slots == 0
-      else
-        supNamed ct.supervisor src && ct.multiplicity == .perPeer && ct.slots != 0
-    | _, _ => false
-  | .trySend _ _ _ onFull onGone => spawnScope D src onFull && spawnScope D src onGone
-  | .call _ _ _ onNotAdmitted onTimedOut =>
-    spawnScope D src onNotAdmitted && spawnScope D src onTimedOut
-  | .peer onTimeout => spawnScope D src onTimeout
-  | _ => true
-end
+/-- `Eff.spawn` names a per-peer child this template supervises. -/
+def spawnScope (D : Description) (src : String) (es : List Eff) : Bool :=
+  spawnScopeFuel D src 64 es
+
+def spawnEffect (D : Description) (src : String) (e : Eff) : Bool :=
+  spawnScopeFuel D src 64 [e]
 
 def transitionOk (I : Impl) (tr : Transition) : Bool :=
   match templateOf I.desc tr.template with
