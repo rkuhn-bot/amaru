@@ -7,9 +7,9 @@ for the initial world, for a self-schedule, for every scheduler spawn,
 for a per-peer child born at its parent's key, and for a pool slot taken
 from `freeSlot`. An empty subtree's key comes from `IxPast` or `RootPast`,
 and the fresh id's lane is empty because it was off the roster. `exec` of a
-send, a try-send, and a call keeps it. A reply, a cell wake, a child spawn,
-and `callTimeout` are still open, and so is carrying `IxPast`, `RootPast`,
-and the off-roster empty lane through every step.
+send, a try-send, a call, a reply, and `terminate` keeps it. A cell wake, a
+child spawn, and `callTimeout` are still open, and so is carrying `IxPast`,
+`RootPast`, and the off-roster empty lane through every step.
 `no_tombstone_overflow` is not restated: this file does not claim that every
 reachable world stays inside the lane.
 -/
@@ -8497,5 +8497,93 @@ theorem hold_call (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Acto
       · rw [mail_phase_other w I.desc id dstId msg true kWait i hwho]
         exact hH.phase i hi
     exact hrun.symm ▸ hold_mail I w hH id dstId msg true kWait hpre hph
+
+theorem hold_reply_proceed (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (k : Cont)
+    (hpre : w.crashed = false) (hdec : ContDeclared I (tname id) k) :
+    Hold I (setActor w id (proceed (w.st id) k)) := by
+  have hph : id ∈ w.roster → phaseDeclared I (tname id) (proceed (w.st id) k).phase := by
+    intro _
+    simpa [proceed_resumed] using resumed_declared I (tname id) k hdec
+  exact hold_proceed I w hH id k hpre hph
+
+theorem hold_reply (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (es : List Eff) (hpre : w.crashed = false) (_ha : a = w.st id) (hlive : a.life = .alive)
+    (hk : k.rest = .reply :: es) (hdec : ContDeclared I (tname id) k) :
+    Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  have hrun : execRun I w id a k = performReply w id k := by
+    simp [execRun, hgo, hk]
+  let k' := afterHead k
+  have htail := ContDeclared.after I (tname id) k _ _ hk hdec
+  have hplain : performReply w id k = setActor w id (proceed (w.st id) k') →
+      Hold I (performReply w id k) := by
+    intro heq
+    have hP := hold_reply_proceed I w hH id k' hpre (by simpa [k'] using htail)
+    simpa [heq, k'] using hP
+  cases hto : k.replyTo with
+  | none =>
+    exact hrun.symm ▸ hplain (by simp [performReply, hto, k'])
+  | some caller =>
+    cases hphase : (w.st caller).phase with
+    | awaitReply dst ck =>
+      by_cases hdst : dst = id
+      · by_cases howe : (w.st id).oweId = some (w.st caller).waitId
+        · have hif : (decide (dst = id) &&
+              decide ((w.st id).oweId = some (w.st caller).waitId)) = true := by
+            simp [hdst, howe]
+          let done := finishCall (w.st caller) ck .reply
+          let w1 := setActor w caller done
+          have hrun1 : performReply w id k =
+              setActor w1 id (proceed (w1.st id) k') := by
+            simp [performReply, hto, hphase, hif, k', done, w1]
+          have hl : done.life = (w.st caller).life := (finish_keep (w.st caller) ck .reply).1
+          have hp : done.prio = (w.st caller).prio := (finish_keep (w.st caller) ck .reply).2.1
+          have hpe : done.pendingTombstone = (w.st caller).pendingTombstone :=
+            (finish_keep (w.st caller) ck .reply).2.2
+          have hpa : done.parent = (w.st caller).parent := finish_parent (w.st caller) ck .reply
+          have hphC : caller ∈ w.roster →
+              phaseDeclared I (tname caller) done.phase := by
+            intro hmem
+            have hcont : ContDeclared I (tname caller) ck := by
+              simpa [hphase, phaseDeclared] using hH.phase caller hmem
+            exact finish_declared I (tname caller) (w.st caller) ck .reply hcont
+          have hW1 := hold_set I w hH caller done hl hp hpe hpa hphC hpre
+          by_cases hsame : caller = id
+          · have hst : w1.st id = done := by simpa [w1, hsame] using setActor_self w caller done
+            have hph : id ∈ w1.roster →
+                phaseDeclared I (tname id) (proceed (w1.st id) k').phase := by
+              intro _
+              simpa [hst, proceed_resumed, k'] using resumed_declared I (tname id) k' htail
+            have hpre1 : w1.crashed = false := by simp [w1, setActor, hpre]
+            have hP := hold_proceed I w1 hW1 id k' hpre1 hph
+            exact hrun.symm ▸ hrun1.symm ▸ hP
+          · have hst : w1.st id = w.st id := setActor_other w caller id done (Ne.symm hsame)
+            have hph : id ∈ w1.roster →
+                phaseDeclared I (tname id) (proceed (w1.st id) k').phase := by
+              intro _
+              simpa [hst, proceed_resumed, k'] using resumed_declared I (tname id) k' htail
+            have hpre1 : w1.crashed = false := by simp [w1, setActor, hpre]
+            have hP := hold_proceed I w1 hW1 id k' hpre1 hph
+            exact hrun.symm ▸ hrun1.symm ▸ hP
+        · have hif : (decide (dst = id) &&
+              decide ((w.st id).oweId = some (w.st caller).waitId)) = false := by
+            simp [hdst, howe]
+          exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, hif, k'])
+      · have hif : (decide (dst = id) &&
+            decide ((w.st id).oweId = some (w.st caller).waitId)) = false := by
+          simp [hdst]
+        exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, hif, k'])
+    | idle =>
+      exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
+    | run _ =>
+      exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
+    | parked _ _ _ =>
+      exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
+    | awaitEffect _ =>
+      exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
+    | awaitPeer _ =>
+      exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
+    | crashed =>
+      exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
 
 end Deadlock
