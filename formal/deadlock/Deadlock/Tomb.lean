@@ -7,9 +7,9 @@ for the initial world, for a self-schedule, for every scheduler spawn,
 for a per-peer child born at its parent's key, and for a pool slot taken
 from `freeSlot`. An empty subtree's key comes from `IxPast` or `RootPast`,
 and the fresh id's lane is empty because it was off the roster. `exec` of a
-send, a try-send, a call, a reply, a cell wake, and `terminate` keeps it. A
-child spawn and `callTimeout` are still open, and so is carrying `IxPast`,
-`RootPast`, and the off-roster empty lane through every step.
+send, a try-send, a call, a reply, a cell wake, a child spawn, and `terminate`
+keeps it. `callTimeout` is still open, and so is carrying `IxPast`, `RootPast`,
+and the off-roster empty lane through every step.
 `no_tombstone_overflow` is not restated: this file does not claim that every
 reachable world stays inside the lane.
 -/
@@ -8742,5 +8742,144 @@ theorem hold_cell (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Acto
     have hpreP : wP.crashed = false := by simp [wP, setActor, hpreC]
     have hW := hold_wakes I (readersOf wP dst) wP hP label id hpreP halive hmem hlabel
     simpa [hrun, wakeReaders] using hW
+
+theorem read_crash (D : Description) (w : World) (id : InstId) :
+    (readCells D w id).crashed = w.crashed := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => simp
+  | cons l ls ih =>
+    simp only [List.foldl_cons]
+    let mid := setObserved
+      (setCell w (tname id) l { (w.cell (tname id) l) with dirty := false }) id l
+      (w.cell (tname id) l).value
+    have hmid : mid.crashed = w.crashed := by simp [mid, setCell, setObserved]
+    exact (ih mid).trans hmid
+
+theorem admit_crash (I : Impl) (w : World) (id : InstId) (a : Actor) :
+    (admitBorn I w id a).crashed = w.crashed := by
+  simp [admitBorn, read_crash, setActor]
+
+/-- A child the template allows is born, and the parent proceeds. A full slot
+is a no-op. A spawn the template does not allow crashes the roster. -/
+theorem hold_spawn_child (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc)
+    (hnd : w.roster.Nodup) (id : InstId) (a : Actor) (k : Cont) (child : String)
+    (es : List Eff) (hpre : w.crashed = false) (ha : a = w.st id) (hlive : a.life = .alive)
+    (hk : k.rest = .spawn child :: es) (hdec : ContDeclared I (tname id) k)
+    (hoff : ∀ i, i ∉ w.roster → (w.st i).prio = []) : Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  have htail := ContDeclared.after I (tname id) k _ _ hk hdec
+  have hphase (w1 : World) : id ∈ w1.roster →
+      phaseDeclared I (tname id) (proceed (w1.st id) k').phase := by
+    intro _
+    simpa [proceed_resumed] using resumed_declared I (tname id) k' htail
+  have hlifeB : ((w.st id).life == .alive) = true := by simpa [ha, beq_iff_eq] using hlive
+  have hparent : (w.st id).life = .alive := by simpa [ha] using hlive
+  cases ht : templateOf I.desc child with
+  | none =>
+    have hsc : spawnChild I w id child = none := by simp [spawnChild, ht]
+    have hrun : execRun I w id a k = crashWorld w := by simp [execRun, hgo, hk, hsc]
+    exact hrun.symm ▸ hold_crash I w hH
+  | some t =>
+    let gate := t.multiplicity == .perPeer && supNamed t.supervisor (tname id) &&
+      ((w.st id).life == .alive)
+    by_cases hok : gate = true
+    · have hmul : t.multiplicity = .perPeer := by
+        cases hm : t.multiplicity with
+        | perPeer => rfl
+        | one =>
+          have hb : (Multiplicity.one == .perPeer) = false := by decide
+          simp [gate, hm, hb] at hok
+      have hsupn : supNamed t.supervisor (tname id) = true := by
+        cases hs : supNamed t.supervisor (tname id) with
+        | true => rfl
+        | false => simp [gate, hs] at hok
+      cases id with
+      | core pname =>
+        have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
+        by_cases hslotsB : (t.slots != 0) = true
+        · have hslots : t.slots ≠ 0 := by
+            intro hz
+            have hzB : (t.slots != 0) = false := by simp [bne, hz]
+            simp [hzB] at hslotsB
+          cases hfree : freeSlot w (.core pname) child t.slots with
+          | none =>
+            have hsc : spawnChild I w (.core pname) child = some w := by
+              simp [spawnChild, ht, gate, hok, hslotsB, hfree]
+            have hrun : execRun I w (.core pname) a k =
+                setActor w (.core pname) (proceed (w.st (.core pname)) k') := by
+              simp [execRun, hgo, hk, hsc, k']
+            exact hrun.symm ▸ hold_proceed I w hH (.core pname) k' hpre (hphase w)
+          | some kslot =>
+            let bornId := InstId.peer child kslot (maxGen w child kslot)
+            let born := { bornActor I.desc w child kslot t.initial with parent := some (.core pname) }
+            let wB := admitBorn I w bornId born
+            have hsc : spawnChild I w (.core pname) child = some wB := by
+              simp [spawnChild, ht, gate, hok, hslotsB, hfree, bornId, born, wB]
+            have hB := hold_child_pool I w hH hG hnd (.core pname) pname child t kslot ht hmul hsup
+              rfl hslots hfree hparent hpre (hoff bornId (gen_fresh w child kslot))
+            have hpreB : wB.crashed = false := by simpa [wB, admit_crash] using hpre
+            have hP := hold_proceed I wB hB (.core pname) k' hpreB (hphase wB)
+            have hrun : execRun I w (.core pname) a k =
+                setActor wB (.core pname) (proceed (wB.st (.core pname)) k') := by
+              simp [execRun, hgo, hk, hsc, k']
+            exact hrun.symm ▸ hP
+        · have hsc : spawnChild I w (.core pname) child = none := by
+            simp [spawnChild, ht, gate, hok, hslotsB]
+          have hrun : execRun I w (.core pname) a k = crashWorld w := by
+            simp [execRun, hgo, hk, hsc]
+          exact hrun.symm ▸ hold_crash I w hH
+      | peer pname pk pg =>
+        have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
+        by_cases hzeroB : (t.slots == 0) = true
+        · by_cases hbusy : (slotOccupied w child pk || slotTombstoneQueued w (.peer pname pk pg) child pk) = true
+          · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
+              simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
+            have hrun : execRun I w (.peer pname pk pg) a k =
+                setActor w (.peer pname pk pg) (proceed (w.st (.peer pname pk pg)) k') := by
+              simp [execRun, hgo, hk, hsc, k']
+            exact hrun.symm ▸ hold_proceed I w hH (.peer pname pk pg) k' hpre (hphase w)
+          · have hocc : slotOccupied w child pk = false := by
+              cases ho : slotOccupied w child pk with
+              | false => rfl
+              | true =>
+                have htrue : (slotOccupied w child pk ||
+                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [ho]
+                exact absurd htrue hbusy
+            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := by
+              cases hto : slotTombstoneQueued w (.peer pname pk pg) child pk with
+              | false => rfl
+              | true =>
+                have htrue : (slotOccupied w child pk ||
+                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [hto]
+                exact absurd htrue hbusy
+            let bornId := InstId.peer child pk (maxGen w child pk)
+            let born := { bornActor I.desc w child pk t.initial with parent := some (.peer pname pk pg) }
+            let wB := admitBorn I w bornId born
+            have hsc : spawnChild I w (.peer pname pk pg) child = some wB := by
+              simp [spawnChild, ht, gate, hok, hzeroB, hocc, hq, bornId, born, wB]
+            have hB := hold_child_peer I w hH (.peer pname pk pg) pname child t pk pg ht hmul hsup
+              rfl hocc hq hparent hpre (hoff bornId (gen_fresh w child pk))
+            have hpreB : wB.crashed = false := by simpa [wB, admit_crash] using hpre
+            have hP := hold_proceed I wB hB (.peer pname pk pg) k' hpreB (hphase wB)
+            have hrun : execRun I w (.peer pname pk pg) a k =
+                setActor wB (.peer pname pk pg) (proceed (wB.st (.peer pname pk pg)) k') := by
+              simp [execRun, hgo, hk, hsc, k']
+            exact hrun.symm ▸ hP
+        · have hsc : spawnChild I w (.peer pname pk pg) child = none := by
+            simp [spawnChild, ht, gate, hok, hzeroB]
+          have hrun : execRun I w (.peer pname pk pg) a k = crashWorld w := by
+            simp [execRun, hgo, hk, hsc]
+          exact hrun.symm ▸ hold_crash I w hH
+    · have hgate : (t.multiplicity == .perPeer && supNamed t.supervisor (tname id)) = false := by
+        cases hg : (t.multiplicity == .perPeer && supNamed t.supervisor (tname id)) with
+        | false => rfl
+        | true =>
+          have htrue : gate = true := by simp [gate, hg, hlifeB]
+          exact absurd htrue hok
+      have hsc : spawnChild I w id child = none := by simp [spawnChild, ht, hgate]
+      have hrun : execRun I w id a k = crashWorld w := by simp [execRun, hgo, hk, hsc]
+      exact hrun.symm ▸ hold_crash I w hH
 
 end Deadlock
