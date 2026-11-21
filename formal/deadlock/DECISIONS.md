@@ -210,11 +210,12 @@ untimed per-peer to be terminable. A core is not that peer: a pure core is
 rejected by `subtreeEntry` (`pureKillMsg`), and demanding `terminable` there
 would contradict the flag check.
 
-N32 is open. Helen's E4 (`Outlive.lean`) is mail from a non-terminable
-per-peer child left in two cores after the per-peer root terminates. That
-root is per-peer, so its `terminate` is still the subtree seal, not a core
-crash. The cores in that run do not terminate. This decision does not move
-that mail, does not crash that run, and does not choose a fix.
+The peer-spawn note below records the decision on N32. Helen's E4
+(`Outlive.lean`) is mail from a non-terminable per-peer child left in two
+cores after the per-peer root terminates. That root is per-peer, so its
+`terminate` is still the subtree seal, not a core crash. The cores in that
+run do not terminate. This decision does not move that mail, does not crash
+that run, and does not choose a fix.
 
 `FairRun.lossTpl` is a terminable core. Its `terminate` used to clear a
 mailbox (`loss_not_delivered`). That step is now `crashWorld`. `FairRun` does
@@ -222,3 +223,25 @@ not build, and this change does not repair it. `TermStep.crash` no longer
 carries `terminable = false`, and `lone` and `cascade` require
 `multiplicity = .perPeer`. Modules that still split the old constructors are
 left as they are.
+
+## 2026-11-21 — One new peer connection per second
+
+Roland, from the 2026-11-21 08:04 CET call: a killed subtree's leftover mail
+in tokio channels cannot be drained or diverted. The only rule is the one
+the steps already follow — a slot's next occupant may be spawned only once
+that slot's tombstone has been consumed. The model has no bound on the
+number of kill-and-spawn cycles over a run. The implementation therefore
+rate-limits peer spawns: at most one new peer connection — one new per-peer
+subtree spawn — per second.
+
+This is the decision on N32. It does not change `spawn`, `freshKey`,
+`nextKey`, generation allocation, or the tombstone-before-respawn rule.
+Mail a non-terminable child has already placed in a core stays there when
+the subtree is sealed.
+
+Helen's E4 (`Outlive.lean`, `outlive_stuck`) is still a checked run. Five
+subtree births fill `H` and `K`, the cores park on each other, and no
+runtime step is enabled. One birth per second still admits that run. The
+pace slows how fast the stuck state is reached. It does not make
+`outlive_stuck` false, and the theorems do not assume the pace. The model
+has no clock, so the pace is not a hypothesis any theorem can use.

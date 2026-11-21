@@ -2469,6 +2469,12 @@ def placePeer (I : Impl) (w : World) (template : String) (k : Nat) (initial : St
   let w := next { w with roster := w.roster ++ [id] }
   readCells I.desc (setActor w id born) id
 
+/-- Scheduler birth of a per-peer subtree root, or of a root a core supervises.
+The deployment admits at most one new peer connection per second. This
+function does not read a clock: a run may spawn a fresh subtree on every
+step `maySpawnRoot` allows. The key comes from `freshKey` or `nextIx`. A
+later occupant of a slot still waits until that slot's tombstone has been
+consumed. -/
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
   | none => none

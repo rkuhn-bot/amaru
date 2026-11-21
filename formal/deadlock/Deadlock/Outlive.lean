@@ -8,6 +8,9 @@ both cores hold a `Ping` plus four `M`s, which is their whole capacity. The
 next `X` parks on `K`. Each core then runs `Ping`, whose program is a blocking
 send of `P` to the other core, and that send parks. The checker accepts the
 description: a non-terminable member is not confined to its subtree.
+
+One new subtree spawn per second does not remove this run. Five births
+still fill the cores, and the cores still park on each other.
 -/
 import Deadlock.Graph
 import Deadlock.Local
