@@ -355,6 +355,7 @@ structure Parked where
 
 structure Actor where
   life : Life
+  /-- A non-idle actor's typestate is the pending landing state; pure-stage has none until `finish`. -/
   typestate : String
   phase : Phase
   box : List Msg
@@ -798,10 +799,12 @@ def noteStale (w : World) (sender : InstId) (dst : String) : World :=
 @[simp] theorem noteStale_observed (w : World) (sender : InstId) (dst : String) :
     (noteStale w sender dst).observed = w.observed := rfl
 
+/-- Enter `k` in `k.toState`. The landing state is written when the arm is chosen,
+including a nonempty arm. An empty arm is idle in that state. -/
 def proceed (a : Actor) (k : Cont) : Actor :=
   match k.rest with
   | [] => { a with phase := .idle, typestate := k.toState }
-  | _ => { a with phase := .run k }
+  | _ => { a with phase := .run k, typestate := k.toState }
 
 /-- `specific` when the outcome names its own typestate, otherwise `fallback`. -/
 def pickState (fallback specific : String) : String :=
