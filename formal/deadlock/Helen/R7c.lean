@@ -57,7 +57,7 @@ overflows the lane (F4 sizing). Also: unmatched tombstone in a later state, key 
 
 def tA : Template := { tpl "A" 2 ["idle", "done"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
-  timeoutKills := true, supervisor := "P", tombstone := "dead/A" }
+  timeoutKills := true, supervisor := some "P", tombstone := "dead/A" }
 def tB : Template := { tpl "B" 2 ["idle"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s" }
 def tP : Template := tpl "P" 2 ["idle", "seen"] "idle" true
@@ -81,10 +81,11 @@ def B0 : InstId := .peer "B" 0 0
 def A0 : InstId := .peer "A" 0 0
 def A1 : InstId := .peer "A" 0 1
 
-/-- Respawn stays at key 0. `g` is the generation. -/
-def cycle (g : Nat) : List Action :=
-  [.spawn "A", .ingress (.peer "A" 0 g) "Go", .recvBulk (.peer "A" 0 g),
-    .exec (.peer "A" 0 g), .exec (.peer "A" 0 g)]
+/-- `k` is the subtree key. A later root takes the next key of subtree `s`,
+not a new generation of key 0. -/
+def cycle (k : Nat) : List Action :=
+  [.spawn "A", .ingress (.peer "A" k 0) "Go", .recvBulk (.peer "A" k 0),
+    .exec (.peer "A" k 0), .exec (.peer "A" k 0)]
 
 theorem sub_graph : checkBool subDesc = true := by decide
 
@@ -107,18 +108,19 @@ in every declared state of the parent. -/
 def tombActs : List Action := cycle 0 ++ [.recvPrio Pc] ++ cycle 1 ++ [.recvPrio Pc]
 theorem tombstone_later_state :
     ((runAt subImpl 1 (cycle 0 ++ [.recvPrio Pc] ++ cycle 1)).map fun w =>
-      ((w.st Pc).typestate, (w.st Pc).prio.map (·.label))) = some ("seen", ["dead/A#1"]) ∧
+      ((w.st Pc).typestate, (w.st Pc).prio.map (·.label))) = some ("seen", ["dead/A#0"]) ∧
     runAt subImpl 1 tombActs = none ∧
     findTr subImpl "P" "seen" "dead/A" = none := by decide
 
-/-- After A generation 0 dies, the replacement is generation 1 at the same key,
-and it still routes to the live B. -/
+/-- A and B share subtree `s`, so B is born at key 1 and the next A at key 2.
+A per-peer send resolves the sender's own key, and these two do not share one. -/
 def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.recvPrio Pc, .spawn "A"]
 theorem respawn_key_split :
     ((runAt subImpl 1 splitActs).map fun w =>
-      (lifeTag (w.st A0).life, lifeTag (w.st A1).life, lifeTag (w.st B0).life,
-       route w subDesc A1 "B", route w subDesc B0 "A")) =
-    some (3, 1, 1, some B0, some A1) := by decide
+      (lifeTag (w.st A0).life, lifeTag (w.st (.peer "A" 2 0)).life,
+        lifeTag (w.st (.peer "B" 1 0)).life,
+        route w subDesc (.peer "A" 2 0) "B", route w subDesc (.peer "B" 1 0) "A")) =
+    some (3, 1, 1, none, none) := by decide
 
 /-- A permanent core's `terminate` crashes the roster, and nothing runs after that. -/
 def ingP : Edge := { ing "P" "idle" with occupancy := { a := 0, b := 1 } }
@@ -144,13 +146,13 @@ supervises a worker. -/
 
 def tConn : Template := { tpl "Conn" 4 ["idle", "up", "done"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 4, b := 1 }, terminable := true, subtree := "net",
-  timeoutKills := true, supervisor := "Mgr", tombstone := "dead/Conn" }
+  timeoutKills := true, supervisor := some "Mgr", tombstone := "dead/Conn" }
 def tHand : Template := { tpl "Hand" 2 ["idle"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "net",
-  supervisor := "Conn", tombstone := "dead/Hand" }
+  supervisor := some "Conn", tombstone := "dead/Hand" }
 def tWork : Template := { tpl "Work" 2 ["idle"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "net",
-  supervisor := "Hand", tombstone := "dead/Work" }
+  supervisor := some "Hand", tombstone := "dead/Work" }
 def tMgr : Template := tpl "Mgr" 2 ["idle"] "idle" true
 
 def treeDesc : Description where
@@ -191,7 +193,7 @@ reaches `Mgr` when `Conn` seals, which is the next `exec`. -/
 theorem terminate_marks_grandchild :
     treeSnap (runAt treeImpl 1 (treeActs.take 7)) = some ([1, 1, 1], []) ∧
     treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], []) ∧
-    isChild treeDesc C0 H0 = true ∧ isChild treeDesc H0 K0 = true := by decide
+    ((runAt treeImpl 1 treeActs).map fun w => isChild w C0 H0 && isChild w H0 K0) = some true := by decide
 
 /-- After the seals, all three are dead. -/
 theorem tree_sealed :
@@ -224,10 +226,10 @@ theorem respawn_child_fresh :
 def tQ : Template := { tpl "Q" 2 ["idle", "gone"] "idle" true with terminable := true, priorityCapacity := { a := 2, b := 1 } }
 def tX : Template := { tpl "X" 2 ["idle", "sent"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
-  timeoutKills := true, supervisor := "Q", tombstone := "dead/X" }
+  timeoutKills := true, supervisor := some "Q", tombstone := "dead/X" }
 def tY : Template := { tpl "Y" 2 ["idle", "done"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
-  supervisor := "Q", tombstone := "dead/Y" }
+  supervisor := some "Q", tombstone := "dead/Y" }
 def tH : Template := { tpl "H" 0 ["idle", "got"] "idle" false with
   multiplicity := .perPeer, terminable := true, subtree := "s" }
 
@@ -256,8 +258,9 @@ def deadImpl : Impl where
                   tr "H" "got" "M" "got" []]
 
 def X0 : InstId := .peer "X" 0 0
-def Y0 : InstId := .peer "Y" 0 0
-def Hh : InstId := .peer "H" 0 0
+/-- X, Y and H share subtree `s`, so the three births take keys 0, 1 and 2. -/
+def Y0 : InstId := .peer "Y" 1 0
+def Hh : InstId := .peer "H" 2 0
 def Qc : InstId := .core "Q"
 
 def deadActs : List Action :=
@@ -275,8 +278,8 @@ theorem dead_local : LocalOk deadImpl := by
   unfold LocalOk
   decide
 
-/-- The parked entry leaves when X is marked, not only when X seals. H has
-nothing of X's left, so `recvBulk H` is disabled. -/
+/-- X's send names H at X's own key. H was born at the next subtree key, so
+the send does not resolve. H stays idle, and X's seal does not crash. -/
 theorem dead_sender_refunded :
     deadSnap (runAt deadImpl 1 (deadActs.take 12)) = some (2, 1, "idle", 0, 1) ∧
     deadSnap (runAt deadImpl 1 deadActs) = some (3, 1, "idle", 0, 1) ∧
@@ -397,7 +400,7 @@ theorem nested_counted :
 
 def tM : Template := tpl "M" 4 ["idle"] "idle" false
 def tW : Template := { tpl "W" 4 ["idle"] "idle" false with
-  multiplicity := .perPeer, slots := 2, supervisor := "M", subtree := "pw",
+  multiplicity := .perPeer, slots := 2, supervisor := some "M", subtree := "pw",
   terminable := true, tombstone := "dead/W" }
 
 def ingM : Edge := { ing "M" "idle" with occupancy := { a := 0, b := 1 } }
@@ -469,8 +472,9 @@ def mailImpl : Impl where
   desc := mailDesc
   transitions := [tr "S" "idle" "Go" "idle" [.send "H" "M" 0, .terminate]]
 
+/-- A second scheduler birth takes the next subtree key, not generation 1. -/
 def S0 : InstId := .peer "S" 0 0
-def S1 : InstId := .peer "S" 0 1
+def S1 : InstId := .peer "S" 1 0
 def Hc : InstId := .core "H"
 
 def mailActs : List Action :=
@@ -480,7 +484,7 @@ theorem old_mail_charged :
     ((runAt mailImpl 1 [.spawn "S"]).map fun w => (w.st S0).tokens "H") = some 1 ∧
     ((runAt mailImpl 1 mailActs).map fun w =>
       (lifeTag (w.st S0).life, lifeTag (w.st S1).life,
-       (w.st Hc).box.length, (w.st S1).tokens "H")) = some (3, 1, 1, 0) := by decide
+       (w.st Hc).box.length, (w.st S1).tokens "H")) = some (3, 1, 1, 1) := by decide
 
 end Deadlock.Helen7c
 
