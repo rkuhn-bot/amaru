@@ -1360,4 +1360,220 @@ theorem performReply_mask (w : World) (sender : InstId) (k : Cont) :
       · exact mask_set_proceed w sender (w.st sender) (afterHead k)
     · exact mask_set_proceed w sender (w.st sender) (afterHead k)
 
+theorem route_mask (w : World) (D : Description) (sender : InstId) (dst : String) (slot : Nat) :
+    route (maskWorld w) D sender dst slot = route w D sender dst slot := by
+  simp [route, maskWorld_st, maskActor_life, findLive_mask]
+
+theorem resolve_mask (D : Description) (w : World) (sender : InstId) (dst : String) (slot : Nat) :
+    resolveId D (maskWorld w) sender dst slot = resolveId D w sender dst slot := by
+  simp [resolveId, findLive_mask]
+
+theorem queued_mask (w : World) (name : String) (key : Nat) (dst : String) :
+    queuedFromKey (maskWorld w) name key dst = queuedFromKey w name key dst := by
+  unfold queuedFromKey
+  simp only [maskWorld_roster, maskWorld_st, maskActor_box, maskActor_parked]
+
+theorem occupied_mask (w : World) (name : String) (k : Nat) :
+    slotOccupied (maskWorld w) name k = slotOccupied w name k := by
+  simp [slotOccupied, maskWorld_roster, maskWorld_st, maskActor_life]
+
+theorem tombQueued_mask (w : World) (parent : InstId) (child : String) (k : Nat) :
+    slotTombstoneQueued (maskWorld w) parent child k = slotTombstoneQueued w parent child k := by
+  simp [slotTombstoneQueued, maskWorld_st, maskActor_prio]
+
+theorem blocked_mask (D : Description) (w : World) (parent : InstId) (name : String) (key : Nat) :
+    slotRespawnBlocked D (maskWorld w) parent name key = slotRespawnBlocked D w parent name key := by
+  simp [slotRespawnBlocked, occupied_mask, tombQueued_mask]
+
+theorem freeGo_mask (D : Description) (w : World) (parent : InstId) (name : String) (n fuel : Nat) :
+    freeGo D (maskWorld w) parent name n fuel = freeGo D w parent name n fuel := by
+  induction fuel with
+  | zero => simp [freeGo]
+  | succ fuel ih =>
+    simp only [freeGo, blocked_mask, ih]
+
+theorem freeSlot_mask (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) :
+    freeSlot D (maskWorld w) parent name n = freeSlot D w parent name n := by
+  simp [freeSlot, freeGo_mask]
+
+theorem born_mask (D : Description) (w : World) (template : String) (key : Nat) (initial : String) :
+    bornActor D (maskWorld w) template key initial = bornActor D w template key initial := by
+  simp [bornActor, withKeyTokens, queued_mask]
+
+theorem child_mask (D : Description) (w : World) (id : InstId) :
+    hasChild D (maskWorld w) id = hasChild D w id := by
+  simp [hasChild, maskWorld_roster, isChild_mask, maskWorld_st, maskActor_life]
+
+theorem mask_extend (w : World) (extra : List InstId) :
+    maskWorld { w with roster := w.roster ++ extra } =
+      { maskWorld w with roster := w.roster ++ extra } := by
+  unfold maskWorld
+  rfl
+
+theorem admit_mask (I : Impl) (w : World) (id : InstId) (a : Actor) (ha : maskActor a = a) :
+    maskWorld (admitBorn I w id a) = admitBorn I (maskWorld w) id a := by
+  unfold admitBorn
+  rw [readCells_mask, mask_setActor, ha, mask_extend, maskWorld_roster]
+
+theorem born_kept (D : Description) (w : World) (template : String) (key : Nat) (initial : String)
+    (parent : InstId) :
+    maskActor { bornActor D w template key initial with parent := some parent } =
+      { bornActor D w template key initial with parent := some parent } := by
+  apply maskActor_keep
+  simp [bornActor, withKeyTokens, tyRead, phaseAnchored]
+
+theorem spawnChild_mask (I : Impl) (w : World) (parent : InstId) (child : String) :
+    (spawnChild I w parent child).map maskWorld =
+      (spawnChild I (maskWorld w) parent child).map maskWorld := by
+  cases parent with
+  | core pname =>
+    unfold spawnChild
+    simp only [maskWorld_st, maskActor_life, freeSlot_mask, maxGen_mask, born_mask, blocked_mask]
+    split
+    · rfl
+    · split
+      · split
+        · split
+          · next k _hk =>
+            simp only [Option.map]
+            have hkeep := born_kept I.desc w child k t.initial (InstId.core pname)
+            rw [admit_mask I w _ _ hkeep]
+            have hkeepM := born_kept I.desc (maskWorld w) child k t.initial (InstId.core pname)
+            rw [admit_mask I (maskWorld w) _ _ hkeepM, maskWorld_idem]
+          · simp [maskWorld_idem]
+        · rfl
+      · split
+        · simp [maskWorld_idem]
+        · rfl
+  | peer pname pkey pgen =>
+    unfold spawnChild
+    simp only [maskWorld_st, maskActor_life, freeSlot_mask, maxGen_mask, born_mask, blocked_mask]
+    split
+    · rfl
+    · split
+      · split
+        · split
+          · simp [maskWorld_idem]
+          · simp only [Option.map]
+            have hkeep :=
+              born_kept I.desc w child pkey t.initial (InstId.peer pname pkey pgen)
+            rw [admit_mask I w _ _ hkeep]
+            have hkeepM :=
+              born_kept I.desc (maskWorld w) child pkey t.initial (InstId.peer pname pkey pgen)
+            rw [admit_mask I (maskWorld w) _ _ hkeepM, maskWorld_idem]
+        · rfl
+      · split
+        · simp [maskWorld_idem]
+        · rfl
+
+theorem execRun_mask (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) :
+    maskWorld (execRun I w id a k) =
+      maskWorld (execRun I (maskWorld w) id (maskActor a) k) := by
+  unfold execRun
+  simp only [maskActor_life, maskActor_phase, maskWorld_N, maskWorld_st, maskActor_box, maskActor_prio,
+    maskActor_parked, maskActor_nextMid, maskActor_tokens, maskActor_waitId, maskActor_nextCall,
+    maskActor_oweId, maskActor_lastCall, maskActor_pending, maskActor_parent, route_mask,
+    resolve_mask, child_mask]
+  split
+  · split
+    · have hland : { a with phase := .idle, typestate := k.toState } =
+          { maskActor a with phase := .idle, typestate := k.toState } := by
+        apply actor_eq <;> first | rfl | simp [maskActor_life, maskActor_box, maskActor_prio,
+          maskActor_parked, maskActor_tokens, maskActor_nextMid, maskActor_waitId,
+          maskActor_nextCall, maskActor_oweId, maskActor_lastCall, maskActor_pending,
+          maskActor_parent]
+      rw [hland, mask_setActor, mask_setActor, maskWorld_idem]
+    · split
+      · split
+        · rw [← note_mask]
+          exact mask_set_proceed (noteStale w id _) id a (afterHead k)
+        · exact enqueueOrPark_mask w I.desc id _ _ false (afterHead k)
+      · split
+        · rw [← note_mask]
+          exact mask_set_proceed (noteStale w id _) id a _
+        · split
+          · exact enqueueOrPark_mask w I.desc id _ _ false _
+          · split
+            · exact mask_set_proceed w id a _
+            · exact mask_set_proceed w id a _
+      · split
+        · rw [← note_mask, ← finish_issued, mask_setActor, mask_setActor, maskWorld_idem]
+        · exact enqueueOrPark_mask w I.desc id _ _ true _
+      · exact performReply_mask w id k
+      · split
+        · exact mask_set_proceed w id a (afterHead k)
+        · split
+          · rw [mask_setActor, mask_setActor, maskWorld_idem]
+            simp [proceed]
+          · exact crashWorld_mask w
+      · conv =>
+          rhs
+          rw [maskWorld_cell]
+        have hcell : ∀ u d l c, (setCell u d l c).st = u.st := by
+          intro u d l c
+          simp [setCell]
+        split
+        · rw [hcell, hcell, maskWorld_st, proceed_erase, ← setCell_mask, mask_setActor, mask_setActor,
+            maskWorld_idem]
+        · rw [hcell, hcell, maskWorld_st, proceed_erase, ← setCell_mask, wakeReaders_mask]
+          conv => rhs; rw [wakeReaders_mask]
+          congr 1
+          congr 1
+          rw [mask_setActor, mask_setActor, maskWorld_idem]
+      · rw [mask_setActor, mask_setActor, maskWorld_idem]
+        refine congrArg (setActor (maskWorld w) id) ?_
+        apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
+      · rw [mask_setActor, mask_setActor, maskWorld_idem]
+        refine congrArg (setActor (maskWorld w) id) ?_
+        apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
+      · exact abortChildren_mask I.desc w id
+      · rename_i _x _tail _eff child _heq
+        split
+        · next w' hw =>
+          have hs := spawnChild_mask I w id child
+          rw [hw] at hs
+          cases hM : spawnChild I (maskWorld w) id child with
+          | none => simp [hM] at hs
+          | some wM =>
+            simp [hM] at hs
+            have hst : maskActor (w'.st id) = maskActor (wM.st id) := by
+              have hws := congrArg (fun u : World => u.st id) hs
+              simpa [maskWorld_st] using hws
+            have hp : proceed (w'.st id) (afterHead k) = proceed (wM.st id) (afterHead k) := by
+              rw [← proceed_erase (w'.st id), ← proceed_erase (wM.st id), hst]
+            simp [hp, mask_setActor, hs, maskWorld_idem]
+        · next hnone =>
+          have hs := spawnChild_mask I w id child
+          rw [hnone] at hs
+          cases hM : spawnChild I (maskWorld w) id child with
+          | some _ => simp [hM] at hs
+          | none =>
+            simp [hM]
+            exact crashWorld_mask w
+      · split
+        · split
+          · exact crashWorld_mask w
+          · split
+            · exact terminateStage_mask I.desc w id a
+            · split
+              · exact shutdownActor_mask I.desc w id
+              · split
+                · exact terminateStage_mask I.desc w id a
+                · exact crashWorld_mask w
+        · exact crashWorld_mask w
+  · exact (maskWorld_idem w).symm
+
+theorem execHead_mask (I : Impl) (w : World) (id : InstId) :
+    (execHead I w id).map maskWorld = (execHead I (maskWorld w) id).map maskWorld := by
+  unfold execHead
+  simp only [maskWorld_st, maskActor_life, maskActor_phase]
+  split
+  · exact congrArg some (sealActor_mask I.desc w id (w.st id))
+  · split
+    · rfl
+    · split
+      · next k _hk =>
+        exact congrArg some (execRun_mask I w id (w.st id) k)
+      · rfl
+
 end Deadlock
