@@ -2389,19 +2389,6 @@ theorem ingress_ready (I : Impl) (w w' : World) (dst : InstId) (label : String)
   obtain ⟨hl, hop, _, _, _⟩ := ingress_open I w w' dst label h
   exact ⟨hl, hop⟩
 
-/-- Smallest key of subtree `sub` that already has a member and has no live
-`template`. A dead occupant keeps the key, so a later incarnation stays with
-its siblings. The dead id itself is not reused. -/
-def openSubtreeKey (D : Description) (w : World) (sub template : String) : Option Nat :=
-  let rec go (k fuel : Nat) : Option Nat :=
-    match fuel with
-    | 0 => none
-    | n + 1 =>
-      if k >= w.nextKey sub then none
-      else if (w.roster.any fun id => isMember D id sub k) && !(aliveAt w template k) then some k
-      else go (k + 1) n
-  go 0 (w.nextKey sub)
-
 /-- A scheduler spawn opens a new subtree root. A child of a per-peer stage is
 not a root: that stage births it with `Eff.spawn`, at its own key. -/
 def rootOf (D : Description) (t : Template) : Bool :=
