@@ -1195,4 +1195,169 @@ theorem finish_issued (a : Actor) (k : Cont) (r : CallResult) :
     finishCall (issueCall (maskActor a)) k r = finishCall (issueCall a) k r := by
   rw [← issue_mask, finish_erase]
 
+theorem mask_diff_ty (a b : Actor)
+    (hl : a.life = b.life) (hp : a.phase = b.phase) (hbox : a.box = b.box) (hprio : a.prio = b.prio)
+    (hpark : a.parked = b.parked) (htok : a.tokens = b.tokens) (hmid : a.nextMid = b.nextMid)
+    (hwait : a.waitId = b.waitId) (hnext : a.nextCall = b.nextCall) (howe : a.oweId = b.oweId)
+    (hlast : a.lastCall = b.lastCall) (hpend : a.pendingTombstone = b.pendingTombstone)
+    (hpar : a.parent = b.parent) (hph : phaseAnchored a.phase = false) :
+    maskActor a = maskActor b := by
+  have ha : tyRead a = false := by simp [tyRead, hph]
+  have hb : tyRead b = false := by
+    unfold tyRead
+    rw [← hp]
+    simp [hph]
+  rw [maskActor_clear a ha, maskActor_clear b hb]
+  exact actor_eq (by simp [hl]) rfl (by simp [hp]) (by simp [hbox]) (by simp [hprio])
+    (by simp [hpark]) (by simp [htok]) (by simp [hmid]) (by simp [hwait]) (by simp [hnext])
+    (by simp [howe]) (by simp [hlast]) (by simp [hpend]) (by simp [hpar])
+
+/-- Masking ignores a typestate that was already replaced by the masked typestate
+of an actor with the same life, phase, and typestate. -/
+theorem mask_join (c a b : Actor)
+    (hcl : c.life = a.life) (hcp : c.phase = a.phase) (hct : c.typestate = a.typestate)
+    (hl : a.life = b.life) (hp : a.phase = b.phase) (hbox : a.box = b.box) (hprio : a.prio = b.prio)
+    (hpark : a.parked = b.parked) (htok : a.tokens = b.tokens) (hmid : a.nextMid = b.nextMid)
+    (hwait : a.waitId = b.waitId) (hnext : a.nextCall = b.nextCall) (howe : a.oweId = b.oweId)
+    (hlast : a.lastCall = b.lastCall) (hpend : a.pendingTombstone = b.pendingTombstone)
+    (hpar : a.parent = b.parent) (ht : b.typestate = (maskActor c).typestate) :
+    maskActor a = maskActor b := by
+  have hty : tyRead a = tyRead c := by simp [tyRead, hcl, hcp, hct]
+  cases htread : tyRead c with
+  | true =>
+    rw [maskActor_keep c htread] at ht
+    rw [hct] at ht
+    have he : a = b := actor_eq hl ht.symm hp hbox hprio hpark htok hmid hwait hnext howe hlast
+      hpend hpar
+    rw [he]
+  | false =>
+    have ha : tyRead a = false := by rw [hty, htread]
+    have hb : tyRead b = false := by
+      have : tyRead b = tyRead a := by simp [tyRead, hl, hp]
+      rw [this, ha]
+    rw [maskActor_clear a ha, maskActor_clear b hb]
+    exact actor_eq (by simp [hl]) rfl (by simp [hp]) (by simp [hbox]) (by simp [hprio])
+      (by simp [hpark]) (by simp [htok]) (by simp [hmid]) (by simp [hwait]) (by simp [hnext])
+      (by simp [howe]) (by simp [hlast]) (by simp [hpend]) (by simp [hpar])
+
+theorem mask_fields (a : Actor) (p : Phase) (ms : List Msg) (ps : List Parked) (mid : Nat)
+    (hp : phaseAnchored p = false) :
+    maskActor { a with phase := p, box := ms, parked := ps, nextMid := mid } =
+      maskActor { maskActor a with phase := p, box := ms, parked := ps, nextMid := mid } := by
+  have h1 : tyRead { a with phase := p, box := ms, parked := ps, nextMid := mid } = false := by
+    simp [tyRead, hp]
+  cases ht : tyRead a with
+  | true => rw [maskActor_keep a ht]
+  | false =>
+    rw [maskActor_clear a ht]
+    have h2 : tyRead { { a with typestate := "" } with phase := p, box := ms, parked := ps, nextMid := mid } =
+        false := by simp [tyRead, hp]
+    rw [maskActor_clear _ h1, maskActor_clear _ h2]
+
+theorem mask_set_phased (w : World) (id : InstId) (a : Actor) (p : Phase) (ms : List Msg)
+    (ps : List Parked) (mid : Nat) (hp : phaseAnchored p = false) :
+    maskWorld (setActor w id { a with phase := p, box := ms, parked := ps, nextMid := mid }) =
+      maskWorld (setActor (maskWorld w) id
+        { maskActor a with phase := p, box := ms, parked := ps, nextMid := mid }) := by
+  rw [mask_setActor, mask_fields a p ms ps mid hp]
+  conv => rhs; rw [mask_setActor]
+  rw [maskWorld_idem]
+
+theorem mask_set_edit (w : World) (id : InstId) (a : Actor) (ms : List Msg) (ps : List Parked)
+    (mid : Nat) :
+    maskWorld (setActor w id { a with box := ms, parked := ps, nextMid := mid }) =
+      setActor (maskWorld w) id { maskActor a with box := ms, parked := ps, nextMid := mid } := by
+  rw [mask_setActor, mask_edit]
+
+theorem enqueueOrPark_mask (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) :
+    maskWorld (enqueueOrPark w D sender dst msg isCall k) =
+      maskWorld (enqueueOrPark (maskWorld w) D sender dst msg isCall k) := by
+  unfold enqueueOrPark
+  simp only [maskWorld_N, maskWorld_st, maskActor_life, maskActor_parked, maskActor_box]
+  split
+  · split
+    · rw [mask_setActor, mask_setActor, maskWorld_idem, finish_issued]
+    · exact mask_set_proceed _ _ _ _
+  · split
+    · split
+      · split
+        · simp only [issueCall, chargeSender, bumpToken, maskActor_nextMid, maskActor_waitId,
+            maskActor_box, maskActor_parked, maskActor_life, maskActor_phase, maskActor_prio,
+            maskActor_tokens, maskActor_nextCall, maskActor_oweId, maskActor_lastCall,
+            maskActor_pending, maskActor_parent]
+          rw [mask_setActor, mask_setActor, maskWorld_idem]
+          refine congrArg (setActor (maskWorld w) sender) ?_
+          first
+            | rfl
+            | apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
+        · simp only [issueCall, chargeSender, bumpToken, maskActor_nextMid, maskActor_waitId,
+            maskActor_box, maskActor_parked, maskActor_life, maskActor_phase, maskActor_prio,
+            maskActor_tokens, maskActor_nextCall, maskActor_oweId, maskActor_lastCall,
+            maskActor_pending, maskActor_parent]
+          rw [mask_setActor, mask_setActor, maskWorld_idem]
+          refine congrArg (setActor (maskWorld w) sender) ?_
+          first
+            | rfl
+            | apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
+      · split
+        · simp only [issueCall, chargeSender, bumpToken, maskWorld_st, maskActor_nextMid,
+            maskActor_waitId, maskActor_box, maskActor_parked, maskActor_life, maskActor_phase,
+            maskActor_prio, maskActor_tokens, maskActor_nextCall, maskActor_oweId,
+            maskActor_lastCall, maskActor_pending, maskActor_parent]
+          rw [mask_setActor, mask_setActor, mask_setActor, mask_setActor, maskWorld_idem]
+          congr 1
+          · congr 1
+            apply mask_join (w.st dst) <;> rfl
+          · apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
+        · simp only [issueCall, chargeSender, bumpToken, maskWorld_st, maskActor_nextMid,
+            maskActor_waitId, maskActor_box, maskActor_parked, maskActor_life, maskActor_phase,
+            maskActor_prio, maskActor_tokens, maskActor_nextCall, maskActor_oweId,
+            maskActor_lastCall, maskActor_pending, maskActor_parent]
+          rw [mask_setActor, mask_setActor, mask_setActor, mask_setActor, maskWorld_idem]
+          congr 1
+          · congr 1
+            apply mask_join (w.st dst) <;> rfl
+    · split
+      · cases isCall <;>
+          simp only [issueCall, chargeSender, bumpToken, maskWorld_st, maskActor_nextMid,
+            maskActor_waitId, maskActor_box, maskActor_parked, maskActor_life, maskActor_phase,
+            maskActor_prio, maskActor_tokens, maskActor_nextCall, maskActor_oweId,
+            maskActor_lastCall, maskActor_pending, maskActor_parent]
+        <;> rw [mask_setActor, mask_setActor, maskWorld_idem]
+        <;> refine congrArg (setActor (maskWorld w) sender) ?_
+        <;> first
+          | rfl
+          | apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
+      · cases isCall <;>
+          simp only [issueCall, chargeSender, bumpToken, maskWorld_st, maskActor_nextMid,
+            maskActor_waitId, maskActor_box, maskActor_parked, maskActor_life, maskActor_phase,
+            maskActor_prio, maskActor_tokens, maskActor_nextCall, maskActor_oweId,
+            maskActor_lastCall, maskActor_pending, maskActor_parent]
+        <;> rw [mask_setActor, mask_setActor, mask_setActor, mask_setActor, maskWorld_idem]
+        <;> (congr 1
+             · congr 1
+               apply mask_join (w.st dst) <;> rfl
+             · apply mask_diff_ty <;> first | rfl | simp [phaseAnchored])
+
+theorem performReply_mask (w : World) (sender : InstId) (k : Cont) :
+    maskWorld (performReply w sender k) = maskWorld (performReply (maskWorld w) sender k) := by
+  unfold performReply
+  simp only [maskWorld_st, maskActor_phase, maskActor_oweId, maskActor_waitId]
+  split
+  · exact mask_set_proceed w sender (w.st sender) (afterHead k)
+  · next caller hreply =>
+    split
+    · next dst ck _hphase =>
+      split
+      · rw [finish_erase]
+        by_cases hself : sender = caller
+        · simp only [hself, setActor_self]
+          rw [mask_setActor, mask_setActor, mask_setActor, mask_setActor, maskWorld_idem]
+        · rw [setActor_other w caller sender _ hself, setActor_other (maskWorld w) caller sender _ hself,
+            maskWorld_st, proceed_erase]
+          rw [mask_setActor, mask_setActor, mask_setActor, mask_setActor, maskWorld_idem]
+      · exact mask_set_proceed w sender (w.st sender) (afterHead k)
+    · exact mask_set_proceed w sender (w.st sender) (afterHead k)
+
 end Deadlock
