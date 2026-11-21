@@ -300,4 +300,18 @@ def twoRootDesc : Description where
 theorem two_roots_rejected : subtreeFails twoRootDesc =
     ["fail: subtree conn has more than one unsupervised root"] := by decide
 
+/-- A supervised child with an empty label. The parent is alive when the child
+terminates, and there is no handler to deliver. -/
+def bareTombDesc : Description where
+  name := "bare-tombstone"
+  freshNames := true
+  templates := [connRole "timer" false true,
+    { connRole "reader" true false (some "timer") with tombstone := "" }]
+  edges := []
+  compatibility := .all
+  steps := []
+
+theorem bare_tombstone_rejected : subtreeFails bareTombDesc =
+    ["fail: reader has a supervisor and no tombstone"] := by decide
+
 end Deadlock

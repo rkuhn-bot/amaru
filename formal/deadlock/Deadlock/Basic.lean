@@ -159,7 +159,9 @@ structure Template where
   A per-peer template may name another member of its own subtree. -/
   supervisor : Option String := none
   /-- Label the supervisor handles when this child terminates. One label per
-  child template, chosen when the parent is wired. Empty means no tombstone. -/
+  child template, chosen when the parent is wired. A supervised child with an
+  empty label is rejected: terminating it while the parent is alive crashes,
+  because the parent has no handler to deliver. -/
   tombstone : String := ""
   /-- How many of this template a core supervisor may have alive at once.
   `0` keeps the single child per parent key. A positive value is a pool:

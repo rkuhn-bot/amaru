@@ -681,6 +681,13 @@ reported on that one, so a subtree is not listed twice. -/
 def firstRoot (D : Description) (sub : String) : Option String :=
   (D.templates.find? fun t => t.subtree == sub && t.supervisor.isNone).map (·.name)
 
+/-- A supervised child with an empty label. Terminating it while the parent is
+alive crashes: there is no handler to deliver. -/
+def missingTombstone (t : Template) : Option String :=
+  if t.supervisor.isSome && t.tombstone == "" then
+    some s!"fail: {t.name} has a supervisor and no tombstone"
+  else none
+
 /-- A nonempty subtree is a per-peer cohort with at most one unsupervised
 template. That template is the scheduler root: it takes a fresh subtree key,
 and a second root would not share it, so a send between them would not
@@ -703,7 +710,7 @@ def subtreeEntry (D : Description) (t : Template) : Option String :=
           some s!"fail: slots must be 0 under a per-peer parent"
         else if t.subtree != "" && !(supervisorInSubtree D t) then
           some s!"fail: subtree {t.subtree} supervisor {name} is not in the subtree"
-        else none
+        else missingTombstone t
       | none => some s!"fail: pool {t.name} names unknown supervisor {name}"
     | none => some s!"fail: pool {t.name} names unknown supervisor none"
   else if t.subtree == "" then
@@ -718,7 +725,7 @@ def subtreeEntry (D : Description) (t : Template) : Option String :=
   else if t.supervisor.isNone && decide (rootCount D t.subtree > 1) &&
       firstRoot D t.subtree == some t.name then
     some s!"fail: subtree {t.subtree} has more than one unsupervised root"
-  else none
+  else missingTombstone t
 
 /-- A multiplicity-one template is not a subtree member. The entry is a pool
 failure when it has slots, and a "not per-peer" failure when it does not. -/
