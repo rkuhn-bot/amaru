@@ -270,23 +270,21 @@ theorem bulk_recv_tail (I : Impl) (w w' : World) (id : InstId) (h : receiveBulk 
             List.append_assoc, List.map_cons]
 
 theorem prio_recv_tail (I : Impl) (w w' : World) (id : InstId) (h : receivePrio I w id = some w') :
-    (w'.st id).prio = (w.st id).prio.tail ∧ bulkQ (w'.st id) = bulkQ (w.st id) := by
-  unfold receivePrio at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    simp [hp] at h
-    split at h
-    · simp at h
-    · next w1 a1 hdel =>
-      rcases h with ⟨_, hw⟩
-      injection hw with hw
-      have hpr := deliver_prio I w id _ m w1 a1 hdel
-      have hd := deliver_box_of I w id _ m w1 a1 hdel
-      rw [← hw]
-      simp [setActor_self]
-      dsimp at hpr hd
-      simp [hpr, hd.1, hd.2, bulkQ, hp]
+    ∃ pre m suf,
+      (w.st id).prio = pre ++ m :: suf ∧
+      (∀ t ∈ pre, tombstoneWaits w t = true) ∧
+      tombstoneWaits w m = false ∧
+      (w'.st id).prio = pre ++ suf ∧
+      bulkQ (w'.st id) = bulkQ (w.st id) := by
+  obtain ⟨m, pre, suf, w1, a1, _hl, _hp, hprio, hpre, hwait, hdel, hw⟩ :=
+    receivePrio_waits I w w' id h
+  have hpr := deliver_prio I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 hdel
+  have hd := deliver_box_of I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 hdel
+  refine ⟨pre, m, suf, hprio, hpre, hwait, ?_, ?_⟩
+  · rw [hw, setActor_self]
+    simpa using hpr
+  · rw [hw, setActor_self]
+    simp [bulkQ, hd.1, hd.2]
 
 theorem pos_grow (old new : List Msg) (mid : Nat) (h : BoxGrow old new)
     (hin : posOf mid old < old.length) :
@@ -538,11 +536,15 @@ def takenBulk (a : Actor) (mid : Nat) : Prop :=
   | [], p :: _ => p.msg.mid = mid
   | [], [] => False
 
-/-- The priority message a `recvPrio` consumes. -/
-def takenPrio (a : Actor) (mid : Nat) : Prop :=
-  match a.prio with
-  | m :: _ => m.mid = mid
-  | [] => False
+/-- The priority message a `recvPrio` consumes. Waiting tombstones in front of
+it stay in the lane, so the message need not be the head. It is the first
+entry that is not a waiting tombstone. -/
+def takenPrio (w : World) (a : Actor) (mid : Nat) : Prop :=
+  ∃ pre m suf,
+    a.prio = pre ++ m :: suf ∧
+    m.mid = mid ∧
+    (∀ t ∈ pre, tombstoneWaits w t = true) ∧
+    tombstoneWaits w m = false
 
 /-- The target had begun shutting down, or had terminated, at `w`. -/
 def lostHost (w : World) (id : InstId) : Prop := Halted (w.st id).life
@@ -567,7 +569,7 @@ def Delivered {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
         (lostHost (ρ.cfg j) id ∧ p ∈ ((ρ.cfg j).st id).parked))) ∧
   (∀ i id m, m ∈ ((ρ.cfg i).st id).prio → m.reliable = true →
     ∃ j, i ≤ j ∧
-      ((ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) m.mid) ∨
+      ((ρ.act j = .recvPrio id ∧ takenPrio (ρ.cfg j) ((ρ.cfg j).st id) m.mid) ∨
         (lostHost (ρ.cfg j) id ∧ m ∈ ((ρ.cfg j).st id).prio)))
 
 theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (hG : GraphOk I.desc) (id : InstId)
@@ -596,6 +598,32 @@ theorem nonterm_stays {I : Impl} {N : Nat} (ρ : Run I N) (hG : GraphOk I.desc) 
             rw [hw, hstay] at hlive
             exact hlive ih
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
+
+/-- Dropping one message that is not `mid`, and that has no copy of `mid` in
+front of it, moves `mid` one place toward the head. -/
+theorem pos_skip (mid : Nat) (pre : List Msg) (m : Msg) (suf : List Msg)
+    (hne : ∀ t ∈ pre, t.mid ≠ mid) (hm : m.mid ≠ mid)
+    (hin : posOf mid (pre ++ m :: suf) < (pre ++ m :: suf).length) :
+    posOf mid (pre ++ suf) = posOf mid (pre ++ m :: suf) - 1 ∧
+      posOf mid (pre ++ suf) < (pre ++ suf).length := by
+  induction pre with
+  | nil =>
+    have hpos := pos_cons_ne m suf mid hm
+    have hlt : posOf mid suf < suf.length := by
+      simp [posOf, hm, List.length_cons] at hin
+      omega
+    simp only [List.nil_append, hpos]
+    exact ⟨by omega, by simpa using hlt⟩
+  | cons t pre ih =>
+    have ht : t.mid ≠ mid := hne t (List.Mem.head _)
+    have htail : ∀ u ∈ pre, u.mid ≠ mid := fun u hu => hne u (List.Mem.tail _ hu)
+    have hin' : posOf mid (pre ++ m :: suf) < (pre ++ m :: suf).length := by
+      simp [List.cons_append, posOf, ht, List.length_cons] at hin
+      omega
+    have hrec := ih htail hin'
+    simp only [List.cons_append, pos_cons_ne t (pre ++ m :: suf) mid ht,
+      pos_cons_ne t (pre ++ suf) mid ht, hrec.1]
+    exact ⟨by omega, by omega⟩
 
 theorem pos_drop (mid : Nat) (m : Msg) (ms new : List Msg) (hne : m.mid ≠ mid)
     (hold : posOf mid (m :: ms) < (m :: ms).length)
@@ -1416,7 +1444,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
     have hbox := prio_box I w w' j id hrec
     have hpark := prio_parked I w w' j id hrec
     by_cases hi : id = j
-    · have htail := prio_recv_tail I w w' j hrec
+    · obtain ⟨pre, taken, suf, hprio, _hpre, _hwait, hrest, _hbulk⟩ := prio_recv_tail I w w' j hrec
       refine ⟨?_, ?_, ?_⟩
       · intro m hm
         rw [hbox] at hm
@@ -1425,21 +1453,18 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
         rw [hpark] at hp
         exact hold.2.1 p hp
       · intro m hm
-        have hm' : m ∈ (w'.st j).prio := by simpa [hi] using hm
-        rw [htail.1] at hm'
-        exact hold.2.2 m (mem_tail _ m (by simpa [hi] using hm'))
-    · have hpr : (w'.st id).prio = (w.st id).prio := by
-        unfold receivePrio at hrec
-        cases hp : (w.st j).prio with
-        | nil => simp [hp] at hrec
-        | cons m ms =>
-          simp [hp] at hrec
-          split at hrec
-          · simp at hrec
-          · next w1 a1 hdel =>
-            cases hrec.2
-            have hst := deliver_st I w j _ m w1 a1 id hdel
-            simp [setActor, hi, hst]
+        have hm' : m ∈ pre ++ suf := by
+          have hm'' : m ∈ (w'.st j).prio := by simpa [hi] using hm
+          simpa [hrest] using hm''
+        have hmem : m ∈ pre ++ taken :: suf := by
+          rcases List.mem_append.mp hm' with hpre' | hsuf
+          · exact List.mem_append.mpr (Or.inl hpre')
+          · exact List.mem_append.mpr (Or.inr (List.mem_cons_of_mem _ hsuf))
+        exact hold.2.2 m (by simpa [hi, hprio] using hmem)
+    · obtain ⟨m, pre, suf, w1, a1, _, _, _, _, _, hdel, hw⟩ := receivePrio_waits I w w' j hrec
+      have hst := deliver_st I w j ({ (w.st j) with prio := pre ++ suf }) m w1 a1 id hdel
+      have hpr : (w'.st id).prio = (w.st id).prio := by
+        rw [hw, setActor_other w1 j id a1 hi, hst]
       exact transport_free hold hbox hpark hpr
   | finish who =>
     have hfin : finishWait I w who = some w' := by simpa [apply] using h
@@ -2130,19 +2155,10 @@ theorem no_prio_gain_dead (I : Impl) (a : Action) (w w' : World) (id : InstId)
     have halive := (prio_ready I w j w' hrec).1
     by_cases hji : id = j
     · exact absurd (hji ▸ halive) hdead
-    · unfold receivePrio at hrec
-      cases hp : (w.st j).prio with
-      | nil => simp [hp] at hrec
-      | cons m ms =>
-        simp [hp] at hrec
-        split at hrec
-        · simp at hrec
-        · next w1 a1 hdel =>
-          rcases hrec with ⟨_, hw⟩
-          injection hw with hw
-          have hst := deliver_st I w j ({ (w.st j) with prio := ms }) m w1 a1 id hdel
-          rw [← hw, setActor_other w1 j id a1 hji, hst]
-          exact hempty
+    · obtain ⟨m, pre, suf, w1, a1, _, _, _, _, _, hdel, hw⟩ := receivePrio_waits I w w' j hrec
+      have hst := deliver_st I w j ({ (w.st j) with prio := pre ++ suf }) m w1 a1 id hdel
+      rw [hw, setActor_other w1 j id a1 hji, hst]
+      exact hempty
   | spawn template =>
     simp only [apply] at h
     unfold spawn at h
@@ -2361,18 +2377,9 @@ theorem prio_suffix_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w
       intro heq
       exact hnot (by simp [heq])
     have hrec : receivePrio I w id = some w' := by simpa [apply] using h
-    unfold receivePrio at hrec
-    cases hp : (w.st id).prio with
-    | nil => simp [hp] at hrec
-    | cons m ms =>
-      simp [hp] at hrec
-      split at hrec
-      · simp at hrec
-      · next w1 a1 hdel =>
-        rcases hrec with ⟨_, hw⟩
-        injection hw with hw
-        have hst := deliver_st I w id ({ (w.st id) with prio := ms }) m w1 a1 d hdel
-        exact suffix_of_eq (by rw [← hw, setActor_other w1 id d a1 hid.symm, hst])
+    obtain ⟨m, pre, suf, w1, a1, _, _, _, _, _, hdel, hw⟩ := receivePrio_waits I w w' id hrec
+    have hst := deliver_st I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 d hdel
+    exact suffix_of_eq (by rw [hw, setActor_other w1 id d a1 hid.symm, hst])
   | finish id =>
     exact suffix_of_eq (finish_prio I w w' id d (by simpa [apply] using h))
   | exec id =>
@@ -2450,11 +2457,11 @@ theorem prio_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
     (hterm : terminableB I.desc (tname id) = false)
     (hlive : ((ρ.cfg i).st id).life = .alive)
     (hpos : posOf mid ((ρ.cfg i).st id).prio < ((ρ.cfg i).st id).prio.length) :
-    ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) mid := by
+    ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio (ρ.cfg j) ((ρ.cfg j).st id) mid := by
   suffices ∀ n i, posOf mid ((ρ.cfg i).st id).prio = n →
       posOf mid ((ρ.cfg i).st id).prio < ((ρ.cfg i).st id).prio.length →
       ((ρ.cfg i).st id).life = .alive →
-      ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) mid by
+      ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio (ρ.cfg j) ((ρ.cfg j).st id) mid by
     exact this _ i rfl hpos hlive
   intro n
   induction n using Nat.strongRecOn with
@@ -2482,26 +2489,34 @@ theorem prio_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
       have hat := hstill j hj hfirst
       have hv := ρ.valid j
       simp [apply, hact] at hv
-      cases hp : ((ρ.cfg j).st id).prio with
-      | nil => simp [hp, posOf] at hat
-      | cons m ms =>
-        by_cases hm : m.mid = mid
-        · refine ⟨j, hj, hact, ?_⟩
-          simp [takenPrio, hp, hm]
-        · have hgt : 0 < n := by
-            have hposj : posOf mid ((ρ.cfg j).st id).prio = n := hat.1
-            simp [hp, posOf, hm] at hposj
-            omega
-          have htail := (prio_recv_tail I (ρ.cfg j) (ρ.cfg (j + 1)) id hv).1
-          have hnew : ((ρ.cfg (j + 1)).st id).prio = ms := by simpa [hp] using htail
-          have hdec := pos_drop mid m ms ((ρ.cfg (j + 1)).st id).prio hm
-            (by simpa [hp] using hat.2) (Or.inl hnew)
+      obtain ⟨pre, taken, suf, hprio, hpre, hclear, hrest, _hbulk⟩ :=
+        prio_recv_tail I (ρ.cfg j) (ρ.cfg (j + 1)) id hv
+      by_cases hm : taken.mid = mid
+      · exact ⟨j, hj, hact, pre, taken, suf, hprio, hm, hpre, hclear⟩
+      · by_cases hfront : ∃ t ∈ pre, t.mid = mid
+        · obtain ⟨t, ht, _heq⟩ := hfront
+          have _hwaits : tombstoneWaits (ρ.cfg j) t = true := hpre t ht
+        · have hfree : ∀ t ∈ pre, t.mid ≠ mid := by
+            intro t ht heq
+            exact hfront ⟨t, ht, heq⟩
+          have hdec := pos_skip mid pre taken suf hfree hm (by simpa [hprio] using hat.2)
           have hnext : posOf mid ((ρ.cfg (j + 1)).st id).prio = n - 1 := by
-            have hhead : posOf mid (m :: ms) = n := by simpa [hp] using hat.1
-            rw [hdec.1, hhead]
-          have hlt' := hdec.2
+            rw [hrest, hdec.1, hprio]
+            exact hat.1
+          have hlt' : posOf mid ((ρ.cfg (j + 1)).st id).prio <
+              ((ρ.cfg (j + 1)).st id).prio.length := by simpa [hrest] using hdec.2
           have hlive' : ((ρ.cfg (j + 1)).st id).life = .alive :=
             halive (j + 1) (Nat.le_trans hj (Nat.le_succ _))
+          have hgt : 0 < n := by
+            have hposj : posOf mid ((ρ.cfg j).st id).prio = n := hat.1
+            have hpos' : posOf mid (pre ++ taken :: suf) = n := by simpa [hprio] using hposj
+            cases pre with
+            | nil =>
+              simp [posOf, hm] at hpos'
+              omega
+            | cons _ _ =>
+              simp [List.cons_append, posOf] at hpos'
+              omega
           obtain ⟨k, hk, hactk, htaken⟩ :=
             ih (n - 1) (by omega) (j + 1) hnext hlt' hlive'
           exact ⟨k, Nat.le_trans hj (Nat.le_trans (Nat.le_succ _) hk), hactk, htaken⟩
@@ -2559,7 +2574,7 @@ theorem park_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
 theorem prio_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) (i : Nat) (id : InstId) (m : Msg)
     (hm : m ∈ ((ρ.cfg i).st id).prio) (hr : m.reliable = true) :
-    ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio ((ρ.cfg j).st id) m.mid := by
+    ∃ j, i ≤ j ∧ ρ.act j = .recvPrio id ∧ takenPrio (ρ.cfg j) ((ρ.cfg j).st id) m.mid := by
   have hR := cfg_reachable ρ i
   have hterm := reliable_permanent I hL hG N (ρ.cfg i) hR id (by
     intro hf

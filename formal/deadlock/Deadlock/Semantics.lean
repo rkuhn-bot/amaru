@@ -697,11 +697,66 @@ def findLive (w : World) (name : String) (key : Nat) : Option InstId :=
 
 /-- One past every incarnation of `name` at `key` already on the roster.
 The first occupant gets generation 0. A dead id is not reused. -/
+def genStep (name : String) (key : Nat) (acc : Nat) (id : InstId) : Nat :=
+  match id with
+  | .peer n k gen => if n == name && k == key then max acc (gen + 1) else acc
+  | .core _ => acc
+
 def maxGen (w : World) (name : String) (key : Nat) : Nat :=
-  w.roster.foldl (fun acc id =>
-    match id with
-    | .peer n k g => if n == name && k == key then max acc (g + 1) else acc
-    | .core _ => acc) 0
+  w.roster.foldl (genStep name key) 0
+
+theorem genStep_ge (name : String) (key acc : Nat) (ids : List InstId) :
+    acc ≤ ids.foldl (genStep name key) acc := by
+  induction ids generalizing acc with
+  | nil => exact Nat.le_refl _
+  | cons id ids ih =>
+    rw [List.foldl_cons]
+    cases id with
+    | core _ => exact ih _
+    | peer n k gen =>
+      by_cases h : (n == name && k == key) = true
+      · simp only [genStep, h, ite_true]
+        exact Nat.le_trans (Nat.le_max_left _ _) (ih _)
+      · simp only [genStep, h, ite_false]
+        exact ih _
+
+theorem genStep_mono (name : String) (key : Nat) (ids : List InstId) {a b : Nat} (h : a ≤ b) :
+    ids.foldl (genStep name key) a ≤ ids.foldl (genStep name key) b := by
+  induction ids generalizing a b with
+  | nil => exact h
+  | cons id ids ih =>
+    rw [List.foldl_cons, List.foldl_cons]
+    cases id with
+    | core _ => exact ih h
+    | peer n k gen =>
+      by_cases hs : (n == name && k == key) = true
+      · simp only [genStep, hs, ite_true]
+        exact ih (by
+          apply Nat.max_le.mpr
+          exact ⟨Nat.le_trans h (Nat.le_max_left _ _), Nat.le_max_right _ _⟩)
+      · simp only [genStep, hs, ite_false]
+        exact ih h
+
+/-- Every incarnation of this slot already on the roster has a smaller generation. -/
+theorem maxGen_gt (ids : List InstId) (name : String) (key g : Nat)
+    (h : InstId.peer name key g ∈ ids) : g < ids.foldl (genStep name key) 0 := by
+  induction ids with
+  | nil => cases h
+  | cons id ids ih =>
+    rw [List.foldl_cons]
+    cases List.mem_cons.mp h with
+    | inl heq =>
+      cases heq
+      simp only [genStep, beq_self_eq_true, Bool.and_self, ite_true]
+      exact Nat.lt_of_lt_of_le (Nat.lt_succ_self g)
+        (Nat.le_trans (Nat.le_max_right _ _) (genStep_ge name key _ ids))
+    | inr hmem =>
+      exact Nat.lt_of_lt_of_le (ih hmem) (genStep_mono name key ids (Nat.zero_le _))
+
+theorem maxGen_notin (w : World) (name : String) (key : Nat) :
+    InstId.peer name key (maxGen w name key) ∉ w.roster := by
+  intro hmem
+  exact Nat.lt_irrefl _ (maxGen_gt w.roster name key _ hmem)
 
 def aliveAt (w : World) (name : String) (key : Nat) : Bool :=
   (findLive w name key).isSome
@@ -1087,6 +1142,72 @@ theorem receivePrio_spec (I : Impl) (w w' : World) (id : InstId)
     obtain ⟨m, pre, suf, w1, a1, happ, hwait, hdel, hw'⟩ :=
       receivePrioFrom_spec I w id [] (w.st id).prio w' h
     exact ⟨m, pre, suf, w1, a1, hlife, hidle, by simpa using happ, hwait, hdel, hw'⟩
+
+/-- Skipped messages are waiting tombstones. `receivePrio_spec` records the
+split; this one also records why the prefix stayed in the lane. -/
+theorem receivePrioFrom_waits (I : Impl) (w : World) (id : InstId) (skipped ms : List Msg)
+    (w' : World) (hskip : ∀ t ∈ skipped, tombstoneWaits w t = true)
+    (h : receivePrioFrom I w id skipped ms = some w') :
+    ∃ m pre suf w1 a1,
+      skipped ++ ms = pre ++ m :: suf ∧
+      (∀ t ∈ pre, tombstoneWaits w t = true) ∧
+      tombstoneWaits w m = false ∧
+      deliver I w id { (w.st id) with prio := pre ++ suf } m = some (w1, a1) ∧
+      w' = setActor w1 id a1 := by
+  induction ms generalizing skipped with
+  | nil => simp [receivePrioFrom] at h
+  | cons m ms ih =>
+    unfold receivePrioFrom at h
+    split at h
+    · rename_i hwait
+      have hskip' : ∀ t ∈ skipped ++ [m], tombstoneWaits w t = true := by
+        intro t ht
+        simp [List.mem_append, List.mem_singleton] at ht
+        rcases ht with ht | rfl
+        · exact hskip t ht
+        · exact hwait
+      obtain ⟨m', pre, suf, w1, a1, happ, hpre, hclear, hdel, hw'⟩ := ih (skipped ++ [m]) hskip' h
+      refine ⟨m', pre, suf, w1, a1, ?_, hpre, hclear, hdel, hw'⟩
+      have hstep : skipped ++ (m :: ms) = (skipped ++ [m]) ++ ms := by simp [List.append_assoc]
+      exact hstep.trans happ
+    · rename_i hclear
+      have hwf : tombstoneWaits w m = false := by
+        cases hb : tombstoneWaits w m with
+        | false => rfl
+        | true => exact absurd hb hclear
+      split at h
+      · cases h
+      · rename_i w1 a1 hdel
+        cases h
+        refine ⟨m, skipped, ms, w1, a1, ?_, hskip, hwf, hdel, rfl⟩
+        simp
+
+theorem receivePrio_waits (I : Impl) (w w' : World) (id : InstId)
+    (h : receivePrio I w id = some w') :
+    ∃ m pre suf w1 a1,
+      (w.st id).life = .alive ∧ (w.st id).phase = .idle ∧
+      (w.st id).prio = pre ++ m :: suf ∧
+      (∀ t ∈ pre, tombstoneWaits w t = true) ∧
+      tombstoneWaits w m = false ∧
+      deliver I w id { (w.st id) with prio := pre ++ suf } m = some (w1, a1) ∧
+      w' = setActor w1 id a1 := by
+  unfold receivePrio at h
+  dsimp at h
+  split at h
+  · cases h
+  · rename_i hready
+    have hboth : decide ((w.st id).life ≠ .alive) = false ∧
+        decide ((w.st id).phase ≠ .idle) = false := by
+      simpa [Bool.or_eq_false_iff] using hready
+    have hlife : (w.st id).life = .alive := by
+      have hnot := decide_eq_false_iff_not.mp hboth.1
+      simpa [ne_eq] using hnot
+    have hidle : (w.st id).phase = .idle := by
+      have hnot := decide_eq_false_iff_not.mp hboth.2
+      simpa [ne_eq] using hnot
+    obtain ⟨m, pre, suf, w1, a1, happ, hpre, hwait, hdel, hw'⟩ :=
+      receivePrioFrom_waits I w id [] (w.st id).prio w' (by intro _ ht; cases ht) h
+    exact ⟨m, pre, suf, w1, a1, hlife, hidle, by simpa using happ, hpre, hwait, hdel, hw'⟩
 
 /-- The message `receivePrio` removes is the one `receivePrio_spec` delivers.
 The world after the receive is that delivery, so the witness is not some

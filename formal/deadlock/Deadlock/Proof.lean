@@ -631,19 +631,7 @@ theorem nat_foldl_gt_of_mem {α : Type} (f : Nat → α → Nat) (hf : ∀ acc x
 /-- A generation already on the roster is below `maxGen`, so a spawn does not reuse it. -/
 theorem maxGen_fresh (w : World) (name : String) (key g : Nat)
     (h : InstId.peer name key g ∈ w.roster) : g < maxGen w name key := by
-  unfold maxGen
-  refine nat_foldl_gt_of_mem _ ?_ (InstId.peer name key g) g ?_ w.roster 0 h
-  · intro acc x
-    cases x with
-    | core _ => exact Nat.le_refl acc
-    | peer n k g' =>
-      dsimp only
-      split
-      · exact Nat.le_max_left _ _
-      · exact Nat.le_refl acc
-  · intro acc
-    simp
-    exact Nat.lt_of_lt_of_le (Nat.lt_succ_self g) (Nat.le_max_right acc (g + 1))
+  simpa [maxGen] using maxGen_gt w.roster name key g h
 
 /-- A child spawn leaves every actor already on the roster as it was. -/
 theorem spawnChild_other_st (I : Impl) (w w' : World) (parent : InstId) (child : String) (s : InstId)

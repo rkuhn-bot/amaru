@@ -65,6 +65,31 @@ theorem readCells_st (D : Description) (w : World) (id i : InstId) :
     simp only [List.foldl_cons, setCell, setObserved]
     exact ih _
 
+/-- `deliver` reads cells and returns the receiver's next actor. It does not
+rewrite anyone's stored actor; the receive installs that actor afterwards. -/
+theorem deliver_st (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a1 : Actor) (i : InstId) (h : deliver I w id a m = some (w1, a1)) :
+    w1.st i = w.st i := by
+  unfold deliver at h
+  dsimp only at h
+  split at h
+  · cases h
+  · split at h
+    · injection h with hpair
+      cases hpair
+      exact readCells_st I.desc w id i
+    · split at h
+      · split at h
+        · cases h
+        · injection h with hpair
+          cases hpair
+          exact readCells_st I.desc w id i
+      · split at h
+        · cases h
+        · injection h with hpair
+          cases hpair
+          exact readCells_st I.desc w id i
+
 theorem findSome_tr (xs : List Transition) (template state label : String) (tr : Transition)
     (h : xs.findSome? (fun a =>
         if a.template == template && a.fromState == state && a.label == label then some a else none) =
