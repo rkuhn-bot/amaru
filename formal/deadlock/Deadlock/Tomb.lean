@@ -694,15 +694,12 @@ theorem freeGo_lt (w : World) (parent : InstId) (name : String) (n fuel k : Nat)
   induction fuel generalizing k with
   | zero => simp [freeGo] at h
   | succ fuel ih =>
-    by_cases hbit : (slotOccupied w name (n - (fuel + 1)) ||
-        slotTombstoneQueued w parent name (n - (fuel + 1))) = true
+    by_cases hbit : slotRespawnBlocked w parent name (n - (fuel + 1)) = true
     · have hrec : freeGo w parent name n fuel = some k := by
         simpa [freeGo, hbit] using h
       exact ih k (Nat.le_of_succ_le hf) hrec
-    · have hfalse : (slotOccupied w name (n - (fuel + 1)) ||
-          slotTombstoneQueued w parent name (n - (fuel + 1))) = false := by
-        cases hbb : slotOccupied w name (n - (fuel + 1)) ||
-            slotTombstoneQueued w parent name (n - (fuel + 1)) <;> simp_all
+    · have hfalse : slotRespawnBlocked w parent name (n - (fuel + 1)) = false := by
+        cases hbb : slotRespawnBlocked w parent name (n - (fuel + 1)) <;> simp_all
       have hk : n - (fuel + 1) = k := by
         simpa [freeGo, hfalse] using h
       subst hk
@@ -715,25 +712,17 @@ theorem freeGo_fresh (w : World) (parent : InstId) (name : String) (n fuel k : N
   induction fuel generalizing k with
   | zero => simp [freeGo] at h
   | succ fuel ih =>
-    by_cases hbit : (slotOccupied w name (n - (fuel + 1)) ||
-        slotTombstoneQueued w parent name (n - (fuel + 1))) = true
+    by_cases hbit : slotRespawnBlocked w parent name (n - (fuel + 1)) = true
     · have hrec : freeGo w parent name n fuel = some k := by
         simpa [freeGo, hbit] using h
       exact ih k hrec
-    · have hfalse : (slotOccupied w name (n - (fuel + 1)) ||
-          slotTombstoneQueued w parent name (n - (fuel + 1))) = false := by
-        cases hbb : slotOccupied w name (n - (fuel + 1)) ||
-            slotTombstoneQueued w parent name (n - (fuel + 1)) <;> simp_all
+    · have hfalse : slotRespawnBlocked w parent name (n - (fuel + 1)) = false := by
+        cases hbb : slotRespawnBlocked w parent name (n - (fuel + 1)) <;> simp_all
       have hk : n - (fuel + 1) = k := by
         simpa [freeGo, hfalse] using h
-      cases hocc : slotOccupied w name (n - (fuel + 1)) with
-      | true => simp [hocc] at hfalse
-      | false =>
-        cases hq : slotTombstoneQueued w parent name (n - (fuel + 1)) with
-        | true => simp [hocc, hq] at hfalse
-        | false =>
-          subst hk
-          exact ⟨hocc, hq⟩
+      have hclear := slotRespawnBlocked_clear w parent name (n - (fuel + 1)) hfalse
+      subst hk
+      exact ⟨hclear.1, hclear.2.1⟩
 
 theorem freeSlot_lt (w : World) (parent : InstId) (name : String) (n k : Nat)
     (h : freeSlot w parent name n = some k) : k < n :=
@@ -8773,32 +8762,23 @@ theorem hold_spawn_child (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.
       | peer pname pk pg =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hzeroB : (t.slots == 0) = true
-        · by_cases hbusy : (slotOccupied w child pk || slotTombstoneQueued w (.peer pname pk pg) child pk) = true
+        · by_cases hbusy : slotRespawnBlocked w (.peer pname pk pg) child pk = true
           · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
               simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
             have hrun : execRun I w (.peer pname pk pg) a k =
                 setActor w (.peer pname pk pg) (proceed (w.st (.peer pname pk pg)) k') := by
               simp [execRun, hgo, hk, hsc, k']
             exact hrun.symm ▸ hold_proceed I w hH (.peer pname pk pg) k' hpre (hphase w)
-          · have hocc : slotOccupied w child pk = false := by
-              cases ho : slotOccupied w child pk with
-              | false => rfl
-              | true =>
-                have htrue : (slotOccupied w child pk ||
-                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [ho]
-                exact absurd htrue hbusy
-            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := by
-              cases hto : slotTombstoneQueued w (.peer pname pk pg) child pk with
-              | false => rfl
-              | true =>
-                have htrue : (slotOccupied w child pk ||
-                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [hto]
-                exact absurd htrue hbusy
+          · have hfalse : slotRespawnBlocked w (.peer pname pk pg) child pk = false := by
+              cases hbb : slotRespawnBlocked w (.peer pname pk pg) child pk <;> simp_all
+            have hclear := slotRespawnBlocked_clear w (.peer pname pk pg) child pk hfalse
+            have hocc : slotOccupied w child pk = false := hclear.1
+            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := hclear.2.1
             let bornId := InstId.peer child pk (maxGen w child pk)
             let born := { bornActor I.desc w child pk t.initial with parent := some (.peer pname pk pg) }
             let wB := admitBorn I w bornId born
             have hsc : spawnChild I w (.peer pname pk pg) child = some wB := by
-              simp [spawnChild, ht, gate, hok, hzeroB, hocc, hq, bornId, born, wB]
+              simp [spawnChild, ht, gate, hok, hzeroB, hfalse, bornId, born, wB]
             have hB := hold_child_peer I w hH (.peer pname pk pg) pname child t pk pg ht hmul hsup
               rfl hocc hq hparent hpre (hoff bornId (gen_fresh w child pk))
             have hpreB : wB.crashed = false := by simpa [wB, admit_crash] using hpre
@@ -10408,8 +10388,7 @@ theorem spawn_effect_side (I : Impl) (w : World) (hH : Hold I w) (hS : Side I w)
       | peer pname pk pg =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hzeroB : (t.slots == 0) = true
-        · by_cases hbusy : (slotOccupied w child pk ||
-              slotTombstoneQueued w (.peer pname pk pg) child pk) = true
+        · by_cases hbusy : slotRespawnBlocked w (.peer pname pk pg) child pk = true
           · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
               simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
             have hrun : execRun I w (.peer pname pk pg) a k =
@@ -10418,25 +10397,13 @@ theorem spawn_effect_side (I : Impl) (w : World) (hH : Hold I w) (hS : Side I w)
             exact hrun.symm ▸ side_frame I w _ hS
               (frame_keep w (.peer pname pk pg) (proceed (w.st (.peer pname pk pg)) k')
                 (by simp [proceed_keeps_prio]))
-          · have hocc : slotOccupied w child pk = false := by
-              cases ho : slotOccupied w child pk with
-              | false => rfl
-              | true =>
-                have htrue : (slotOccupied w child pk ||
-                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [ho]
-                exact absurd htrue hbusy
-            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := by
-              cases hto : slotTombstoneQueued w (.peer pname pk pg) child pk with
-              | false => rfl
-              | true =>
-                have htrue : (slotOccupied w child pk ||
-                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [hto]
-                exact absurd htrue hbusy
+          · have hfalse : slotRespawnBlocked w (.peer pname pk pg) child pk = false := by
+              cases hbb : slotRespawnBlocked w (.peer pname pk pg) child pk <;> simp_all
             let bornId := InstId.peer child pk (maxGen w child pk)
             let born := { bornActor I.desc w child pk t.initial with parent := some (.peer pname pk pg) }
             let wB := admitBorn I w bornId born
             have hsc : spawnChild I w (.peer pname pk pg) child = some wB := by
-              simp [spawnChild, ht, gate, hok, hzeroB, hocc, hq, bornId, born, wB]
+              simp [spawnChild, ht, gate, hok, hzeroB, hfalse, bornId, born, wB]
             have hB := admit_side I w hH hS child pk (.peer pname pk pg) t ht hsup
               (Or.inr ⟨pname, pk, pg, rfl⟩) (alive_mem I w hH (.peer pname pk pg) hparent)
             have hrun : execRun I w (.peer pname pk pg) a k =
@@ -11203,32 +11170,19 @@ theorem spawn_child_wired (I : Impl) (w : World) (hW : Wired I.desc w) (parent :
       | peer pname pk pg =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hzeroB : (t.slots == 0) = true
-        · by_cases hbusy : (slotOccupied w child pk ||
-              slotTombstoneQueued w (.peer pname pk pg) child pk) = true
+        · by_cases hbusy : slotRespawnBlocked w (.peer pname pk pg) child pk = true
           · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
               simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
             have hw' : w = w' := by simpa [hsc] using h
             exact hw'.symm ▸ hW
-          · have hocc : slotOccupied w child pk = false := by
-              cases ho : slotOccupied w child pk with
-              | false => rfl
-              | true =>
-                have htrue : (slotOccupied w child pk ||
-                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [ho]
-                exact absurd htrue hbusy
-            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := by
-              cases hto : slotTombstoneQueued w (.peer pname pk pg) child pk with
-              | false => rfl
-              | true =>
-                have htrue : (slotOccupied w child pk ||
-                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [hto]
-                exact absurd htrue hbusy
+          · have hfalse : slotRespawnBlocked w (.peer pname pk pg) child pk = false := by
+              cases hbb : slotRespawnBlocked w (.peer pname pk pg) child pk <;> simp_all
             let bornId := InstId.peer child pk (maxGen w child pk)
             let born := { bornActor I.desc w child pk t.initial with
               parent := some (.peer pname pk pg) }
             have hsc : spawnChild I w (.peer pname pk pg) child =
                 some (admitBorn I w bornId born) := by
-              simp [spawnChild, ht, gate, hok, hzeroB, hocc, hq, bornId, born]
+              simp [spawnChild, ht, gate, hok, hzeroB, hfalse, bornId, born]
             have hw' : admitBorn I w bornId born = w' := by simpa [hsc] using h
             have hnew : ∀ q, born.parent = some q →
                 ∃ t, templateOf I.desc (tname bornId) = some t ∧ t.supervisor = some (tname q) := by

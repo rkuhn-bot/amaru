@@ -210,11 +210,11 @@ untimed per-peer to be terminable. A core is not that peer: a pure core is
 rejected by `subtreeEntry` (`pureKillMsg`), and demanding `terminable` there
 would contradict the flag check.
 
-N32 is open. Helen's E4 (`Outlive.lean`) is mail from a non-terminable
-per-peer child left in two cores after the per-peer root terminates. That
-root is per-peer, so its `terminate` is still the subtree seal, not a core
-crash. The cores in that run do not terminate. This decision does not move
-that mail, does not crash that run, and does not choose a fix.
+The slot-mail note below is the decision on N32. Helen's E4
+(`Outlive.lean`) is mail from a non-terminable per-peer child left in two
+cores after the per-peer root terminates. That root is per-peer, so its
+`terminate` is still the subtree seal, not a core crash. The cores in that
+run do not terminate. This decision does not move that mail.
 
 `FairRun.lossTpl` is a terminable core. Its `terminate` used to clear a
 mailbox (`loss_not_delivered`). That step is now `crashWorld`. `FairRun` does
@@ -222,3 +222,58 @@ not build, and this change does not repair it. `TermStep.crash` no longer
 carries `terminable = false`, and `lone` and `cascade` require
 `multiplicity = .perPeer`. Modules that still split the old constructors are
 left as they are.
+
+## 2026-11-21 — A slot respawns after its core mail is consumed
+
+Roland, from the 2026-11-21 08:04 CET call: mail in a tokio channel cannot
+be removed or diverted, so processing-before-respawn must be a precondition
+of spawn, not an operational hope. A per-peer slot may be respawned only
+once every message that any previous occupant of that slot sent to a core
+has been consumed by that core.
+
+The slot is `(template, key)`. A pool slot is that key in `0 ..< slots`
+under its core. A per-peer parent's one child uses the parent's key, and
+the next generation is the next occupant. A scheduler root takes a fresh
+key from `freshKey` — a new slot, with no previous occupant.
+`slotCoreMail` is a bulk message, a priority message, or a parked send still
+sitting on a core, whose sender is any generation of that slot.
+`slotRespawnBlocked` is that mail, or the slot still alive or shutting
+down, or its tombstone still queued. `spawnChild` is then a no-op, the
+same as a full pool. `freeSlot` skips such a pool index. `spawn` of a root
+is unchanged: the key is fresh.
+
+The tombstone rule and this rule are separate — the tombstone is one
+priority message on the supervisor. Core mail is what occupants already
+placed on cores. Neither implies the other. A per-peer supervisor's
+tombstone is not on a core, so the parent can consume it while a core still
+holds the slot's bulk mail, and a core can consume that mail while the
+tombstone is still queued. A core supervisor's tombstone is itself core
+mail from the slot, so consuming it clears that one priority message and
+the queued-tombstone bit together. Other messages on that core, and mail
+on any other core, stay until those cores consume them. A respawn needs
+both guards clear. They can be discharged in either order.
+
+A respawn can stay disabled for the rest of the run. Liveness of respawn
+is not claimed. The slot stays blocked while any of that mail remains.
+The shutdown mark drops the dying sender's parked entries on other hosts
+without delivering them (`releaseOutbound`), so those particular parked
+sends do not outlive the occupant. Mail already admitted to a core's box
+or priority lane does, and it is not drained. If the core never receives
+it, the next incarnation is not born.
+
+`GraphOk` is unchanged: it does not read mailboxes. `LocalOk`'s restart
+check is unchanged. It refuses a spawn that can run while the tombstone
+may still be queued, which is a fact about typestate. Core mail is not.
+The step no-op is the guard.
+
+pure-stage and Amaru have to enforce the same precondition before a
+restart. This model does not change the Rust node. A restart that births
+the next incarnation while a core still holds the slot's earlier mail
+would not be this semantics.
+
+Helen's E4 (`outlive_stuck`) is still a checked run. Each birth of `R`
+and `X` is generation 0 of a fresh subtree key, not a later occupant of
+an old slot. The guard does not refuse those spawns. The mail in `H` and
+`K` is from five different slots. `outlive_first_generation` is that the
+final roster still has only generation 0 at each of those keys, and
+`outlive_stuck` is the cores parked on each other.

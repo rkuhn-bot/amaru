@@ -1507,32 +1507,71 @@ def slotOccupied (w : World) (name : String) (k : Nat) : Bool :=
         ((w.st id).life == .alive || (w.st id).life == .shuttingDown)
     | .core _ => false
 
-/-- Lowest slot in `0 ..< n` with no live or shutting-down `name` and no
-tombstone of that slot still queued on `parent`. `fuel` counts the indices
-still to try, from `0` upward. A queued tombstone occupies the slot until
-the supervisor consumes it. -/
+/-- `id` is an occupant of per-peer slot `(name, key)`. A pool slot is that
+key under its core, in `0 ..< slots`. A per-peer parent's one child uses the
+parent's key. Generation distinguishes occupants of the same key. A scheduler
+root takes a fresh key, so it is a new slot. -/
+def fromSlot (name : String) (key : Nat) (id : InstId) : Bool :=
+  match id with
+  | .peer n k _ => n == name && k == key
+  | .core _ => false
+
+/-- Mail from slot `(name, key)` that this actor has not consumed: a bulk
+message, a priority message, or a parked send still sitting here. -/
+def actorHoldsSlotMail (name : String) (key : Nat) (a : Actor) : Bool :=
+  a.box.any (fun m => fromSlot name key m.sender) ||
+    a.prio.any (fun m => fromSlot name key m.sender) ||
+    a.parked.any (fun p => fromSlot name key p.sender || fromSlot name key p.msg.sender)
+
+/-- A core still holds mail from any occupant of slot `(name, key)`. -/
+def slotCoreMail (w : World) (name : String) (key : Nat) : Bool :=
+  w.roster.any fun id =>
+    match id with
+    | .core _ => actorHoldsSlotMail name key (w.st id)
+    | .peer _ _ _ => false
+
+/-- No new incarnation of this slot. It is alive or shutting down, its
+tombstone is still queued, or a core still holds mail from an occupant. -/
+def slotRespawnBlocked (w : World) (parent : InstId) (name : String) (key : Nat) : Bool :=
+  slotOccupied w name key || slotTombstoneQueued w parent name key || slotCoreMail w name key
+
+theorem slotRespawnBlocked_clear (w : World) (parent : InstId) (name : String) (key : Nat)
+    (h : slotRespawnBlocked w parent name key = false) :
+    slotOccupied w name key = false ∧ slotTombstoneQueued w parent name key = false ∧
+      slotCoreMail w name key = false := by
+  unfold slotRespawnBlocked at h
+  have htail := Bool.or_eq_false_iff.mp h
+  have hhead := Bool.or_eq_false_iff.mp htail.1
+  exact ⟨hhead.1, hhead.2, htail.2⟩
+
+/-- Lowest slot in `0 ..< n` that is not `slotRespawnBlocked`. `fuel` counts
+the indices still to try, from `0` upward. A queued tombstone occupies the
+slot until the supervisor consumes it. Mail an occupant sent to a core
+occupies it until that core consumes the message. -/
 def freeGo (w : World) (parent : InstId) (name : String) (n : Nat) : Nat → Option Nat
   | 0 => none
   | fuel + 1 =>
     let k := n - (fuel + 1)
-    if slotOccupied w name k || slotTombstoneQueued w parent name k then freeGo w parent name n fuel
+    if slotRespawnBlocked w parent name k then freeGo w parent name n fuel
     else some k
 
 /-- Lowest free slot below `n`. -/
 def freeSlot (w : World) (parent : InstId) (name : String) (n : Nat) : Option Nat :=
   freeGo w parent name n n
 
-/-- Lowest root key in `0 ..< n` whose tombstone is not still on the core. -/
+/-- Lowest root key in `0 ..< n` that `freeSlot` accepts. -/
 def freeRootSlot (w : World) (supervisor name : String) (n : Nat) : Option Nat :=
   freeSlot w (.core supervisor) name n
 
 /-- A per-peer parent births one child at its own key. A core births one pool
-child in a free slot below `slots`. A slot that is alive, still shutting
-down, or whose tombstone is still queued is not free: the spawn is a no-op,
-the same as a full pool. The tombstone is queued at the seal, so the
-predecessor is dead before the parent can consume it and birth the next
-generation. A parent that is not alive admits nobody. A spawn the template
-does not allow is `none`, and the effect then crashes. -/
+child in a free slot below `slots`. The spawn is a no-op, the same as a full
+pool, while `slotRespawnBlocked` holds: the slot is alive or shutting down,
+its tombstone is still queued, or a core still holds mail from an occupant.
+The tombstone is queued at the seal, so the predecessor is dead before the
+parent can consume it. Mail already admitted to a core stays there until that
+core consumes it, and that mail blocks the next incarnation on its own.
+A parent that is not alive admits nobody. A spawn the template does not
+allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
   match templateOf I.desc child with
   | none => none
@@ -1550,7 +1589,7 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
         else none
       | .peer _ k _ =>
         if t.slots == 0 then
-          if slotOccupied w child k || slotTombstoneQueued w parent child k then some w
+          if slotRespawnBlocked w parent child k then some w
           else
             let id := InstId.peer child k (maxGen w child k)
             let born := { bornActor I.desc w child k t.initial with parent := some parent }
@@ -2469,6 +2508,11 @@ def placePeer (I : Impl) (w : World) (template : String) (k : Nat) (initial : St
   let w := next { w with roster := w.roster ++ [id] }
   readCells I.desc (setActor w id born) id
 
+/-- Scheduler birth of a per-peer subtree root. The key is fresh (`freshKey`
+or `nextIx`), so this is a new slot: it has no previous occupant, and
+`slotCoreMail` does not apply. A later incarnation of a pool slot or of a
+per-peer parent's one child is `spawnChild`, which is a no-op while
+`slotRespawnBlocked` holds. -/
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
   | none => none

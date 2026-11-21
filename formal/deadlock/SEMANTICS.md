@@ -64,7 +64,7 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, `prio` nonempty, `deliver` accepts | Consume the `prio` head. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root with `slots = 0` and a free key, supervisor alive | Fresh generation at a free key, idle, on the roster. A core-supervised root uses keys `0 ..< N`. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive, shutting down, or its tombstone is still queued: that spawn is a no-op, and a root spawn into such a key is not enabled. The same rule applies to a per-peer parent. A dead id is not reused. |
+| `spawn template` | per-peer root with `slots = 0` and a free key, supervisor alive | Fresh generation at a fresh key, idle, on the roster. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive, shutting down, its tombstone is still queued, or a core still holds mail from any occupant of that slot: that spawn is a no-op. The same rule applies to a per-peer parent's one child. A scheduler root takes a fresh key, so it is a new slot. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
@@ -147,11 +147,14 @@ queued at the seal, once the child is dead, on the immediate supervisor's
 priority lane. That is when pure-stage notifies the parent:
 `terminate_stage` finishes the child before `tombstones.push_back`. The
 supervisor may be a per-peer stage of the same subtree. The parent answers
-the tombstone in its own later step. A re-spawn of that slot is enabled when
-the slot has never been born, when its tombstone has been consumed, or in
-the transition that consumes it. Until then the spawn is a no-op, the same
-as a full pool, and a root spawn into that slot is not enabled. A core pool
-and a per-peer parent use the same rule. A sibling is not a descendant, and
+the tombstone in its own later step. A re-spawn of that slot is a no-op
+while the slot is alive or shutting down, while its tombstone is queued,
+or while a core still holds mail from any occupant — bulk box, priority
+lane, or a parked send still on that core.
+The tombstone and the core mail are separate. Either can be consumed while
+the other remains, and the spawn stays a no-op until both are clear. A core
+pool and a per-peer parent use the same rule. A scheduler root takes a fresh
+key. A sibling is not a descendant, and
 nothing here clears a sibling's mailbox. A lone terminable per-peer with no
 child and no parked call is `shutdownActor` of itself. Every core's
 `terminate`, and a priority enqueue onto a full lane, are `crashWorld`.

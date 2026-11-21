@@ -8,6 +8,10 @@ both cores hold a `Ping` plus four `M`s, which is their whole capacity. The
 next `X` parks on `K`. Each core then runs `Ping`, whose program is a blocking
 send of `P` to the other core, and that send parks. The checker accepts the
 description: a non-terminable member is not confined to its subtree.
+
+Each birth is generation 0 of a fresh subtree key, not a later occupant of
+an old slot. `slotCoreMail` does not refuse these spawns. The mail in `H`
+and `K` is from five different slots, and the cores still park on each other.
 -/
 import Deadlock.Graph
 import Deadlock.Local
@@ -198,4 +202,19 @@ theorem outlive_stuck :
         parkedOn (w.st Hc) Kc && parkedOn (w.st Kc) Hc &&
           decide ((w.st Hc).box.length = 5) && decide ((w.st Kc).box.length = 5) &&
           !w.crashed && !runtimeBusy outImpl w && (apply outImpl .stutter w).isSome) = true := by
+  decide
+
+/-- Each `X` and `R` in that run is generation 0 of its own key. The respawn
+guard looks at earlier occupants of the same key, so it does not refuse
+these births. -/
+theorem outlive_first_generation :
+    (match runAt outliveActs with
+      | none => false
+      | some w =>
+        decide (maxGen w "X" 0 = 1) && decide (maxGen w "X" 1 = 1) &&
+          decide (maxGen w "X" 2 = 1) && decide (maxGen w "X" 3 = 1) &&
+          decide (maxGen w "X" 4 = 1) &&
+          decide (maxGen w "R" 0 = 1) && decide (maxGen w "R" 1 = 1) &&
+          decide (maxGen w "R" 2 = 1) && decide (maxGen w "R" 3 = 1) &&
+          decide (maxGen w "R" 4 = 1)) = true := by
   decide

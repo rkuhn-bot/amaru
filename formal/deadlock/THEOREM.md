@@ -67,6 +67,19 @@ not added, and the lane holds each label once across later transitions.
 `LocalOk` also rejects a re-spawn that can run while that slot's tombstone
 is still queued. The semantics makes the same spawn a no-op, for a core pool
 and for a per-peer parent, and a root spawn into such a slot is not enabled.
+A pool slot, and a per-peer parent's one child, also stay blocked while a
+core still holds mail from any occupant of that slot — a bulk message, a
+priority message, or a parked send still on the core. `slotCoreMail` is
+that test. `spawnChild` is a no-op until the core has consumed it, the same
+treatment as a queued tombstone. The two guards are independent: a per-peer
+supervisor can consume the tombstone while the core mail remains, and a
+core can consume the mail while the tombstone remains. A scheduler root
+takes a fresh key, so it is a new slot. The restart check in `LocalOk` is
+still only the tombstone, because core mail is not a typestate fact.
+`GraphOk` does not read mailboxes. A respawn can stay disabled for the rest
+of the run. Liveness of respawn is not claimed. pure-stage and Amaru have
+to enforce the same precondition before a restart. `outlive_stuck` is still
+reachable: each of its births is generation 0 of a fresh key.
 A slot that is still shutting down is occupied too. The tombstone is queued
 at the seal, so the predecessor is dead before the parent is notified.
 `no_tombstone_overflow` is that account for a reachable world. Under
