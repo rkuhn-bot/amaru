@@ -8,8 +8,8 @@ for a per-peer child born at its parent's key, and for a pool slot taken
 from `freeSlot`. An empty subtree's key comes from `IxPast` or `RootPast`,
 and the fresh id's lane is empty because it was off the roster. `exec` of a
 send, a try-send, a call, a reply, a cell wake, a child spawn, and `terminate`
-keeps it. `callTimeout` is still open, and so is carrying `IxPast`, `RootPast`,
-and the off-roster empty lane through every step.
+keeps it, and so does `callTimeout`. Carrying `IxPast`, `RootPast`, and the
+off-roster empty lane through every step is still open.
 `no_tombstone_overflow` is not restated: this file does not claim that every
 reachable world stays inside the lane.
 -/
@@ -8949,5 +8949,121 @@ theorem hold_exec (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc)
     | awaitEffect _ => simp [hph] at h
     | awaitPeer _ => simp [hph] at h
     | crashed => simp [hph] at h
+
+theorem detach_keep (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).life = a.life ∧
+      (detachReply (detachBox a caller) caller cid).prio = a.prio ∧
+      (detachReply (detachBox a caller) caller cid).pendingTombstone = a.pendingTombstone ∧
+      (detachReply (detachBox a caller) caller cid).parent = a.parent := by
+  unfold detachReply detachBox
+  split <;> simp
+
+theorem detach_phase (I : Impl) (template : String) (a : Actor) (caller : InstId) (cid : Nat)
+    (h : phaseDeclared I template a.phase) :
+    phaseDeclared I template (detachReply (detachBox a caller) caller cid).phase := by
+  unfold detachReply
+  split
+  · simpa [detachBox] using clear_phase_declared I template caller a.phase (by simpa [detachBox] using h)
+  · simpa [detachBox] using h
+
+theorem hold_credits (I : Impl) (ps : List Parked) (w : World) (hH : Hold I w)
+    (name : String) (sender : InstId) (hpre : w.crashed = false) :
+    Hold I (ps.foldl (fun acc _ => creditSender acc name sender) w) := by
+  induction ps generalizing w with
+  | nil => simpa using hH
+  | cons p ps ih =>
+    simp only [List.foldl_cons]
+    exact ih (creditSender w name sender) (hold_credit I w hH name sender hpre)
+      (by simp [creditSender, setActor, hpre])
+
+theorem hold_refund_call (I : Impl) (w : World) (hH : Hold I w) (caller dst : InstId)
+    (hpre : w.crashed = false) : Hold I (refundParkedCall w caller dst) := by
+  unfold refundParkedCall
+  by_cases hempty :
+      (((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty) = true
+  · simp [hempty]
+    exact hH
+  · simp only [hempty]
+    let keep := (w.st dst).parked.filter fun p => !(p.sender == caller && p.isCall)
+    let base := setActor w dst { (w.st dst) with parked := keep }
+    have hB := hold_set I w hH dst { (w.st dst) with parked := keep }
+      (by simp) (by simp) (by simp) (by simp)
+      (fun hmem => by simpa using hH.phase dst hmem) hpre
+    have hpreB : base.crashed = false := by simp [base, setActor, hpre]
+    simpa [keep, base] using hold_credits I
+      ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall)
+      base hB (tname dst) caller hpreB
+
+theorem timeout_declared (I : Impl) (template : String) (k : Cont)
+    (h : ContDeclared I template k) : ContDeclared I template
+      { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout } :=
+  ⟨h.timeout, h.na, h.to, h.timeout⟩
+
+/-- A deadline keeps the lane invariant. The caller finishes on the continuation
+the static check allowed, and a parked call returns its token. -/
+theorem hold_timeout (I : Impl) (w : World) (hH : Hold I w) (id : InstId)
+    (hpre : w.crashed = false) (w' : World) (h : callTimeout w id = some w') : Hold I w' := by
+  unfold callTimeout at h
+  by_cases hlive : (w.st id).life = .alive
+  · have hbit : ((w.st id).life != .alive) = false := by simpa [bne, beq_iff_eq] using hlive
+    simp only [hbit] at h
+    have hmem : id ∈ w.roster := hH.rostered id (by simp [hlive])
+    cases hph : (w.st id).phase with
+    | awaitReply dst k =>
+      simp only [hph] at h
+      have hdec : ContDeclared I (tname id) k := by
+        simpa [hph, phaseDeclared] using hH.phase id hmem
+      let cid := (w.st id).waitId
+      let host := detachReply (detachBox (w.st dst) id) id cid
+      let w1 := setActor w dst host
+      have hkeep := detach_keep (w.st dst) id cid
+      have h1 := hold_set I w hH dst host hkeep.1 hkeep.2.1 hkeep.2.2.1 hkeep.2.2.2
+        (fun hdst => detach_phase I (tname dst) (w.st dst) id cid (hH.phase dst hdst)) hpre
+      have hpre1 : w1.crashed = false := by simp [w1, setActor, hpre]
+      have hdone := hold_set I w1 h1 id (finishCall (w1.st id) k .timedOut)
+        (finish_keep (w1.st id) k .timedOut).1
+        (finish_keep (w1.st id) k .timedOut).2.1
+        (finish_keep (w1.st id) k .timedOut).2.2
+        (finish_parent (w1.st id) k .timedOut)
+        (fun _ => finish_declared I (tname id) (w1.st id) k .timedOut hdec) hpre1
+      have heq : w' = setActor w1 id (finishCall (w1.st id) k .timedOut) := by
+        simpa [cid, host, w1, Option.some.injEq] using h.symm
+      exact heq ▸ hdone
+    | parked dst c k =>
+      cases c with
+      | false => simp [hph] at h
+      | true =>
+        simp only [hph] at h
+        have hdec : ContDeclared I (tname id) k := by
+          simpa [hph, phaseDeclared] using hH.phase id hmem
+        let wR := refundParkedCall w id dst
+        have hR := hold_refund_call I w hH id dst hpre
+        have hpreR : wR.crashed = false := by
+          simpa [wR, (refund_call_frame w id dst id).2.2.2.2.2.2] using hpre
+        have hdone := hold_set I wR hR id (finishCall (wR.st id) k .notAdmitted)
+          (finish_keep (wR.st id) k .notAdmitted).1
+          (finish_keep (wR.st id) k .notAdmitted).2.1
+          (finish_keep (wR.st id) k .notAdmitted).2.2
+          (finish_parent (wR.st id) k .notAdmitted)
+          (fun _ => finish_declared I (tname id) (wR.st id) k .notAdmitted hdec) hpreR
+        have heq : w' = setActor wR id (finishCall (wR.st id) k .notAdmitted) := by
+          simpa [wR, Option.some.injEq] using h.symm
+        exact heq ▸ hdone
+    | awaitPeer k =>
+      simp only [hph] at h
+      have hdec : ContDeclared I (tname id) k := by
+        simpa [hph, phaseDeclared] using hH.phase id hmem
+      let kT := { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout }
+      have hto := timeout_declared I (tname id) k hdec
+      have hP := hold_reply_proceed I w hH id kT hpre hto
+      have heq : w' = setActor w id (proceed (w.st id) kT) := by
+        simpa [kT, Option.some.injEq] using h.symm
+      exact heq ▸ hP
+    | idle => simp [hph] at h
+    | run _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | crashed => simp [hph] at h
+  · have hbit : ((w.st id).life != .alive) = true := by simpa [bne, beq_iff_eq] using hlive
+    simp [hbit] at h
 
 end Deadlock
