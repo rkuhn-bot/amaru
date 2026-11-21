@@ -3,10 +3,12 @@ One tombstone per child slot, for a world that already satisfies `Hold`.
 
 `tmb_seal_room` is that numeric fact: a pending seal has room on the live
 parent's lane when the slot account is inside `prioSized`. `Hold` is proved
-for the initial world and for the steps that do not birth a pool slot or an
-empty-subtree root, including a nonempty supervised root birth and a
-self-schedule. `no_tombstone_overflow` is not restated: this file does not
-claim that every reachable world stays inside the lane.
+for the initial world, for a self-schedule, and for every scheduler spawn,
+including an empty subtree. An empty subtree's key comes from `IxPast` or
+`RootPast`, and the fresh id's lane is empty because it was off the roster.
+A pool slot and a per-peer child are not covered yet. `no_tombstone_overflow`
+is not restated: this file does not claim that every reachable world stays
+inside the lane.
 -/
 
 import Deadlock.Local
@@ -6819,5 +6821,410 @@ theorem filter_snoc_off {α : Type} (p : α → Bool) (xs : List α) (a : α) (h
         · rfl
         · exact absurd hbit hp
       rw [ite_eq_right (by rw [hpf]; decide), ite_eq_right (by rw [hpf]; decide), ih]
+
+/-- A birth with no recorded parent is not anyone's child, so no template
+count moves. -/
+theorem census_free (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
+    (born : Actor) (template : String) (k : Nat)
+    (hst : ∀ i, w'.st i = if i = id then born else w.st i)
+    (hros : w'.roster = w.roster ++ [id]) (hnew : id ∉ w.roster)
+    (hparent : born.parent = none) (hbornPrio : born.prio = (w.st id).prio)
+    (hprios : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio) :
+    ∀ par nm, namedOpen I.desc w' par nm ≤ nameBudget I.desc par w.N nm := by
+  have hst' : ∀ i, w'.st i = if i = id then w'.st id else w.st i := by
+    intro i
+    by_cases hi : i = id
+    · have hborn : w'.st id = born := by simpa [hi] using hst id
+      simp [hi, hborn]
+    · simp [hi, hst i]
+  have hself : w'.st id = born := by simpa using hst id
+  intro par nm
+  have hbit : namedChild I.desc w' par nm id = false := by
+    have hchild : isChild w' par id = false := by
+      unfold isChild
+      rw [hself, hparent]
+    unfold namedChild childOpen
+    rw [hchild]
+    simp only [Bool.false_and]
+  have hprio : (w'.st par).prio = (w.st par).prio := by
+    by_cases heq : par = id
+    · rw [heq, hself]
+      exact hbornPrio
+    · exact hprios par heq
+  have hcount := census_born_other I.desc w w' id par nm hst' hros hnew hbit hprio
+  simpa [hcount] using hH.census par nm
+
+/-- `maySpawnRoot` for a template with no supervisor. -/
+theorem may_free_parts (D : Description) (w : World) (template : String) (t : Template)
+    (hmay : maySpawnRoot D w template t = true) (hsup : t.supervisor = none) :
+    t.multiplicity = .perPeer ∧ t.slots = 0 ∧ aliveCount w template < w.N := by
+  simp only [maySpawnRoot, hsup, Bool.and_eq_true, decide_eq_true_iff] at hmay
+  obtain ⟨⟨⟨⟨hmul, hslots⟩, _⟩, _⟩, hlt⟩ := hmay
+  refine ⟨?_, ?_, hlt⟩
+  · cases hm : t.multiplicity with
+    | perPeer => rfl
+    | one =>
+      exfalso
+      rw [hm] at hmul
+      rw [show (Multiplicity.one == Multiplicity.perPeer) = false from rfl] at hmul
+      exact Bool.noConfusion hmul
+  · simpa [beq_iff_eq] using hslots
+
+/-- A scheduler spawn with no supervisor and a nonempty subtree installs one
+fresh root. It records no parent, so it is not counted on any lane. -/
+theorem hold_spawn_free (I : Impl) (w : World) (hH : Hold I w) (template : String)
+    (t : Template) (ht : templateOf I.desc template = some t)
+    (hmay : maySpawnRoot I.desc w template t = true) (hsup : t.supervisor = none)
+    (hsub : t.subtree ≠ "") (hpre : w.crashed = false)
+    (hoff : (w.st (InstId.peer template (freshKey I.desc w t.subtree)
+        (maxGen w template (freshKey I.desc w t.subtree)))).prio = []) :
+    Hold I (placePeer I w template (freshKey I.desc w t.subtree) t.initial none
+      (fun u => { u with nextKey := fun s =>
+        if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })) := by
+  have ⟨hmul, _, _⟩ := may_free_parts I.desc w template t hmay hsup
+  let k := freshKey I.desc w t.subtree
+  let id := InstId.peer template k (maxGen w template k)
+  let parent : Option InstId := none
+  let next : World → World := fun u =>
+    { u with nextKey := fun s => if s = t.subtree then k + 1 else u.nextKey s }
+  let born := { bornActor I.desc w template k t.initial with parent := parent }
+  let w' := placePeer I w template k t.initial parent next
+  have htree : templateSubtree I.desc template = t.subtree := by simp [templateSubtree, ht]
+  have hnext : ∀ (u : World) (i : InstId),
+      (next u).st i = u.st i ∧ (next u).roster = u.roster ∧ (next u).N = u.N ∧
+        (next u).crashed = u.crashed := by
+    intro u i
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  have hst : ∀ i, w'.st i = if i = id then born else w.st i := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    intro i
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next, k]
+    rw [hw', show (readCells I.desc planted id).st i = planted.st i from cellsSt I.desc planted id i]
+    by_cases h : i = id
+    · simp [planted, setActor, h]
+    · simp [planted, setActor, h, mid, (hnext base i).1, base]
+  have hros : w'.roster = w.roster ++ [id] := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next, k]
+    rw [hw', show (readCells I.desc planted id).roster = planted.roster from
+      cellsRoster I.desc planted id]
+    simp [planted, setActor, mid, (hnext base id).2.1, base]
+  have hnew : id ∉ w.roster := gen_fresh w template k
+  have hparent : born.parent = none := by simp [born, parent]
+  have hbornPrio : born.prio = (w.st id).prio := by
+    have hp : born.prio = [] := by simp [born, bornActor, withKeyTokens]
+    simpa [hp, id, k, hoff]
+  have hprios : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio := by
+    intro i hne
+    have h := hst i
+    simp [hne] at h
+    rw [h]
+  have hcensus := census_free I w w' hH id born template k hst hros hnew hparent hbornPrio hprios
+  have hocc : ∀ c, c ∈ w.roster → occupant (w.st c) = true →
+      sameSlot (InstId.peer template k (maxGen w template k)) c = false := by
+    intro c hc _
+    exact fresh_sameSlot I.desc w t.subtree template k hsub htree rfl c hc
+  have hfit : ∀ par, parent = some par →
+      notifies I.desc (InstId.peer template k (maxGen w template k)) = true →
+      slotIndexed I.desc par template = true → (template, k) ∈ legalSlots I.desc par w.N := by
+    intro par hpar
+    simp [parent] at hpar
+  have hfree : ∀ par, parent = some par → slotTombstoneQueued w par template k = false := by
+    intro par hpar
+    simp [parent] at hpar
+  have hHold := hold_place I w hH template k t.initial parent next hpre hnext
+    ⟨t, ht, hmul⟩ hocc hfit hfree (by simpa [w', k] using hcensus)
+  simpa [w', k, parent, next] using hHold
+
+/-- An unsupervised empty subtree takes keys from `nextIx`, so the next one
+is not a slot any roster actor of that template still holds. -/
+theorem ix_sameSlot (I : Impl) (w : World) (hI : IxPast I w) (template : String)
+    (t : Template) (k : Nat) (ht : templateOf I.desc template = some t)
+    (hsup : t.supervisor = none) (hsub : t.subtree = "") (hk : k = w.nextIx template)
+    (c : InstId) (hc : c ∈ w.roster) :
+    sameSlot (InstId.peer template k (maxGen w template k)) c = false := by
+  cases c with
+  | core _ => simp [sameSlot]
+  | peer n k' g =>
+    by_cases hn : (n == template) = true
+    · have hname : n = template := by simpa [beq_iff_eq] using hn
+      have hlt : k' < k := by
+        have hmem : InstId.peer n k' g ∈ w.roster := hc
+        rw [hname] at hmem
+        simpa [hk] using hI template k' g hmem t ht hsup hsub
+      have hnameB : (template == n) = true := by rw [beq_comm]; exact hn
+      have hkb : (k == k') = false := by
+        cases hbb : k == k'
+        · rfl
+        · have heq : k = k' := by simpa [beq_iff_eq] using hbb
+          omega
+      simp only [sameSlot, hnameB, hkb, Bool.and_false]
+    · have hnf : (n == template) = false := by
+        cases hbb : n == template
+        · rfl
+        · exact absurd hbb hn
+      have hnameB : (template == n) = false := by rw [beq_comm]; exact hnf
+      simp only [sameSlot, hnameB, Bool.false_and]
+
+/-- A scheduler spawn with no supervisor and an empty subtree installs one
+root at `nextIx`. The key is past every earlier birth of that template. -/
+theorem hold_spawn_ix (I : Impl) (w : World) (hH : Hold I w) (hI : IxPast I w)
+    (template : String) (t : Template) (ht : templateOf I.desc template = some t)
+    (hmay : maySpawnRoot I.desc w template t = true) (hsup : t.supervisor = none)
+    (hsub : t.subtree = "") (hpre : w.crashed = false)
+    (hoff : (w.st (InstId.peer template (w.nextIx template)
+        (maxGen w template (w.nextIx template)))).prio = []) :
+    Hold I (placePeer I w template (w.nextIx template) t.initial none
+      (fun u => { u with nextIx := fun n =>
+        if n = template then w.nextIx template + 1 else u.nextIx n })) := by
+  have ⟨hmul, _, _⟩ := may_free_parts I.desc w template t hmay hsup
+  let k := w.nextIx template
+  let id := InstId.peer template k (maxGen w template k)
+  let parent : Option InstId := none
+  let next : World → World := fun u =>
+    { u with nextIx := fun n => if n = template then k + 1 else u.nextIx n }
+  let born := { bornActor I.desc w template k t.initial with parent := parent }
+  let w' := placePeer I w template k t.initial parent next
+  have hnext : ∀ (u : World) (i : InstId),
+      (next u).st i = u.st i ∧ (next u).roster = u.roster ∧ (next u).N = u.N ∧
+        (next u).crashed = u.crashed := by
+    intro u i
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  have hst : ∀ i, w'.st i = if i = id then born else w.st i := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    intro i
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next, k]
+    rw [hw', show (readCells I.desc planted id).st i = planted.st i from cellsSt I.desc planted id i]
+    by_cases h : i = id
+    · simp [planted, setActor, h]
+    · simp [planted, setActor, h, mid, (hnext base i).1, base]
+  have hros : w'.roster = w.roster ++ [id] := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next, k]
+    rw [hw', show (readCells I.desc planted id).roster = planted.roster from
+      cellsRoster I.desc planted id]
+    simp [planted, setActor, mid, (hnext base id).2.1, base]
+  have hnew : id ∉ w.roster := gen_fresh w template k
+  have hparent : born.parent = none := by simp [born, parent]
+  have hbornPrio : born.prio = (w.st id).prio := by
+    have hp : born.prio = [] := by simp [born, bornActor, withKeyTokens]
+    simpa [hp, id, k, hoff]
+  have hprios : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio := by
+    intro i hne
+    have h := hst i
+    simp [hne] at h
+    rw [h]
+  have hcensus := census_free I w w' hH id born template k hst hros hnew hparent hbornPrio hprios
+  have hocc : ∀ c, c ∈ w.roster → occupant (w.st c) = true →
+      sameSlot (InstId.peer template k (maxGen w template k)) c = false := by
+    intro c hc _
+    exact ix_sameSlot I w hI template t k ht hsup hsub rfl c hc
+  have hfit : ∀ par, parent = some par →
+      notifies I.desc (InstId.peer template k (maxGen w template k)) = true →
+      slotIndexed I.desc par template = true → (template, k) ∈ legalSlots I.desc par w.N := by
+    intro par hpar
+    simp [parent] at hpar
+  have hfree : ∀ par, parent = some par → slotTombstoneQueued w par template k = false := by
+    intro par hpar
+    simp [parent] at hpar
+  have hHold := hold_place I w hH template k t.initial parent next hpre hnext
+    ⟨t, ht, hmul⟩ hocc hfit hfree (by simpa [w', k] using hcensus)
+  simpa [w', k, parent, next] using hHold
+
+/-- Empty-subtree roots under a core share `nextKey ""`. The next key is not a
+slot any of them still holds. -/
+theorem root_sameSlot (I : Impl) (w : World) (hR : RootPast I w) (template : String)
+    (t : Template) (k : Nat) (ht : templateOf I.desc template = some t)
+    (hslots : t.slots = 0) (hsub : t.subtree = "") (hroot : rootOf I.desc t = true)
+    (hsup : ∃ name, t.supervisor = some name) (hk : k = w.nextKey "")
+    (c : InstId) (hc : c ∈ w.roster) :
+    sameSlot (InstId.peer template k (maxGen w template k)) c = false := by
+  cases c with
+  | core _ => simp [sameSlot]
+  | peer n k' g =>
+    by_cases hn : (n == template) = true
+    · have hname : n = template := by simpa [beq_iff_eq] using hn
+      rcases hsup with ⟨name, hnameSup⟩
+      have hlt : k' < k := by
+        rw [hname] at hc
+        simpa [hk] using hR template k' g hc t ht hslots hsub hroot name hnameSup
+      have hnameB : (template == n) = true := by rw [beq_comm]; exact hn
+      have hkb : (k == k') = false := by
+        cases hbb : k == k'
+        · rfl
+        · have heq : k = k' := by simpa [beq_iff_eq] using hbb
+          omega
+      simp only [sameSlot, hnameB, hkb, Bool.and_false]
+    · have hnf : (n == template) = false := by
+        cases hbb : n == template
+        · rfl
+        · exact absurd hbb hn
+      have hnameB : (template == n) = false := by rw [beq_comm]; exact hnf
+      simp only [sameSlot, hnameB, Bool.false_and]
+
+/-- A scheduler spawn of an empty subtree under a live core installs one root
+at `nextKey ""`. The key is past every earlier empty-subtree root. -/
+theorem hold_spawn_root (I : Impl) (w : World) (hH : Hold I w) (hR : RootPast I w)
+    (template : String) (t : Template) (name : String)
+    (ht : templateOf I.desc template = some t)
+    (hmay : maySpawnRoot I.desc w template t = true) (hsup : t.supervisor = some name)
+    (hsub : t.subtree = "") (hpre : w.crashed = false)
+    (hoff : (w.st (InstId.peer template (freshKey I.desc w "")
+        (maxGen w template (freshKey I.desc w "")))).prio = []) :
+    Hold I (placePeer I w template (freshKey I.desc w "") t.initial (some (.core name))
+      (fun u => { u with nextKey := fun s =>
+        if s = "" then freshKey I.desc w "" + 1 else u.nextKey s })) := by
+  have ⟨hmul, hslots, hlt⟩ := may_root_parts I.desc w template t name ht hmay hsup
+  have hroot : rootOf I.desc t = true := by
+    simp only [maySpawnRoot, hsup, Bool.and_eq_true, decide_eq_true_iff] at hmay
+    obtain ⟨⟨⟨⟨_, _⟩, hroot⟩, _⟩, _⟩ := hmay
+    exact hroot
+  let k := freshKey I.desc w ""
+  let id := InstId.peer template k (maxGen w template k)
+  let parent : Option InstId := some (.core name)
+  let next : World → World := fun u =>
+    { u with nextKey := fun s => if s = "" then k + 1 else u.nextKey s }
+  let born := { bornActor I.desc w template k t.initial with parent := parent }
+  let w' := placePeer I w template k t.initial parent next
+  have hk : k = w.nextKey "" := freshKey_empty I.desc w
+  have hnext : ∀ (u : World) (i : InstId),
+      (next u).st i = u.st i ∧ (next u).roster = u.roster ∧ (next u).N = u.N ∧
+        (next u).crashed = u.crashed := by
+    intro u i
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  have hst : ∀ i, w'.st i = if i = id then born else w.st i := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    intro i
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next, k]
+    rw [hw', show (readCells I.desc planted id).st i = planted.st i from cellsSt I.desc planted id i]
+    by_cases h : i = id
+    · simp [planted, setActor, h]
+    · simp [planted, setActor, h, mid, (hnext base i).1, base]
+  have hros : w'.roster = w.roster ++ [id] := by
+    let base := { w with roster := w.roster ++ [id] }
+    let mid := next base
+    let planted := setActor mid id born
+    have hw' : w' = readCells I.desc planted id := by
+      simp [w', placePeer, id, born, base, mid, planted, next, k]
+    rw [hw', show (readCells I.desc planted id).roster = planted.roster from
+      cellsRoster I.desc planted id]
+    simp [planted, setActor, mid, (hnext base id).2.1, base]
+  have hnew : id ∉ w.roster := gen_fresh w template k
+  have hparent : born.parent = some (.core name) := by simp [born, parent]
+  have hlive : born.life = .alive := by simp [born, bornActor, withKeyTokens]
+  have hbornPrio : born.prio = (w.st id).prio := by
+    have hp : born.prio = [] := by simp [born, bornActor, withKeyTokens]
+    simpa [hp, id, k, hoff]
+  have hprios : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio := by
+    intro i hne
+    have h := hst i
+    simp [hne] at h
+    rw [h]
+  have hcensus := census_supervised I w w' hH id born template t name k ht hslots hsup hlt hst hros
+    hnew rfl hparent hlive hbornPrio hprios
+  have hocc : ∀ c, c ∈ w.roster → occupant (w.st c) = true →
+      sameSlot (InstId.peer template k (maxGen w template k)) c = false := by
+    intro c hc _
+    exact root_sameSlot I w hR template t k ht hslots hsub hroot ⟨name, hsup⟩ hk c hc
+  have hfit : ∀ par, parent = some par →
+      notifies I.desc (InstId.peer template k (maxGen w template k)) = true →
+      slotIndexed I.desc par template = true → (template, k) ∈ legalSlots I.desc par w.N := by
+    intro par hpar _ hidx
+    have heq : InstId.core name = par := by simpa [parent] using hpar
+    rw [← heq] at hidx
+    simp [slotIndexed, ht, hslots] at hidx
+  have hfree : ∀ par, parent = some par → slotTombstoneQueued w par template k = false := by
+    intro par hpar
+    have heq : InstId.core name = par := by simpa [parent] using hpar
+    rw [← heq]
+    cases hq : slotTombstoneQueued w (.core name) template k with
+    | false => rfl
+    | true =>
+      have hq' : ((w.st (.core name)).prio.any fun m =>
+          m.tombstone &&
+            match m.sender with
+            | .peer n key _ => n == template && key == k
+            | .core _ => false) = true := by
+        unfold slotTombstoneQueued at hq
+        exact hq
+      obtain ⟨m, g, hm, htomb, hs⟩ := queued_sender (w.st (.core name)).prio template k hq'
+      have hmem := hH.tombHere (.core name) m hm htomb
+      have hslot := root_sameSlot I w hR template t k ht hslots hsub hroot ⟨name, hsup⟩ hk
+        m.sender hmem
+      rw [hs] at hslot
+      simp [sameSlot] at hslot
+  have hHold := hold_place I w hH template k t.initial parent next hpre hnext
+    ⟨t, ht, hmul⟩ hocc hfit hfree (by simpa [w', k] using hcensus)
+  simpa [w', k, parent, next, hsub] using hHold
+
+/-- Every scheduler spawn that the runtime accepts keeps the tombstone count.
+An empty subtree takes its key from `nextIx` or `nextKey ""`; a nonempty
+subtree takes a fresh subtree key. A birth the guard refuses is not a step. -/
+theorem hold_spawn (I : Impl) (w w' : World) (hH : Hold I w) (hI : IxPast I w)
+    (hR : RootPast I w) (template : String) (hpre : w.crashed = false)
+    (hoff : ∀ id, id ∉ w.roster → (w.st id).prio = [])
+    (h : spawn I w template = some w') : Hold I w' := by
+  cases ht : templateOf I.desc template with
+  | none => simp [spawn, ht] at h
+  | some t =>
+    simp only [spawn, ht] at h
+    split at h
+    · rename_i hmay
+      split at h
+      · rename_i name hsup
+        by_cases hsub : t.subtree = ""
+        · simp [hsub] at h
+          have hstep := h.symm
+          have hoff' : (w.st (InstId.peer template (freshKey I.desc w "")
+              (maxGen w template (freshKey I.desc w "")))).prio = [] :=
+            hoff _ (gen_fresh _ _ _)
+          have hHold := hold_spawn_root I w hH hR template t name ht hmay hsup hsub hpre hoff'
+          simpa [hstep] using hHold
+        · simp at h
+          have hstep := h.symm
+          have hoff' : (w.st (InstId.peer template (freshKey I.desc w t.subtree)
+              (maxGen w template (freshKey I.desc w t.subtree)))).prio = [] :=
+            hoff _ (gen_fresh _ _ _)
+          have hHold := hold_spawn_core I w hH template t name ht hmay hsup hsub hpre hoff'
+          simpa [hstep] using hHold
+      · rename_i hsup
+        split at h
+        · rename_i hsubB
+          have hsub : t.subtree = "" := by simpa [beq_iff_eq] using hsubB
+          simp at h
+          have hstep := h.symm
+          have hoff' : (w.st (InstId.peer template (w.nextIx template)
+              (maxGen w template (w.nextIx template)))).prio = [] :=
+            hoff _ (gen_fresh _ _ _)
+          have hHold := hold_spawn_ix I w hH hI template t ht hmay hsup hsub hpre hoff'
+          simpa [hstep] using hHold
+        · rename_i hbit
+          have hsub : t.subtree ≠ "" := by
+            intro heq
+            apply hbit
+            simpa [beq_iff_eq] using heq
+          simp at h
+          have hstep := h.symm
+          have hoff' : (w.st (InstId.peer template (freshKey I.desc w t.subtree)
+              (maxGen w template (freshKey I.desc w t.subtree)))).prio = [] :=
+            hoff _ (gen_fresh _ _ _)
+          have hHold := hold_spawn_free I w hH template t ht hmay hsup hsub hpre hoff'
+          simpa [hstep] using hHold
+    · simp at h
 
 end Deadlock
