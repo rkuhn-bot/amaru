@@ -298,10 +298,85 @@ theorem lands_toState (I : Impl) (hO : OutcomesLand I) (tr : Transition) (htr : 
       rw [pick_named tr.toState tr.toGone hne'] at hp
       rw [h]; exact hp
 
-/-- While every outcome field is empty or `toState`, a `RowOk` derivation is a
-stored tuple. A landing step does not move the tuple, and a declared step stays
-inside the checked closure. -/
-theorem row_mem (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (g : CompatGroup)
+theorem ne_bne (s : String) (h : s ≠ "") : (s != "") = true := by
+  cases hb : (s == "") with
+  | false => simp [bne, hb]
+  | true => exact absurd (beq_iff_eq.mp hb) h
+
+theorem mem_filter {α : Type} (p : α → Bool) (x : α) (xs : List α)
+    (hx : x ∈ xs) (hp : p x = true) : x ∈ xs.filter p := by
+  induction xs with
+  | nil => cases hx
+  | cons y ys ih =>
+    cases hx with
+    | head =>
+      rw [List.filter_cons, hp, if_pos rfl]
+      exact List.Mem.head _
+    | tail _ ht =>
+      rw [List.filter_cons]
+      cases hy : p y with
+      | true =>
+        rw [if_pos rfl]
+        exact List.Mem.tail _ (ih ht)
+      | false =>
+        rw [if_neg (by decide : ¬ (false = true))]
+        exact ih ht
+
+theorem outcome_mem (tr : Transition) (s : String) (hne : s ≠ "")
+    (hs : s = tr.toNotAdmitted ∨ s = tr.toTimedOut ∨ s = tr.toTimeout ∨
+      s = tr.toFull ∨ s = tr.toGone) :
+    s ∈ outcomeFields tr := by
+  unfold outcomeFields
+  have hp := ne_bne s hne
+  rcases hs with h | h | h | h | h
+  · subst h; exact mem_filter (· != "") tr.toNotAdmitted _ (List.Mem.head _) hp
+  · subst h; exact mem_filter (· != "") tr.toTimedOut _
+      (List.Mem.tail _ (List.Mem.head _)) hp
+  · subst h; exact mem_filter (· != "") tr.toTimeout _
+      (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))) hp
+  · subst h; exact mem_filter (· != "") tr.toFull _
+      (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _)))) hp
+  · subst h; exact mem_filter (· != "") tr.toGone _
+      (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))) hp
+
+theorem lands_mem (tr : Transition) (s : String) (hs : landsAt tr s) : s ∈ landingStates tr := by
+  rcases hs with rfl | ⟨hne, hfield⟩
+  · exact List.Mem.head _
+  · exact List.Mem.tail _ (outcome_mem tr s hne hfield)
+
+/-- `LocalOk` runs `pairBreaks` on every landing pair, so a move inside that set
+is a checked step. -/
+theorem landing_pair_nil (I : Impl) (hL : LocalOk I) (g : CompatGroup)
+    (hg : g ∈ compatGroups I.desc.compatibility) (tr : Transition) (htr : tr ∈ I.transitions)
+    (hrole : g.roles.elem tr.template = true) (s0 s1 : String)
+    (hm0 : s0 ∈ landingStates tr) (hm1 : s1 ∈ landingStates tr) (hne : s0 ≠ s1) :
+    stepBreaks g { template := tr.template, fromState := s0, toState := s1, label := tr.label } false = [] := by
+  have hnil := landing_nil I hL
+  cases hmode : I.desc.compatibility with
+  | all => simp [compatGroups, hmode] at hg
+  | explicit _ => simp [compatGroups, hmode] at hg
+  | groups gs =>
+    simp only [landingFails, hmode] at hnil
+    simp only [compatGroups, hmode] at hg
+    have hgrp := flatMap_nil_mem (fun g => I.transitions.flatMap (landingBreaks g)) gs g hnil hg
+    have htrb := flatMap_nil_mem (landingBreaks g) I.transitions tr hgrp htr
+    unfold landingBreaks pairBreaks at htrb
+    rw [hrole] at htrb
+    rw [if_pos rfl] at htrb
+    have h0 := flatMap_nil_mem _ (landingStates tr) s0 htrb hm0
+    have h1 := flatMap_nil_mem _ (landingStates tr) s1 h0 hm1
+    have hbb : (s0 == s1) = false := by
+      cases hb : (s0 == s1) with
+      | false => rfl
+      | true => exact absurd (beq_iff_eq.mp hb) hne
+    rw [hbb] at h1
+    rw [if_neg (by decide : ¬ (false = true))] at h1
+    exact h1
+
+/-- A `RowOk` derivation is a stored tuple. Declared steps are closed by
+`compatFails`. A landing move is closed by `landingFails`, including a move
+between two distinct outcome states. -/
+theorem row_mem (I : Impl) (hL : LocalOk I) (g : CompatGroup)
     (hg : g ∈ compatGroups I.desc.compatibility) {tup : List RoleState} (hR : RowOk I g tup) :
     tupleMem g.allowed tup = true := by
   induction hR with
@@ -312,16 +387,18 @@ theorem row_mem (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (g : CompatGro
       (step_in_closure I.desc g st (compat_empty_of_local I hL) hg hstep) ih hrole hf
   | land hpre htr hrole hlook hs0 hs1 ih =>
     rename_i tup tr s0 s1
-    have hs0e := lands_toState I hO tr htr s0 hs0
-    have hs1e := lands_toState I hO tr htr s1 hs1
-    have heq : s1 = s0 := hs1e.trans hs0e.symm
-    have hfix : substRole tup tr.template s1 = tup := by
-      rw [heq]
-      apply substRole_fixed
-      intro rs hrs hr
-      obtain ⟨a, _, hag⟩ := tupleMem_pick g.allowed tup ih
-      exact tuple_role_state a tup tr.template s0 hag hlook rs hrs hr
-    simpa [hfix] using ih
+    by_cases heq : s0 = s1
+    · have hfix : substRole tup tr.template s1 = tup := by
+        rw [← heq]
+        apply substRole_fixed
+        intro rs hrs hr
+        obtain ⟨a, _, hag⟩ := tupleMem_pick g.allowed tup ih
+        exact tuple_role_state a tup tr.template s0 hag hlook rs hrs hr
+      simpa [hfix] using ih
+    · exact step_on_observed g
+        { template := tr.template, fromState := s0, toState := s1, label := tr.label } tup
+        (landing_pair_nil I hL g hg tr htr hrole s0 s1 (lands_mem tr s0 hs0) (lands_mem tr s1 hs1) heq)
+        ih hrole hlook
 
 def Inv (I : Impl) (w : World) : Prop :=
   SemInv I w ∧ MailInv w ∧ OpenSlots w ∧ OutcomeInv I w

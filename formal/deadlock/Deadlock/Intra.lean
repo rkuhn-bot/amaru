@@ -114,6 +114,7 @@ theorem intra_send_issues : localIssues sendPair = [] := by
   have hsc : schedIssues sendPair = [] := by decide
   have hr : restartFails sendPair = [] := by decide
   have hz : prioSizeFails sendPair = [] := by decide
+  have hlnd : landingFails sendPair = [] := by decide
   have hts : sendPair.transitions =
       [intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1],
        intraTr "a" "idle" "Start" "busy" [.send "b" "M" 0],
@@ -122,7 +123,7 @@ theorem intra_send_issues : localIssues sendPair = [] := by
        intraTr "timer" "idle" "dead/a" "idle" [],
        intraTr "timer" "idle" "dead/b" "idle" []] := rfl
   simp only [localIssues, hts, List.flatMap_cons, List.flatMap_nil, h1, h2, h3, h4, h5, h6,
-    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz]
+    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz, hlnd]
   simp
 
 theorem intra_call_graph : checkBool callPair.desc = true := by decide
@@ -154,6 +155,7 @@ theorem intra_call_issues : localIssues callPair = [] := by
   have hsc : schedIssues callPair = [] := by decide
   have hr : restartFails callPair = [] := by decide
   have hz : prioSizeFails callPair = [] := by decide
+  have hlnd : landingFails callPair = [] := by decide
   have hts : callPair.transitions =
       [intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1],
        intraTr "a" "idle" "Start" "busy" [.call "b" "Q" 0 [] []],
@@ -162,7 +164,7 @@ theorem intra_call_issues : localIssues callPair = [] := by
        intraTr "timer" "idle" "dead/a" "idle" [],
        intraTr "timer" "idle" "dead/b" "idle" []] := rfl
   simp only [localIssues, hts, List.flatMap_cons, List.flatMap_nil, h1, h2, h3, h4, h5, h6,
-    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz]
+    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz, hlnd]
   simp
 
 def muxWake : Edge :=
@@ -246,6 +248,7 @@ theorem mux_chain_issues : localIssues muxChain = [] := by
   have hsc : schedIssues muxChain = [] := by decide
   have hr : restartFails muxChain = [] := by decide
   have hz : prioSizeFails muxChain = [] := by decide
+  have hlnd : landingFails muxChain = [] := by decide
   have hts : muxChain.transitions =
       [intraTr "opener" "idle" "Go" "idle" [.cell "mux" "Start" 1],
        intraTr "mux" "idle" "Start" "busy" [.send "handler" "H" 0],
@@ -257,7 +260,7 @@ theorem mux_chain_issues : localIssues muxChain = [] := by
        intraTr "timer" "idle" "dead/handler" "idle" [],
        intraTr "timer" "idle" "dead/connection" "idle" []] := rfl
   simp only [localIssues, hts, List.flatMap_cons, List.flatMap_nil, h1, h2, h3, h4, h5, h6, h7, h8, h9,
-    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz]
+    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz, hlnd]
   simp
 
 /-- A terminable per-peer with an empty subtree is still not allowed to send. -/

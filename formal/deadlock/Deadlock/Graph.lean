@@ -204,6 +204,12 @@ def groupTargets (gs : List CompatGroup) (src ss dst : String) : List String :=
 
 /-! Discharge -/
 
+/-- Partner states drawn while `e.src` waits in `e.srcState`. In group mode that is
+the intersection of the stored rows. A nonempty outcome landing
+(`toNotAdmitted`, `toTimedOut`, `toTimeout`, `toFull`, `toGone`) is not a
+separate field of the description: `pairBreaks` requires every substitution
+between those states to already be a stored row, and this function then draws
+the partner that row names. -/
 def targetStates (D : Description) (e : Edge) : List String :=
   match D.compatibility with
   | .all => statesOf D e.dst
@@ -485,6 +491,17 @@ def stepBreaks (g : CompatGroup) (step : CompatStep) (fromAny : Bool) : List Str
           if tupleMem g.allowed post then none
           else
             some s!"fail: compatibility broken by transition {step.template} {s} -> {step.toState} [{step.label}]\n  pre: {fmtTuple tup}\n  post: {fmtTuple post}"
+
+/-- Substituting `template` from any state in `states` to any other state in
+`states` must stay inside the stored rows. The local check passes one
+transition's landing set: `toState` together with every nonempty outcome field. -/
+def pairBreaks (g : CompatGroup) (template : String) (states : List String) (label : String) : List String :=
+  if g.roles.elem template then
+    states.flatMap fun s0 =>
+      states.flatMap fun s1 =>
+        if s0 == s1 then []
+        else stepBreaks g { template := template, fromState := s0, toState := s1, label := label } false
+  else []
 
 def groupWellformed (D : Description) (g : CompatGroup) : List String :=
   if g.roles.length < 2 then [s!"fail: compatibility group {g.name} needs at least two roles"]

@@ -418,6 +418,22 @@ def restartOk (I : Impl) : Bool := (restartFails I).isEmpty
 
 def prioSizeOk (I : Impl) : Bool := (prioSizeFails I).isEmpty
 
+/-- Nonempty outcome fields, plus `toState`. Empty means the outcome stays on `toState`. -/
+def outcomeFields (tr : Transition) : List String :=
+  [tr.toNotAdmitted, tr.toTimedOut, tr.toTimeout, tr.toFull, tr.toGone].filter (· != "")
+
+def landingStates (tr : Transition) : List String :=
+  tr.toState :: outcomeFields tr
+
+def landingBreaks (g : CompatGroup) (tr : Transition) : List String :=
+  pairBreaks g tr.template (landingStates tr) tr.label
+
+/-- Group rows must already contain every substitution inside a transition's landing set. -/
+def landingFails (I : Impl) : List String :=
+  match I.desc.compatibility with
+  | .groups gs => gs.flatMap fun g => I.transitions.flatMap fun tr => landingBreaks g tr
+  | _ => []
+
 def localTail (I : Impl) : Bool :=
   stepsCoverB I && uniqueKeys I && labelHandled I && permanentTarget I && pureSchedOk I &&
     (tombstoneHandled I && restartOk I && prioSizeOk I)
@@ -425,7 +441,7 @@ def localTail (I : Impl) : Bool :=
 def localOkB (I : Impl) : Bool :=
   I.transitions.all (transitionOk I) && callTotal I && targetsAll I.desc &&
     occShape I.desc && dstClosed I && prioOk I &&
-    (compatFails I.desc).isEmpty && localTail I
+    (compatFails I.desc).isEmpty && localTail I && (landingFails I).isEmpty
 
 def LocalOk (I : Impl) : Prop := localOkB I = true
 
@@ -465,38 +481,51 @@ theorem local_parts (I : Impl) (h : LocalOk I) :
       (compatFails I.desc).isEmpty = true ∧ stepsCoverB I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact ⟨h.1.1.1.1.1.1.1, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2, h.1.2,
-    h.2.1.1.1.1.1⟩
+  exact ⟨h.1.1.1.1.1.1.1.1, h.1.1.1.1.1.1.1.2, h.1.1.1.1.1.1.2, h.1.1.1.1.1.2, h.1.1.1.1.2, h.1.1.1.2, h.1.1.2,
+    h.1.2.1.1.1.1.1⟩
 
 theorem unique_keys_local (I : Impl) (h : LocalOk I) : uniqueKeys I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.1.1.1.2
+  exact h.1.2.1.1.1.1.2
 
 theorem label_handled_local (I : Impl) (h : LocalOk I) : labelHandled I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.1.1.2
+  exact h.1.2.1.1.1.2
 
 theorem permanent_target_local (I : Impl) (h : LocalOk I) : permanentTarget I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.1.2
+  exact h.1.2.1.1.2
 
 theorem pure_sched_local (I : Impl) (h : LocalOk I) : pureSchedOk I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.1.2
+  exact h.1.2.1.2
 
 theorem tombstone_handled_local (I : Impl) (h : LocalOk I) : tombstoneHandled I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.2.1.1
+  exact h.1.2.2.1.1
 
 theorem prio_size_local (I : Impl) (h : LocalOk I) : prioSizeOk I = true := by
   simp only [LocalOk, localOkB, localTail] at h
   simp only [Bool.and_eq_true] at h
-  exact h.2.2.2
+  exact h.1.2.2.2
+
+theorem landing_clear (I : Impl) (h : LocalOk I) : (landingFails I).isEmpty = true := by
+  simp only [LocalOk, localOkB] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2
+
+theorem list_isEmpty_nil {α : Type} (xs : List α) (h : xs.isEmpty = true) : xs = [] := by
+  cases xs with
+  | nil => rfl
+  | cons _ _ => simp at h
+
+theorem landing_nil (I : Impl) (h : LocalOk I) : landingFails I = [] :=
+  list_isEmpty_nil _ (landing_clear I h)
 
 theorem transitionOk_of_mem (I : Impl) (h : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions) :
     transitionOk I tr = true := by
@@ -739,6 +768,7 @@ def closedIssues (I : Impl) : List String :=
 def localIssues (I : Impl) : List String :=
   (I.transitions.flatMap (transitionIssues I)) ++ callIssues I ++ targetIssues I.desc ++
     shapeIssues I.desc ++ closedIssues I ++ prioIssues I ++ coverIssues I ++ keyIssues I ++
-    handledIssues I ++ permanentIssues I ++ schedIssues I ++ restartFails I ++ prioSizeFails I
+    handledIssues I ++ permanentIssues I ++ schedIssues I ++ restartFails I ++ prioSizeFails I ++
+    landingFails I
 
 end Deadlock

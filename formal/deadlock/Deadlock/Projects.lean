@@ -1466,7 +1466,7 @@ theorem edge_covered (D : Description) (gs : List CompatGroup) (e : Edge) (h : u
   obtain ⟨g, hg, hs, hd⟩ := hf
   exact ⟨g, hg, List.elem_iff.mpr hs, List.elem_iff.mpr hd⟩
 
-theorem partner_mem (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : OutcomesLand I) (N : Nat)
+theorem partner_mem (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) (e : Edge) (he : e ∈ I.desc.edges) (hk : e.kind = .blocking)
     (id dst : InstId) (hsrc : e.src = tname id) (hss : e.srcState = (w.st id).typestate)
     (hdstn : e.dst = tname dst) (hbusy : (w.st id).phase ≠ .idle) (hcr : (w.st id).phase ≠ .crashed) :
@@ -1502,7 +1502,7 @@ theorem partner_mem (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : Outc
     · intro g hg hs hd
       have hgG : g ∈ compatGroups I.desc.compatibility := by simp [compatGroups, hmode, hg]
       have htup := (hI.1.live g hgG).1
-      have hraw := row_mem I hL hO g hgG htup
+      have hraw := row_mem I hL g hgG htup
       obtain ⟨a, ha, hag⟩ := tupleMem_pick g.allowed (roleTuple w g) hraw
       have hlookS := lookup_roleTuple w g e.src (List.elem_iff.mp hs)
       have hss' : lookupRole (roleTuple w g) e.src = some e.srcState := by
@@ -1516,7 +1516,7 @@ theorem partner_mem (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : Outc
 
 /-- A parked actor waits on a blocking edge that is discharged, or whose live
 partner typestate is one `targetStates` still draws. -/
-theorem projects_park (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : OutcomesLand I) (N : Nat)
+theorem projects_park (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) (id dst : InstId) (isCall : Bool) (k : Cont)
     (hph : (w.st id).phase = .parked dst isCall k) :
     ∃ label e, e ∈ I.desc.edges ∧ e.src = tname id ∧ e.srcState = (w.st id).typestate ∧
@@ -1527,12 +1527,12 @@ theorem projects_park (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : Ou
   have hI := inv_reachable I N w hL hR
   obtain ⟨label, e, he, hsrc, hss, hdstn, hkind, heff, hlab⟩ :=
     described_park I w hI id dst isCall k hph
-  have hpart := partner_mem I hL hG hO N w hR e he hkind id dst hsrc hss hdstn
+  have hpart := partner_mem I hL hG N w hR e he hkind id dst hsrc hss hdstn
     (by rw [hph]; intro hbad; cases hbad) (by rw [hph]; intro hbad; cases hbad)
   exact ⟨label, e, he, hsrc, hss, hdstn, hkind, heff, hlab, hpart⟩
 
 /-- An actor awaiting a reply waits on a blocking call edge with the same filter. -/
-theorem projects_reply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : OutcomesLand I) (N : Nat)
+theorem projects_reply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) (id dst : InstId) (k : Cont) (hph : (w.st id).phase = .awaitReply dst k) :
     ∃ label e, e ∈ I.desc.edges ∧ e.src = tname id ∧ e.srcState = (w.st id).typestate ∧
       e.dst = tname dst ∧ e.kind = .blocking ∧ e.effect = EffectKind.call ∧ e.label = label ∧
@@ -1540,7 +1540,7 @@ theorem projects_reply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : O
         ((w.st dst).life = .alive → (w.st dst).typestate ∈ targetStates I.desc e)) := by
   have hI := inv_reachable I N w hL hR
   obtain ⟨label, e, he, hsrc, hss, hdstn, hkind, heff, hlab⟩ := described_reply I w hI id dst k hph
-  have hpart := partner_mem I hL hG hO N w hR e he hkind id dst hsrc hss hdstn
+  have hpart := partner_mem I hL hG N w hR e he hkind id dst hsrc hss hdstn
     (by rw [hph]; intro hbad; cases hbad) (by rw [hph]; intro hbad; cases hbad)
   exact ⟨label, e, he, hsrc, hss, hdstn, hkind, heff, hlab, hpart⟩
 
@@ -1558,9 +1558,9 @@ def Projects (I : Impl) (w : World) : Prop :=
       (discharged I.desc e = true ∨
         ((w.st dst).life = .alive → (w.st dst).typestate ∈ targetStates I.desc e)))
 
-theorem projects (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : OutcomesLand I) (N : Nat)
+theorem projects (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) : Projects I w :=
-  ⟨fun id dst isCall k hph => projects_park I hL hG hO N w hR id dst isCall k hph,
-   fun id dst k hph => projects_reply I hL hG hO N w hR id dst k hph⟩
+  ⟨fun id dst isCall k hph => projects_park I hL hG N w hR id dst isCall k hph,
+   fun id dst k hph => projects_reply I hL hG N w hR id dst k hph⟩
 
 end Deadlock

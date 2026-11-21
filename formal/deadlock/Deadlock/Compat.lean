@@ -5,12 +5,12 @@ set_option autoImplicit false
 namespace Deadlock
 
 /-! The group relation is untrusted. `compatFails = []` checks the initial tuple
-and closure under the listed typestate steps. It does not mention an outcome
-typestate. A reachable tuple may still stand in one: `toState`, or a nonempty
-`toNotAdmitted` / `toTimedOut` / `toTimeout` / `toFull` / `toGone` of a
-transition whose landing set already contains the role's state. Absent and dead
-roles are not read as `initial`: the tuple is required only while every role is
-alive. -/
+and closure under the listed typestate steps. Outcome landings are not fields of
+the description, so that check does not see them. `landingFails` does: every
+nonempty `toNotAdmitted` / `toTimedOut` / `toTimeout` / `toFull` / `toGone` is
+a state the stored rows must already be closed under, via `pairBreaks`. Absent
+and dead roles are not read as `initial`: the tuple is required only while every
+role is alive. -/
 
 def roleTuple (w : World) (g : CompatGroup) : List RoleState :=
   g.roles.map fun r => { role := r, state := (w.st (.core r)).typestate }
