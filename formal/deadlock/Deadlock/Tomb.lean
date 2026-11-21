@@ -2,11 +2,11 @@
 One tombstone per child slot, for a world that already satisfies `Hold`.
 
 `tmb_seal_room` is that numeric fact: a pending seal has room on the live
-parent's lane when the slot account is inside `prioSized`. It is not true of
-every world `GraphOk` and `LocalOk` can reach. Two live generations of one
-supervisor can each spawn the same slot, and both seals offer their
-tombstone to the older generation. `Deadlock/Counterexample.lean` is that
-run; `offerPrio` crashes. The reachable wrapper stays unproved.
+parent's lane when the slot account is inside `prioSized`. `Hold` is proved
+for the initial world and for the steps that do not birth a pool slot or an
+empty-subtree root, including a nonempty supervised root birth and a
+self-schedule. `no_tombstone_overflow` is not restated: this file does not
+claim that every reachable world stays inside the lane.
 -/
 
 import Deadlock.Local
@@ -6696,7 +6696,7 @@ theorem lane_absent (ms : List Msg) (label : String)
   simp [tmb_laneLabels, List.mem_map] at hmem
   obtain ⟨m, hm, hl⟩ := hmem
   have hany : (ms.any fun p => p.label == label) = true :=
-    List.any_eq_true.mpr ⟨m, hm.1, by rw [hl]; exact (beq_iff_eq).mpr rfl⟩
+    _root_.List.any_eq_true.mpr ⟨m, hm.1, by rw [hl]; exact (beq_iff_eq).mpr rfl⟩
   simp [hany] at h
 
 /-- Re-arming a label already on the lane leaves the count alone. A new label
