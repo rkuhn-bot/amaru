@@ -94,8 +94,7 @@ def lifeTag (l : Life) : Nat :=
   match l with
   | .absent => 0
   | .alive => 1
-  | .shuttingDown => 2
-  | .dead => 3
+  | .dead => 2
 
 def R0 : InstId := .peer "R" 0 0
 def C0 : InstId := .peer "C" 0 0
@@ -110,10 +109,10 @@ def birth : List Action :=
 def killed : List Action :=
   birth ++ [.ingress C0 "Go", .recvBulk C0, .exec C0]
 
-def sealed : List Action := killed ++ [.exec C0]
-
+/-- `C`'s terminate seals `C` and `G` in that `exec`. The restart is the parent's
+receive of `C`'s tombstone. -/
 def restarted : List Action :=
-  sealed ++ [.recvPrio R0, .exec R0, .ingress C1 "Go", .recvBulk C1, .exec C1]
+  killed ++ [.recvPrio R0, .exec R0, .ingress C1 "Go", .recvBulk C1, .exec C1]
 
 /-- The design passes the checker, and both parents are inside `prioSized`. -/
 theorem orphan_checked :
@@ -124,12 +123,12 @@ theorem orphan_checked :
   refine ⟨hcheck, ?_, by decide, by decide, by decide⟩
   simp [render, hcheck]
 
-/-- `C`'s terminate seals `G`. `C` is shutting down and `G` is dead, so the
-slot is free. Nothing has crashed. -/
+/-- `C`'s terminate seals `C` and `G` in that step. `G`'s slot is free.
+Nothing has crashed. -/
 theorem orphan_grandchild_sealed :
     (runAt orphanImpl 2 killed).map (fun w =>
       (lifeTag (w.st C0).life, lifeTag (w.st G0).life, slotOccupied w "G" 0, w.crashed)) =
-      some (2, 3, false, false) := by
+      some (2, 2, false, false) := by
   decide
 
 /-- The restarted `C` births a new `G`. The old `G` stays dead, parented by the
@@ -138,8 +137,8 @@ theorem orphan_respawn :
     (match runAt orphanImpl 2 restarted with
       | none => false
       | some w =>
-        decide (lifeTag (w.st C0).life = 3) &&
-          decide (lifeTag (w.st G0).life = 3) &&
+        decide (lifeTag (w.st C0).life = 2) &&
+          decide (lifeTag (w.st G0).life = 2) &&
           decide (lifeTag (w.st C1).life = 1) &&
           decide (lifeTag (w.st G1).life = 1) &&
           w.roster.contains G1 &&

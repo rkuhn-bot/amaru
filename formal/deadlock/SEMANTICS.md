@@ -64,7 +64,7 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, and some `prio` message is not a waiting tombstone, and `deliver` accepts it | Consume the first such message. A waiting tombstone stays in the lane, in its place. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while shutting down or while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail is in flight. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive, shutting down, or its tombstone is still queued: that spawn is a no-op. The tombstone stays queued until the stage's in-flight mail has left every live queue. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
+| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail is in a live queue. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive or its tombstone is still queued: that spawn is a no-op. The tombstone is queued in the seal and stays queued until the stage's in-flight mail has left every live queue. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
@@ -76,7 +76,7 @@ One `exec` step, by the head effect:
 - `send` and `call` use `route` (a call first uses `resolveId`). A miss is
   `noteStale` and the sender proceeds. A hit is `enqueueOrPark`: into `box`
   when the target is alive, its `parked` list is empty, and `box` has room;
-  otherwise onto `parked`. A dead, shutting-down, or absent target stores
+  otherwise onto `parked`. A dead or absent target stores
   nothing. A send then proceeds. A call ends as `NotAdmitted` on
   `onNotAdmitted`, and does not enter `awaitReply`. An admitted call waits
   in `awaitReply` (room) or `parked` with `isCall` (no room). `Reply`,
@@ -96,9 +96,9 @@ One `exec` step, by the head effect:
   path is `finish`. The timeout is `callTimeout`, which runs `onTimeout`
   into its own typestate.
 - `terminate` is the shutdown below. Every core crashes the roster.
-  A per-peer stage in a supervision tree marks itself and its descendants.
-  A lone terminable per-peer with no child and no parked call shuts only
-  itself down.
+  A per-peer stage in a supervision tree seals itself and its descendants
+  in that step. A lone terminable per-peer with no child and no parked call
+  seals only itself.
 
 `route` resolves a multiplicity-one name to its live core. A pool
 (`slots` > 0) is the live occupant of the addressed slot, and `hint` is
@@ -141,35 +141,34 @@ An untimed peer (`peerUntimed`) is not a `Deadlock`. Its data result is
 
 `terminate` of a stage in a supervision tree is `terminateStage`:
 `dropDescendants` seals every recorded descendant in this step, and those
-tombstones are not delivered. The stage itself is `shutdownActor`. It is
-marked shutting down, the tombstone is armed then, and the tombstone is
-queued at the seal, once the child is dead, on the immediate supervisor's
-priority lane. pure-stage does not deliver it yet.
-`terminate_stage` finishes the child before `tombstones.push_back`, and the
-receive skips that message while program mail from the child, or from a
-descendant sealed with it, sits in a live queue. Mail at a dead or
-shutting-down receiver counts as consumed. A parked send of the killed
-stage is dropped at the kill. The supervisor may be a per-peer stage of the
-same subtree. The parent answers the tombstone in its own later step, which
-runs only after that mail is gone. A re-spawn of that slot is a no-op while
-the slot is alive or shutting down, or while its tombstone is queued. The
-mail is not a second guard. A core pool and a per-peer parent use the same
-rule. A scheduler root under a core keeps one of the `N` population slots
-while that tombstone is queued. An unsupervised root has no tombstone, and
-that key keeps its population slot while the subtree's mail remains on a
-surviving receiver. Shutting down alone does not. A shutting-down root that
-still holds a descendant's mail does, until its seal clears that mailbox.
-A sibling is not a descendant, and
-nothing here clears a sibling's mailbox. A lone terminable per-peer with no
-child and no parked call is `shutdownActor` of itself. Every core's
-`terminate`, and a priority enqueue onto a full lane, are `crashWorld`.
-There is no per-core shutdown. `terminable` is rejected on a multiplicity-one
-template.
+tombstones are not delivered. The stage itself is `shutdownActor` in the
+same step. `shutdownActor` calls `sealActor`. `releaseWorld` refunds the
+mailbox, drops parked sends, and installs the actor `dead` and empty, and
+`enqueueTombstone` queues the tombstone on the immediate supervisor's
+priority lane. There is no later seal. A stage that terminates inside its
+own transition is sealed before that `exec` returns.
+pure-stage `terminate_stage` removes the stage and its mailbox and pushes
+the tombstone in that step. The receive skips that message while program
+mail from the child, or from a descendant sealed with it, sits in a live
+queue. Mail at a dead receiver counts as consumed. A parked send of the
+killed stage is dropped at the kill. The supervisor may be a per-peer stage
+of the same subtree. The parent answers the tombstone in its own later
+step, which runs only after that mail is gone. A re-spawn of that slot is a
+no-op while the slot is alive, or while its tombstone is queued. The mail
+is not a second guard. A core pool and a per-peer parent use the same rule.
+A scheduler root under a core keeps one of the `N` population slots while
+that tombstone is queued. An unsupervised root has no tombstone, and that
+key keeps its population slot while the subtree's mail remains on a
+surviving receiver. The seal clears the root's own mailbox in the same
+step. A sibling is not a descendant, and nothing here clears a sibling's
+mailbox. A lone terminable per-peer with no child and no parked call is
+`shutdownActor` of itself. Every core's `terminate`, and a priority enqueue
+onto a full lane, are `crashWorld`. There is no per-core shutdown.
+`terminable` is rejected on a multiplicity-one template.
 
-`markShutdown` sets `shuttingDown` and `idle`, and `releaseOutbound` drops
-that sender's parked entries on other hosts at the mark, not at the seal.
-The seal is a later `exec`: `releaseWorld` refunds the mailbox, installs
-`dead`, and resumes non-call parked senders. A crashed world has
+`releaseWorld` is `readCells`, `refundMsgs` (`creditLive`), `refundParked`,
+`releaseOutbound`, the dead empty actor, and `releaseParked` for non-call
+parked senders. `markShutdown` is not a step. A crashed world has
 `crashed = true`. Every action, including spawn, ingress, and stutter, is
 disabled, so the run stops. The liveness claim is deadlock-free or crashed.
 
@@ -177,8 +176,8 @@ A drop that is not a crash: `trySend` discards when the target is missing or
 the box is not free; `noteStale` records a route miss and stores nothing;
 `enqueueOrPark` toward a target that is not alive stores nothing and does
 not charge. A stored reliable message is not dropped by a later send. Mail
-inside a shutting-down member is refunded by the seal, not left for a later
-receive.
+inside a member sealed in this step is refunded by `releaseWorld`, not left
+for a later receive.
 
 ## Later
 
@@ -214,8 +213,8 @@ way. It gets no extra proof burden. If keeping it costs significant proof
 work, stop and report. The environment `.kill sub key` action goes away with `killWait`,
 and so do `World.tombstone` and `plantTombstone`. Peer selection stays in
 the application typegraph. A send that has been dropped stays dropped
-because death is permanent, shutting-down is monotone, and an id is not
-reused. On that step relation, `route` reads life and shutting-down.
+because death is permanent and an id is not reused. On that step relation,
+`route` reads life.
 
 Mailbox sizing is a separate decision, not a change to this step relation.
 Slots are sized for a duplex connection, and the model may include every

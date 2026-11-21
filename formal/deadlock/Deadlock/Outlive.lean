@@ -164,11 +164,12 @@ def Xk (k : Nat) : InstId := .peer "X" k 0
 def runAt (acts : List Action) : Option World :=
   acts.foldl (fun w a => w.bind (apply outImpl a)) (some (initWorld outImpl 2))
 
+/-- `R`'s `terminate` seals `R` and `X` in that `exec`. There is no later seal. -/
 def gen (k : Nat) : List Action :=
   [.spawn "R",
    .ingress (Rk k) "Go", .recvBulk (Rk k), .exec (Rk k),
    .ingress (Xk k) "Go", .recvBulk (Xk k), .exec (Xk k), .exec (Xk k),
-   .ingress (Rk k) "Go", .recvBulk (Rk k), .exec (Rk k), .exec (Rk k)]
+   .ingress (Rk k) "Go", .recvBulk (Rk k), .exec (Rk k)]
 
 def early : List Action :=
   [.ingress Hc "Ping", .ingress Kc "Ping"] ++ gen 0 ++ gen 1 ++ gen 2 ++ gen 3

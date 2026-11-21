@@ -289,8 +289,9 @@ stage's in-flight mail has been consumed. Each message is tagged with the
 sender's slot and generation. A live receiver reports consumption of those
 tagged messages. The tombstone is delivered when every such message from
 the terminated stage, and from the descendants sealed with it, has been
-consumed or dropped. Mail at a dead or shutting-down receiver counts as
-consumed. A parked send of a stage that is killed is dropped at the kill
+consumed or dropped. Mail at a dead receiver counts as consumed: the seal
+cleared that mailbox in the same step, and there is no shutting-down
+receiver. A parked send of a stage that is killed is dropped at the kill
 and is not in the set. The supervisor does not wait. The tombstone is
 already on its priority lane, and a receive skips it until the set is
 empty. The signal is not a mailbox becoming empty. Unrelated mail may keep
@@ -320,8 +321,9 @@ leaves a waiting tombstone queued while it delivers a later message.
 
 The in-flight count is not one mailbox. It is that dead stage's program
 mail in every live mailbox, every live priority queue, and every tokio
-channel that still holds it. A dead or shutting-down receiver is not in
-the count.
+channel that still holds it. A dead receiver is not in the count. The
+20:20 entry is that seal: the receiver is dead in the step that terminates
+it, and its mailbox is already empty.
 
 The tombstone queue has to fall through to the priority lane and then to
 bulk, instead of stalling the receive on a tombstone that is not yet ready.
@@ -419,10 +421,12 @@ Roland, 2026-11-21 11:46–11:50 CET, his own words and his approval. A dead
 stage's tombstone, the `ChildDied` offered to its supervisor, is not
 delivered while mail sent by the terminated stage, and by the descendants
 sealed with it, is still in flight. In flight means sitting in a live
-receiver's bulk or priority queue, not yet dequeued. Mail at a dead or
-shutting-down receiver counts as consumed. Parked sends need nothing:
-aborting the sender means that message is never enqueued, and the kill
-drops it. This holds for every supervisor. There is no per-supervisor flag.
+receiver's bulk or priority queue, not yet dequeued. Mail at a dead
+receiver counts as consumed. There is no shutting-down receiver: the 20:20
+entry seals the stage in the step that terminates it, and that seal clears
+the mailbox. Parked sends need nothing: aborting the sender means that
+message is never enqueued, and the kill drops it. This holds for every
+supervisor. There is no per-supervisor flag.
 
 The tombstone is still queued at the seal, on the supervisor's priority
 lane, so it keeps its place in the lane census and `no_tombstone_overflow`
@@ -450,24 +454,23 @@ that class (N49).
 An unsupervised root has no tombstone. `loneOutstanding` still counts it
 while it is alive, or while `slotMailHeld` says a surviving receiver holds
 subtree mail. That is the population rule for E4, and `outlive_refused` is
-unchanged. Shutting down alone does not hold that slot. A shutting-down
-root that still holds a descendant's mail does, until its own seal clears
-that mailbox (N50). The count is transient.
+unchanged. The seal clears the root's own mailbox in the same step, so a
+dead root holds the slot only through mail a surviving receiver still has
+(N50). The count is transient.
 
-`survivesSender` counts a host that is alive or shutting down, and
-`slotMailHeld` uses that (N56). A supervised slot does not.
-`mailInFlight` requires the receiver's life to be `alive`, so mail at a
-shutting-down host is already consumed there. The unsupervised count is
-the conservative one, and it is transient: that host seals and clears the
-mailbox.
+`survivesSender` counts a host that is alive, and `slotMailHeld` uses that
+(N56). A supervised slot does not. `mailInFlight` requires the receiver's
+life to be `alive`, so mail at a dead host is already consumed there. The
+unsupervised count is the conservative one, and it is transient: that host
+is sealed and its mailbox cleared in the step that terminates it.
 
-`rootOutstanding`, the core-supervised count, is alive, shutting down, or
-tombstone still queued. The mail term is gone. The tombstone cannot be
-received while that root's in-flight mail remains, so the slot stays
-occupied through the drain. `guards_root_held_until_drain` is two such
-roots. The tombstones stay queued, both labelled `dead/R#0`, until `H` and
-`K` have taken the mail, and the spawn is enabled once both tombstones are
-received.
+`rootOutstanding`, the core-supervised count, is alive, or tombstone still
+queued. The mail term is gone. The tombstone is queued in the seal and
+cannot be received while that root's in-flight mail remains, so the slot
+stays occupied through the drain. `guards_root_held_until_drain` is two
+such roots. The tombstones stay queued, both labelled `dead/R#0`, until
+`H` and `K` have taken the mail, and the spawn is enabled once both
+tombstones are received.
 
 Roland, 2026-11-21 11:49 CET: a pending tombstone adds no runtime wait
 edge. The only blocking waits are parked sends, and this guard does not
@@ -500,3 +503,33 @@ and block a sibling's ready message.
 spawn it allows is the transition that consumes the tombstone, or a state
 reached only by consuming it. That attempt now happens when the in-flight
 set is empty. The checker still does not read mailboxes.
+
+## 2026-11-21 — A termination seals the stage in that step
+
+Roland, 2026-11-21 20:20 CET. This supersedes the shutting-down phase.
+`markShutdown` and the later seal are one step. `Life` is `absent`,
+`alive`, or `dead`.
+
+`terminateStage`, `abortChildren`, and `shutdownActor` take an alive actor
+to dead in the step that terminates it. `releaseWorld` runs then:
+`readCells`, `refundMsgs` through `creditLive`, `refundParked`,
+`releaseOutbound`, an empty box, priority lane, and parked list, and
+`releaseParked` for a non-call parked sender. The tombstone is queued on
+the supervisor in that same step. `armTombstone` is not a step, and
+`pendingTombstone` is not consulted. A stage that terminates inside its own
+transition is sealed before that step returns. `dropDescendants` seals
+descendants in the step, and their tombstones are not delivered. A sibling
+is not in that seal.
+
+The delayed tombstone is unchanged in one respect and restated for this
+step. The message is queued at the seal, which is now the terminate step,
+and `receivePrio` still skips it while program mail from the dead stage, or
+from a descendant sealed with it, sits in a live receiver's bulk or
+priority queue. Mail at a dead receiver counts as consumed — the seal
+cleared that mailbox, and mail `crashWorld` leaves behind is never
+dequeued. A parked send is dropped at the kill. The handler that consumes
+the tombstone therefore still runs only after that live mail is gone, and
+the spawn in the handler is not refused for mail. An alive sibling that
+still holds the message withholds `ChildDied`; the refund is `creditLive`
+when that sibling consumes it, which is before the handler can spawn the
+next generation.

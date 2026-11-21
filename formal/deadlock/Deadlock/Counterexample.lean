@@ -93,8 +93,9 @@ def c1 : InstId := .peer "C" 1 0
 def spawnC (parent : InstId) : List Action :=
   [.ingress parent "Go", .recvBulk parent, .exec parent]
 
+/-- The `exec` of `Die` seals the child and queues its tombstone. There is no later seal. -/
 def killC (id : InstId) : List Action :=
-  [.ingress id "Die", .recvBulk id, .exec id, .exec id]
+  [.ingress id "Die", .recvBulk id, .exec id]
 
 /-- Two scheduler births. Each root births one child and seals it. -/
 def faithful : List Action :=
@@ -118,7 +119,8 @@ theorem faithful_lanes :
           decide ((w.st r0).prio.map (·.label) = ["dead/C#0"]) &&
           decide ((w.st r1).prio.map (·.label) = ["dead/C#0"])) = true := by decide
 
-/-! A child can seal after its parent was marked. The new root is not that parent. -/
+/-! A child seals, then its parent terminates and is sealed in that same step.
+The child's tombstone was queued on the parent and is cleared with the parent's lane. -/
 
 def rT2 : Template :=
   { tpl "R" 8 ["boot", "up"] "boot" with
@@ -144,7 +146,7 @@ def kImpl : Impl where
      tr "R" "boot" "dead/C" "boot" [], tr "R" "up" "dead/C" "up" [],
      tr "C" "idle" "Die" "idle" [.terminate]]
 
-/-- `C` marks itself, then `R` terminates and seals `C` in that step. -/
+/-- `C` seals itself, then `R` terminates and is sealed in that step. -/
 def lateBase : List Action :=
   [.spawn "R", .ingress r0 "Go", .recvBulk r0, .exec r0,
    .ingress c0 "Die", .recvBulk c0, .exec c0,
@@ -153,26 +155,25 @@ def lateBase : List Action :=
 theorem k_checks : checkBool kDesc = true ∧ localOkB kImpl = true ∧
     prioSized kDesc "R" (prioSenderBound kImpl "R") = true := by decide
 
-/-- `R`'s terminate seals `C` in that step. The tombstone is discarded because
-the parent is the one shutting down, the lane stays empty, and the roster
-does not crash. `C` is already dead, so a later `exec` of `C` is not enabled. -/
+/-- `R`'s terminate seals `R` in that step. `C` is already dead. `R`'s lane,
+including `C`'s tombstone, is cleared by that seal, and the roster does not crash. -/
 theorem late_seal_drops :
     (match runAt kImpl 2 lateBase with
       | none => false
       | some w =>
         decide (w.crashed = false) &&
-          decide ((w.st r0).life = .shuttingDown) &&
+          decide ((w.st r0).life = .dead) &&
           decide ((w.st c0).life = .dead) &&
           decide ((w.st r0).prio = [])) = true := by decide
 
-/-- A root born while the parent is shutting down takes the next key. The
-child's tombstone is not delivered to that new root. -/
+/-- The dead root holds no mail and has no supervisor, so another root is born
+at the next key. `C`'s tombstone was cleared with `R` and is not delivered there. -/
 theorem foreign_tombstone :
     (match runAt kImpl 2 (lateBase ++ [.spawn "R"]) with
       | none => false
       | some w =>
         decide (w.crashed = false) &&
-          decide ((w.st r0).life = .shuttingDown) &&
+          decide ((w.st r0).life = .dead) &&
           decide ((w.st r1).life = .alive) &&
           decide ((w.st r1).prio = []) &&
           decide ((w.st c0).life = .dead)) = true := by decide

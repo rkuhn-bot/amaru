@@ -4,11 +4,12 @@ dirty-bit cells, and fresh-name restart.
 
 `N` bounds how many root subtrees of a per-peer template occupy a population
 slot at once. A root holds its slot while it is alive. A core-supervised root
-also holds it while it is shutting down or its tombstone is queued, and that
-tombstone is not receivable while the dead stage's mail is in flight. An
-unsupervised root holds it while a member of its subtree still has mail on a
-surviving receiver. Instance indices stay fresh: a restart allocates a new
-key, and the dead id is never reused.
+also holds it while its tombstone is queued, and that tombstone is not
+receivable while the dead stage's mail is in a live queue. An unsupervised
+root holds it while a member of its subtree still has mail on a surviving
+receiver. Instance indices stay fresh: a restart allocates a new key, and the
+dead id is never reused. There is no shutting-down phase: a stage that
+terminates goes from alive to dead in that step.
 -/
 
 import Deadlock.Graph
@@ -61,21 +62,18 @@ def timeoutKillsB (D : Description) (name : String) : Bool :=
 inductive Life where
   | absent
   | alive
-  /-- Has begun to terminate. It accepts nothing. A later `exec` seals it to `dead`. -/
-  | shuttingDown
   | dead
   deriving DecidableEq, Repr, Inhabited
 
-/-- How a life may change. Shutting down and death are permanent. An id is not reused. -/
+/-- How a life may change. Death is permanent. An id is not reused.
+There is no shutting-down life: a termination goes from alive to dead in one step. -/
 def LifeStep (old new : Life) : Prop :=
   new = old ∨
     (old = .absent ∧ new = .alive) ∨
-    (old = .alive ∧ new = .shuttingDown) ∨
-    (old = .alive ∧ new = .dead) ∨
-    (old = .shuttingDown ∧ new = .dead)
+    (old = .alive ∧ new = .dead)
 
-/-- The target will not handle mail: it has begun shutting down, or it has terminated. -/
-def Halted (l : Life) : Prop := l = .shuttingDown ∨ l = .dead
+/-- The target will not handle mail: it has terminated. -/
+def Halted (l : Life) : Prop := l = .dead
 
 /-- Effects carry the real message label. `hint` is a per-peer index; cores ignore it. -/
 inductive Eff where
@@ -93,8 +91,8 @@ inductive Eff where
   /-- `onTimeout` runs when the external peer does not answer. The tail is the
   data result. -/
   | peer (onTimeout : List Eff)
-  /-- A parent marks every child, terminable or not, and that child's descendants
-  shutting down. Siblings are not children of each other. -/
+  /-- A parent seals every child, terminable or not, and that child's descendants,
+  in this step. Siblings are not children of each other. -/
   | abort
   | terminate
   /-- A per-peer stage spawns one child of `template` at its own key.
@@ -377,8 +375,9 @@ structure Actor where
   oweId : Option Nat := none
   /-- Outcome of the last call this actor finished, with that call's id. -/
   lastCall : Option (Nat × CallResult) := none
-  /-- The seal of this actor owes its supervisor one tombstone. The message is
-  queued when the actor becomes dead, not when it is marked shutting down. -/
+  /-- Unused by the step. `shutdownActor` queues the tombstone itself in the
+  same step that seals the actor, so nothing arms this flag. It stays on the
+  record because earlier proofs still name the field. -/
   pendingTombstone : Bool := false
   /-- The incarnation that wired this actor. `none` is a scheduler root.
   The tombstone is delivered to this id, and dropped when that id is not alive. -/
@@ -1038,7 +1037,7 @@ def descends (fuel : Nat) (w : World) (anc desc : InstId) : Bool :=
 
 /-- `host` is dropped in the same seal as `sender`. `terminateStage` seals
 the sender's descendants in that step (`dropDescendants`, then `sealBranch`
-and `releaseWorld`) and seals the sender when it later seals. `releaseWorld`
+and `releaseWorld`) and seals the sender in the same step. `releaseWorld`
 empties that actor's mailbox. It does not clear a sibling, a parent, or a
 core: those hosts are not in this seal. -/
 def sealedTogether (w : World) (sender host : InstId) : Bool :=
@@ -1046,8 +1045,9 @@ def sealedTogether (w : World) (sender host : InstId) : Bool :=
 
 /-- Program mail from `origin` or a recorded descendant, still sitting in a
 live receiver's bulk or priority queue. A tombstone is not program mail.
-A dead or shutting-down receiver has already dropped what it held. A parked
-send is not here: the kill drops it, so it is never enqueued. -/
+A dead receiver's mailbox was cleared when it was sealed. Mail left by
+`crashWorld` is never consumed, because a crashed world takes no step. A
+parked send is not here: the kill drops it, so it is never enqueued. -/
 def mailInFlight (w : World) (origin : InstId) : Bool :=
   w.roster.any fun host =>
     (w.st host).life == .alive &&
@@ -1232,11 +1232,10 @@ def enqueueOrPark (w : World) (D : Description) (sender dst : InstId) (msg : Msg
   let target := w.st dst
   let cap := capBulk D w.N dst
   if target.life ≠ .alive then
-    -- Shutting-down, dead, and absent targets store nothing and are not charged.
-    -- The drop is permanent: those lives do not return to alive, and a dead or
-    -- shutting-down id is not spawned again. A call ends as `NotAdmitted`. A
-    -- send proceeds. An absent id can still be spawned later, but this call
-    -- does not sit on it.
+    -- Dead and absent targets store nothing and are not charged.
+    -- The drop is permanent: death does not return to alive, and a dead id
+    -- is not spawned again. A call ends as `NotAdmitted`. A send proceeds.
+    -- An absent id can still be spawned later, but this call does not sit on it.
     if isCall then
       setActor w sender (finishCall (issueCall (w.st sender)) k .notAdmitted)
     else
@@ -1301,12 +1300,12 @@ label is not already pending. Wakes are not bulk occupancy and are not charged. 
 def upsertPrio (prio : List Msg) (m : Msg) : List Msg :=
   if prio.any (fun p => p.label == m.label) then prio else prio ++ [m]
 
-/-- A core's `terminate`, and a priority lane with no room left. Every live or
-shutting-down actor on the roster dies in this step, in the crashed phase.
+/-- A core's `terminate`, and a priority lane with no room left. Every alive
+actor on the roster dies in this step, in the crashed phase.
 Mail stays queued: the host is dead before anything dequeues it, and a crashed
 world takes no further step. -/
 def crashActor (a : Actor) : Actor :=
-  if a.life == .alive || a.life == .shuttingDown then
+  if a.life == .alive then
     { a with life := .dead, phase := .crashed }
   else a
 
@@ -1504,8 +1503,8 @@ def tombstoneMsg (D : Description) (parent : Actor) (child : InstId) : Msg :=
   { label := tombstoneLabel D child, sender := child, callFrom := none,
     reliable := true, mid := parent.nextMid, tombstone := true, baseLabel := base }
 
-/-- The recorded parent, when that incarnation is still alive. A shutting or
-dead parent is not a delivery target: pure-stage has already removed its queue. -/
+/-- The recorded parent, when that incarnation is still alive. A dead parent
+is not a delivery target: pure-stage has already removed its queue. -/
 def liveSupervisor (D : Description) (w : World) (child : InstId) : Option InstId :=
   let _desc := D
   match (w.st child).parent with
@@ -1513,7 +1512,7 @@ def liveSupervisor (D : Description) (w : World) (child : InstId) : Option InstI
   | some p => if (w.st p).life == .alive then some p else none
 
 /-- Hand the recorded parent the child's tombstone. No recorded parent is not a
-delivery. A parent that is shutting down or dead has no queue left, so the
+delivery. A parent that is dead has no queue left, so the
 tombstone is dropped. A live parent with no wired label crashes: a live
 supervisor must have a handler. A tombstone that does not fit is `offerPrio`'s
 crash. The tombstone counts toward that lane's budget. -/
@@ -1615,31 +1614,18 @@ def releaseWorld (D : Description) (w : World) (id : InstId) (a : Actor) : World
     { base with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
   releaseParked (setActor w id dead) id a.parked
 
-/-- Enter shutting-down. Mail stays until `releaseWorld` seals the actor.
-A life that is not alive is left alone. -/
-def markShutdown (w : World) (id : InstId) : World :=
-  if (w.st id).life == .alive then
-    -- The phase stops here. Mail stays until the seal, and the actor accepts nothing.
-    -- Parked entries this actor still has on other hosts leave now, as in pure-stage,
-    -- so a host cannot admit them between the mark and the seal.
-    releaseOutbound (setActor w id { (w.st id) with life := .shuttingDown, phase := .idle }) id
-  else w
-
-/-- Remember that `id`'s seal owes its supervisor a tombstone. -/
-def armTombstone (w : World) (id : InstId) : World :=
-  setActor w id { (w.st id) with pendingTombstone := true }
-
-/-- Finish `id` and, when the mark armed it, queue the tombstone on the
-supervisor. The actor is dead before that message can be received, and the
-receive skips it while program mail from this stage is still in a live queue. -/
+/-- Finish `id` and queue its tombstone on the supervisor. `releaseWorld` refunds
+the mailbox, drops parked sends, and installs the actor dead and empty. The
+tombstone is queued in that same step. A receive skips it while program mail
+from this stage is still in a live queue. `pendingTombstone` is not consulted. -/
 def sealActor (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
-  let sealed := releaseWorld D w id a
-  if a.pendingTombstone then enqueueTombstone D sealed id else sealed
+  enqueueTombstone D (releaseWorld D w id a) id
 
-/-- Mark `id` shutting down. The tombstone is armed here and queued at the seal. -/
+/-- Seal `id` when it is alive: alive becomes dead, and the tombstone is queued
+on the supervisor, in this step. A life that is not alive is left alone.
+A stage that terminates inside its own transition is sealed here. -/
 def shutdownActor (D : Description) (w : World) (id : InstId) : World :=
-  let marked := markShutdown w id
-  if (w.st id).life == .alive then armTombstone marked id else marked
+  if (w.st id).life == .alive then sealActor D w id (w.st id) else w
 
 /-- A core's `terminate`, or a priority-lane overflow, has crashed the roster.
 `crashWorld` sets `w.crashed` and every later action is disabled, so the world
@@ -1664,7 +1650,7 @@ def sealBranch (fuel : Nat) (D : Description) (w : World) (id : InstId) : World 
   | fuel + 1 =>
     let sealed := w.roster.foldl (fun acc child =>
       if isChild acc id child then sealBranch fuel D acc child else acc) w
-    if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+    if (sealed.st id).life == .alive then
       releaseWorld D sealed id (sealed.st id)
     else sealed
 
@@ -1675,16 +1661,16 @@ def dropDescendants (D : Description) (w : World) (id : InstId) : World :=
     if isChild acc id child then sealBranch w.roster.length D acc child else acc) w
 
 /-- A stage in the supervision tree terminates. Descendants are sealed in this
-step, and their tombstones are not delivered. The stage itself only begins
-shutting down: its tombstone is queued when it later seals, on the immediate
-supervisor. A sibling is not a descendant. -/
+step, and their tombstones are not delivered. The stage itself is sealed in
+the same step: alive becomes dead, and its tombstone is queued on the
+immediate supervisor. A sibling is not a descendant. -/
 def terminateStage (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
   let _committed := a
   shutdownActor D (dropDescendants D w id) id
 
-/-- The parent's abort. Every live child is marked and armed, so the parent
-still receives that child's tombstone. The child's own descendants are sealed
-now and do not leave a grandchild occupying the slot. -/
+/-- The parent's abort. Every live child is sealed in this step, so the parent
+receives that child's tombstone now. The child's own descendants are sealed
+in the same step and do not leave a grandchild occupying the slot. -/
 def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
   w.roster.foldl (fun w child =>
     if isChild w parent child && (w.st child).life == .alive then
@@ -1699,14 +1685,13 @@ def slotTombstoneQueued (w : World) (parent : InstId) (child : String) (k : Nat)
       | .peer n key _ => n == child && key == k
       | .core _ => false
 
-/-- `name` at `key` is alive or still shutting down. The seal has not run, so
-the slot is not free yet: its tombstone is queued only at the seal. -/
+/-- `name` at `key` is alive. The seal installs `dead` and queues the tombstone
+in the same step, so a dead slot is held by `slotTombstoneQueued`, not here. -/
 def slotOccupied (w : World) (name : String) (k : Nat) : Bool :=
   w.roster.any fun id =>
     match id with
     | .peer n key _ =>
-      n == name && key == k &&
-        ((w.st id).life == .alive || (w.st id).life == .shuttingDown)
+      n == name && key == k && (w.st id).life == .alive
     | .core _ => false
 
 /-- `id` is an occupant of per-peer slot `(name, key)`. A pool slot is that
@@ -1718,13 +1703,12 @@ def fromSlot (name : String) (key : Nat) (id : InstId) : Bool :=
   | .peer n k _ => n == name && k == key
   | .core _ => false
 
-/-- `host` still has to consume mail from `sender`. It is alive or shutting
-down, and it is not sealed together with the sender. A dead or absent host
-does not count: a host sealed with the sender is already dead by the time a
-later spawn is checked, and its mailbox was cleared in that seal. -/
+/-- `host` still has to consume mail from `sender`. It is alive, and it is not
+sealed together with the sender. A dead or absent host does not count: a host
+sealed with the sender is already dead, and its mailbox was cleared in that
+seal. -/
 def survivesSender (w : World) (sender host : InstId) : Bool :=
-  ((w.st host).life == .alive || (w.st host).life == .shuttingDown) &&
-    !(sealedTogether w sender host)
+  (w.st host).life == .alive && !(sealedTogether w sender host)
 
 /-- Mail from slot `(name, key)` that `host` has not consumed: a bulk
 message, a priority message, or a parked send still sitting here, and only
@@ -1766,11 +1750,12 @@ def slotMailHeld (D : Description) (w : World) (name : String) (key : Nat) : Boo
   let sub := templateSubtree D name
   if sub == "" then slotCoreMail w name key else subtreeCoreMail D w sub key
 
-/-- No new incarnation of this slot. It is alive or shutting down, or its
-tombstone is still on the supervisor's lane. The tombstone is not receivable
-while program mail from that stage is in flight, so the handler that would
-respawn runs only after that mail has left every live queue. Mail is not a
-second guard here. -/
+/-- No new incarnation of this slot. It is alive, or its tombstone is still on
+the supervisor's lane. The tombstone is queued in the seal and is not
+receivable while program mail from that stage is in a live queue, so the
+handler that would respawn runs only after that mail has left every live
+queue. Mail at a dead receiver counts as consumed. Mail is not a second
+guard here. -/
 def slotRespawnBlocked (_D : Description) (w : World) (parent : InstId) (name : String) (key : Nat) : Bool :=
   slotOccupied w name key || slotTombstoneQueued w parent name key
 
@@ -1801,9 +1786,9 @@ def freeRootSlot (D : Description) (w : World) (supervisor name : String) (n : N
 
 /-- A per-peer parent births one child at its own key. A core births one pool
 child in a free slot below `slots`. The spawn is a no-op, the same as a full
-pool, while `slotRespawnBlocked` holds: the slot is alive or shutting down,
-or its tombstone is still on the supervisor's lane. The tombstone is queued
-at the seal and is not receivable while program mail from that stage, or
+pool, while `slotRespawnBlocked` holds: the slot is alive, or its tombstone
+is still on the supervisor's lane. The tombstone is queued in the same step
+as the seal and is not receivable while program mail from that stage, or
 from a descendant sealed with it, sits in a live queue. The handler that
 consumes the tombstone therefore runs with that mail already gone, and the
 spawn in the handler is not refused for mail.
@@ -1836,8 +1821,8 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
       some w
     else none
 
-/-- Run one effect. An actor that is not alive does not run: while it is shutting
-down the only enabled step is the seal in `execHead`. -/
+/-- Run one effect. An actor that is not alive does not run. A `terminate`
+inside this transition seals the actor in the same step. -/
 def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World :=
   if a.life == .alive then
     match k.rest with
@@ -1931,9 +1916,9 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
 /-- What one `terminate` effect does when the actor is alive.
 `fall` is every terminate that does not crash a core and does not shut a
 per-peer down: a missing template, or a lone per-peer that still has a parked
-call. The roster crashes. `crash` is every core. `lone` marks one childless
-per-peer shutting down. `cascade` marks that per-peer's descendants shutting
-down and notifies its parent. -/
+call. The roster crashes. `crash` is every core. `lone` seals one childless
+per-peer. `cascade` seals that per-peer's descendants and queues the parent's
+tombstone in the same step. -/
 inductive TermStep (I : Impl) (w : World) (id : InstId) (a : Actor) : World → Prop where
   | fall : TermStep I w id a (crashWorld w)
   | crash (t : Template) :
@@ -2056,12 +2041,12 @@ theorem execRun_terminate (I : Impl) (w : World) (id : InstId) (a : Actor) (k : 
   | cascade t ht hper hsub htm hpk hch =>
     exact Or.inr (Or.inr (Or.inr ⟨t, ht, hper, hsub, htm, hpk, hch, rfl⟩))
 
-/-- An actor that is shutting down seals on `exec`: the mailbox is cleared and
-the life becomes `dead`. A live actor runs. Anyone else has no `exec`. -/
+/-- A live actor in `.run` performs the head effect. A `terminate` in that
+effect seals the actor before this step returns. Anyone who is not alive
+has no `exec`: the seal already ran in the step that killed them. -/
 def execHead (I : Impl) (w : World) (id : InstId) : Option World :=
   let a := w.st id
-  if a.life == .shuttingDown then some (sealActor I.desc w id a)
-  else if a.life ≠ .alive then none
+  if a.life ≠ .alive then none
   else
     match a.phase with
     | .run k => some (execRun I w id a k)
@@ -2257,8 +2242,8 @@ def callTimeout (w : World) (id : InstId) : Option World :=
     | _ => none
 
 /-- Internal effects and the data result of a peer wait complete as an ordinary
-step. The peer timeout is `callTimeout`, on `onTimeout`. A shutting-down or
-dead actor does not finish; its next step is the seal, or nothing. -/
+step. The peer timeout is `callTimeout`, on `onTimeout`. A dead actor does
+not finish. -/
 def finishWait (I : Impl) (w : World) (id : InstId) : Option World :=
   if (w.st id).life ≠ .alive then none
   else
@@ -2715,16 +2700,16 @@ def freshKey (D : Description) (w : World) (sub : String) : Nat :=
     | .core _ => m) (w.nextKey sub)
 
 /-- Roots of `name` under this core that still occupy a population slot.
-One slot per such root, up to `N`: alive, shutting down, or tombstone still
-queued. The tombstone stays queued until the core receives it, and the core
-cannot receive it while that root's in-flight mail remains, so the slot is
-held through the drain without a separate mail count. -/
+One slot per such root, up to `N`: alive, or tombstone still queued. The
+tombstone is queued in the seal and stays queued until the core receives it,
+and the core cannot receive it while that root's mail remains in a live
+queue, so the slot is held through the drain without a separate mail count. -/
 def rootOutstanding (_D : Description) (w : World) (supervisor name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with
     | .peer child k _ =>
       if child == name &&
-          ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
+          ((w.st id).life == .alive ||
             slotTombstoneQueued w (.core supervisor) name k) then n + 1
       else n
     | .core _ => n) 0
@@ -2732,12 +2717,11 @@ def rootOutstanding (_D : Description) (w : World) (supervisor name : String) : 
 /-- Unsupervised roots of `name` that occupy a population slot. Alive counts.
 There is no supervisor and no tombstone, so a root that has left `alive`
 still counts while any member of its subtree key has mail on a surviving
-receiver. Shutting down alone does not hold the slot. A shutting-down root
-that still holds a descendant's mail does, until its own seal clears that
-mailbox. Mail on the root itself does not count. At most `N` of these roots.
-`survivesSender` counts a shutting-down host as still holding that mail.
-A supervised slot does not: `mailInFlight` requires the receiver to be
-`alive`. This count is the conservative one, and it is transient. -/
+receiver. The seal clears that root's own mailbox in the same step, so mail
+on the root itself does not count. At most `N` of these roots.
+`survivesSender` counts an alive host. A supervised slot does not:
+`mailInFlight` requires the receiver to be `alive`. This count is the
+conservative one, and it is transient. -/
 def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with
@@ -2749,8 +2733,8 @@ def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
 
 /-- A root under no supervisor is bounded by `loneOutstanding`: alive roots,
 plus roots whose subtree mail is still on a surviving receiver. A root under
-a core is bounded by `rootOutstanding`: alive, shutting down, or tombstone
-still queued. The key itself is always fresh. -/
+a core is bounded by `rootOutstanding`: alive, or tombstone still queued.
+The key itself is always fresh. -/
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
   t.multiplicity == .perPeer && t.slots == 0 && rootOf D t && supervisorLive D w t &&
     match t.supervisor with
@@ -2842,8 +2826,7 @@ theorem apply_step (I : Impl) (a : Action) (w w' : World) (h : apply I a w = som
     exact ⟨rfl, h⟩
 
 /-- Data branch of `awaitPeer`: the external result arrived and `rest` runs.
-The timeout is a separate `callTimeout` step. A shutting-down actor does not
-take either. -/
+The timeout is a separate `callTimeout` step. A dead actor takes neither. -/
 def peerData (I : Impl) (w : World) (id : InstId) : Option World :=
   if (w.st id).life != .alive then none
   else
@@ -7393,7 +7376,7 @@ theorem crashWorld_prev (w : World) (i : InstId)
   simp only [crashWorld] at h
   by_cases hmem : decide (i ∈ w.roster) = true
   · simp only [hmem, ite_true, crashActor] at h
-    by_cases hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true
+    by_cases hgo : ((w.st i).life == .alive) = true
     · simp [hgo] at h
     · simpa [hgo] using h
   · simpa [hmem] using h
@@ -7403,7 +7386,7 @@ theorem crashWorld_keeps_dead (w : World) (i : InstId) (h : (w.st i).life = .dea
   simp only [crashWorld]
   by_cases hmem : decide (i ∈ w.roster) = true
   · simp only [hmem, ite_true, crashActor]
-    have hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = false := by
+    have hgo : ((w.st i).life == .alive) = false := by
       simp [h]
     simp [hgo, h]
   · simpa [hmem] using h
@@ -7479,45 +7462,20 @@ theorem tombstone_core_life (D : Description) (w : World) (child : InstId) (name
     (w.st (InstId.core name)).life = .alive :=
   enqueueTombstone_life D w child (InstId.core name) h
 
-theorem armTombstone_prev (w : World) (id i : InstId)
-    (h : ((armTombstone w id).st i).life = .alive) : (w.st i).life = .alive := by
-  unfold armTombstone at h
-  by_cases hi : i = id
-  · rw [hi] at h ⊢
-    simp [setActor] at h
-    exact h
-  · simpa [setActor, hi] using h
-
 theorem sealActor_self_dead (D : Description) (w : World) (id : InstId) (a : Actor) :
     ((sealActor D w id a).st id).life = .dead := by
   unfold sealActor
-  by_cases hpend : a.pendingTombstone = true
-  · simp only [hpend, ite_true]
-    exact enqueueTombstone_keeps_dead D (releaseWorld D w id a) id id (releaseWorld_self_dead D w id a)
-  · simp only [hpend, ite_false]
-    exact releaseWorld_self_dead D w id a
-
-theorem markShutdown_prev (w : World) (id i : InstId)
-    (h : ((markShutdown w id).st i).life = .alive) : (w.st i).life = .alive := by
-  unfold markShutdown at h
-  by_cases hlive : ((w.st id).life == .alive) = true
-  · simp only [hlive, ite_true] at h
-    have hrel := releaseOutbound_life
-      (setActor w id { (w.st id) with life := .shuttingDown, phase := .idle }) id i
-    rw [hrel] at h
-    by_cases hi : i = id
-    · simp [setActor, hi] at h
-    · simpa [setActor, hi] using h
-  · simpa [hlive] using h
+  exact enqueueTombstone_keeps_dead D (releaseWorld D w id a) id id (releaseWorld_self_dead D w id a)
 
 theorem shutdownActor_prev (D : Description) (w : World) (id i : InstId)
     (h : ((shutdownActor D w id).st i).life = .alive) : (w.st i).life = .alive := by
   unfold shutdownActor at h
   by_cases hlive : ((w.st id).life == .alive) = true
   · simp only [hlive, ite_true] at h
-    exact markShutdown_prev w id i (armTombstone_prev (markShutdown w id) id i h)
-  · simp only [hlive, ite_false] at h
-    exact markShutdown_prev w id i h
+    unfold sealActor at h
+    exact releaseWorld_prev D w id (w.st id) i
+      (enqueueTombstone_life D (releaseWorld D w id (w.st id)) id i h)
+  · simpa [hlive] using h
 
 /-- A cell wake that leaves a core alive did not create that life. A full lane
 crashes the roster instead of dropping the wake. -/
@@ -7596,13 +7554,13 @@ theorem sealBranch_prev (fuel : Nat) (D : Description) (i : InstId) :
           simp only [hf] at h0
           exact ihids w0 h0
     let sealed := w.roster.foldl step w
-    change ((if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+    change ((if (sealed.st id).life == .alive then
       releaseWorld D sealed id (sealed.st id) else sealed).st i).life = .alive at h
-    by_cases hgo : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = true
+    by_cases hgo : ((sealed.st id).life == .alive) = true
     · simp only [hgo, ite_true] at h
       exact hfold w.roster w (releaseWorld_prev D sealed id (sealed.st id) i h)
-    · have hf : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = false := by
-        cases hb : (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown with
+    · have hf : ((sealed.st id).life == .alive) = false := by
+        cases hb : (sealed.st id).life == .alive with
         | false => rfl
         | true => exact absurd hb hgo
       simp only [hf] at h
@@ -7633,7 +7591,7 @@ theorem dropDescendants_prev (D : Description) (w : World) (id i : InstId)
         exact ihids w0 h0
   exact hfold w.roster w h
 
-/-- Beginning to shut down does not bring a core to life. -/
+/-- Sealing a stage does not bring a core to life. -/
 theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
     (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
     (w.st (InstId.core name)).life = .alive := by
@@ -7946,40 +7904,20 @@ theorem apply_core_prev (I : Impl) (w w' : World) (a : Action) (name : String)
     have hhead : execHead I w id = some w' := by
       simpa [stepWorld] using (apply_step I (.exec id) w w' h).2
     unfold execHead at hhead
-    by_cases hshut : ((w.st id).life == .shuttingDown) = true
-    · simp only [hshut, ite_true] at hhead
-      cases hhead
-      by_cases hid : id = InstId.core name
-      · rw [hid] at hl
-        rw [sealActor_self_dead I.desc w (InstId.core name) (w.st (InstId.core name))] at hl
-        cases hl
-      · have hne : InstId.core name ≠ id := fun h => hid h.symm
-        have hrel := releaseWorld_core_life I.desc w id (w.st id) name hne
-        unfold sealActor at hl
-        by_cases hpend : (w.st id).pendingTombstone = true
-        · simp only [hpend, ite_true] at hl
-          have hpre := enqueueTombstone_life I.desc (releaseWorld I.desc w id (w.st id)) id
-            (InstId.core name) hl
-          exact hrel.symm.trans hpre
-        · simp only [hpend, ite_false] at hl
-          exact hrel.symm.trans hl
-    · have hnot : ((w.st id).life == .shuttingDown) = false := by
-        simpa [Bool.not_eq_true] using hshut
-      simp only [hnot, ite_false] at hhead
-      by_cases hlive : (w.st id).life = .alive
-      · simp [hlive] at hhead
-        cases hph : (w.st id).phase with
-        | run k =>
-          simp [hph] at hhead
-          cases hhead
-          exact exec_core_alive_prev I w id (w.st id) k name rfl hl
-        | idle => simp [hph] at hhead
-        | parked _ _ _ => simp [hph] at hhead
-        | awaitReply _ _ => simp [hph] at hhead
-        | awaitEffect _ => simp [hph] at hhead
-        | awaitPeer _ => simp [hph] at hhead
-        | crashed => simp [hph] at hhead
-      · simp [hlive, bne] at hhead
+    by_cases hlive : (w.st id).life = .alive
+    · simp [hlive] at hhead
+      cases hph : (w.st id).phase with
+      | run k =>
+        simp [hph] at hhead
+        cases hhead
+        exact exec_core_alive_prev I w id (w.st id) k name rfl hl
+      | idle => simp [hph] at hhead
+      | parked _ _ _ => simp [hph] at hhead
+      | awaitReply _ _ => simp [hph] at hhead
+      | awaitEffect _ => simp [hph] at hhead
+      | awaitPeer _ => simp [hph] at hhead
+      | crashed => simp [hph] at hhead
+    · simp [hlive, bne] at hhead
 
 /-- Reading cells does not change actor state. -/
 theorem reads_keep_st (D : Description) (ids : List InstId) (w : World) (i : InstId) :
