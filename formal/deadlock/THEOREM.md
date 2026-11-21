@@ -5,7 +5,13 @@ Nothing in the development uses `sorry` or `admit`.
 
 ## What is proved
 
-Three statements lead.
+The headline chain does not build. `Deadlock.Proof`, `Deadlock.RunInv`,
+`Deadlock.Intra`, and `Deadlock.Json` fail to elaborate, and so does every
+module that imports them (`CallTag`, `Inv2`, `Mail`, `Occ`, `Pres`,
+`Projects`, `Step`, `Chain`, `Counter`, `Deliver`, `FairRun`, `Progress`,
+`Rank`, `Witness`, `Theorem`). The names below are the statements that
+chain is meant to carry. They are not theorems of this tree until it builds
+again. `no_tombstone_overflow` is not among them: it has not been restated.
 
 `blocked_unblocks` is a finite execution along the blocked actor's own wait
 chain, when that actor is not a pure untimed peer end. It ends with that
@@ -472,19 +478,31 @@ this development.
   allocation of the whole tree.
 - **F7.** Peer waits are not given their own timeout. A timed peer ends by the
   `finish` step; there is no clock beside that step.
-- **F10.** Under `LocalOk` and `GraphOk`, `fair_delivered` shows each reliable
-  message, identified by the id of the actor that stored it, is consumed by
-  `recvBulk` or `recvPrio`. `reliable_free_reachable` keeps a terminable mailbox
-  free of reliable mail, so a killing `terminate` cannot discard one.
-  `loss_not_delivered` is that discard on a description the checker does not
-  accept: the run is `Fair` and the message is never received.
+- **F10.** The intended statement, once `fair_delivered` builds again, is that
+  under `LocalOk` and `GraphOk` each reliable message, identified by the id of
+  the actor that stored it, is consumed by `recvBulk` or `recvPrio`.
+  `reliable_free_reachable` would keep a terminable mailbox free of reliable
+  mail, so a killing `terminate` cannot discard one. `loss_not_delivered` is
+  that discard on a description the checker does not accept: the run is `Fair`
+  and the message is never received. None of these three elaborate today.
 - **F11.** `CellFlags` is not checked against the set of writers. A cell edge
   is accepted when the flag word passes `cellFails`, not when the program
   effects are shown to be the only writers.
 
 ## Axioms
 
-From `lake build Deadlock` (`#print axioms`):
+`lake build Deadlock` does not succeed: the default target elaborates
+`Deadlock.Json`, and the headline modules above do not build. The list is
+what an earlier successful build printed. It is not a `#print axioms` of
+this tree.
+
+The modules that do build are `Basic`, `Compat`, `Counterexample`,
+`Examples`, `Failures`, `Graph`, `Local`, `Occupy`, `Safety`, `Semantics`,
+`Tomb`, and `Orphan`. An axiom audit of the green modules at `ab612cde9`
+found only `propext`, `Classical.choice`, and `Quot.sound`. The commits
+since add no `sorry` and no `native_decide`.
+
+From that earlier `lake build Deadlock`:
 
 ```
 'Deadlock.below_idle' depends on axioms: [propext, Classical.choice, Quot.sound]
