@@ -8,8 +8,9 @@ for a per-peer child born at its parent's key, and for a pool slot taken
 from `freeSlot`. An empty subtree's key comes from `IxPast` or `RootPast`,
 and the fresh id's lane is empty because it was off the roster. `exec` of a
 send, a try-send, a call, a reply, a cell wake, a child spawn, and `terminate`
-keeps it, and so does `callTimeout`. Carrying `IxPast`, `RootPast`, and the
-off-roster empty lane through every step is still open.
+keeps it, and so does `callTimeout`. `hold_step` keeps it for every enabled
+step, given `IxPast`, `RootPast`, and the off-roster empty lane. Carrying
+those through the step is still open.
 `no_tombstone_overflow` is not restated: this file does not claim that every
 reachable world stays inside the lane.
 -/
@@ -9065,5 +9066,31 @@ theorem hold_timeout (I : Impl) (w : World) (hH : Hold I w) (id : InstId)
     | crashed => simp [hph] at h
   · have hbit : ((w.st id).life != .alive) = true := by simpa [bne, beq_iff_eq] using hlive
     simp [hbit] at h
+
+/-- Every enabled step keeps the lane invariant. A scheduler spawn is the step
+that spends `IxPast` and `RootPast`. A child spawn spends the free-slot account. -/
+theorem hold_step (I : Impl) (w w' : World) (hH : Hold I w) (hG : GraphOk I.desc)
+    (hnd : w.roster.Nodup) (hI : IxPast I w) (hR : RootPast I w)
+    (hoff : ∀ i, i ∉ w.roster → (w.st i).prio = []) (a : Action)
+    (h : apply I a w = some w') : Hold I w' := by
+  have hpre : w.crashed = false := (apply_step I a w w' h).1
+  have hstep : stepWorld I a w = some w' := (apply_step I a w w' h).2
+  cases a with
+  | recvBulk s =>
+    exact hold_recv_bulk I w w' hH s (by simpa [stepWorld] using hstep) hpre
+  | recvPrio s =>
+    exact hold_recv_prio I w w' hH s (by simpa [stepWorld] using hstep) hpre
+  | exec s =>
+    exact hold_exec I w hH hG hnd s hpre hoff w' (by simpa [stepWorld] using hstep)
+  | finish s =>
+    exact hold_finish I w w' hH s (by simpa [stepWorld] using hstep) hpre
+  | spawn template =>
+    exact hold_spawn I w w' hH hI hR template hpre hoff (by simpa [stepWorld] using hstep)
+  | ingress dst label =>
+    exact hold_ingress I w w' hH dst label (by simpa [stepWorld] using hstep) hpre
+  | callTimeout s =>
+    exact hold_timeout I w hH s hpre w' (by simpa [stepWorld] using hstep)
+  | stutter =>
+    exact (stutter_unchanged I w w' h).symm ▸ hH
 
 end Deadlock
