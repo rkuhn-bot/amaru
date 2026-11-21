@@ -275,39 +275,39 @@ Helen's E4 is not this same-key guard. Each birth of `R` and `X` is
 generation 0 of a fresh subtree key. The 08:44 entry is the decision on
 that case.
 
-The 09:30 entry generalises the receiver. The same mail holds the slot on
-any host that is not sealed with the sender, not only on a core.
+The 09:30 entry generalises the receiver. The 11:46 entry changes the
+interaction. A supervised tombstone is not delivered while that stage's
+in-flight mail remains, and the spawn is not given a second mail guard.
 
 ## 2026-11-21 — Implementation work not covered by the Lean model
 
-Roland, from the 2026-11-21 08:06 CET call. The spawn precondition is a fact
-about one slot's messages. pure-stage cannot observe that fact yet.
+Roland, from the 2026-11-21 08:06 CET call, revised 2026-11-21 11:46 CET.
+pure-stage cannot yet delay a tombstone the way this model does.
 
-pure-stage needs a drained signal from every receiver, not only from a core.
-Each message an occupant sends is tagged with the sender's slot and
-generation. Every receiver that is not sealed together with that sender
-tracks consumption of those tagged messages per slot. When every such
-message has been consumed, that receiver emits a drained signal for the
-slot. The supervisor and the scheduler wait for the drained signal from
-every such receiver before the next spawn.
+pure-stage delays delivery of a terminated stage's tombstone until that
+stage's in-flight mail has been consumed. Each message is tagged with the
+sender's slot and generation. A live receiver reports consumption of those
+tagged messages. The tombstone is delivered when every such message from
+the terminated stage, and from the descendants sealed with it, has been
+consumed or dropped. Mail at a dead or shutting-down receiver counts as
+consumed. A parked send of a stage that is killed is dropped at the kill
+and is not in the set. The supervisor does not wait. The tombstone is
+already on its priority lane, and a receive skips it until the set is
+empty. The signal is not a mailbox becoming empty. Unrelated mail may keep
+arriving. Mail on a host sealed together with the sender is not in the set:
+that host drops its mailbox in the same seal. This is net-new functionality
+in pure-stage.
 
-The signal is that finite set — the messages that slot sent to receivers
-that outlive the sender. It is not a mailbox becoming empty. A mailbox may
-never empty, because unrelated mail can keep arriving. Mail on a host that
-is sealed together with the sender does not belong to the set: that host
-drops the mailbox in the same seal. This is net-new functionality in
-pure-stage.
+An unsupervised root has no tombstone, so there is nothing to delay. The
+scheduler holds that population slot until every surviving receiver has
+consumed the subtree's mail. That is the set `loneOutstanding` counts. A
+core-supervised root is held by the queued tombstone, and the tombstone is
+what pure-stage withholds until the same consumption reports arrive.
 
-The same signals hold a population slot. The scheduler, like a supervisor,
-keeps that root's slot until every surviving receiver has drained the
-messages the subtree sent. A new root key is not a free slot while that
-mail remains.
-
-The Lean guard is the same set. `slotMailHeld` is mail still on a live or
-shutting-down host that is not sealed together with the sender, from that
-subtree key: a bulk message, a priority message, or a parked send. It does
-not ask whether a mailbox is empty. The drained signal itself is not a
-state of this model.
+The Lean model checks the finite set directly. `mailInFlight` is program
+mail from the dead stage or a recorded descendant, sitting in a live
+receiver's bulk or priority queue. It does not ask whether a mailbox is
+empty. The drained signal itself is not a state of this model.
 
 ## 2026-11-21 — A dead root keeps its population slot
 
@@ -324,13 +324,14 @@ lane, or a parked send. That is the same holding as a queued tombstone.
 `rootOutstanding` is the core-supervised count, and it still includes a root
 that is alive, shutting down, or waiting on its tombstone. `loneOutstanding`
 is the unsupervised count: alive, or still holding subtree mail. An
-unsupervised root has no tombstone on a core, and shutting down alone does
-not hold its slot. Fresh keys are unchanged.
+unsupervised root has no tombstone. Shutting down alone does not hold its
+slot. A shutting-down root that still holds a descendant's mail does, until
+its own seal clears that mailbox. Fresh keys are unchanged.
 
 A core-supervised pool is the same unit on a different account. Its
 population is `slots`, not `N`, so it does not go through `rootOutstanding`.
-`freeSlot` already skips an index while `slotRespawnBlocked` holds, and that
-guard now uses `slotMailHeld` for the subtree at that key. A per-peer
+`freeSlot` already skips an index while `slotRespawnBlocked` holds. The
+11:46 entry takes the mail term off that supervised guard. A per-peer
 parent's one child is the same guard at the parent's key.
 
 `may_root_parts` and `may_free_parts` are the bound: a spawn is enabled only
@@ -347,7 +348,9 @@ the receiver is any host that is not sealed with the sender.
 
 Roland, 2026-11-21 09:30 CET, his own answer: hold the slot while its mail
 sits at any live host that is not sealed together with it. The drained
-signal comes from every receiver.
+signal comes from every receiver. The 11:46 entry supersedes this for a
+supervised respawn and for `rootOutstanding`. `slotMailHeld` remains the
+unsupervised population count.
 
 This generalises the receiver of the 08:04 respawn rule and the 08:44
 population rule. The sender set is unchanged. A nonempty subtree holds for
@@ -366,18 +369,20 @@ slot. At a later spawn check those hosts are already dead, so the life
 filter excludes them as well. A sibling is not in that seal. Its copy stays
 until that sibling consumes it or seals on its own.
 
-`slotMailHeld` is that test. `slotRespawnBlocked`, `freeSlot`,
-`rootOutstanding`, and `loneOutstanding` all use it. A same-key respawn is a
-no-op while the mail remains. A fresh-key root still occupies a population
-slot while it remains. Shutting down alone does not hold an unsupervised
-root: mail on the root itself is sealed with the sender.
+`slotMailHeld` is that test. At 09:30, `slotRespawnBlocked`, `freeSlot`,
+`rootOutstanding`, and `loneOutstanding` all used it. A same-key respawn was
+a no-op while the mail remained. A fresh-key root still occupies a
+population slot while it remains, and that half is what `loneOutstanding`
+keeps. Shutting down alone does not hold an unsupervised root. Mail on the
+root itself is sealed with the sender and does not count. A shutting-down
+root that still holds a descendant's mail does count, until its own seal
+clears that mailbox.
 
-`child_sub_refused` is the per-peer witness. `X` mails `A` and `B`,
-terminates, and `R`'s respawn of `X` does not birth the next generation.
-`pool_sub_refused` is the same inside a pool subtree: `X` mails pool
-children `A` and `B`, `C` terminates, and `M`'s respawn of `C` does not
-birth the next generation. `outlive_refused` still holds, because that mail
-sits on cores, and a core is not sealed with the sender.
+`child_sub_refused` and `pool_sub_refused` were the one-script witnesses
+that a supervised respawn did not birth the next generation. They do not
+survive the 11:46 rule, and they must not be cited as closing that class.
+`outlive_refused` still holds, because that mail sits on cores, the roots
+are unsupervised, and a core is not sealed with the sender.
 
 `GraphOk` is unchanged. `LocalOk` still does not read mailboxes. The step
 no-op is the guard. The drained signal is how pure-stage learns the same
@@ -390,3 +395,81 @@ the generation. Two roots of one template at generation 0 and different keys
 therefore share the string `dead/R#0`. The guard counts the sender id, not
 the label, so the slot is held for the right occupant. A handler cannot tell
 the keys apart by the label alone. The spelling is unchanged.
+
+## 2026-11-21 — A tombstone waits until the dead stage's mail is consumed
+
+Roland, 2026-11-21 11:46–11:50 CET, his own words and his approval. A dead
+stage's tombstone, the `ChildDied` offered to its supervisor, is not
+delivered while mail sent by the terminated stage, and by the descendants
+sealed with it, is still in flight. In flight means sitting in a live
+receiver's bulk or priority queue, not yet dequeued. Mail at a dead or
+shutting-down receiver counts as consumed. Parked sends need nothing:
+aborting the sender means that message is never enqueued, and the kill
+drops it. This holds for every supervisor. There is no per-supervisor flag.
+
+The tombstone is still queued at the seal, on the supervisor's priority
+lane, so it keeps its place in the lane census and `no_tombstone_overflow`
+is unchanged. A priority receive skips a waiting tombstone and takes the
+first message that is not waiting. The skipped tombstone stays in the lane.
+It is not a head that stalls a later ready message. `slotTombstoneQueued`
+stays true until the message is taken, so the population slot and the
+respawn stay held, and that hold is counted.
+
+`slotRespawnBlocked` is only the slot still occupied, or that tombstone
+still queued. It does not consult `slotMailHeld`. The handler that consumes
+the tombstone therefore runs when the in-flight set is already empty, and
+the spawn in that handler is not refused for mail. The sender set is the
+dead stage and its recorded descendants, which is who was sealed in that
+termination. A sibling's tombstone, and mail from a live sibling, do not
+hold this slot. `child_sub_respawn_enabled` and `pool_sub_respawn_enabled`
+are that birth, for a per-peer child and for a pool child.
+`guards_child_respawn_enabled` and `guards_pool_respawn_enabled` are the
+same when the mail sits on a core and the spawn is the supervisor's later
+step, once the tombstone has been received. The one-script refusals
+`child_sub_refused` and `pool_sub_refused` do not survive. They showed a
+permanent drop under the old no-op, and they must not be cited as closing
+that class (N49).
+
+An unsupervised root has no tombstone. `loneOutstanding` still counts it
+while it is alive, or while `slotMailHeld` says a surviving receiver holds
+subtree mail. That is the population rule for E4, and `outlive_refused` is
+unchanged. Shutting down alone does not hold that slot. A shutting-down
+root that still holds a descendant's mail does, until its own seal clears
+that mailbox (N50). The count is transient.
+
+`rootOutstanding`, the core-supervised count, is alive, shutting down, or
+tombstone still queued. The mail term is gone. The tombstone cannot be
+received while that root's in-flight mail remains, so the slot stays
+occupied through the drain. `guards_root_held_until_drain` is two such
+roots. The tombstones stay queued, both labelled `dead/R#0`, until `H` and
+`K` have taken the mail, and the spawn is enabled once both tombstones are
+received.
+
+Roland, 2026-11-21 11:49 CET: a pending tombstone adds no runtime wait
+edge. The only blocking waits are parked sends, and this guard does not
+wait on those. Dequeuing the dead child's mail is ordinary receive work,
+covered by fairness. A standoff where receiver `B` waits on a protocol
+message that only the supervisor's reaction to the death would send is a
+higher-level protocol liveness question, the same shape as each side
+sending only after the other has sent. It is out of scope. Both parties
+stay responsive to other messages.
+
+The obligation that delivery of the tombstone eventually becomes enabled
+follows from fair receive. It is argued here and is not proved in `FairRun`.
+`mailInFlight` is a finite set of messages already sitting in live actors'
+bulk or priority queues. Each is program mail, not a tombstone, and its
+sender is the dead stage or a recorded descendant. Those senders are dead.
+The seal cleared their mailboxes, and the kill dropped their parked sends,
+so they have no enabled send and the set cannot grow. A live receiver with
+a nonempty queue is busy, and fair receive dequeues it. If that receiver
+leaves `alive` first, what it still holds no longer counts. The set shrinks
+to empty. `tombstoneWaits` is then false, and `receivePrio` is enabled for
+the supervisor on the same condition as any other priority message: the
+supervisor is alive and idle, and the lane has a message that is not
+waiting. A waiting tombstone is skipped, so it does not stand at the head
+and block a sibling's ready message.
+
+`GraphOk` is unchanged. `LocalOk`'s restart check is unchanged. The one
+spawn it allows is the transition that consumes the tombstone, or a state
+reached only by consuming it. That attempt now happens when the in-flight
+set is empty. The checker still does not read mailboxes.

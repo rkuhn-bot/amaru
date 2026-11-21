@@ -396,11 +396,10 @@ def closeAvoid (I : Impl) (template blocked : String) (seed : List String) : Lis
 still queued. The transition that consumes the tombstone is allowed. A later
 spawn is allowed from a state that cannot be reached, without consuming the
 tombstone, from a state in which the child may already be alive.
-Mail an occupant has already placed on a surviving receiver is not a
-typestate fact: the checker cannot see it. `slotMailHeld` refuses that
-respawn in the step relation, as a no-op, and this check does not repeat
-it. A root's population slot is the same fact at the scheduler, and this
-check does not see that either. -/
+The tombstone is not receivable while program mail from that stage is still
+in a live queue, so the one spawn this rule allows runs only after that mail
+has been consumed. The checker does not see the mail. An unsupervised root's
+population slot is a scheduler fact, and this check does not see that either. -/
 def restartFails (I : Impl) : List String :=
   I.desc.templates.flatMap fun child =>
     match child.supervisor with

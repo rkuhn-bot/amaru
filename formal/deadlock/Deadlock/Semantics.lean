@@ -4,10 +4,11 @@ dirty-bit cells, and fresh-name restart.
 
 `N` bounds how many root subtrees of a per-peer template occupy a population
 slot at once. A root holds its slot while it is alive. A core-supervised root
-also holds it while it is shutting down or its tombstone is queued. Any root
-holds it while a member of its subtree still has mail on a core. Instance
-indices stay fresh: a restart allocates a new key, and the dead id is never
-reused.
+also holds it while it is shutting down or its tombstone is queued, and that
+tombstone is not receivable while the dead stage's mail is in flight. An
+unsupervised root holds it while a member of its subtree still has mail on a
+surviving receiver. Instance indices stay fresh: a restart allocates a new
+key, and the dead id is never reused.
 -/
 
 import Deadlock.Graph
@@ -962,16 +963,135 @@ def receiveBulk (I : Impl) (w : World) (id : InstId) : Option World :=
         some (setActor w p.sender (resumeSender (w.st p.sender) p.isCall id))
     | [], [] => none
 
-def receivePrio (I : Impl) (w : World) (id : InstId) : Option World :=
-  let a := w.st id
-  match a.prio with
+/-- `desc` sits under `anc` on the recorded parent chain. `fuel` is the
+roster length, so a cycle stops. The node itself is not a descendant. -/
+def descends (fuel : Nat) (w : World) (anc desc : InstId) : Bool :=
+  match fuel with
+  | 0 => false
+  | fuel + 1 =>
+    if desc == anc then false
+    else
+      match (w.st desc).parent with
+      | none => false
+      | some p =>
+        if p == anc then true
+        else if p == desc then false
+        else descends fuel w anc p
+
+/-- `host` is dropped in the same seal as `sender`. `terminateStage` seals
+the sender's descendants in that step (`dropDescendants`, then `sealBranch`
+and `releaseWorld`) and seals the sender when it later seals. `releaseWorld`
+empties that actor's mailbox. It does not clear a sibling, a parent, or a
+core: those hosts are not in this seal. -/
+def sealedTogether (w : World) (sender host : InstId) : Bool :=
+  sender == host || descends w.roster.length w sender host
+
+/-- Program mail from `origin` or a recorded descendant, still sitting in a
+live receiver's bulk or priority queue. A tombstone is not program mail.
+A dead or shutting-down receiver has already dropped what it held. A parked
+send is not here: the kill drops it, so it is never enqueued. -/
+def mailInFlight (w : World) (origin : InstId) : Bool :=
+  w.roster.any fun host =>
+    (w.st host).life == .alive &&
+      let hit (m : Msg) : Bool := !m.tombstone && sealedTogether w origin m.sender
+      (w.st host).box.any hit || (w.st host).prio.any hit
+
+/-- A queued tombstone whose sender, or one of that sender's sealed
+descendants, still has program mail in a live queue. It stays in the lane,
+so it keeps its priority slot, and a receive skips it. -/
+def tombstoneWaits (w : World) (m : Msg) : Bool :=
+  m.tombstone && mailInFlight w m.sender
+
+theorem tombstone_clear_of_take (w : World) (m : Msg)
+    (h : tombstoneWaits w m = false) (ht : m.tombstone = true) :
+    mailInFlight w m.sender = false := by
+  simp only [tombstoneWaits, ht, Bool.true_and] at h
+  exact h
+
+/-- Take the first priority message that is not a waiting tombstone. Messages
+skipped are waiting tombstones; they stay in the lane, ahead of whatever
+follows them in the remainder. A waiting tombstone is not a head that stalls
+a later ready message. -/
+def receivePrioFrom (I : Impl) (w : World) (id : InstId) (skipped : List Msg) :
+    List Msg → Option World
   | [] => none
   | m :: ms =>
-    if a.life ≠ .alive || a.phase ≠ .idle then none
+    if tombstoneWaits w m then receivePrioFrom I w id (skipped ++ [m]) ms
     else
-      match deliver I w id { a with prio := ms } m with
+      match deliver I w id { (w.st id) with prio := skipped ++ ms } m with
       | none => none
-      | some (w, a') => some (setActor w id a')
+      | some (w', a') => some (setActor w' id a')
+
+def receivePrio (I : Impl) (w : World) (id : InstId) : Option World :=
+  let a := w.st id
+  if a.life ≠ .alive || a.phase ≠ .idle then none
+  else receivePrioFrom I w id [] a.prio
+
+theorem receivePrioFrom_spec (I : Impl) (w : World) (id : InstId) (skipped ms : List Msg)
+    (w' : World) (h : receivePrioFrom I w id skipped ms = some w') :
+    ∃ m pre suf w1 a1,
+      skipped ++ ms = pre ++ m :: suf ∧
+      tombstoneWaits w m = false ∧
+      deliver I w id { (w.st id) with prio := pre ++ suf } m = some (w1, a1) ∧
+      w' = setActor w1 id a1 := by
+  induction ms generalizing skipped with
+  | nil => simp [receivePrioFrom] at h
+  | cons m ms ih =>
+    unfold receivePrioFrom at h
+    split at h
+    · rename_i hwait
+      obtain ⟨m', pre, suf, w1, a1, happ, hclear, hdel, hw'⟩ := ih (skipped ++ [m]) h
+      refine ⟨m', pre, suf, w1, a1, ?_, hclear, hdel, hw'⟩
+      have hstep : skipped ++ (m :: ms) = (skipped ++ [m]) ++ ms := by
+        simp [List.append_assoc]
+      exact hstep.trans happ
+    · rename_i hclear
+      have hwf : tombstoneWaits w m = false := by
+        cases hb : tombstoneWaits w m with
+        | false => rfl
+        | true => exact absurd hb hclear
+      split at h
+      · cases h
+      · rename_i w1 a1 hdel
+        cases h
+        refine ⟨m, skipped, ms, w1, a1, ?_, hwf, hdel, rfl⟩
+        simp
+
+/-- A successful priority receive takes one message that is not a waiting
+tombstone, and leaves every skipped waiting tombstone in the lane. -/
+theorem receivePrio_spec (I : Impl) (w w' : World) (id : InstId)
+    (h : receivePrio I w id = some w') :
+    ∃ m pre suf w1 a1,
+      (w.st id).life = .alive ∧ (w.st id).phase = .idle ∧
+      (w.st id).prio = pre ++ m :: suf ∧
+      tombstoneWaits w m = false ∧
+      deliver I w id { (w.st id) with prio := pre ++ suf } m = some (w1, a1) ∧
+      w' = setActor w1 id a1 := by
+  unfold receivePrio at h
+  dsimp at h
+  split at h
+  · cases h
+  · rename_i hready
+    have hboth : decide ((w.st id).life ≠ .alive) = false ∧
+        decide ((w.st id).phase ≠ .idle) = false := by
+      simpa [Bool.or_eq_false_iff] using hready
+    have hlife : (w.st id).life = .alive := by
+      have hnot := decide_eq_false_iff_not.mp hboth.1
+      simpa [ne_eq] using hnot
+    have hidle : (w.st id).phase = .idle := by
+      have hnot := decide_eq_false_iff_not.mp hboth.2
+      simpa [ne_eq] using hnot
+    obtain ⟨m, pre, suf, w1, a1, happ, hwait, hdel, hw'⟩ :=
+      receivePrioFrom_spec I w id [] (w.st id).prio w' h
+    exact ⟨m, pre, suf, w1, a1, hlife, hidle, by simpa using happ, hwait, hdel, hw'⟩
+
+/-- A tombstone that `receivePrio` delivers has no program mail left in a
+live queue. The handler that runs next therefore sees that mail already gone. -/
+theorem receivePrio_tombstone_drained (I : Impl) (w w' : World) (id : InstId)
+    (h : receivePrio I w id = some w') :
+    ∃ m, tombstoneWaits w m = false ∧ (m.tombstone = true → mailInFlight w m.sender = false) := by
+  obtain ⟨m, _, _, _, _, _, _, _, hwait, _, _⟩ := receivePrio_spec I w w' id h
+  exact ⟨m, hwait, fun ht => tombstone_clear_of_take w m hwait ht⟩
 
 def enqueueOrPark (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) : World :=
@@ -1375,8 +1495,9 @@ def markShutdown (w : World) (id : InstId) : World :=
 def armTombstone (w : World) (id : InstId) : World :=
   setActor w id { (w.st id) with pendingTombstone := true }
 
-/-- Finish `id` and, when the mark armed it, hand the supervisor the tombstone.
-The actor is dead before the parent is notified. -/
+/-- Finish `id` and, when the mark armed it, queue the tombstone on the
+supervisor. The actor is dead before that message can be received, and the
+receive skips it while program mail from this stage is still in a live queue. -/
 def sealActor (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
   let sealed := releaseWorld D w id a
   if a.pendingTombstone then enqueueTombstone D sealed id else sealed
@@ -1463,29 +1584,6 @@ def fromSlot (name : String) (key : Nat) (id : InstId) : Bool :=
   | .peer n k _ => n == name && k == key
   | .core _ => false
 
-/-- `desc` sits under `anc` on the recorded parent chain. `fuel` is the
-roster length, so a cycle stops. The node itself is not a descendant. -/
-def descends (fuel : Nat) (w : World) (anc desc : InstId) : Bool :=
-  match fuel with
-  | 0 => false
-  | fuel + 1 =>
-    if desc == anc then false
-    else
-      match (w.st desc).parent with
-      | none => false
-      | some p =>
-        if p == anc then true
-        else if p == desc then false
-        else descends fuel w anc p
-
-/-- `host` is dropped in the same seal as `sender`. `terminateStage` seals
-the sender's descendants in that step (`dropDescendants`, then `sealBranch`
-and `releaseWorld`) and seals the sender when it later seals. `releaseWorld`
-empties that actor's mailbox. It does not clear a sibling, a parent, or a
-core: those hosts are not in this seal. -/
-def sealedTogether (w : World) (sender host : InstId) : Bool :=
-  sender == host || descends w.roster.length w sender host
-
 /-- `host` still has to consume mail from `sender`. It is alive or shutting
 down, and it is not sealed together with the sender. A dead or absent host
 does not count: a host sealed with the sender is already dead by the time a
@@ -1534,26 +1632,24 @@ def slotMailHeld (D : Description) (w : World) (name : String) (key : Nat) : Boo
   let sub := templateSubtree D name
   if sub == "" then slotCoreMail w name key else subtreeCoreMail D w sub key
 
-/-- No new incarnation of this slot. It is alive or shutting down, its
-tombstone is still queued, or a surviving receiver still holds mail from
-the subtree at this key. -/
-def slotRespawnBlocked (D : Description) (w : World) (parent : InstId) (name : String) (key : Nat) : Bool :=
-  slotOccupied w name key || slotTombstoneQueued w parent name key || slotMailHeld D w name key
+/-- No new incarnation of this slot. It is alive or shutting down, or its
+tombstone is still on the supervisor's lane. The tombstone is not receivable
+while program mail from that stage is in flight, so the handler that would
+respawn runs only after that mail has left every live queue. Mail is not a
+second guard here. -/
+def slotRespawnBlocked (_D : Description) (w : World) (parent : InstId) (name : String) (key : Nat) : Bool :=
+  slotOccupied w name key || slotTombstoneQueued w parent name key
 
 theorem slotRespawnBlocked_clear (D : Description) (w : World) (parent : InstId) (name : String) (key : Nat)
     (h : slotRespawnBlocked D w parent name key = false) :
-    slotOccupied w name key = false ∧ slotTombstoneQueued w parent name key = false ∧
-      slotMailHeld D w name key = false := by
+    slotOccupied w name key = false ∧ slotTombstoneQueued w parent name key = false := by
   unfold slotRespawnBlocked at h
-  have htail := Bool.or_eq_false_iff.mp h
-  have hhead := Bool.or_eq_false_iff.mp htail.1
-  exact ⟨hhead.1, hhead.2, htail.2⟩
+  exact Bool.or_eq_false_iff.mp h
 
 /-- Lowest slot in `0 ..< n` that is not `slotRespawnBlocked`. `fuel` counts
 the indices still to try, from `0` upward. A queued tombstone occupies the
-slot until the supervisor consumes it. Mail any member of the subtree sent
-to a receiver that is not sealed with the sender occupies it until that
-receiver consumes the message. -/
+slot until the supervisor consumes it, and the supervisor cannot consume it
+while that stage's program mail is still in a live queue. -/
 def freeGo (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) : Nat → Option Nat
   | 0 => none
   | fuel + 1 =>
@@ -1572,11 +1668,11 @@ def freeRootSlot (D : Description) (w : World) (supervisor name : String) (n : N
 /-- A per-peer parent births one child at its own key. A core births one pool
 child in a free slot below `slots`. The spawn is a no-op, the same as a full
 pool, while `slotRespawnBlocked` holds: the slot is alive or shutting down,
-its tombstone is still queued, or a surviving receiver still holds mail from
-that subtree key. The tombstone is queued at the seal, so the predecessor is
-dead before the parent can consume it. Mail already admitted to a host that
-is not sealed with the sender stays there until that host consumes it, and
-that mail blocks the next incarnation on its own.
+or its tombstone is still on the supervisor's lane. The tombstone is queued
+at the seal and is not receivable while program mail from that stage, or
+from a descendant sealed with it, sits in a live queue. The handler that
+consumes the tombstone therefore runs with that mail already gone, and the
+spawn in the handler is not refused for mail.
 A parent that is not alive admits nobody. A spawn the template does not
 allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
@@ -2485,25 +2581,26 @@ def freshKey (D : Description) (w : World) (sub : String) : Nat :=
     | .core _ => m) (w.nextKey sub)
 
 /-- Roots of `name` under this core that still occupy a population slot.
-One slot per such root, up to `N`: alive, shutting down, tombstone still
-queued, or any member of that subtree key still has mail on a surviving
-receiver. -/
-def rootOutstanding (D : Description) (w : World) (supervisor name : String) : Nat :=
+One slot per such root, up to `N`: alive, shutting down, or tombstone still
+queued. The tombstone stays queued until the core receives it, and the core
+cannot receive it while that root's in-flight mail remains, so the slot is
+held through the drain without a separate mail count. -/
+def rootOutstanding (_D : Description) (w : World) (supervisor name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with
     | .peer child k _ =>
       if child == name &&
           ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
-            slotTombstoneQueued w (.core supervisor) name k ||
-            slotMailHeld D w name k) then n + 1
+            slotTombstoneQueued w (.core supervisor) name k) then n + 1
       else n
     | .core _ => n) 0
 
 /-- Unsupervised roots of `name` that occupy a population slot. Alive counts.
-A root that has left `alive` still counts while any member of its subtree key
-has mail on a surviving receiver. Shutting down alone does not: there is no
-supervisor tombstone, and mail on the root itself does not count. At most
-`N` of these roots. -/
+There is no supervisor and no tombstone, so a root that has left `alive`
+still counts while any member of its subtree key has mail on a surviving
+receiver. Shutting down alone does not hold the slot. A shutting-down root
+that still holds a descendant's mail does, until its own seal clears that
+mailbox. Mail on the root itself does not count. At most `N` of these roots. -/
 def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with
@@ -2515,8 +2612,8 @@ def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
 
 /-- A root under no supervisor is bounded by `loneOutstanding`: alive roots,
 plus roots whose subtree mail is still on a surviving receiver. A root under
-a core is bounded by `rootOutstanding`, so the core's lane and that mail
-together hold at most `N` of them. The key itself is always fresh. -/
+a core is bounded by `rootOutstanding`: alive, shutting down, or tombstone
+still queued. The key itself is always fresh. -/
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
   t.multiplicity == .perPeer && t.slots == 0 && rootOf D t && supervisorLive D w t &&
     match t.supervisor with
@@ -2534,9 +2631,10 @@ def placePeer (I : Impl) (w : World) (template : String) (k : Nat) (initial : St
 
 /-- Scheduler birth of a per-peer subtree root. The key is fresh (`freshKey`
 or `nextIx`). The birth is not enabled while `N` roots of this template
-already occupy a population slot, counting a dead root whose subtree still
-has mail on a surviving receiver. A later incarnation of a pool slot or of a
-per-peer parent's one child is `spawnChild`, which is a no-op while
+already occupy a population slot. A core-supervised root keeps the slot
+while its tombstone is queued. An unsupervised root keeps it while subtree
+mail remains on a surviving receiver. A later incarnation of a pool slot or
+of a per-peer parent's one child is `spawnChild`, which is a no-op while
 `slotRespawnBlocked` holds. -/
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
@@ -7025,21 +7123,13 @@ theorem receiveBulk_keeps_life (I : Impl) (w w' : World) (id i : InstId)
 
 theorem receivePrio_keeps_life (I : Impl) (w w' : World) (id i : InstId)
     (h : receivePrio I w id = some w') : (w'.st i).life = (w.st i).life := by
-  unfold receivePrio at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
-    · simp [hp, hready] at h
-    · simp [hp, hready] at h
-      split at h
-      · cases h
-      · next w1 a1 hdel =>
-        cases h
-        have hkeep := deliver_life I w id _ m w1 a1 hdel
-        by_cases hi : i = id
-        · rw [hi]; simpa [setActor] using hkeep.1
-        · simpa [setActor, hi] using hkeep.2 i
+  obtain ⟨m, pre, suf, w1, a1, _, _, _, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+  have hkeep := deliver_life I w id { (w.st id) with prio := pre ++ suf } m w1 a1 hdel
+  rw [hw']
+  by_cases hi : i = id
+  · rw [hi]
+    simpa [setActor] using hkeep.1
+  · simpa [setActor, hi] using hkeep.2 i
 
 /-- Spawning a peer does not change a core's life. -/
 theorem spawn_core_life (I : Impl) (w : World) (template : String) (w' : World) (name : String)

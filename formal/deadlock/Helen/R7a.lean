@@ -244,9 +244,7 @@ theorem W6_disabled (hoff : OffIdle) (a : Action) (hf : forced a = true) : ¬ En
     · obtain ⟨hidle, hdead⟩ := hoff s hs
       rcases hsub with rfl | rfl | rfl | rfl | rfl
       · simp [apply, stepWorld, W6_open, receiveBulk, hdead]
-      · cases hp : (W6.st s).prio with
-        | nil => simp [apply, stepWorld, W6_open, receivePrio, hp]
-        | cons _ _ => simp [apply, stepWorld, W6_open, receivePrio, hp, hdead]
+      · simp [apply, stepWorld, W6_open, receivePrio, hdead]
       · simp [apply, stepWorld, W6_open, execHead, hdead]
       · simp [apply, stepWorld, W6_open, finishWait, hidle]
       · simp [apply, stepWorld, W6_open, callTimeout, hdead]

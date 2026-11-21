@@ -4,10 +4,9 @@ set_option maxRecDepth 100000
 set_option maxHeartbeats 4000000
 namespace Deadlock.Helen12c
 open Deadlock Deadlock.Outlive
-/-! E4 inside one per-peer subtree, no core and no pool: root R births hosts
-A, B and a terminable child X. X mails A and B, terminates, and R's `dead/X`
-handler tries to re-spawn X. That mail sits on A and B, which are not sealed
-with X, so the respawn is a no-op and the later schedule is refused. -/
+/-! Per-peer child X under root R mails siblings A and B, then terminates.
+R's tombstone stays queued while those messages sit in a live queue, and
+the handler that consumes it births the next X once A and B have taken them. -/
 def child (name : String) (cap : Affine) (states : List String) (term : Bool) : Template :=
   let base := core name
   { base with multiplicity := .perPeer, supervisor := some "R", tombstone := ("dead/" ++ name), subtree := "s", capacity := cap, states := states, initial := "idle", terminable := term }
@@ -77,19 +76,37 @@ def snap (w : World) :=
     if en.isEmpty then none else some (toString (repr id).pretty, en.length),
    runtimeBusy cImpl w, (apply cImpl .stutter w).isSome, (w.st A0).box.map fun m => toString (repr m.sender).pretty ++ ":" ++ m.label)
 
-/-- After X's mail is on A and B, R's respawn does not birth the next
-generation. The later schedule, which addresses that generation, is refused. -/
-theorem child_sub_refused :
-    (match run 1 (boot ++ churn 0) with
+def seal0 : List Action := boot ++
+  [.ingress (Xg 0) "Go", .recvBulk (Xg 0), .exec (Xg 0), .exec (Xg 0),
+   .ingress (Xg 0) "Go", .recvBulk (Xg 0), .exec (Xg 0), .exec (Xg 0)]
+def drainX : List Action :=
+  [.recvBulk A0, .exec A0, .recvBulk A0, .recvBulk B0, .exec B0, .recvBulk B0]
+
+/-- While M sits on A and B, R cannot receive X's tombstone and the next
+generation is absent. Once both have taken M, the receive is enabled, and
+the handler births X at generation 1. -/
+theorem child_sub_respawn_enabled :
+    (match run 1 seal0 with
       | none => false
       | some w =>
-        slotMailHeld cDesc w "X" 0 &&
-          decide (maxGen w "X" 0 = 1) &&
+        mailInFlight w (Xg 0) &&
+          decide ((apply cImpl (.recvPrio R0) w).isNone) &&
+          ((w.st (Xg 0)).life == .dead) &&
           ((w.st (Xg 1)).life == .absent) &&
           (w.st A0).box.any (fun m => m.label == "M") &&
           (w.st B0).box.any (fun m => m.label == "M")) = true ∧
-      run 1 (boot ++ churn 0 ++ [.ingress (Xg 1) "Go"]) = none ∧
-      run 1 acts = none := by
+      (match run 1 (seal0 ++ drainX) with
+        | none => false
+        | some w =>
+          !(mailInFlight w (Xg 0)) &&
+            decide ((apply cImpl (.recvPrio R0) w).isSome) &&
+            ((w.st (Xg 1)).life == .absent)) = true ∧
+      (match run 1 (seal0 ++ drainX ++ [.recvPrio R0, .exec R0]) with
+        | none => false
+        | some w =>
+          !(mailInFlight w (Xg 0)) &&
+            ((w.st (Xg 1)).life == .alive) &&
+            decide (maxGen w "X" 0 = 2)) = true := by
   decide
 
 end Deadlock.Helen12c

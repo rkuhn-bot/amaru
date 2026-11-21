@@ -61,10 +61,10 @@ idle. Everyone else is `absentActor`.
 | Action | Enabled when | Effect |
 | --- | --- | --- |
 | `recvBulk id` | alive, `idle`, and `box` or `parked` nonempty, and `deliver` accepts the head | Consume the `box` head, or the parked head if `box` is empty. If both are nonempty, also move the parked head onto `box` and `resumeSender`. Credit the consumed sender. |
-| `recvPrio id` | alive, `idle`, `prio` nonempty, `deliver` accepts | Consume the `prio` head. No credit. |
+| `recvPrio id` | alive, `idle`, and some `prio` message is not a waiting tombstone, and `deliver` accepts it | Consume the first such message. A waiting tombstone stays in the lane, in its place. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while shutting down or while its tombstone is queued. Any root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive, shutting down, its tombstone is still queued, or a surviving receiver still holds mail from that subtree key: that spawn is a no-op. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
+| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while shutting down or while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail is in flight. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive, shutting down, or its tombstone is still queued: that spawn is a no-op. The tombstone stays queued until the stage's in-flight mail has left every live queue. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
@@ -144,18 +144,21 @@ An untimed peer (`peerUntimed`) is not a `Deadlock`. Its data result is
 tombstones are not delivered. The stage itself is `shutdownActor`. It is
 marked shutting down, the tombstone is armed then, and the tombstone is
 queued at the seal, once the child is dead, on the immediate supervisor's
-priority lane. That is when pure-stage notifies the parent:
-`terminate_stage` finishes the child before `tombstones.push_back`. The
-supervisor may be a per-peer stage of the same subtree. The parent answers
-the tombstone in its own later step. A re-spawn of that slot is a no-op
-while the slot is alive or shutting down, while its tombstone is queued,
-or while a surviving receiver still holds mail from that subtree key — bulk box, priority
-lane, or a parked send still on that host, and the host is not sealed with the sender.
-The tombstone and that mail are separate. Either can be consumed while
-the other remains, and the spawn stays a no-op until both are clear. A core
-pool and a per-peer parent use the same rule. The mail is the subtree's, any
-member and any generation. A scheduler root takes a fresh key, and that key
-keeps one of the `N` population slots while the subtree's mail remains on a surviving receiver.
+priority lane. pure-stage does not deliver it yet.
+`terminate_stage` finishes the child before `tombstones.push_back`, and the
+receive skips that message while program mail from the child, or from a
+descendant sealed with it, sits in a live queue. Mail at a dead or
+shutting-down receiver counts as consumed. A parked send of the killed
+stage is dropped at the kill. The supervisor may be a per-peer stage of the
+same subtree. The parent answers the tombstone in its own later step, which
+runs only after that mail is gone. A re-spawn of that slot is a no-op while
+the slot is alive or shutting down, or while its tombstone is queued. The
+mail is not a second guard. A core pool and a per-peer parent use the same
+rule. A scheduler root under a core keeps one of the `N` population slots
+while that tombstone is queued. An unsupervised root has no tombstone, and
+that key keeps its population slot while the subtree's mail remains on a
+surviving receiver. Shutting down alone does not. A shutting-down root that
+still holds a descendant's mail does, until its seal clears that mailbox.
 A sibling is not a descendant, and
 nothing here clears a sibling's mailbox. A lone terminable per-peer with no
 child and no parked call is `shutdownActor` of itself. Every core's

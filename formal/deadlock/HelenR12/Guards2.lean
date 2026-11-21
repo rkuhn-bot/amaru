@@ -4,8 +4,9 @@ set_option maxRecDepth 100000
 set_option maxHeartbeats 4000000
 namespace Deadlock.Helen12g2
 open Deadlock Deadlock.Outlive
-/-! (a) per-peer child X under root R, and (b) pool W (subtree pw) under core M.
-Both mail core H, die, and are re-spawned from a later state. -/
+/-! (a) per-peer child C under root R, and (b) pool W under core M.
+A descendant mails core H. The supervisor's tombstone stays queued until H
+takes that mail. The following spawn then births the next generation. -/
 def lifeTag (l : Life) : Nat := match l with | .absent => 0 | .alive => 1 | .shuttingDown => 2 | .dead => 3
 def st (t f l to : String) : CompatStep := { template := t, fromState := f, toState := to, label := l }
 def ingA (t s l : String) : Edge := { go t s with label := l, occupancy := { a := 1, b := 0 } }
@@ -70,10 +71,6 @@ def preA : List Action :=
 def infoA (w : World) :=
   (lifeTag (w.st (P "C" 0)).life, lifeTag (w.st (P "X" 0)).life, lifeTag (w.st (P "C" 1)).life,
    (w.st Hc).box.map (·.label), slotRespawnBlocked gDesc w (P "R" 0) "C" 0, slotMailHeld gDesc w "C" 0, w.crashed)
-#eval (run preA).map infoA
-#eval (run (preA ++ [.exec (P "R" 0)])).map infoA            -- blocked: C@0.1 not born
-#eval (run (preA ++ [.recvBulk Hc])).map infoA                -- H consumes X@0.0's M
-#eval (run (preA ++ [.recvBulk Hc, .exec (P "R" 0)])).map infoA  -- unblocked: C@0.1 born
 -- (b) pool W (slot 0) under core M: Y (child of W) mails H, W terminates, M respawns W.
 def preB : List Action :=
   [.ingress Mc "Go", .recvBulk Mc, .exec Mc,
@@ -84,33 +81,66 @@ def preB : List Action :=
 def infoB (w : World) :=
   (lifeTag (w.st (P "W" 0)).life, lifeTag (w.st (P "W" 1)).life, (w.st Hc).box.map (·.label),
    freeSlot gDesc w Mc "W" 1, slotMailHeld gDesc w "W" 0, w.crashed)
-#eval (run preB).map infoB
-#eval (run (preB ++ [.exec Mc])).map infoB
-#eval (run (preB ++ [.recvBulk Hc, .exec Mc])).map infoB
+def sealA : List Action :=
+  [.spawn "R", .ingress (P "R" 0) "Go", .recvBulk (P "R" 0), .exec (P "R" 0),
+   .ingress (P "C" 0) "Go", .recvBulk (P "C" 0), .exec (P "C" 0),
+   .ingress (P "X" 0) "Go", .recvBulk (P "X" 0), .exec (P "X" 0),
+   .ingress (P "C" 0) "Go", .recvBulk (P "C" 0), .exec (P "C" 0), .exec (P "C" 0)]
+def readyA : List Action := sealA ++ [.recvBulk Hc, .recvPrio (P "R" 0)]
+def bornA : List Action :=
+  readyA ++ [.ingress (P "R" 0) "Go", .recvBulk (P "R" 0), .exec (P "R" 0)]
+def sealB : List Action :=
+  [.ingress Mc "Go", .recvBulk Mc, .exec Mc,
+   .ingress (P "W" 0) "Go", .recvBulk (P "W" 0), .exec (P "W" 0),
+   .ingress (P "Y" 0) "Go", .recvBulk (P "Y" 0), .exec (P "Y" 0),
+   .ingress (P "W" 0) "Go", .recvBulk (P "W" 0), .exec (P "W" 0), .exec (P "W" 0)]
+def readyB : List Action := sealB ++ [.recvBulk Hc, .recvPrio Mc]
+def bornB : List Action := readyB ++ [.ingress Mc "Go", .recvBulk Mc, .exec Mc]
+#eval (run sealA).map infoA
+#eval (run readyA).map infoA
+#eval (run bornA).map infoA
+#eval (run sealB).map infoB
+#eval (run readyB).map infoB
+#eval (run bornB).map infoB
 
-/-- C stays unborn while X's mail sits on H, and is born once H consumes it. -/
-theorem guards_child_reenabled :
-    (match run (preA ++ [.exec (P "R" 0)]) with
-      | none => false
-      | some w => slotMailHeld gDesc w "C" 0 && ((w.st (P "C" 1)).life == .absent)) = true ∧
-      (match run (preA ++ [.recvBulk Hc, .exec (P "R" 0)]) with
-        | none => false
-        | some w =>
-          !(slotMailHeld gDesc w "C" 0) && ((w.st (P "C" 1)).life == .alive)) = true := by
-  decide
-
-/-- Pool slot W stays free of a new generation while Y's mail sits on H, and
-is born once H consumes it. -/
-theorem guards_pool_reenabled :
-    (match run (preB ++ [.exec Mc]) with
+/-- C's tombstone is not receivable while X's mail sits on H. After H takes
+it, the slot is free, and the following Go births generation 1. -/
+theorem guards_child_respawn_enabled :
+    (match run sealA with
       | none => false
       | some w =>
-        decide (freeSlot gDesc w Mc "W" 1 = none) &&
-          ((w.st (P "W" 1)).life == .absent)) = true ∧
-      (match run (preB ++ [.recvBulk Hc, .exec Mc]) with
+        mailInFlight w (P "C" 0) &&
+          decide ((apply gImpl (.recvPrio (P "R" 0)) w).isNone) &&
+          ((w.st (P "C" 1)).life == .absent)) = true ∧
+      (match run readyA with
         | none => false
         | some w =>
-          ((w.st (P "W" 1)).life == .alive) && !(slotMailHeld gDesc w "W" 0)) = true := by
+          !(mailInFlight w (P "C" 0)) &&
+            (slotRespawnBlocked gDesc w (P "R" 0) "C" 0 == false) &&
+            ((w.st (P "C" 1)).life == .absent)) = true ∧
+      (match run bornA with
+        | none => false
+        | some w => (w.st (P "C" 1)).life == .alive) = true := by
+  decide
+
+/-- W's tombstone is not receivable while Y's mail sits on H. After H takes
+it, the pool slot is free, and the following Go births generation 1. -/
+theorem guards_pool_respawn_enabled :
+    (match run sealB with
+      | none => false
+      | some w =>
+        mailInFlight w (P "W" 0) &&
+          decide ((apply gImpl (.recvPrio Mc) w).isNone) &&
+          ((w.st (P "W" 1)).life == .absent)) = true ∧
+      (match run readyB with
+        | none => false
+        | some w =>
+          !(mailInFlight w (P "W" 0)) &&
+            decide (freeSlot gDesc w Mc "W" 1 = some 0) &&
+            ((w.st (P "W" 1)).life == .absent)) = true ∧
+      (match run bornB with
+        | none => false
+        | some w => (w.st (P "W" 1)).life == .alive) = true := by
   decide
 
 end Deadlock.Helen12g2

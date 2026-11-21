@@ -722,7 +722,7 @@ theorem freeGo_fresh (D : Description) (w : World) (parent : InstId) (name : Str
         simpa [freeGo, hfalse] using h
       have hclear := slotRespawnBlocked_clear D w parent name (n - (fuel + 1)) hfalse
       subst hk
-      exact ⟨hclear.1, hclear.2.1⟩
+      exact ⟨hclear.1, hclear.2⟩
 
 theorem freeSlot_lt (D : Description) (w : World) (parent : InstId) (name : String) (n k : Nat)
     (h : freeSlot D w parent name n = some k) : k < n :=
@@ -2940,17 +2940,123 @@ theorem lane_of_tail (I : Impl) (template : String) (m : Msg) (ms : List Msg)
         simp [ht, hs] at htomb
         exact htomb.2
 
-/-- Dropping the head of one priority lane preserves the invariant. -/
+theorem tombs_append (xs ys : List Msg) :
+    tombSlots (xs ++ ys) = tombSlots xs ++ tombSlots ys := by
+  induction xs with
+  | nil => simp [tombSlots]
+  | cons x xs ih =>
+    simp only [List.cons_append]
+    rw [tmb_tombs_cons, tmb_tombs_cons, ih]
+    simp [List.append_assoc]
+
+theorem laneLabels_append (xs ys : List Msg) :
+    tmb_laneLabels (xs ++ ys) = tmb_laneLabels xs ++ tmb_laneLabels ys := by
+  induction xs with
+  | nil => simp [tmb_laneLabels]
+  | cons x xs ih =>
+    simp only [List.cons_append, tmb_labels_cons, ih]
+    cases x.tombstone <;> simp
+
+theorem mem_of_remove {α : Type} (pre suf : List α) (m a : α) (h : a ∈ pre ++ suf) :
+    a ∈ pre ++ m :: suf := by
+  rcases List.mem_append.mp h with h | h
+  · exact List.mem_append_left _ h
+  · exact List.mem_append_right _ (List.mem_cons_of_mem _ h)
+
+theorem tomb_mem_of_remove (pre suf : List Msg) (m : Msg) (slot : String × Nat)
+    (h : slot ∈ tombSlots (pre ++ suf)) :
+    slot ∈ tombSlots (pre ++ m :: suf) := by
+  rw [tombs_append] at h
+  rw [tombs_append]
+  rcases List.mem_append.mp h with h | h
+  · exact List.mem_append_left _ h
+  · rw [tmb_tombs_cons]
+    exact List.mem_append_right _ (List.mem_append_right _ h)
+
+theorem label_mem_of_remove (pre suf : List Msg) (m : Msg) (l : String)
+    (h : l ∈ tmb_laneLabels (pre ++ suf)) :
+    l ∈ tmb_laneLabels (pre ++ m :: suf) := by
+  rw [laneLabels_append] at h
+  rw [laneLabels_append]
+  rcases List.mem_append.mp h with h | h
+  · exact List.mem_append_left _ h
+  · rw [tmb_labels_cons]
+    cases hm : m.tombstone with
+    | true =>
+      exact List.mem_append_right _ h
+    | false =>
+      exact List.mem_append_right _ (List.mem_cons_of_mem _ h)
+
+theorem namedTombs_remove_le (pre suf : List Msg) (m : Msg) (name : String) :
+    (namedTombs (pre ++ suf) name).length ≤ (namedTombs (pre ++ m :: suf) name).length := by
+  unfold namedTombs
+  rw [tombs_append]
+  rw [tombs_append]
+  rw [tmb_tombs_cons]
+  simp only [List.filter_append, List.length_append]
+  omega
+
+/-- Removing one message from a priority lane preserves the lane facts. The
+message taken need not be the head: a receive skips a waiting tombstone. -/
+theorem lane_of_remove (I : Impl) (template : String) (pre suf : List Msg) (m : Msg)
+    (hnd : (tmb_laneLabels (pre ++ m :: suf)).Nodup)
+    (hin : ∀ l, l ∈ tmb_laneLabels (pre ++ m :: suf) → l ∈ prioLabels I template)
+    (hpeer : ∀ m', m' ∈ pre ++ m :: suf → m'.tombstone = true → ∃ n k g, m'.sender = .peer n k g)
+    (htomb : (tombSlots (pre ++ m :: suf)).Nodup) :
+    (tmb_laneLabels (pre ++ suf)).Nodup ∧
+      (∀ l, l ∈ tmb_laneLabels (pre ++ suf) → l ∈ prioLabels I template) ∧
+      (∀ m', m' ∈ pre ++ suf → m'.tombstone = true → ∃ n k g, m'.sender = .peer n k g) ∧
+      (tombSlots (pre ++ suf)).Nodup := by
+  induction pre with
+  | nil =>
+    exact lane_of_tail I template m suf hnd hin hpeer htomb
+  | cons x xs ih =>
+    have htail := lane_of_tail I template x (xs ++ m :: suf) hnd hin hpeer htomb
+    have ih' := ih htail.1 htail.2.1 htail.2.2.1 htail.2.2.2
+    refine ⟨?nd, ?inn, ?peer, ?tn⟩
+    · rw [show (x :: xs) ++ suf = x :: (xs ++ suf) from rfl, tmb_labels_cons]
+      cases ht : x.tombstone with
+      | true => simpa [ht] using ih'.1
+      | false =>
+        simp
+        refine ⟨?not, ih'.1⟩
+        intro hmem
+        have hbad : x.label ∈ tmb_laneLabels (xs ++ m :: suf) :=
+          label_mem_of_remove xs suf m x.label hmem
+        have hnd' : (tmb_laneLabels (x :: (xs ++ m :: suf))).Nodup := by
+          simpa [List.cons_append] using hnd
+        simp [tmb_labels_cons, ht] at hnd'
+        exact hnd'.1 hbad
+    · intro l hl
+      exact hin l (label_mem_of_remove (x :: xs) suf m l hl)
+    · intro m' hm' ht'
+      exact hpeer m' (mem_of_remove (x :: xs) suf m m' hm') ht'
+    · rw [show (x :: xs) ++ suf = x :: (xs ++ suf) from rfl, tmb_tombs_cons]
+      cases ht : x.tombstone with
+      | false => simpa [ht] using ih'.2.2.2
+      | true =>
+        cases hs : x.sender with
+        | core _ => simpa [ht, hs] using ih'.2.2.2
+        | peer n k g =>
+          simp
+          refine ⟨?nots, ih'.2.2.2⟩
+          intro hmem
+          have hbad : (n, k) ∈ tombSlots (xs ++ m :: suf) :=
+            tomb_mem_of_remove xs suf m (n, k) hmem
+          simp [tmb_tombs_cons, ht, hs] at htomb
+          exact htomb.1 hbad
+
+/-- Removing one message from a priority lane preserves the invariant. -/
 theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
     (hN : w'.N = w.N) (hros : w'.roster = w.roster)
     (hlife : ∀ i, (w'.st i).life = (w.st i).life)
     (hpend : ∀ i, (w'.st i).pendingTombstone = (w.st i).pendingTombstone)
-    (hhead : ∃ m, (w.st id).prio = m :: (w'.st id).prio)
+    (hhead : ∃ pre m suf, (w.st id).prio = pre ++ m :: suf ∧ (w'.st id).prio = pre ++ suf)
     (hother : ∀ i, i ≠ id → (w'.st i).prio = (w.st i).prio)
     (hphase : ∀ i, i ∈ w'.roster → phaseDeclared I (tname i) (w'.st i).phase)
     (hpar : ∀ i, (w'.st i).parent = (w.st i).parent)
     (hcrash : w'.crashed = false) (hpre : w.crashed = false) : Hold I w' := by
-  obtain ⟨m, hcons⟩ := hhead
+  obtain ⟨pre, m, suf, hcons, hrest⟩ := hhead
   refine ⟨?_, ?_, ?_, ?_, hphase, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro i hl
     exact hros ▸ hH.rostered i (by simpa [hlife i] using hl)
@@ -2958,26 +3064,22 @@ theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
     simpa [hlife i] using hH.pend i (by simpa [hpend i] using hp)
   · intro _ i hd
     by_cases h : i = id
-    · have htail := lane_of_tail I (tname id) m (w'.st id).prio
-        (by simpa [hcons] using (hH.lane id).ordNodup)
-        (by simpa [hcons] using (hH.lane id).ordIn)
-        (by simpa [hcons] using (hH.lane id).peer)
-        (by simpa [hcons] using (hH.lane id).tombNodup)
-      -- a dead actor's whole lane was empty, so it had no head to drop
-      have hempty := hH.deadPrio hpre id (by simpa [h, hlife id] using hd)
-      simp [h, hcons] at hempty
+    · have hempty := hH.deadPrio hpre id (by simpa [h, hlife id] using hd)
+      exfalso
+      rw [hcons] at hempty
+      exact List.cons_ne_nil _ _ (List.append_eq_nil_iff.mp hempty).2
     · exact hother i h ▸ hH.deadPrio hpre i (by simpa [hlife i] using hd)
   · intro i hid
     exact hH.role i (by simpa [hros] using hid)
   · intro i
     by_cases h : i = id
-    · have htail := lane_of_tail I (tname id) m (w'.st id).prio
+    · have htail := lane_of_remove I (tname id) pre suf m
         (by simpa [hcons] using (hH.lane id).ordNodup)
         (by simpa [hcons] using (hH.lane id).ordIn)
         (by simpa [hcons] using (hH.lane id).peer)
         (by simpa [hcons] using (hH.lane id).tombNodup)
-      exact ⟨by simpa [h] using htail.1, by simpa [h] using htail.2.1,
-        by simpa [h] using htail.2.2.1, by simpa [h] using htail.2.2.2⟩
+      exact ⟨by simpa [h, hrest] using htail.1, by simpa [h, hrest] using htail.2.1,
+        by simpa [h, hrest] using htail.2.2.1, by simpa [h, hrest] using htail.2.2.2⟩
     · have hold := hH.lane i
       exact ⟨by simpa [hother i h] using hold.ordNodup,
         fun l hl => hold.ordIn l (by simpa [hother i h] using hl),
@@ -2994,21 +3096,11 @@ theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
   · intro parent name k hq
     have hwas : slotTombstoneQueued w parent name k = true := by
       by_cases h : parent = id
-      · -- a key queued on the tail was queued on the whole lane
-        have hmem : (name, k) ∈ tombSlots (w'.st parent).prio := (tmb_queued_iff w' parent name k).mp hq
-        have htail := lane_of_tail I (tname parent) m (w'.st parent).prio
-          (by simpa [h, hcons] using (hH.lane id).ordNodup)
-          (by simpa [h, hcons] using (hH.lane id).ordIn)
-          (by simpa [h, hcons] using (hH.lane id).peer)
-          (by simpa [h, hcons] using (hH.lane id).tombNodup)
-        have hcons' : tombSlots (w.st parent).prio =
-            (match m.tombstone, m.sender with
-              | true, .peer n k _ => [(n, k)]
-              | _, _ => []) ++ tombSlots (w'.st parent).prio := by
-          simpa [h, hcons] using tmb_tombs_cons m (w'.st parent).prio
+      · have hmem : (name, k) ∈ tombSlots (w'.st parent).prio := (tmb_queued_iff w' parent name k).mp hq
         have hsub : (name, k) ∈ tombSlots (w.st parent).prio := by
-          rw [hcons']
-          exact List.mem_append_right _ hmem
+          rw [h, hcons]
+          rw [h, hrest] at hmem
+          exact tomb_mem_of_remove pre suf m _ hmem
         exact (tmb_queued_iff w parent name k).mpr hsub
       · have hq' : slotTombstoneQueued w parent name k = true := by
           simpa [slotTombstoneQueued, hother parent h] using hq
@@ -3028,14 +3120,10 @@ theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
         -- if the tail queued it, the whole lane queued it
         by_cases hq : slotTombstoneQueued w' parent n k = true
         · have hmem : (n, k) ∈ tombSlots (w'.st parent).prio := (tmb_queued_iff w' parent n k).mp hq
-          have hcons' : tombSlots (w.st parent).prio =
-              (match m.tombstone, m.sender with
-                | true, .peer n1 k1 _ => [(n1, k1)]
-                | _, _ => []) ++ tombSlots (w'.st parent).prio := by
-            simpa [h, hcons] using tmb_tombs_cons m (w'.st parent).prio
           have hwas : (n, k) ∈ tombSlots (w.st parent).prio := by
-            rw [hcons']
-            exact List.mem_append_right _ hmem
+            rw [h, hcons]
+            rw [h, hrest] at hmem
+            exact tomb_mem_of_remove pre suf m _ hmem
           have htrue : slotTombstoneQueued w parent n k = true := (tmb_queued_iff w parent n k).mpr hwas
           simp [htrue] at hnot
         · have hf : slotTombstoneQueued w' parent n k = false := by
@@ -3055,14 +3143,8 @@ theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
     by_cases h : parent = id
     · have hleq : (namedTombs (w'.st parent).prio name).length ≤
           (namedTombs (w.st parent).prio name).length := by
-        have hcons' : tombSlots (w.st parent).prio =
-            (match m.tombstone, m.sender with
-              | true, .peer n k _ => [(n, k)]
-              | _, _ => []) ++ tombSlots (w'.st parent).prio := by
-          simpa [h, hcons] using tmb_tombs_cons m (w'.st parent).prio
-        unfold namedTombs
-        rw [hcons']
-        simp [List.filter_append]
+        rw [h, hcons, hrest]
+        exact namedTombs_remove_le pre suf m name
       have hsame : ∀ c, c ∈ w.roster →
           namedChild I.desc w' parent name c = namedChild I.desc w parent name c := by
         intro c _
@@ -3083,7 +3165,8 @@ theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
     · have hm' : msg ∈ (w'.st id).prio := by simpa [hi] using hm
       have hsub : msg ∈ (w.st id).prio := by
         rw [hcons]
-        exact List.mem_cons_of_mem _ hm'
+        rw [hrest] at hm'
+        exact mem_of_remove pre suf m msg hm'
       exact hros ▸ hH.tombHere id msg hsub ht
     · have hsame := hother i hi
       exact hros ▸ hH.tombHere i msg (by simpa [hsame] using hm) ht
@@ -3751,52 +3834,41 @@ theorem hold_ingress (I : Impl) (w w' : World) (hH : Hold I w) (dst : InstId) (l
 
 theorem hold_recv_prio (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
     (h : receivePrio I w id = some w') (hpre : w.crashed = false) : Hold I w' := by
-  unfold receivePrio at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
-    · simp [hp, hready] at h
-    · simp [hp, hready] at h
-      split at h
-      · cases h
-      · next w1 a1 hdel =>
-        cases h
-        rcases deliver_frame I w id { (w.st id) with prio := ms } m w1 a1 hdel with
-          ⟨hlife, hprioA, hpendA, hparA, hworld, hros, hN, hcrash, hst⟩
-        have hdec := deliver_declared I w id { (w.st id) with prio := ms } m w1 a1 hdel
-        apply hold_drop I w (setActor w1 id a1) hH id
-        · simp [setActor, hN]
-        · simp [setActor, hros]
-        · intro i
-          by_cases hi : i = id
-          · rw [hi]
-            simpa [setActor] using hlife
-          · have hst := (hworld i).1
-            simpa [setActor, hi] using hst
-        · intro i
-          by_cases hi : i = id
-          · rw [hi]
-            simpa [setActor] using hpendA
-          · have hst := (hworld i).2.2
-            simpa [setActor, hi] using hst
-        · exact ⟨m, by simp [setActor, hp, hprioA]⟩
-        · intro i hi
-          have hst := (hworld i).2.1
-          simpa [setActor, hi] using hst
-        · intro i hi
-          by_cases heq : i = id
-          · simpa [setActor, heq] using hdec
-          · have hphaseEq : (w1.st i).phase = (w.st i).phase := congrArg Actor.phase (hst i)
-            have hmem : i ∈ w.roster := by simpa [setActor, hros] using hi
-            simpa [setActor, heq, hphaseEq] using hH.phase i hmem
-        · intro i
-          by_cases heq : i = id
-          · simp [setActor, heq]
-            exact hparA
-          · simpa [setActor, heq] using congrArg Actor.parent (hst i)
-        · simpa [setActor, hcrash] using hpre
-        · exact hpre
+  obtain ⟨m, pre, suf, w1, a1, _, _, hprio, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+  rcases deliver_frame I w id { (w.st id) with prio := pre ++ suf } m w1 a1 hdel with
+    ⟨hlife, hprioA, hpendA, hparA, hworld, hros, hN, hcrash, hst⟩
+  have hdec := deliver_declared I w id { (w.st id) with prio := pre ++ suf } m w1 a1 hdel
+  have hHold : Hold I (setActor w1 id a1) := by
+    apply hold_drop I w (setActor w1 id a1) hH id
+    · simp [setActor, hN]
+    · simp [setActor, hros]
+    · intro i
+      by_cases hi : i = id
+      · rw [hi]
+        simpa [setActor] using hlife
+      · simpa [setActor, hi] using (hworld i).1
+    · intro i
+      by_cases hi : i = id
+      · rw [hi]
+        simpa [setActor] using hpendA
+      · simpa [setActor, hi] using (hworld i).2.2
+    · exact ⟨pre, m, suf, hprio, by simp [setActor, hprioA]⟩
+    · intro i hi
+      simpa [setActor, hi] using (hworld i).2.1
+    · intro i hi
+      by_cases heq : i = id
+      · simpa [setActor, heq] using hdec
+      · have hphaseEq : (w1.st i).phase = (w.st i).phase := congrArg Actor.phase (hst i)
+        have hmem : i ∈ w.roster := by simpa [setActor, hros] using hi
+        simpa [setActor, heq, hphaseEq] using hH.phase i hmem
+    · intro i
+      by_cases heq : i = id
+      · simp [setActor, heq]
+        exact hparA
+      · simpa [setActor, heq] using congrArg Actor.parent (hst i)
+    · simpa [setActor, hcrash] using hpre
+    · exact hpre
+  simpa [hw'] using hHold
 
 theorem hold_same (I : Impl) (w w' : World) (hH : Hold I w)
     (hst : ∀ i, w'.st i = w.st i) (hros : w'.roster = w.roster) (hN : w'.N = w.N)
@@ -5429,13 +5501,12 @@ theorem split_root (child root : Bool) (h : child = true → root = true) :
     (child || (root && !child)) = root := by
   cases child <;> cases root <;> simp_all
 
-def rootBit (D : Description) (w : World) (supervisor name : String) (id : InstId) : Bool :=
+def rootBit (_D : Description) (w : World) (supervisor name : String) (id : InstId) : Bool :=
   match id with
   | .peer child k _ =>
     child == name &&
       ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
-        slotTombstoneQueued w (.core supervisor) name k ||
-        slotMailHeld D w name k)
+        slotTombstoneQueued w (.core supervisor) name k)
   | .core _ => false
 
 theorem foldl_congr {α β : Type} (f g : β → α → β) (xs : List α) (start : β)
@@ -5452,8 +5523,7 @@ theorem root_step (D : Description) (w : World) (supervisor name : String) (n : 
       | InstId.peer child k _ =>
         if child == name &&
             ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
-              slotTombstoneQueued w (.core supervisor) name k ||
-              slotMailHeld D w name k) then n + 1
+              slotTombstoneQueued w (.core supervisor) name k) then n + 1
         else n
       | InstId.core _ => n) =
       (if rootBit D w supervisor name id then n + 1 else n) := by
@@ -8775,7 +8845,7 @@ theorem hold_spawn_child (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.
               cases hbb : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk <;> simp_all
             have hclear := slotRespawnBlocked_clear I.desc w (.peer pname pk pg) child pk hfalse
             have hocc : slotOccupied w child pk = false := hclear.1
-            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := hclear.2.1
+            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := hclear.2
             let bornId := InstId.peer child pk (maxGen w child pk)
             let born := { bornActor I.desc w child pk t.initial with parent := some (.peer pname pk pg) }
             let wB := admitBorn I w bornId born
@@ -10000,26 +10070,13 @@ theorem prio_alive (w : World) (id : InstId)
 
 theorem prio_frame (I : Impl) (w : World) (hH : Hold I w) (w' : World) (id : InstId)
     (h : receivePrio I w id = some w') : Frame w w' := by
-  unfold receivePrio at h
-  dsimp at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    simp only [hp] at h
-    split at h
-    · simp at h
-    · rename_i hf
-      cases hd : deliver I w id ({ (w.st id) with prio := ms }) m with
-      | none => simp [hd] at h
-      | some pair =>
-        obtain ⟨w1, a'⟩ := pair
-        simp only [hd] at h
-        have hw' : w' = setActor w1 id a' := by simpa [Option.some.injEq] using h.symm
-        have ⟨hc, _hp⟩ := deliver_cells I w id ({ (w.st id) with prio := ms }) m w1 a' hd
-        have hmem : id ∈ w.roster :=
-          hH.rostered id (by rw [prio_alive w id hf]; intro hne; cases hne)
-        exact hw' ▸ frame_trans (hc ▸ cells_frame I.desc w id)
-          (frame_touch w1 id a' (by simpa [hc, cellsRoster] using hmem))
+  obtain ⟨m, pre, suf, w1, a', hlive, _, _, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+  have ⟨hc, _hp⟩ :=
+    deliver_cells I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a' hdel
+  have hmem : id ∈ w.roster :=
+    hH.rostered id (by rw [hlive]; intro hne; cases hne)
+  exact hw' ▸ frame_trans (hc ▸ cells_frame I.desc w id)
+    (frame_touch w1 id a' (by simpa [hc, cellsRoster] using hmem))
 
 theorem finish_frame (I : Impl) (w w' : World) (id : InstId) (h : finishWait I w id = some w') :
     Frame w w' := by
@@ -11048,22 +11105,10 @@ theorem bulk_parent (I : Impl) (w w' : World) (id i : InstId)
 theorem prio_parent (I : Impl) (w w' : World) (id i : InstId)
     (h : receivePrio I w id = some w') :
     (w'.st i).parent = (w.st i).parent := by
-  unfold receivePrio at h
-  dsimp at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    simp only [hp] at h
-    split at h
-    · simp at h
-    · cases hd : deliver I w id ({ (w.st id) with prio := ms }) m with
-      | none => simp [hd] at h
-      | some pair =>
-        obtain ⟨w1, a'⟩ := pair
-        rw [hd] at h
-        have hw' : w' = setActor w1 id a' := by simpa [Option.some.injEq] using h.symm
-        have ⟨hpa, hst⟩ := deliver_parent I w id _ m w1 a' hd
-        exact hw' ▸ (set_parent w1 id a' i (by rw [hpa]; simp [hst])).trans (hst i)
+  obtain ⟨m, pre, suf, w1, a', _, _, _, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+  have ⟨hpa, hst⟩ :=
+    deliver_parent I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a' hdel
+  exact hw' ▸ (set_parent w1 id a' i (by rw [hpa]; simp [hst])).trans (hst i)
 
 theorem ingress_parent (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
     (h : receiveIngress I w dst label = some w') :

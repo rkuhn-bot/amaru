@@ -4,10 +4,9 @@ set_option maxRecDepth 100000
 set_option maxHeartbeats 4000000
 namespace Deadlock.Helen12s
 open Deadlock Deadlock.Outlive
-/-! E4 inside one pool subtree `pw`: hosts A, B are pool children of core M,
-churn pool C births child X, X mails A and B (same subtree), C terminates and
-M's tombstone handler tries to re-spawn C. That mail sits on A and B, which
-are not sealed with X, so the respawn is a no-op. No mail ever touches a core. -/
+/-! Pool child C under core M births X. X mails pool siblings A and B, then
+C terminates. M's tombstone stays queued while that mail sits in a live
+queue. Once A and B have taken it, the handler births the next C. -/
 def pool (name : String) (cap : Affine) (states : List String) (init : String) : Template :=
   let base := core name
   { base with multiplicity := .perPeer, slots := 1, supervisor := some "M", tombstone := ("dead/" ++ name), subtree := "pw", capacity := cap, states := states, initial := init, terminable := true }
@@ -85,20 +84,38 @@ def snap (w : World) :=
     if en.isEmpty then none else some (toString (repr id).pretty, en.length),
    runtimeBusy sImpl w, (apply sImpl .stutter w).isSome, (w.st A0).box.map fun m => tname m.sender ++ "." ++ m.label)
 
-/-- After X's mail is on A and B, M's respawn does not birth the next C.
-The later schedule, which addresses that generation, is refused. -/
-theorem pool_sub_refused :
-    (match run 1 (boot ++ churn 0) with
+def seal0 : List Action := boot ++
+  [.ingress (Cg 0) "Go", .recvBulk (Cg 0), .exec (Cg 0),
+   .ingress (Xg 0) "Go", .recvBulk (Xg 0), .exec (Xg 0), .exec (Xg 0),
+   .ingress (Cg 0) "Go", .recvBulk (Cg 0), .exec (Cg 0), .exec (Cg 0)]
+def drainX : List Action :=
+  [.recvBulk A0, .exec A0, .recvBulk A0, .recvBulk B0, .exec B0, .recvBulk B0]
+
+/-- While M sits on A and B, the core cannot receive C's tombstone and the
+next generation is absent. Once both have taken M, the receive is enabled,
+and the handler births C at generation 1. -/
+theorem pool_sub_respawn_enabled :
+    (match run 1 seal0 with
       | none => false
       | some w =>
-        slotMailHeld sDesc w "C" 0 &&
-          decide (freeSlot sDesc w Mc "C" 1 = none) &&
-          decide (maxGen w "C" 0 = 1) &&
+        mailInFlight w (Cg 0) &&
+          decide ((apply sImpl (.recvPrio Mc) w).isNone) &&
+          ((w.st (Cg 0)).life == .dead) &&
           ((w.st (Cg 1)).life == .absent) &&
           (w.st A0).box.any (fun m => m.label == "M") &&
           (w.st B0).box.any (fun m => m.label == "M")) = true ∧
-      run 1 (boot ++ churn 0 ++ [.ingress (Cg 1) "Go"]) = none ∧
-      run 1 acts = none := by
+      (match run 1 (seal0 ++ drainX) with
+        | none => false
+        | some w =>
+          !(mailInFlight w (Cg 0)) &&
+            decide ((apply sImpl (.recvPrio Mc) w).isSome) &&
+            ((w.st (Cg 1)).life == .absent)) = true ∧
+      (match run 1 (seal0 ++ drainX ++ [.recvPrio Mc, .exec Mc]) with
+        | none => false
+        | some w =>
+          !(mailInFlight w (Cg 0)) &&
+            ((w.st (Cg 1)).life == .alive) &&
+            decide (maxGen w "C" 0 = 2)) = true := by
   decide
 
 end Deadlock.Helen12s

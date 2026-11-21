@@ -18,23 +18,33 @@ def info (w : World) :=
   (rootOutstanding sDesc w "S" "R", (apply sImpl (.spawn "R") w).isSome, (w.st Sc).prio.map (·.label),
    (w.st Hc).box.map (·.label), (w.st Kc).box.map (·.label))
 #eval (run prefix2).map info
-#eval (run (prefix2 ++ [.recvPrio Sc, .recvPrio Sc])).map info
 def drain : List Action := [.recvBulk Hc, .exec Hc, .recvBulk Kc, .exec Kc, .recvBulk Hc, .recvBulk Hc, .recvBulk Kc, .recvBulk Kc]
-#eval (List.range (drain.length + 1)).map fun n => (n, (run (prefix2 ++ [.recvPrio Sc, .recvPrio Sc] ++ drain.take n)).map info)
+#eval (run (prefix2 ++ drain)).map info
+#eval (run (prefix2 ++ drain ++ [.recvPrio Sc, .recvPrio Sc])).map info
 
-/-- After both tombstones are consumed, core mail still holds both population
-slots. The spawn is enabled again once H and K have consumed that mail. -/
-theorem guards_root_reenabled :
-    (match run (prefix2 ++ [.recvPrio Sc, .recvPrio Sc]) with
+/-- Both tombstones stay queued, and the population stays full, while subtree
+mail sits on H and K. S cannot receive them yet. After the drain, receiving
+both frees the slots and the next root spawn is enabled. -/
+theorem guards_root_held_until_drain :
+    (match run prefix2 with
       | none => false
       | some w =>
         decide (rootOutstanding sDesc w "S" "R" = 2) &&
-          decide ((apply sImpl (.spawn "R") w).isNone)) = true ∧
-      (match run (prefix2 ++ [.recvPrio Sc, .recvPrio Sc] ++ drain) with
+          decide ((apply sImpl (.recvPrio Sc) w).isNone) &&
+          decide ((apply sImpl (.spawn "R") w).isNone) &&
+          decide ((w.st Sc).prio.map (·.label) = ["dead/R#0", "dead/R#0"])) = true ∧
+      (match run (prefix2 ++ drain) with
+        | none => false
+        | some w =>
+          decide (rootOutstanding sDesc w "S" "R" = 2) &&
+            decide ((apply sImpl (.spawn "R") w).isNone) &&
+            decide ((w.st Sc).prio.map (·.label) = ["dead/R#0", "dead/R#0"])) = true ∧
+      (match run (prefix2 ++ drain ++ [.recvPrio Sc, .recvPrio Sc]) with
         | none => false
         | some w =>
           decide (rootOutstanding sDesc w "S" "R" = 0) &&
-            decide ((apply sImpl (.spawn "R") w).isSome)) = true := by
+            decide ((apply sImpl (.spawn "R") w).isSome) &&
+            (w.st Sc).prio.isEmpty) = true := by
   decide
 
 end Deadlock.Helen12g3

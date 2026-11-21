@@ -162,9 +162,7 @@ theorem WT_disabled (hoff : OffIdle) (a : Action) (hf : forced a = true) : ¬ En
     · obtain ⟨hidle, hdead⟩ := hoff s hs
       rcases hsub with rfl | rfl | rfl | rfl | rfl
       · simp [apply, stepWorld, WT_open, receiveBulk, hdead]
-      · cases hp : (WT.st s).prio with
-        | nil => simp [apply, stepWorld, WT_open, receivePrio, hp]
-        | cons _ _ => simp [apply, stepWorld, WT_open, receivePrio, hp, hdead]
+      · simp [apply, stepWorld, WT_open, receivePrio, hdead]
       · simp [apply, stepWorld, WT_open, execHead, hdead]
       · simp [apply, stepWorld, WT_open, finishWait, hdead]
       · simp [apply, stepWorld, WT_open, callTimeout, hdead]
