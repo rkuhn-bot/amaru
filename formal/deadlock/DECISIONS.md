@@ -136,9 +136,12 @@ cell-wake senders. A path contributes the sends on one outcome; the two
 branches are not added. The lane also keeps a label from a later transition,
 and it keeps each label once, so the sender term is the larger of the
 single-path count and the number of distinct labels. `prioSizeFails` is part
-of `LocalOk`. That bound is the lane's static account. It is not yet a
-theorem that every reachable seal stays inside it. A self-schedule or a
-cell wake that does not fit still crashes. That is pure-stage's panic.
+of `LocalOk`. That bound is the lane's static account.
+`no_tombstone_overflow` is that account for a reachable seal: under
+`GraphOk` and `LocalOk`, a pending seal of a shutting child does not fill a
+live parent's lane when the tombstone label is nonempty. `LocalOk` supplies
+`prioSized`. A self-schedule or a cell wake that does not fit still crashes.
+That is pure-stage's panic.
 
 Pure-stage will be changed to match this bound. Its tombstone queue is an
 unbounded `VecDeque` (`supervisor.tombstones.push_back` in
@@ -163,7 +166,9 @@ alive. A root under a core is bounded by how many are alive, shutting down,
 or still have a tombstone queued. `supervisor` is an `Option`: `none` does
 not match a template, including one whose name is empty.
 
-`no_tombstone_overflow` is not restated. `tmb_seal_room` still says a world
-that satisfies `Hold` has room for the seal. `Hold` is not yet proved for
-every step. Refunds still go to the live generation, and the tombstone is
-still queued at the seal.
+`no_tombstone_overflow` is that seal for a reachable world. `hold_reach` is
+`Hold` at every world a run reaches under `GraphOk`. `Side` carries the key
+counters, a duplicate-free roster, and the empty off-roster lane from the
+initial world through every enabled step. `tmb_seal_room` is the numeric
+fact those worlds instantiate. Refunds still go to the live generation, and
+the tombstone is still queued at the seal.

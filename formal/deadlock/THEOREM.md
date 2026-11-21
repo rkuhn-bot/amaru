@@ -11,7 +11,12 @@ module that imports them (`CallTag`, `Inv2`, `Mail`, `Occ`, `Pres`,
 `Projects`, `Step`, `Chain`, `Counter`, `Deliver`, `FairRun`, `Progress`,
 `Rank`, `Witness`, `Theorem`). The names below are the statements that
 chain is meant to carry. They are not theorems of this tree until it builds
-again. `no_tombstone_overflow` is not among them: it has not been restated.
+again. `no_tombstone_overflow` is not part of that chain. It is a theorem of
+`Deadlock.Tomb`: a reachable world under `GraphOk` and `LocalOk` does not
+overflow a live parent's lane with a nonempty tombstone. `hold_reach` is
+`Hold` for every reachable world under `GraphOk`. `Side` carries the key counters, roster
+uniqueness, and the empty off-roster lane from the initial world through
+every enabled step. `LocalOk` supplies `prioSized`.
 
 `blocked_unblocks` is a finite execution along the blocked actor's own wait
 chain, when that actor is not a pure untimed peer end. It ends with that
@@ -57,14 +62,17 @@ is still queued. The semantics makes the same spawn a no-op, for a core pool
 and for a per-peer parent, and a root spawn into such a slot is not enabled.
 A slot that is still shutting down is occupied too. The tombstone is queued
 at the seal, so the predecessor is dead before the parent is notified.
-`no_tombstone_overflow` is not a theorem. The run that overflowed one lane
-reused a subtree key and delivered both tombstones to the older generation.
-A birth now takes a fresh key, the child records the parent incarnation, and
-a seal drops the tombstone when that incarnation is not alive.
-`Deadlock/Counterexample.lean` runs the schedule that matches that rule: two
-roots, two keys, one tombstone on each live lane. `tmb_seal_room` is the
-numeric fact for a world that already satisfies `Hold`. A self-schedule or a
-cell wake that does not fit still crashes, matching pure-stage's panic.
+`no_tombstone_overflow` is that account for a reachable world. Under
+`GraphOk` and `LocalOk`, a pending seal of a shutting child does not fill a
+live parent's lane when the tombstone label is nonempty. The offer stays
+strictly below `capPrio`. `LocalOk` supplies `prioSized`, through
+`tmb_prio_sized`, and `hold_reach` supplies `Hold`. The run that overflowed
+one lane reused a subtree key and delivered both tombstones to the older
+generation. A birth now takes a fresh key, the child records the parent
+incarnation, and a seal drops the tombstone when that incarnation is not
+alive. `Deadlock/Counterexample.lean` runs the schedule that matches that
+rule: two roots, two keys, one tombstone on each live lane. A self-schedule
+or a cell wake that does not fit still crashes, matching pure-stage's panic.
 `LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head
@@ -498,9 +506,11 @@ this tree.
 
 The modules that do build are `Basic`, `Compat`, `Counterexample`,
 `Examples`, `Failures`, `Graph`, `Local`, `Occupy`, `Safety`, `Semantics`,
-`Tomb`, and `Orphan`. An axiom audit of the green modules at `ab612cde9`
-found only `propext`, `Classical.choice`, and `Quot.sound`. The commits
-since add no `sorry` and no `native_decide`.
+`Tomb`, `Orphan`, and `Outlive`. An axiom audit of those modules, and of
+the R6a, R6b, R6c, R7a, R7b, R7c, R7d, R8b, R8c, Orphan, and Outlive
+probes, found only `propext`, `Classical.choice`, and `Quot.sound`. The
+probes' printed axioms are `propext` and `Quot.sound`. There is no `sorry`
+and no `native_decide`.
 
 From that earlier `lake build Deadlock`:
 
