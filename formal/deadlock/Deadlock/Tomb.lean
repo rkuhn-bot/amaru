@@ -8882,4 +8882,72 @@ theorem hold_spawn_child (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.
       have hrun : execRun I w id a k = crashWorld w := by simp [execRun, hgo, hk, hsc]
       exact hrun.symm ▸ hold_crash I w hH
 
+/-- One running step keeps the lane invariant. A shutting actor seals instead,
+and that seal is the same fact as `hold_seal`. -/
+theorem hold_exec (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc)
+    (hnd : w.roster.Nodup) (id : InstId) (hpre : w.crashed = false)
+    (hoff : ∀ i, i ∉ w.roster → (w.st i).prio = []) (w' : World)
+    (h : execHead I w id = some w') : Hold I w' := by
+  by_cases hshut : (w.st id).life = .shuttingDown
+  · exact hold_exec_seal I w hH id hpre hG hshut w' h
+  · have hbit : ((w.st id).life == .shuttingDown) = false := by
+      cases hb : ((w.st id).life == .shuttingDown) with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hb) hshut
+    unfold execHead at h
+    simp only [hbit] at h
+    have halive : (w.st id).life = .alive := by
+      by_cases ha : (w.st id).life = .alive
+      · exact ha
+      · simp [ha] at h
+    have hliveP : ¬((w.st id).life ≠ .alive) := fun hn => hn halive
+    simp only [hliveP, ite_false] at h
+    let a := w.st id
+    have ha : a = w.st id := rfl
+    have hlive : a.life = .alive := by simpa [a] using halive
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp only [hph] at h
+      have hmem : id ∈ w.roster := hH.rostered id (by simp [halive])
+      have hdec : ContDeclared I (tname id) k := by
+        simpa [hph, phaseDeclared] using hH.phase id hmem
+      have hrun : a.phase = .run k := by simpa [a] using hph
+      have heq : w' = execRun I w id a k := by
+        simpa [a, Option.some.injEq] using h.symm
+      cases hk : k.rest with
+      | nil =>
+        exact heq ▸ hold_idle I w hH id a k hpre ha hlive hk
+      | cons e es =>
+        cases e with
+        | send dst label hint =>
+          exact heq ▸ hold_send I w hH id a k dst label hint es hpre ha hlive hk hdec
+        | trySend dst label hint onFull onGone =>
+          exact heq ▸ hold_try I w hH id a k dst label hint onFull onGone es hpre ha hlive hk hdec
+        | call dst label hint onNotAdmitted onTimedOut =>
+          exact heq ▸
+            hold_call I w hH id a k dst label hint onNotAdmitted onTimedOut es hpre ha hlive hk hdec
+        | reply =>
+          exact heq ▸ hold_reply I w hH id a k es hpre ha hlive hk hdec
+        | selfSchedule label =>
+          exact heq ▸ hold_self I w hH id a k label es hpre ha hlive hrun hk hdec
+        | cell dst label value =>
+          exact heq ▸ hold_cell I w hH id a k dst label value es hpre ha hlive hk hdec
+        | internal =>
+          exact heq ▸ hold_internal I w hH id a k es hpre ha hlive hk hdec
+        | peer onTimeout =>
+          exact heq ▸ hold_peer I w hH id a k onTimeout es hpre ha hlive hk hdec
+        | abort =>
+          exact heq ▸ hold_abort I w hH id a k hpre hlive ⟨es, hk⟩
+        | spawn child =>
+          exact heq ▸
+            hold_spawn_child I w hH hG hnd id a k child es hpre ha hlive hk hdec hoff
+        | terminate =>
+          exact heq ▸ hold_terminate I w hH id a k hpre ha hlive ⟨es, hk⟩
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
 end Deadlock
