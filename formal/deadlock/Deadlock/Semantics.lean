@@ -652,6 +652,32 @@ theorem tombstone_enqueue_room
     simpa [hcomm] using hsum
   exact Nat.lt_of_succ_le (Nat.le_trans hstep hbound)
 
+/-- One more ordinary priority message fits a `prioSized` lane when the
+tombstones already queued are within the slot bound and the ordinary messages
+are strictly under the static sender count. A label already queued is not a
+new message: the caller checks that before it asks for room. -/
+theorem ordinary_enqueue_room
+    (D : Description) (parent : String) (other tombs rest N : Nat) (t : Template)
+    (ht : templateOf D parent = some t)
+    (hs : prioSized D parent other = true)
+    (hrest : rest + 1 ≤ other)
+    (htombs : tombs ≤ (tombstoneAffine D parent).eval N) :
+    tombs + rest < t.priorityCapacity.eval N := by
+  simp only [prioSized, ht] at hs
+  have hcap := Affine.eval_le_of_leB (prioDemandAffine D parent other) t.priorityCapacity hs N
+  have hdem :
+      (prioDemandAffine D parent other).eval N = (tombstoneAffine D parent).eval N + other := by
+    unfold prioDemandAffine Affine.eval
+    exact (Nat.add_assoc ((tombstoneAffine D parent).a * N) (tombstoneAffine D parent).b other).symm
+  have hbound : (tombstoneAffine D parent).eval N + other ≤ t.priorityCapacity.eval N := by
+    simpa [hdem] using hcap
+  have hstep : tombs + rest + 1 ≤ (tombstoneAffine D parent).eval N + other := by
+    have hsum : tombs + (rest + 1) ≤ (tombstoneAffine D parent).eval N + other :=
+      Nat.add_le_add htombs hrest
+    have hcomm : tombs + rest + 1 = tombs + (rest + 1) := Nat.add_assoc tombs rest 1
+    simpa [hcomm] using hsum
+  exact Nat.lt_of_succ_le (Nat.le_trans hstep hbound)
+
 /-- Tombstones still queued on `id`. A dead child's message stays until the
 parent's `recvPrio`, and a replacement has to count it. -/
 def queuedTombstones (w : World) (id : InstId) : Nat :=
@@ -1423,17 +1449,6 @@ slot bound and the other priority messages are within the static sender count.
 A self-schedule or a cell wake that does not fit still crashes. -/
 def WorldCrashed (w : World) : Prop :=
   ∃ id, id ∈ w.roster ∧ (w.st id).life = .dead ∧ (w.st id).phase = .crashed
-
-/-- Mark `id` and every descendant shutting down. Mail stays. Terminable and
-permanent children are both marked: a parent abort is not the voluntary
-`terminate` of a terminable actor. -/
-def markTree (fuel : Nat) (D : Description) (w : World) (id : InstId) : World :=
-  match fuel with
-  | 0 => w
-  | fuel + 1 =>
-    let w := markShutdown w id
-    w.roster.foldl (fun w child =>
-      if isChild w id child then markTree fuel D w child else w) w
 
 /-- Seal `id` and every recorded descendant in this step. A descendant's
 tombstone is discarded: pure-stage terminates each child, ignores the
@@ -7415,35 +7430,6 @@ theorem wake_core_life (D : Description) (w : World) (dst label : String) (write
     intro w0 h0
     rw [List.foldl_cons] at h0
     exact tryWake_core_life D w0 j label writer name (ih _ h0)
-
-/-- If `exec` leaves a core alive, it was already alive. A core's own lone
-`terminate` is the only life change, and that one ends dead. -/
-theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
-    (h : ((markTree fuel D w id).st i).life = .alive) : (w.st i).life = .alive := by
-  induction fuel generalizing w id with
-  | zero => simpa [markTree] using h
-  | succ fuel ih =>
-    simp only [markTree] at h
-    let step (w : World) (child : InstId) : World :=
-      if isChild w id child then markTree fuel D w child else w
-    have hfold : ∀ (ids : List InstId) (w0 : World),
-        ((ids.foldl step w0).st i).life = .alive → (w0.st i).life = .alive := by
-      intro ids
-      induction ids with
-      | nil => intro _ h0; exact h0
-      | cons child ids ihids =>
-        intro w0 h0
-        simp only [List.foldl_cons, step] at h0
-        by_cases hc : isChild w0 id child = true
-        · simp only [hc, ite_true] at h0
-          exact ih w0 child (ihids _ h0)
-        · have hf : isChild w0 id child = false := by
-            cases hb : isChild w0 id child with
-            | false => rfl
-            | true => exact absurd hb hc
-          simp only [hf, ite_false] at h0
-          exact ihids w0 h0
-    exact markShutdown_prev w id i (hfold (markShutdown w id).roster (markShutdown w id) h)
 
 /-- Sealing a branch does not bring anyone back to life. -/
 theorem sealBranch_prev (fuel : Nat) (D : Description) (i : InstId) :

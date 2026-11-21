@@ -740,6 +740,44 @@ theorem subtreeEntry_not_one (D : Description) (t : Template)
   · simp [hs, hmult]
   · simp [hs, hsub, hmult]
 
+/-- A supervised template that passes `subtreeEntry` names a tombstone.
+`missingTombstone` is the last check on every arm that allows a supervisor. -/
+theorem missingTombstone_ne (t : Template) (name : String)
+    (h : missingTombstone t = none) (hsup : t.supervisor = some name) :
+    t.tombstone ≠ "" := by
+  have hsome : t.supervisor.isSome = true := by simp [hsup]
+  unfold missingTombstone at h
+  by_cases hempty : (t.tombstone == "") = true
+  · simp [hsome, hempty] at h
+  · intro heq
+    apply hempty
+    simp [heq]
+
+theorem subtreeEntry_tombstone (D : Description) (t : Template) (name : String)
+    (h : subtreeEntry D t = none) (hsup : t.supervisor = some name) :
+    t.tombstone ≠ "" := by
+  unfold subtreeEntry at h
+  simp only [hsup] at h
+  split at h
+  · simp at h
+  · split at h
+    · split at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · exact missingTombstone_ne t name h hsup
+      · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · split at h
+            · simp at h
+            · exact missingTombstone_ne t name h hsup
+
 def subtreeFails (D : Description) : List String :=
   D.templates.filterMap (subtreeEntry D)
 

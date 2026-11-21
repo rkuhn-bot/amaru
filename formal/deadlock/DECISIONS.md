@@ -122,9 +122,11 @@ is occupied: the tombstone is not queued until the seal.
 The tombstone is queued when the child seals, after it is dead. Pure-stage's
 `terminate_stage` finishes the child before the parent is notified, and the
 model follows that. A consumed tombstone therefore means the predecessor has
-sealed. Refunds still go to the live generation of the sender's key. A peer
-whose template tombstone is empty keeps an empty label, so the enqueue
-crashes before `offerPrio` and that slot is not in the affine count.
+sealed. Refunds still go to the live generation of the sender's key.
+`GraphOk` rejects a supervised template whose tombstone is empty. A reachable
+world records a parent only when the child's template names that supervisor,
+so the seal's label is nonempty. An empty label is not in the affine count
+because that template does not pass the checker.
 
 `LocalOk` rejects a program that spawns the child from a state which can run
 while the tombstone is still queued, so a checked design cannot rely on the
@@ -139,9 +141,9 @@ single-path count and the number of distinct labels. `prioSizeFails` is part
 of `LocalOk`. That bound is the lane's static account.
 `no_tombstone_overflow` is that account for a reachable seal: under
 `GraphOk` and `LocalOk`, a pending seal of a shutting child does not fill a
-live parent's lane when the tombstone label is nonempty. `LocalOk` supplies
-`prioSized`. A self-schedule or a cell wake that does not fit still crashes.
-That is pure-stage's panic.
+live parent's lane. `LocalOk` supplies `prioSized`. A reachable self-schedule
+or cell wake fits the same lane, so it does not crash there. An undeclared
+label is outside that claim. pure-stage still panics when a lane has no room.
 
 Pure-stage will be changed to match this bound. Its tombstone queue is an
 unbounded `VecDeque` (`supervisor.tombstones.push_back` in
@@ -160,8 +162,8 @@ The semantics follow that rule. A scheduler root takes a fresh subtree key.
 A per-peer child is born at its parent's key, and a restart under that same
 live parent is a new generation. The child records the parent incarnation.
 The seal delivers the tombstone to that incarnation, and drops it when the
-incarnation is shutting down or dead. A live parent with an empty tombstone
-label still crashes. A root under no supervisor is bounded by how many are
+incarnation is shutting down or dead. An empty tombstone on a live parent is
+not a reachable seal under `GraphOk`. A root under no supervisor is bounded by how many are
 alive. A root under a core is bounded by how many are alive, shutting down,
 or still have a tombstone queued. `supervisor` is an `Option`: `none` does
 not match a template, including one whose name is empty.

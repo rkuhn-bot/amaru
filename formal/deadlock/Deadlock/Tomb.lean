@@ -4,10 +4,14 @@ One tombstone per child slot, for a reachable world.
 `Hold` is proved for every enabled step. `Side` carries `IxPast`, `RootPast`,
 roster uniqueness, and the off-roster empty lane from the initial world
 through every enabled step. `hold_reach` is `Hold` for every reachable world
-under `GraphOk`. `no_tombstone_overflow` is `tmb_seal_room` for those worlds
-under `GraphOk` and `LocalOk`: a pending seal of a shutting child does not
-fill a live parent's lane when the tombstone label is nonempty. `LocalOk`
-supplies `prioSized`.
+under `GraphOk`. `Wired` records that a parent field was set by a birth whose
+template names that supervisor. `no_tombstone_overflow` is `tmb_seal_room`
+for a reachable world under `GraphOk` and `LocalOk`: a pending seal of a
+shutting child does not fill a live parent's lane. `GraphOk` makes the
+supervised template's tombstone nonempty, so the label is not a separate
+assumption. `self_schedule_fits` and `cell_wake_fits` are the same lane for
+a reachable actor's self-schedule and for a cell wake of one of its readers.
+`LocalOk` supplies `prioSized`.
 -/
 
 import Deadlock.Local
@@ -83,6 +87,18 @@ theorem tmb_nodup_sub_length {α} [DecidableEq α] (xs ys : List α)
       have htail : xs.length ≤ ys.length - 1 := by simpa [herase] using ih'
       omega
     simpa using hsucc
+
+/-- One fresh member of `ys` lengthens a duplicate-free sublist by one. -/
+theorem tmb_nodup_sub_cons {α} [DecidableEq α] (xs ys : List α) (x : α)
+    (hnd : xs.Nodup) (hsub : ∀ z, z ∈ xs → z ∈ ys) (hx : x ∈ ys) (hfresh : x ∉ xs) :
+    xs.length + 1 ≤ ys.length := by
+  have hnd' : (x :: xs).Nodup := List.nodup_cons.mpr ⟨hfresh, hnd⟩
+  have hsub' : ∀ z, z ∈ x :: xs → z ∈ ys := by
+    intro z hz
+    cases List.mem_cons.mp hz with
+    | inl heq => exact heq ▸ hx
+    | inr ht => exact hsub z ht
+  simpa using tmb_nodup_sub_length (x :: xs) ys hnd' hsub'
 
 theorem tmb_filter_split {α} (p : α → Bool) (xs : List α) :
     xs.length = (xs.filter p).length + (xs.filter (fun x => !p x)).length := by
@@ -3531,78 +3547,6 @@ theorem mark_shuts (w : World) (id : InstId) (h : (w.st id).life = .alive) :
     simpa [markShutdown, tmb_marked, hb] using this
   simpa [setActor_self, tmb_marked] using
     (releaseOutbound_keep (setActor w id (tmb_marked (w.st id))) id id).1
-
-theorem mark_fold (fuel : Nat) (D : Description) (root : InstId)
-    (ih : ∀ w id, Marked w (markTree fuel D w id)) :
-    ∀ ids : List InstId, ∀ w : World,
-      Marked w (ids.foldl (fun w child =>
-        if isChild w root child then markTree fuel D w child else w) w) := by
-  intro ids
-  induction ids with
-  | nil => intro w; simp; exact Marked.refl w
-  | cons child ids ihf =>
-    intro w
-    simp only [List.foldl_cons]
-    cases hc : isChild w root child
-    · have hstep : (if false = true then markTree fuel D w child else w) = w := by simp
-      rw [hstep]
-      exact ihf w
-    · have hstep :
-        (if true = true then markTree fuel D w child else w) = markTree fuel D w child := by simp
-      rw [hstep]
-      exact Marked.trans (ih w child) (ihf (markTree fuel D w child))
-
-theorem markTree_marked (fuel : Nat) (D : Description) :
-    ∀ w id, Marked w (markTree fuel D w id) := by
-  induction fuel with
-  | zero =>
-    intro w id
-    rw [show markTree 0 D w id = w from rfl]
-    exact Marked.refl w
-  | succ fuel ih =>
-    intro w id
-    rw [show markTree (fuel + 1) D w id =
-        (let marked := markShutdown w id
-        marked.roster.foldl (fun w child =>
-          if isChild w id child then markTree fuel D w child else w) marked) from rfl]
-    exact Marked.trans (markShutdown_marked w id)
-      (mark_fold fuel D id ih (markShutdown w id).roster (markShutdown w id))
-
-theorem fold_keeps_shut (fuel : Nat) (D : Description) (root i : InstId) :
-    ∀ ids : List InstId, ∀ w : World, (w.st i).life = .shuttingDown →
-      ((ids.foldl (fun w child =>
-        if isChild w root child then markTree fuel D w child else w) w).st i).life =
-        .shuttingDown := by
-  intro ids
-  induction ids with
-  | nil => intro w h; simp [h]
-  | cons child ids ih =>
-    intro w h
-    simp only [List.foldl_cons]
-    cases hc : isChild w root child
-    · have hstep : (if false = true then markTree fuel D w child else w) = w := by simp
-      rw [hstep]
-      exact ih w h
-    · have hstep :
-        (if true = true then markTree fuel D w child else w) = markTree fuel D w child := by simp
-      rw [hstep]
-      have hM := markTree_marked fuel D w child
-      have h1 : ((markTree fuel D w child).st i).life = .shuttingDown := by
-        cases hM.life i with
-        | inl heq => exact heq ▸ h
-        | inr hch => simp [h] at hch
-      exact ih (markTree fuel D w child) h1
-
-theorem markTree_shuts (D : Description) (w : World) (id : InstId) (n : Nat)
-    (hn : w.roster.length = n + 1) (h : (w.st id).life = .alive) :
-    ((markTree (n + 1) D w id).st id).life = .shuttingDown := by
-  have hshut := mark_shuts w id h
-  have hfold := fold_keeps_shut n D id id w.roster (markShutdown w id) hshut
-  have heq : markTree (n + 1) D w id =
-      (markShutdown w id).roster.foldl (fun w child =>
-        if isChild w id child then markTree n D w child else w) (markShutdown w id) := rfl
-  have hros : (markShutdown w id).roster = w.roster := (markShutdown_marked w id).roster
-  simpa [heq, hros, hn] using hfold
 
 /-- Arming the actor a shutdown just marked. It was alive, so the slot it
 holds afterwards is a slot it already held. -/
@@ -10762,18 +10706,1010 @@ theorem hold_reach (I : Impl) (N : Nat) (w : World) (hG : GraphOk I.desc) (hR : 
     Hold I w :=
   (reach_pack I N w hG hR).1
 
+/-! A recorded parent was wired by the template that names it. -/
+
+theorem set_parent (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (hp : a.parent = (w.st id).parent) :
+    ((setActor w id a).st i).parent = (w.st i).parent := by
+  by_cases hi : i = id
+  · simp [setActor, hi, hp]
+  · simp [setActor, hi]
+
+theorem resume_parent (a : Actor) (isCall : Bool) (dst : InstId) :
+    (resumeSender a isCall dst).parent = a.parent := by
+  cases hph : a.phase with
+  | parked _ _ _ =>
+    simp only [resumeSender, hph]
+    split <;> simp [proceed_parent]
+  | idle => simp [resumeSender, hph]
+  | run _ => simp [resumeSender, hph]
+  | awaitReply _ _ => simp [resumeSender, hph]
+  | awaitEffect _ => simp [resumeSender, hph]
+  | awaitPeer _ => simp [resumeSender, hph]
+  | crashed => simp [resumeSender, hph]
+
+theorem live_parent (w : World) (name : String) (sender i : InstId) :
+    ((creditLive w name sender).st i).parent = (w.st i).parent := by
+  simpa [creditLive] using credit_parent w name (budgetHolder w sender) i
+
+theorem perform_parent (w : World) (sender : InstId) (k : Cont) (i : InstId) :
+    ((performReply w sender k).st i).parent = (w.st i).parent := by
+  unfold performReply
+  cases hto : k.replyTo with
+  | none =>
+    simp
+    exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+  | some caller =>
+    simp
+    cases hph : (w.st caller).phase with
+    | awaitReply dst ck =>
+      simp
+      split
+      · exact (set_parent (setActor w caller (finishCall (w.st caller) ck .reply)) sender
+            (proceed ((setActor w caller (finishCall (w.st caller) ck .reply)).st sender)
+              (afterHead k)) i (proceed_parent _ _)).trans
+          (set_parent w caller (finishCall (w.st caller) ck .reply) i (finish_parent _ _ _))
+      · exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+    | idle =>
+      simp
+      exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+    | run _ =>
+      simp
+      exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+    | parked _ _ _ =>
+      simp
+      exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+    | awaitEffect _ =>
+      simp
+      exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+    | awaitPeer _ =>
+      simp
+      exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+    | crashed =>
+      simp
+      exact set_parent w sender (proceed (w.st sender) (afterHead k)) i (proceed_parent _ _)
+
+theorem credit_fold_parent (name : String) (caller : InstId) :
+    ∀ ps : List Parked, ∀ w : World, ∀ i : InstId,
+      ((ps.foldl (fun w _ => creditSender w name caller) w).st i).parent =
+        (w.st i).parent := by
+  intro ps
+  induction ps with
+  | nil => intro w i; simp
+  | cons _ ps ih =>
+    intro w i
+    simp only [List.foldl_cons]
+    exact (ih _ i).trans (credit_parent w name caller i)
+
+theorem refund_call_parent (w : World) (caller dst i : InstId) :
+    ((refundParkedCall w caller dst).st i).parent = (w.st i).parent := by
+  unfold refundParkedCall
+  dsimp
+  by_cases hempty :
+      (((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty) = true
+  · simp [hempty]
+  · have hf :
+        (((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty) = false := by
+      cases hb : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty with
+      | false => rfl
+      | true => exact absurd hb hempty
+    simp only [hf]
+    let drop := (w.st dst).parked.filter fun p => p.sender == caller && p.isCall
+    let keep := (w.st dst).parked.filter fun p => !(p.sender == caller && p.isCall)
+    exact (credit_fold_parent (tname dst) caller drop
+        (setActor w dst { (w.st dst) with parked := keep }) i).trans
+      (set_parent w dst { (w.st dst) with parked := keep } i (by simp))
+
+theorem offer_parent (D : Description) (w : World) (host : InstId) (msg : Msg) (i : InstId) :
+    ((offerPrio D w host msg).st i).parent = (w.st i).parent := by
+  unfold offerPrio
+  by_cases hfull : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) = true
+  · simp [hfull]
+    exact crash_parent w i
+  · have hf : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) = false := by
+      cases hb : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) with
+      | false => rfl
+      | true => exact absurd hb hfull
+    simp [hf, setActor]
+    by_cases hi : i = host <;> simp [hi]
+
+theorem try_parent (D : Description) (w : World) (dst : InstId) (label : String)
+    (writer i : InstId) :
+    ((tryWake D w dst label writer).st i).parent = (w.st i).parent := by
+  unfold tryWake
+  by_cases hskip : ((w.st dst).life != .alive ||
+      (w.st dst).prio.any (fun p => p.label == label)) = true
+  · simp [hskip]
+  · have hf : ((w.st dst).life != .alive ||
+        (w.st dst).prio.any (fun p => p.label == label)) = false := by
+      cases hb : (w.st dst).life != .alive || (w.st dst).prio.any (fun p => p.label == label) with
+      | false => rfl
+      | true => exact absurd hb hskip
+    simp [hf]
+    exact offer_parent D w dst _ i
+
+theorem wakes_go_parent (D : Description) (label : String) (writer : InstId) :
+    ∀ ids : List InstId, ∀ w : World, ∀ i : InstId,
+      ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).parent =
+        (w.st i).parent := by
+  intro ids
+  induction ids with
+  | nil => intro w i; simp
+  | cons id ids ih =>
+    intro w i
+    simp only [List.foldl_cons]
+    exact (ih _ i).trans (try_parent D w id label writer i)
+
+theorem enqueue_parent (D : Description) (w : World) (child i : InstId) :
+    ((enqueueTombstone D w child).st i).parent = (w.st i).parent := by
+  unfold enqueueTombstone
+  cases hpar : (w.st child).parent with
+  | none => simp
+  | some parent =>
+    by_cases halive : ((w.st parent).life != .alive) = true
+    · simp [halive]
+    · have hf : ((w.st parent).life != .alive) = false := by
+        cases hb : (w.st parent).life != .alive with
+        | false => rfl
+        | true => exact absurd hb halive
+      simp only [hf]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp [hlab]
+        exact crash_parent w i
+      · have hlf : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          cases hb : (tombstoneMsg D (w.st parent) child).label == "" with
+          | false => rfl
+          | true => exact absurd hb hlab
+        simp [hlf]
+        exact offer_parent D w parent _ i
+
+theorem mark_parent (w : World) (id i : InstId) :
+    ((markShutdown w id).st i).parent = (w.st i).parent := by
+  unfold markShutdown
+  split
+  · exact (releaseOutbound_parent _ id i).trans
+      (set_parent w id { (w.st id) with life := .shuttingDown, phase := .idle } i (by simp))
+  · rfl
+
+theorem arm_parent (w : World) (id i : InstId) :
+    ((armTombstone w id).st i).parent = (w.st i).parent := by
+  unfold armTombstone
+  exact set_parent w id { (w.st id) with pendingTombstone := true } i (by simp)
+
+theorem shutdown_parent (D : Description) (w : World) (id i : InstId) :
+    ((shutdownActor D w id).st i).parent = (w.st i).parent := by
+  unfold shutdownActor
+  split
+  · exact (arm_parent _ id i).trans (mark_parent w id i)
+  · exact mark_parent w id i
+
+theorem seal_go_parent (fuel : Nat) (D : Description) (id : InstId)
+    (ih : ∀ w c i, ((sealBranch fuel D w c).st i).parent = (w.st i).parent) :
+    ∀ ids : List InstId, ∀ w : World, ∀ i : InstId,
+      ((ids.foldl (fun acc child =>
+        if isChild acc id child then sealBranch fuel D acc child else acc) w).st i).parent =
+        (w.st i).parent := by
+  intro ids
+  induction ids with
+  | nil => intro w i; simp
+  | cons c cs ihf =>
+    intro w i
+    simp only [List.foldl_cons]
+    split
+    · exact (ihf _ i).trans (ih w c i)
+    · exact ihf w i
+
+theorem seal_branch_parent (fuel : Nat) (D : Description) :
+    ∀ w id i, ((sealBranch fuel D w id).st i).parent = (w.st i).parent := by
+  induction fuel with
+  | zero => intro w id i; simp [sealBranch]
+  | succ fuel ih =>
+    intro w id i
+    simp only [sealBranch]
+    split
+    · exact (release_parent D _ id _ i).trans
+        (seal_go_parent fuel D id ih w.roster w i)
+    · exact seal_go_parent fuel D id ih w.roster w i
+
+theorem drop_parent (D : Description) (w : World) (id i : InstId) :
+    ((dropDescendants D w id).st i).parent = (w.st i).parent := by
+  unfold dropDescendants
+  exact seal_go_parent w.roster.length D id
+    (fun acc c j => seal_branch_parent w.roster.length D acc c j) w.roster w i
+
+theorem abort_go_parent (D : Description) (parent : InstId) :
+    ∀ ids : List InstId, ∀ w : World, ∀ i : InstId,
+      ((ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor D (dropDescendants D w child) child
+        else w) w).st i).parent = (w.st i).parent := by
+  intro ids
+  induction ids with
+  | nil => intro w i; simp
+  | cons c cs ih =>
+    intro w i
+    simp only [List.foldl_cons]
+    split
+    · exact (ih _ i).trans
+        ((shutdown_parent D (dropDescendants D w c) c i).trans (drop_parent D w c i))
+    · exact ih w i
+
+theorem abort_parent (D : Description) (w : World) (parent i : InstId) :
+    ((abortChildren D w parent).st i).parent = (w.st i).parent := by
+  simpa [abortChildren] using abort_go_parent D parent w.roster w i
+
+theorem terminate_parent (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId) :
+    ((terminateStage D w id a).st i).parent = (w.st i).parent := by
+  unfold terminateStage
+  exact (shutdown_parent D (dropDescendants D w id) id i).trans (drop_parent D w id i)
+
+theorem seal_actor_parent (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId) :
+    ((sealActor D w id a).st i).parent = (w.st i).parent := by
+  unfold sealActor
+  split
+  · exact (enqueue_parent D _ id i).trans (release_parent D w id a i)
+  · exact release_parent D w id a i
+
+/-- A parent field names the supervisor the child's template declared. -/
+def Wired (D : Description) (w : World) : Prop :=
+  ∀ id p, (w.st id).parent = some p →
+    ∃ t, templateOf D (tname id) = some t ∧ t.supervisor = some (tname p)
+
+theorem wired_stable (D : Description) (w w' : World) (hW : Wired D w)
+    (h : ∀ i, (w'.st i).parent = (w.st i).parent) : Wired D w' := by
+  intro i p hp
+  exact hW i p (by rw [← h i]; exact hp)
+
+theorem wired_set (D : Description) (w : World) (hW : Wired D w) (jid : InstId) (a : Actor)
+    (hp : a.parent = (w.st jid).parent) : Wired D (setActor w jid a) := by
+  intro i p h
+  by_cases hi : i = jid
+  · rw [hi] at h ⊢
+    rw [setActor_self] at h
+    exact hW jid p (hp ▸ h)
+  · rw [setActor_other w jid i a hi] at h
+    exact hW i p h
+
+theorem wired_crash (D : Description) (w : World) (hW : Wired D w) : Wired D (crashWorld w) :=
+  wired_stable D w _ hW (fun i => crash_parent w i)
+
+theorem deliver_parent (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a' : Actor) (h : deliver I w id a m = some (w1, a')) :
+    a'.parent = a.parent ∧ ∀ i, (w1.st i).parent = (w.st i).parent := by
+  unfold deliver at h
+  dsimp at h
+  split at h
+  · simp at h
+  · split at h
+    · have heq := by simpa [Option.some.injEq] using h
+      rcases heq with ⟨rfl, rfl⟩
+      exact ⟨by simp, fun i => congrArg Actor.parent (cellsSt I.desc w id i)⟩
+    · split at h
+      · split at h
+        · simp at h
+        · have heq := by simpa [Option.some.injEq] using h
+          rcases heq with ⟨rfl, rfl⟩
+          exact ⟨by simp, fun i => congrArg Actor.parent (cellsSt I.desc w id i)⟩
+      · split at h
+        · simp at h
+        · split at h
+          · have heq := by simpa [Option.some.injEq] using h
+            rcases heq with ⟨rfl, rfl⟩
+            exact ⟨by simp, fun i => congrArg Actor.parent (cellsSt I.desc w id i)⟩
+          · have heq := by simpa [Option.some.injEq] using h
+            rcases heq with ⟨rfl, rfl⟩
+            exact ⟨by simp, fun i => congrArg Actor.parent (cellsSt I.desc w id i)⟩
+
+theorem bulk_parent (I : Impl) (w w' : World) (id i : InstId)
+    (h : receiveBulk I w id = some w') :
+    (w'.st i).parent = (w.st i).parent := by
+  unfold receiveBulk at h
+  dsimp at h
+  split at h
+  · simp at h
+  · cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp only [hbox, hpark] at h
+        cases hd : deliver I w id ({ (w.st id) with parked := ps }) p.msg with
+        | none =>
+          simp only [hbox] at hd
+          rw [hd] at h
+          simp at h
+        | some pair =>
+          obtain ⟨w1, a'⟩ := pair
+          simp only [hbox] at hd
+          rw [hd] at h
+          have hw' : w' = setActor (creditLive (setActor w1 id a') (tname id) p.msg.sender) p.sender
+              (resumeSender ((creditLive (setActor w1 id a') (tname id) p.msg.sender).st p.sender)
+                p.isCall id) := by simpa [Option.some.injEq] using h.symm
+          have ⟨hpa, hst⟩ := deliver_parent I w id _ p.msg w1 a' hd
+          have hset := set_parent w1 id a' i (by rw [hpa]; simp [hst])
+          let wA := setActor w1 id a'
+          let wC := creditLive wA (tname id) p.msg.sender
+          have hlive := live_parent wA (tname id) p.msg.sender i
+          have hres := set_parent wC p.sender
+            (resumeSender (wC.st p.sender) p.isCall id) i (resume_parent _ _ _)
+          exact hw' ▸ hres.trans (hlive.trans (hset.trans (hst i)))
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp only [hbox, hpark] at h
+        cases hd : deliver I w id ({ (w.st id) with box := ms }) m with
+        | none =>
+          simp only [hpark] at hd
+          rw [hd] at h
+          simp at h
+        | some pair =>
+          obtain ⟨w1, a'⟩ := pair
+          simp only [hpark] at hd
+          rw [hd] at h
+          have hw' : w' = creditLive (setActor w1 id a') (tname id) m.sender := by
+            simpa [Option.some.injEq] using h.symm
+          have ⟨hpa, hst⟩ := deliver_parent I w id _ m w1 a' hd
+          have hset := set_parent w1 id a' i (by rw [hpa]; simp [hst])
+          exact hw' ▸ (live_parent _ (tname id) m.sender i).trans (hset.trans (hst i))
+      | cons p ps =>
+        simp only [hbox, hpark] at h
+        cases hd : deliver I w id ({ (w.st id) with box := ms }) m with
+        | none =>
+          simp only [hpark] at hd
+          rw [hd] at h
+          simp at h
+        | some pair =>
+          obtain ⟨w1, a'⟩ := pair
+          simp only [hpark] at hd
+          rw [hd] at h
+          let admitted := { a' with box := a'.box ++ [p.msg], parked := ps }
+          have hw' : w' = setActor (creditLive (setActor w1 id admitted) (tname id) m.sender) p.sender
+              (resumeSender ((creditLive (setActor w1 id admitted) (tname id) m.sender).st p.sender)
+                p.isCall id) := by simpa [Option.some.injEq, admitted] using h.symm
+          have ⟨hpa, hst⟩ := deliver_parent I w id _ m w1 a' hd
+          have hadmit : admitted.parent = a'.parent := by simp [admitted]
+          have hset := set_parent w1 id admitted i (by rw [hadmit, hpa]; simp [hst])
+          let wA := setActor w1 id admitted
+          let wC := creditLive wA (tname id) m.sender
+          have hres := set_parent wC p.sender
+            (resumeSender (wC.st p.sender) p.isCall id) i (resume_parent _ _ _)
+          exact hw' ▸ hres.trans
+            ((live_parent wA (tname id) m.sender i).trans (hset.trans (hst i)))
+
+theorem prio_parent (I : Impl) (w w' : World) (id i : InstId)
+    (h : receivePrio I w id = some w') :
+    (w'.st i).parent = (w.st i).parent := by
+  unfold receivePrio at h
+  dsimp at h
+  cases hp : (w.st id).prio with
+  | nil => simp [hp] at h
+  | cons m ms =>
+    simp only [hp] at h
+    split at h
+    · simp at h
+    · cases hd : deliver I w id ({ (w.st id) with prio := ms }) m with
+      | none => simp [hd] at h
+      | some pair =>
+        obtain ⟨w1, a'⟩ := pair
+        rw [hd] at h
+        have hw' : w' = setActor w1 id a' := by simpa [Option.some.injEq] using h.symm
+        have ⟨hpa, hst⟩ := deliver_parent I w id _ m w1 a' hd
+        exact hw' ▸ (set_parent w1 id a' i (by rw [hpa]; simp [hst])).trans (hst i)
+
+theorem ingress_parent (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
+    (h : receiveIngress I w dst label = some w') :
+    (w'.st i).parent = (w.st i).parent := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            exact set_parent w dst _ i (by simp [charge_parent])
+
+theorem finish_wait_parent (I : Impl) (w w' : World) (id i : InstId)
+    (h : finishWait I w id = some w') :
+    (w'.st i).parent = (w.st i).parent := by
+  obtain ⟨_, _, heq⟩ := finish_proceed I w w' id h
+  exact heq ▸ set_parent w id _ i (proceed_parent _ _)
+
+theorem timeout_parent (w w' : World) (id i : InstId) (h : callTimeout w id = some w') :
+    (w'.st i).parent = (w.st i).parent := by
+  unfold callTimeout at h
+  dsimp at h
+  split at h
+  · simp at h
+  · split at h
+    · have heq := by simpa [Option.some.injEq] using h
+      subst heq
+      exact (set_parent _ id _ i (finish_parent _ _ _)).trans
+        (set_parent w _ _ i ((detach_keep _ id _).2.2.2))
+    · have heq := by simpa [Option.some.injEq] using h
+      subst heq
+      exact (set_parent _ id _ i (finish_parent _ _ _)).trans (refund_call_parent w id _ i)
+    · have heq := by simpa [Option.some.injEq] using h
+      subst heq
+      exact set_parent w id _ i (proceed_parent _ _)
+    · simp at h
+
+theorem admit_parent (I : Impl) (w : World) (id : InstId) (born : Actor) (i : InstId) :
+    ((admitBorn I w id born).st i).parent = (if i = id then born else w.st i).parent := by
+  have heq : admitBorn I w id born =
+      readCells I.desc (setActor { w with roster := w.roster ++ [id] } id born) id := rfl
+  rw [heq, cellsSt]
+  by_cases hi : i = id
+  · simp [setActor, hi]
+  · simp [setActor, hi]
+
+theorem wired_birth (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (born : Actor)
+    (hnew : ∀ p, born.parent = some p →
+      ∃ t, templateOf I.desc (tname id) = some t ∧ t.supervisor = some (tname p)) :
+    Wired I.desc (admitBorn I w id born) := by
+  intro i p hp
+  have hst := admit_parent I w id born i
+  by_cases hi : i = id
+  · subst hi
+    rw [hst] at hp
+    simp at hp
+    exact hnew p hp
+  · rw [hst] at hp
+    simp [hi] at hp
+    exact hW i p hp
+
+theorem spawn_child_wired (I : Impl) (w : World) (hW : Wired I.desc w) (parent : InstId)
+    (child : String) (w' : World) (h : spawnChild I w parent child = some w') :
+    Wired I.desc w' := by
+  cases ht : templateOf I.desc child with
+  | none => simp [spawnChild, ht] at h
+  | some t =>
+    let gate := t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+      ((w.st parent).life == .alive)
+    by_cases hok : gate = true
+    · have hsupn : supNamed t.supervisor (tname parent) = true := by
+        cases hs : supNamed t.supervisor (tname parent) with
+        | true => rfl
+        | false => simp [gate, hs] at hok
+      cases parent with
+      | core pname =>
+        have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
+        by_cases hslotsB : (t.slots != 0) = true
+        · cases hfree : freeSlot w (.core pname) child t.slots with
+          | none =>
+            have hsc : spawnChild I w (.core pname) child = some w := by
+              simp [spawnChild, ht, gate, hok, hslotsB, hfree]
+            have hw' : w = w' := by simpa [hsc] using h
+            exact hw'.symm ▸ hW
+          | some kslot =>
+            let bornId := InstId.peer child kslot (maxGen w child kslot)
+            let born := { bornActor I.desc w child kslot t.initial with parent := some (.core pname) }
+            have hsc : spawnChild I w (.core pname) child = some (admitBorn I w bornId born) := by
+              simp [spawnChild, ht, gate, hok, hslotsB, hfree, bornId, born]
+            have hw' : admitBorn I w bornId born = w' := by simpa [hsc] using h
+            have hnew : ∀ q, born.parent = some q →
+                ∃ t, templateOf I.desc (tname bornId) = some t ∧ t.supervisor = some (tname q) := by
+              intro q hq
+              have hflip : .core pname = q := by simpa [born] using hq
+              have hq' : q = .core pname := hflip.symm
+              subst hq'
+              exact ⟨t, ht, sup_is_some _ _ hsup⟩
+            exact hw'.symm ▸ wired_birth I w hW bornId born hnew
+        · simp [spawnChild, ht, gate, hok, hslotsB] at h
+      | peer pname pk pg =>
+        have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
+        by_cases hzeroB : (t.slots == 0) = true
+        · by_cases hbusy : (slotOccupied w child pk ||
+              slotTombstoneQueued w (.peer pname pk pg) child pk) = true
+          · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
+              simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
+            have hw' : w = w' := by simpa [hsc] using h
+            exact hw'.symm ▸ hW
+          · have hocc : slotOccupied w child pk = false := by
+              cases ho : slotOccupied w child pk with
+              | false => rfl
+              | true =>
+                have htrue : (slotOccupied w child pk ||
+                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [ho]
+                exact absurd htrue hbusy
+            have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := by
+              cases hto : slotTombstoneQueued w (.peer pname pk pg) child pk with
+              | false => rfl
+              | true =>
+                have htrue : (slotOccupied w child pk ||
+                    slotTombstoneQueued w (.peer pname pk pg) child pk) = true := by simp [hto]
+                exact absurd htrue hbusy
+            let bornId := InstId.peer child pk (maxGen w child pk)
+            let born := { bornActor I.desc w child pk t.initial with
+              parent := some (.peer pname pk pg) }
+            have hsc : spawnChild I w (.peer pname pk pg) child =
+                some (admitBorn I w bornId born) := by
+              simp [spawnChild, ht, gate, hok, hzeroB, hocc, hq, bornId, born]
+            have hw' : admitBorn I w bornId born = w' := by simpa [hsc] using h
+            have hnew : ∀ q, born.parent = some q →
+                ∃ t, templateOf I.desc (tname bornId) = some t ∧ t.supervisor = some (tname q) := by
+              intro q hqb
+              have hflip : .peer pname pk pg = q := by simpa [born] using hqb
+              have hq' : q = .peer pname pk pg := hflip.symm
+              subst hq'
+              exact ⟨t, ht, sup_is_some _ _ hsup⟩
+            exact hw'.symm ▸ wired_birth I w hW bornId born hnew
+        · simp [spawnChild, ht, gate, hok, hzeroB] at h
+    · by_cases hpre : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · by_cases hlife : ((w.st parent).life == .alive) = true
+        · have hgate : gate = true := by simp [gate, hpre, hlife]
+          exact absurd hgate hok
+        · have hdead : ((w.st parent).life == .alive) = false := by
+            cases hbit : ((w.st parent).life == .alive) with
+            | false => rfl
+            | true => exact absurd hbit hlife
+          simp [spawnChild, ht, hdead, hpre] at h
+          have hw' : w = w' := by simpa [Option.some.injEq] using h
+          exact hw'.symm ▸ hW
+      · have hpref : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hbit : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) with
+          | false => rfl
+          | true => exact absurd hbit hpre
+        simp [spawnChild, ht, hpref] at h
+
+theorem wired_place (I : Impl) (w : World) (hW : Wired I.desc w) (template : String) (k : Nat)
+    (initial : String) (parent : Option InstId) (next : World → World)
+    (hnext : ∀ u i, (next u).st i = u.st i ∧ (next u).roster = u.roster)
+    (hnew : ∀ p, parent = some p →
+      ∃ t, templateOf I.desc template = some t ∧ t.supervisor = some (tname p)) :
+    Wired I.desc (placePeer I w template k initial parent next) := by
+  intro i q hq
+  have hst := (place_facts I w template k initial parent next hnext).1 i
+  by_cases hi : i = InstId.peer template k (maxGen w template k)
+  · rw [hi] at hq ⊢
+    simp [hi] at hst
+    rw [hst] at hq
+    exact hnew q (by simpa using hq)
+  · simp [hi] at hst
+    rw [hst] at hq
+    exact hW i q hq
+
+theorem spawn_wired (I : Impl) (w w' : World) (hW : Wired I.desc w) (template : String)
+    (h : spawn I w template = some w') : Wired I.desc w' := by
+  cases ht : templateOf I.desc template with
+  | none => simp [spawn, ht] at h
+  | some t =>
+    simp only [spawn, ht] at h
+    split at h
+    · rename_i hmay
+      clear hmay
+      split at h
+      · rename_i name hsup
+        let k := freshKey I.desc w t.subtree
+        let next : World → World := fun u =>
+          { u with nextKey := fun s => if s = t.subtree then k + 1 else u.nextKey s }
+        have hnext : ∀ u i, (next u).st i = u.st i ∧ (next u).roster = u.roster :=
+          fun _ _ => ⟨rfl, rfl⟩
+        have hw' : w' = placePeer I w template k t.initial (some (.core name)) next := by
+          simpa [Option.some.injEq] using h.symm
+        have hnew : ∀ q, some (.core name) = some q →
+            ∃ t, templateOf I.desc template = some t ∧ t.supervisor = some (tname q) := by
+          intro q hq
+          have hflip : .core name = q := by simpa using hq
+          have hq' : q = .core name := hflip.symm
+          subst hq'
+          exact ⟨t, ht, hsup⟩
+        exact hw' ▸ wired_place I w hW template k t.initial (some (.core name)) next hnext hnew
+      · rename_i hsup
+        split at h
+        · let k := w.nextIx template
+          let next : World → World := fun u =>
+            { u with nextIx := fun n => if n = template then k + 1 else u.nextIx n }
+          have hnext : ∀ u i, (next u).st i = u.st i ∧ (next u).roster = u.roster :=
+            fun _ _ => ⟨rfl, rfl⟩
+          have hw' : w' = placePeer I w template k t.initial none next := by
+            simpa [Option.some.injEq] using h.symm
+          exact hw' ▸ wired_place I w hW template k t.initial none next hnext
+            (fun _ hq => by cases hq)
+        · let k := freshKey I.desc w t.subtree
+          let next : World → World := fun u =>
+            { u with nextKey := fun s => if s = t.subtree then k + 1 else u.nextKey s }
+          have hnext : ∀ u i, (next u).st i = u.st i ∧ (next u).roster = u.roster :=
+            fun _ _ => ⟨rfl, rfl⟩
+          have hw' : w' = placePeer I w template k t.initial none next := by
+            simpa [Option.some.injEq] using h.symm
+          exact hw' ▸ wired_place I w hW template k t.initial none next hnext
+            (fun _ hq => by cases hq)
+    · simp at h
+
+theorem exec_wired (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (a : Actor)
+    (k : Cont) (ha : a = w.st id) : Wired I.desc (execRun I w id a k) := by
+  by_cases hlive : a.life = .alive
+  · have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+    cases hk : k.rest with
+    | nil =>
+      unfold execRun
+      simp only [hgo, hk]
+      exact wired_set I.desc w hW id _ (by simp [ha])
+    | cons e es =>
+      cases e with
+      | send dst label hint =>
+        unfold execRun
+        simp only [hgo, hk]
+        cases hr : route w I.desc id dst hint with
+        | none =>
+          exact wired_stable I.desc w _ hW fun i =>
+            (set_parent (noteStale w id dst) id (proceed a (afterHead k)) i
+              (by simp [proceed_parent, ha, noteStale_st])).trans
+              (congrArg Actor.parent (noteStale_st w id dst i))
+        | some dstId =>
+          exact wired_stable I.desc w _ hW fun i =>
+            mail_parent w I.desc id dstId { label := label, sender := id, callFrom := none }
+              false (afterHead k) i
+      | trySend dst label hint onFull onGone =>
+        unfold execRun
+        simp only [hgo, hk]
+        cases hr : route w I.desc id dst hint with
+        | none =>
+          exact wired_stable I.desc w _ hW fun i =>
+            (set_parent (noteStale w id dst) id (proceed a _) i
+              (by simp [proceed_parent, ha, noteStale_st])).trans
+              (congrArg Actor.parent (noteStale_st w id dst i))
+        | some dstId =>
+          by_cases hroom : ((w.st dstId).life == .alive && decide ((w.st dstId).parked = []) &&
+              decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = true
+          · simp only [hroom]
+            exact wired_stable I.desc w _ hW fun i =>
+              mail_parent w I.desc id dstId
+                { label := label, sender := id, callFrom := none, reliable := false }
+                false (afterHead k) i
+          · have hfroom : ((w.st dstId).life == .alive && decide ((w.st dstId).parked = []) &&
+                decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = false := by
+              cases hb : (w.st dstId).life == .alive && decide ((w.st dstId).parked = []) &&
+                  decide ((w.st dstId).box.length < capBulk I.desc w.N dstId) with
+              | false => rfl
+              | true => exact absurd hb hroom
+            simp only [hfroom]
+            by_cases haliveT : ((w.st dstId).life == .alive) = true
+            · simp only [haliveT]
+              exact wired_set I.desc w hW id _ (by simp [proceed_parent, ha])
+            · have hdead : ((w.st dstId).life == .alive) = false := by
+                cases hb : (w.st dstId).life == .alive with
+                | false => rfl
+                | true => exact absurd hb haliveT
+              simp only [hdead]
+              exact wired_set I.desc w hW id _ (by simp [proceed_parent, ha])
+      | call dst label hint onNotAdmitted onTimedOut =>
+        unfold execRun
+        simp only [hgo, hk]
+        cases hr : resolveId I.desc w id dst hint with
+        | none =>
+          exact wired_stable I.desc w _ hW fun i =>
+            (set_parent (noteStale w id dst) id (finishCall (issueCall a) _ .notAdmitted) i
+              (by simp [finish_parent, issue_parent, ha, noteStale_st])).trans
+              (congrArg Actor.parent (noteStale_st w id dst i))
+        | some dstId =>
+          exact wired_stable I.desc w _ hW fun i =>
+            mail_parent w I.desc id dstId { label := label, sender := id, callFrom := some id }
+              true _ i
+      | reply =>
+        unfold execRun
+        simp only [hgo, hk]
+        exact wired_stable I.desc w _ hW fun i => perform_parent w id k i
+      | selfSchedule label =>
+        unfold execRun
+        simp only [hgo, hk]
+        by_cases hany : (a.prio.any (fun p => p.label == label)) = true
+        · simp only [hany]
+          exact wired_set I.desc w hW id _ (by simp [proceed_parent, ha])
+        · have hfany : (a.prio.any (fun p => p.label == label)) = false := by
+            cases hb : a.prio.any (fun p => p.label == label) with
+            | false => rfl
+            | true => exact absurd hb hany
+          simp only [hfany]
+          by_cases hroom : prioLoad a.prio < capPrio I.desc w.N id
+          · simp only [hroom]
+            exact wired_set I.desc w hW id _ (by simp [proceed_parent, ha])
+          · simp only [hroom]
+            exact wired_crash I.desc w hW
+      | cell dst label value =>
+        unfold execRun
+        simp only [hgo, hk]
+        let previous := w.cell dst label
+        let wC := setCell w dst label { value := max previous.value value, dirty := true }
+        have hC : ∀ i, (wC.st i).parent = (w.st i).parent := fun _ => rfl
+        let wP := setActor wC id (proceed (wC.st id) (afterHead k))
+        have hP : Wired I.desc wP :=
+          wired_set I.desc wC (wired_stable I.desc w wC hW hC) id _
+            (by simp [proceed_parent])
+        by_cases hdirty : (w.cell dst label).dirty = true
+        · simp only [hdirty]
+          exact hP
+        · have hf : (w.cell dst label).dirty = false := by
+            cases hb : (w.cell dst label).dirty with
+            | false => rfl
+            | true => exact absurd hb hdirty
+          simp only [hf]
+          exact wired_stable I.desc wP _ hP fun i =>
+            wakes_go_parent I.desc label id (readersOf wP dst) wP i
+      | internal =>
+        unfold execRun
+        simp only [hgo, hk]
+        exact wired_set I.desc w hW id _ (by simp [ha])
+      | peer onTimeout =>
+        unfold execRun
+        simp only [hgo, hk]
+        exact wired_set I.desc w hW id _ (by simp [ha])
+      | abort =>
+        unfold execRun
+        simp only [hgo, hk]
+        exact wired_stable I.desc w _ hW fun i => abort_parent I.desc w id i
+      | spawn child =>
+        unfold execRun
+        simp only [hgo, hk]
+        cases hsp : spawnChild I w id child with
+        | none =>
+          exact wired_crash I.desc w hW
+        | some w' =>
+          exact wired_set I.desc w' (spawn_child_wired I w hW id child w' hsp) id _
+            (proceed_parent _ _)
+      | terminate =>
+        rcases execRun_terminate I w id a k hlive ⟨es, hk⟩ with hcrash | hshut | htree | hcascade
+        · exact hcrash ▸ wired_crash I.desc w hW
+        · rcases hshut with ⟨_, _, _, _, _, _, heq⟩
+          exact heq ▸ wired_stable I.desc w _ hW fun i => shutdown_parent I.desc w id i
+        · rcases htree with ⟨_, _, _, _, heq⟩
+          exact heq ▸ wired_stable I.desc w _ hW fun i => terminate_parent I.desc w id a i
+        · rcases hcascade with ⟨_, _, _, _, _, _, heq⟩
+          exact heq ▸ wired_stable I.desc w _ hW fun i => terminate_parent I.desc w id a i
+  · have hgo : (a.life == .alive) = false := by
+      cases hb : a.life == .alive with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hb) hlive
+    simp [execRun, hgo]
+    exact hW
+
+theorem exec_head_wired (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (w' : World)
+    (h : execHead I w id = some w') : Wired I.desc w' := by
+  by_cases hshut : (w.st id).life = .shuttingDown
+  · have hbit : ((w.st id).life == .shuttingDown) = true := (beq_iff_eq).mpr hshut
+    unfold execHead at h
+    simp only [hbit] at h
+    have heq : w' = sealActor I.desc w id (w.st id) := by simpa [Option.some.injEq] using h.symm
+    exact heq ▸ wired_stable I.desc w _ hW fun i => seal_actor_parent I.desc w id (w.st id) i
+  · have hbit : ((w.st id).life == .shuttingDown) = false := by
+      cases hb : ((w.st id).life == .shuttingDown) with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hb) hshut
+    unfold execHead at h
+    simp only [hbit] at h
+    have halive : (w.st id).life = .alive := by
+      by_cases ha : (w.st id).life = .alive
+      · exact ha
+      · simp [ha] at h
+    have hliveP : ¬((w.st id).life ≠ .alive) := fun hn => hn halive
+    simp only [hliveP, ite_false] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp only [hph] at h
+      have heq : w' = execRun I w id (w.st id) k := by simpa [Option.some.injEq] using h.symm
+      exact heq ▸ exec_wired I w hW id (w.st id) k rfl
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+theorem wire_step (I : Impl) (w w' : World) (hW : Wired I.desc w) (a : Action)
+    (h : apply I a w = some w') : Wired I.desc w' := by
+  have hstep : stepWorld I a w = some w' := (apply_step I a w w' h).2
+  cases a with
+  | recvBulk s =>
+    exact wired_stable I.desc w w' hW fun i =>
+      bulk_parent I w w' s i (by simpa [stepWorld] using hstep)
+  | recvPrio s =>
+    exact wired_stable I.desc w w' hW fun i =>
+      prio_parent I w w' s i (by simpa [stepWorld] using hstep)
+  | exec s =>
+    exact exec_head_wired I w hW s w' (by simpa [stepWorld] using hstep)
+  | finish s =>
+    exact wired_stable I.desc w w' hW fun i =>
+      finish_wait_parent I w w' s i (by simpa [stepWorld] using hstep)
+  | spawn template =>
+    exact spawn_wired I w w' hW template (by simpa [stepWorld] using hstep)
+  | ingress dst label =>
+    exact wired_stable I.desc w w' hW fun i =>
+      ingress_parent I w w' dst label i (by simpa [stepWorld] using hstep)
+  | callTimeout s =>
+    exact wired_stable I.desc w w' hW fun i =>
+      timeout_parent w w' s i (by simpa [stepWorld] using hstep)
+  | stutter =>
+    exact (stutter_unchanged I w w' h).symm ▸ hW
+
+theorem read_fold_st (D : Description) :
+    ∀ ids : List InstId, ∀ w : World, ∀ i : InstId,
+      ((ids.foldl (fun w id => readCells D w id) w).st i) = w.st i := by
+  intro ids
+  induction ids with
+  | nil => intro w i; simp
+  | cons id ids ih =>
+    intro w i
+    simp only [List.foldl_cons]
+    rw [ih (readCells D w id) i, cellsSt]
+
+theorem init_actor_parent (D : Description) (id : InstId) : (initActor D id).parent = none := by
+  cases h : templateOf D (tname id) <;> simp [initActor, h, withTokens, absentActor]
+
+theorem wired_init (I : Impl) (N : Nat) : Wired I.desc (initWorld I N) := by
+  intro id p hp
+  unfold initWorld at hp
+  rw [read_fold_st I.desc (coreRoster I.desc)
+    { N := N, roster := coreRoster I.desc, nextIx := fun _ => 0,
+      st := fun i => if (coreRoster I.desc).contains i then initActor I.desc i else absentActor,
+      cell := fun _ _ => cleanCell, observed := fun _ _ => 0 } id] at hp
+  by_cases hm : id ∈ coreRoster I.desc
+  · simp [hm, init_actor_parent] at hp
+  · simp [hm, absentActor] at hp
+
+theorem wire_reach (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) : Wired I.desc w := by
+  induction hR with
+  | init => exact wired_init I N
+  | step _ _ _ _ happ ih => exact wire_step I _ _ ih _ happ
+
+/-- `GraphOk` rejects a supervised template with an empty tombstone, on every
+arm of `subtreeEntry`. A recorded parent is that supervisor, so the label the
+seal would enqueue is nonempty. -/
+theorem tombstone_label_ne (D : Description) (hG : GraphOk D) (w : World) (hW : Wired D w)
+    (child p : InstId) (hpar : (w.st child).parent = some p) :
+    tombstoneLabel D child ≠ "" := by
+  obtain ⟨t, ht, hsup⟩ := hW child p hpar
+  have hmap : D.templates.filterMap (subtreeEntry D) = [] := by
+    simpa [subtreeFails_entry] using hG.subtrees
+  have hentry := filterMap_none (subtreeEntry D) D.templates hmap t
+    (templateOf_mem D (tname child) t ht).1
+  have hne := subtreeEntry_tombstone D t (tname p) hentry hsup
+  unfold tombstoneLabel
+  simp only [ht]
+  have hb : (t.tombstone == "") = false := by
+    cases hbit : t.tombstone == "" with
+    | false => rfl
+    | true => exact absurd ((beq_iff_eq).mp hbit) hne
+  simp only [hb]
+  cases child with
+  | core _ => exact hne
+  | peer _ _ g => exact tmb_hash_ne t.tombstone g hne
+
+/-- One more declared ordinary label fits. Tombstones already queued are within
+the slot bound, and a label that is not on the lane is one more sender inside
+`prioLabels`, which `prioSized` counted. -/
+theorem lane_room (I : Impl) (w : World) (hG : GraphOk I.desc) (hL : LocalOk I)
+    (hH : Hold I w) (id : InstId) (label : String) (hmem : id ∈ w.roster)
+    (hlabel : label ∈ prioLabels I (tname id))
+    (habsent : label ∉ tmb_laneLabels (w.st id).prio) :
+    prioLoad (w.st id).prio < capPrio I.desc w.N id := by
+  obtain ⟨sup, ht, hmult⟩ := hH.role id hmem
+  have hsized := tmb_prio_sized I hL (tname id) sup ht
+  have hlane := hH.lane id
+  have hload : prioLoad (w.st id).prio =
+      (tombSlots (w.st id).prio).length + (tmb_laneLabels (w.st id).prio).length := by
+    simpa [prioLoad] using tmb_load_split (w.st id).prio hlane.peer
+  have hord : (tmb_laneLabels (w.st id).prio).length + 1 ≤ (prioLabels I (tname id)).length :=
+    tmb_nodup_sub_cons _ _ label hlane.ordNodup hlane.ordIn hlabel habsent
+  have hrest : (tmb_laneLabels (w.st id).prio).length + 1 ≤ prioSenderBound I (tname id) :=
+    Nat.le_trans hord (Nat.le_max_right _ _)
+  have htombs : (tombSlots (w.st id).prio).length ≤ openCount I.desc w id := by
+    unfold openCount
+    exact Nat.le_add_left _ _
+  have haff := legal_le_affine I.desc id w.N sup ht hmult
+  have htombsLe : (tombSlots (w.st id).prio).length ≤
+      (tombstoneAffine I.desc (tname id)).eval w.N :=
+    Nat.le_trans (Nat.le_trans htombs (census_total I.desc w id hG hH.rooted (hH.census id))) haff
+  have hlt := ordinary_enqueue_room I.desc (tname id) (prioSenderBound I (tname id))
+    (tombSlots (w.st id).prio).length (tmb_laneLabels (w.st id).prio).length w.N sup
+    ht hsized hrest htombsLe
+  simpa [hload, capPrio, ht] using hlt
+
+/-- A reachable actor's self-schedule is already on its priority lane, or the
+lane is strictly under `capPrio`. The label is one `prioLabels` counted. -/
+theorem self_schedule_fits (I : Impl) (N : Nat) (w : World)
+    (hG : GraphOk I.desc) (hL : LocalOk I) (hReach : Reachable I N w)
+    (id : InstId) (k : Cont) (label : String) (es : List Eff)
+    (hlive : (w.st id).life = .alive) (hph : (w.st id).phase = .run k)
+    (hk : k.rest = .selfSchedule label :: es) :
+    ((w.st id).prio.any (fun p => p.label == label)) = true ∨
+      prioLoad (w.st id).prio < capPrio I.desc w.N id := by
+  have hH := hold_reach I N w hG hReach
+  have hmem : id ∈ w.roster := hH.rostered id (by rw [hlive]; intro h; cases h)
+  have hdec : ContDeclared I (tname id) k := by
+    simpa [phaseDeclared, hph] using hH.phase id hmem
+  have hlabel : label ∈ prioLabels I (tname id) :=
+    hdec.rest.sched label (by simpa [hk] using tmb_self_head label es)
+  by_cases hqueued : ((w.st id).prio.any (fun p => p.label == label)) = true
+  · exact Or.inl hqueued
+  · have hfree : ((w.st id).prio.any (fun p => p.label == label)) = false := by
+      cases hbit : ((w.st id).prio.any (fun p => p.label == label)) with
+      | false => rfl
+      | true => exact absurd hbit hqueued
+    exact Or.inr (lane_room I w hG hL hH id label hmem hlabel
+      (lane_absent (w.st id).prio label hfree))
+
+/-- A cell wake on a reachable reader is already on that reader's priority lane,
+or the lane is strictly under `capPrio`. The writer's continuation declared
+the label for this reader. -/
+theorem cell_wake_fits (I : Impl) (N : Nat) (w : World)
+    (hG : GraphOk I.desc) (hL : LocalOk I) (hReach : Reachable I N w)
+    (writer : InstId) (k : Cont) (dst label : String) (value : Nat) (es : List Eff)
+    (hliveW : (w.st writer).life = .alive) (hph : (w.st writer).phase = .run k)
+    (hk : k.rest = .cell dst label value :: es) (reader : InstId)
+    (hliveR : (w.st reader).life = .alive) (hname : tname reader = dst) :
+    ((w.st reader).prio.any (fun p => p.label == label)) = true ∨
+      prioLoad (w.st reader).prio < capPrio I.desc w.N reader := by
+  have hH := hold_reach I N w hG hReach
+  have hmemW : writer ∈ w.roster := hH.rostered writer (by rw [hliveW]; intro h; cases h)
+  have hdec : ContDeclared I (tname writer) k := by
+    simpa [phaseDeclared, hph] using hH.phase writer hmemW
+  have hwake : label ∈ cellWakeLabels dst k.rest := by
+    simpa [hk] using tmb_cell_head dst label value es
+  have hlabel : label ∈ prioLabels I (tname reader) := by
+    simpa [hname] using hdec.rest.wake dst label hwake
+  have hmemR : reader ∈ w.roster := hH.rostered reader (by rw [hliveR]; intro h; cases h)
+  by_cases hqueued : ((w.st reader).prio.any (fun p => p.label == label)) = true
+  · exact Or.inl hqueued
+  · have hfree : ((w.st reader).prio.any (fun p => p.label == label)) = false := by
+      cases hbit : ((w.st reader).prio.any (fun p => p.label == label)) with
+      | false => rfl
+      | true => exact absurd hbit hqueued
+    exact Or.inr (lane_room I w hG hL hH reader label hmemR hlabel
+      (lane_absent (w.st reader).prio label hfree))
+
+theorem self_schedule_safe (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (label : String) (es : List Eff) (hlive : a.life = .alive)
+    (hk : k.rest = .selfSchedule label :: es) (hcrash : w.crashed = false)
+    (hfit : (a.prio.any (fun p => p.label == label)) = true ∨
+      prioLoad a.prio < capPrio I.desc w.N id) :
+    (execRun I w id a k).crashed = false := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  unfold execRun
+  simp only [hgo, hk]
+  by_cases hany : (a.prio.any (fun p => p.label == label)) = true
+  · simp [hany, setActor, hcrash]
+  · have hfany : (a.prio.any (fun p => p.label == label)) = false := by
+      cases hb : a.prio.any (fun p => p.label == label) with
+      | false => rfl
+      | true => exact absurd hb hany
+    simp [hfany]
+    by_cases hroom : prioLoad a.prio < capPrio I.desc w.N id
+    · simp [hroom, setActor, hcrash]
+    · rcases hfit with hqueued | hlt
+      · exact absurd hqueued (by simp [hfany])
+      · exact absurd hlt hroom
+
 /-- A reachable world under `GraphOk` and `LocalOk` never overflows a live
-parent's priority lane with a nonempty tombstone. `LocalOk` supplies
-`prioSized` (`tmb_prio_sized`). The offer stays strictly below `capPrio`. -/
+parent's priority lane. `GraphOk` makes the supervised template's tombstone
+nonempty, and `Wired` says a recorded parent is that supervisor. `LocalOk`
+supplies `prioSized` (`tmb_prio_sized`). The offer stays strictly below
+`capPrio`. -/
 theorem no_tombstone_overflow (I : Impl) (N : Nat) (w : World) (child : InstId)
     (hG : GraphOk I.desc) (hL : LocalOk I) (hReach : Reachable I N w)
     (hshut : (w.st child).life = .shuttingDown)
     (hpend : (w.st child).pendingTombstone = true) :
     ∀ parent, liveSupervisor I.desc (releaseWorld I.desc w child (w.st child)) child = some parent →
       ((releaseWorld I.desc w child (w.st child)).st parent).life = .alive →
-      (tombstoneMsg I.desc ((releaseWorld I.desc w child (w.st child)).st parent) child).label ≠ "" →
       prioLoad ((releaseWorld I.desc w child (w.st child)).st parent).prio <
         capPrio I.desc (releaseWorld I.desc w child (w.st child)).N parent := by
-  exact tmb_seal_room I w child hG hL (hold_reach I N w hG hReach) hshut hpend
+  intro parent hsup halive
+  have hH := hold_reach I N w hG hReach
+  have hW := wire_reach I N w hReach
+  let sealed := releaseWorld I.desc w child (w.st child)
+  have hparS : (sealed.st child).parent = (w.st child).parent :=
+    release_parent I.desc w child (w.st child) child
+  have hlive := tmb_parent_alive I.desc sealed child parent hsup
+  have hpar : (w.st child).parent = some parent := by
+    rw [← hparS]
+    exact hlive.1
+  have hlabel := tombstone_label_ne I.desc hG w hW child parent hpar
+  have hmsg : (tombstoneMsg I.desc (sealed.st parent) child).label ≠ "" := by
+    simpa [tombstoneMsg] using hlabel
+  exact tmb_seal_room I w child hG hL hH hshut hpend parent hsup halive hmsg
 
 end Deadlock

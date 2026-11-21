@@ -138,10 +138,12 @@ An untimed peer (`peerUntimed`) is not a `Deadlock`. Its data result is
 
 ## Shutdown and drop
 
-`terminate` of a stage in a supervision tree is `terminateStage`: `markTree`
-marks that stage and every descendant shutting down. The tombstone is armed
-then and queued at the seal, once the child is dead, on the immediate
-supervisor's priority lane. That is when pure-stage notifies the parent:
+`terminate` of a stage in a supervision tree is `terminateStage`:
+`dropDescendants` seals every recorded descendant in this step, and those
+tombstones are not delivered. The stage itself is `shutdownActor`. It is
+marked shutting down, the tombstone is armed then, and the tombstone is
+queued at the seal, once the child is dead, on the immediate supervisor's
+priority lane. That is when pure-stage notifies the parent:
 `terminate_stage` finishes the child before `tombstones.push_back`. The
 supervisor may be a per-peer stage of the same subtree. The parent answers
 the tombstone in its own later step. A re-spawn of that slot is enabled when

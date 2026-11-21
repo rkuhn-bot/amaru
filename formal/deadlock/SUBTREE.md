@@ -13,7 +13,7 @@ A subtree may have no unsupervised template. Every member then names a superviso
 - A subtree member is per-peer.
 - A named supervisor is a multiplicity-one core or a per-peer stage of the same subtree, and not the member itself.
 - A pool (`slots` > 0) names a multiplicity-one supervisor. Slots under a per-peer parent are rejected.
-- A supervised child names a nonempty tombstone. An empty label crashes when that child terminates while the parent is alive, because the parent has no handler to deliver.
+- A supervised child names a nonempty tombstone. `GraphOk` rejects an empty one, so a reachable seal does not enqueue an empty label.
 - An untimed peer wait is allowed when a timed `timeoutKills` peer shares the subtree. A pure untimed wait is not an interior dependency and is not a permanent mailbox.
 
 `muxDesc` is that shape. `timer` is the one unsupervised root and the killing timeout. `reader` is its child, and the untimed header wait sits in the same subtree.

@@ -13,7 +13,12 @@ module that imports them (`CallTag`, `Inv2`, `Mail`, `Occ`, `Pres`,
 chain is meant to carry. They are not theorems of this tree until it builds
 again. `no_tombstone_overflow` is not part of that chain. It is a theorem of
 `Deadlock.Tomb`: a reachable world under `GraphOk` and `LocalOk` does not
-overflow a live parent's lane with a nonempty tombstone. `hold_reach` is
+overflow a live parent's lane. `GraphOk` rejects a supervised template whose
+tombstone is empty, and a recorded parent on a reachable world is the
+supervisor that template names, so the label is nonempty.
+`self_schedule_fits` and `cell_wake_fits` are the same lane for a reachable
+self-schedule and for a cell wake of one of its readers: the label is already
+queued, or the lane is below `capPrio`. `hold_reach` is
 `Hold` for every reachable world under `GraphOk`. `Side` carries the key counters, roster
 uniqueness, and the empty off-roster lane from the initial world through
 every enabled step. `LocalOk` supplies `prioSized`.
@@ -33,23 +38,23 @@ A fair run is exactly a non-crashing infinite run. Once `crashWorld` sets
 `World.crashed`, every action is disabled, including stutter, ingress, and
 spawn, and the run stops. The claim is deadlock-free or crashed. `LocalOk`
 does not remove the crash. Under `GraphOk` and `LocalOk` the steps that
-still crash the roster are:
+still crash a world a run can reach are:
 
 - `terminate` of a permanent core
-- a self-schedule that does not fit the priority lane
-- a cell wake that does not fit the priority lane
-- `enqueueTombstone` when the recorded parent is alive and the tombstone
-  label is empty
 - the `terminate` fall-through, a stage the shutdown cases do not classify
 - a missing template at a step that looks the template up and crashes
 
-The last three are obligations, not a proved absence. A seal whose recorded
-parent is shutting down or dead drops the tombstone: pure-stage has already
-discarded that queue in `terminate_stage`. An empty label on a parent that
-is still alive crashes, before the offer. A `LocalOk` program's `terminate`
-is expected to meet one of the classified shutdown cases, and a step is
-expected to look up a template the description declares. This note does not
-prove those sites unreachable. A design that reaches one of them crashes.
+Those three are obligations, not a proved absence. A `LocalOk` program's
+`terminate` is expected to meet one of the classified shutdown cases, and a
+step is expected to look up a template the description declares. This note
+does not prove those sites unreachable. A design that reaches one of them
+crashes.
+
+A seal whose recorded parent is shutting down or dead drops the tombstone:
+pure-stage has already discarded that queue in `terminate_stage`. An empty
+label on a live parent is not a reachable seal under `GraphOk`. A reachable
+self-schedule and a reachable cell wake fit the lane, so neither overflows
+it.
 
 `prioSized` is part of `LocalOk`. Per parent it is one tombstone per child
 slot — a pool's `slots`, one key per root population for a root a core
@@ -64,15 +69,16 @@ A slot that is still shutting down is occupied too. The tombstone is queued
 at the seal, so the predecessor is dead before the parent is notified.
 `no_tombstone_overflow` is that account for a reachable world. Under
 `GraphOk` and `LocalOk`, a pending seal of a shutting child does not fill a
-live parent's lane when the tombstone label is nonempty. The offer stays
+live parent's lane. The offer stays
 strictly below `capPrio`. `LocalOk` supplies `prioSized`, through
 `tmb_prio_sized`, and `hold_reach` supplies `Hold`. The run that overflowed
 one lane reused a subtree key and delivered both tombstones to the older
 generation. A birth now takes a fresh key, the child records the parent
 incarnation, and a seal drops the tombstone when that incarnation is not
 alive. `Deadlock/Counterexample.lean` runs the schedule that matches that
-rule: two roots, two keys, one tombstone on each live lane. A self-schedule
-or a cell wake that does not fit still crashes, matching pure-stage's panic.
+rule: two roots, two keys, one tombstone on each live lane. A reachable
+self-schedule or cell wake fits the same lane: the label is already queued,
+or there is room under `capPrio`. An undeclared label is outside that claim.
 `LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head

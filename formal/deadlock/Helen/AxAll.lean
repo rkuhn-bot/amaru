@@ -286,7 +286,6 @@ import Deadlock.Local
 #print axioms Deadlock.crashWorld_prev
 #print axioms Deadlock.tryWake_core_life
 #print axioms Deadlock.wake_core_life
-#print axioms Deadlock.markTree_prev
 #print axioms Deadlock.terminateStage_core_prev
 #print axioms Deadlock.abortChildren_prev
 #print axioms Deadlock.spawnChild_core_life
