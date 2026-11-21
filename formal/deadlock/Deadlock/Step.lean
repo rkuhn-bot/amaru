@@ -2838,6 +2838,12 @@ theorem inv_reachable (I : Impl) (N : Nat) (w : World) (hL : LocalOk I)
   | init => exact inv_init I N hL
   | step _ _ _ _ ha ih => exact step_inv I hL _ _ ⟨_, ha⟩ ih
 
+/-- Reachable worlds satisfy the semantic invariant. A scheduler step is proved
+for the whole invariant, and this is that result's first field. -/
+theorem sem_reachable (I : Impl) (N : Nat) (w : World) (hL : LocalOk I)
+    (hR : Reachable I N w) : SemInv I w :=
+  (inv_reachable I N w hL hR).1
+
 theorem effect_beq (a b : EffectKind) : (a == b) = true ↔ a = b := by
   cases a <;> cases b <;> decide
 

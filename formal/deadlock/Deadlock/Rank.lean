@@ -2168,11 +2168,6 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
       | peer =>
         simp [execRun, hrest, setActor, carried] at h
 
-theorem cfg_reachable {I : Impl} {N : Nat} (ρ : Run I N) (n : Nat) : Reachable I N (ρ.cfg n) := by
-  induction n with
-  | zero => simpa [ρ.start] using (Reachable.init : Reachable I N (initWorld I N))
-  | succ n ih => exact Reachable.step (ρ.cfg n) (ρ.cfg (n + 1)) (ρ.act n) ih (ρ.valid n)
-
 theorem run_prefix {I : Impl} (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
     (s : InstId) (i n : Nat) (k : Cont)
     (hp : ((ρ.cfg i).st s).phase = .run k)
@@ -18783,7 +18778,7 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
 theorem deadlock_freedom (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) : ¬ Deadlock ρ := by
   intro hD
-  obtain ⟨s, i, _, hS, hkind⟩ := deadlock_kind ρ hF hD
+  obtain ⟨s, i, _, hS, hkind⟩ := deadlock_kind hL ρ hF hD
   exact never_stuck I hL hG hA ρ hF s i hS (Or.inr (by
     rcases hkind with hkind | hkind <;> simp [hkind]))
 
