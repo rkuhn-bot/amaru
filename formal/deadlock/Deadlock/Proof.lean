@@ -202,8 +202,6 @@ theorem enqueue_keeps_other_run (w : World) (D : Description) (sender dst : Inst
           · simp [hd, setActor_other, hs, hp]
   · simp [hlife]
     split <;> simp [setActor_other, hs, hp]
-  · simp [hlife]
-    split <;> simp [setActor_other, hs, hp]
 
 /-- An actor that a roster crash leaves alive was not touched by it. -/
 theorem crashWorld_alive_st (w : World) (i : InstId)
@@ -211,7 +209,7 @@ theorem crashWorld_alive_st (w : World) (i : InstId)
   simp only [crashWorld] at h ⊢
   by_cases hmem : decide (i ∈ w.roster) = true
   · simp only [hmem, ite_true, crashActor] at h ⊢
-    by_cases hgo : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true
+    by_cases hgo : ((w.st i).life == .alive) = true
     · simp [hgo] at h
     · simp [hgo]
   · simp [hmem]
@@ -434,47 +432,6 @@ theorem releaseOutbound_phase (w : World) (dead s : InstId) :
             rw [ite_eq_right hne]
           · simp [setActor, hs, hh, addTokens]
 
-theorem armTombstone_phase_life (w : World) (id i : InstId) :
-    ((armTombstone w id).st i).phase = (w.st i).phase ∧
-      ((armTombstone w id).st i).life = (w.st i).life := by
-  unfold armTombstone
-  by_cases hi : i = id
-  · rw [hi, setActor_self]
-    exact ⟨rfl, rfl⟩
-  · rw [setActor_other _ _ _ _ hi]
-    exact ⟨rfl, rfl⟩
-
-/-- Marking `id` shutting down keeps the running continuation of every actor
-that is still alive afterwards. `id` itself is no longer alive once marked. -/
-theorem markShutdown_preserves_run (w : World) (id s : InstId) (k : Cont)
-    (hp : (w.st s).phase = .run k) (hfin : ((markShutdown w id).st s).life = .alive) :
-    ((markShutdown w id).st s).phase = .run k := by
-  unfold markShutdown at hfin ⊢
-  by_cases hlive : ((w.st id).life == .alive) = true
-  · rw [ite_eq_left hlive] at hfin ⊢
-    rw [releaseOutbound_life] at hfin
-    rw [releaseOutbound_phase]
-    by_cases hi : s = id
-    · rw [hi, setActor_self] at hfin
-      cases hfin
-    · rw [setActor_other _ _ _ _ hi]
-      exact hp
-  · rw [ite_eq_right hlive] at hfin ⊢
-    exact hp
-
-theorem shutdownActor_preserves_run (D : Description) (w : World) (id s : InstId) (k : Cont)
-    (hp : (w.st s).phase = .run k) (hfin : ((shutdownActor D w id).st s).life = .alive) :
-    ((shutdownActor D w id).st s).phase = .run k := by
-  unfold shutdownActor at hfin ⊢
-  dsimp only at hfin ⊢
-  by_cases hlive : ((w.st id).life == .alive) = true
-  · rw [ite_eq_left hlive] at hfin ⊢
-    rw [(armTombstone_phase_life _ id s).2] at hfin
-    rw [(armTombstone_phase_life _ id s).1]
-    exact markShutdown_preserves_run w id s k hp hfin
-  · rw [ite_eq_right hlive] at hfin ⊢
-    exact markShutdown_preserves_run w id s k hp hfin
-
 theorem releaseWorld_preserves_run (D : Description) (w : World) (id s : InstId) (a : Actor)
     (k : Cont) (hs : s ≠ id) (hp : (w.st s).phase = .run k) :
     ((releaseWorld D w id a).st s).phase = .run k := by
@@ -483,6 +440,56 @@ theorem releaseWorld_preserves_run (D : Description) (w : World) (id s : InstId)
   rw [setActor_other _ id s _ hs, releaseOutbound_phase, (refundParked_phase_life _ _ _ s).1,
     (refundMsgs_phase_life _ _ _ s).1, cellsSt]
   exact hp
+
+theorem shutdownActor_preserves_run (D : Description) (w : World) (id s : InstId) (k : Cont)
+    (hp : (w.st s).phase = .run k) (hfin : ((shutdownActor D w id).st s).life = .alive) :
+    ((shutdownActor D w id).st s).phase = .run k := by
+  unfold shutdownActor at hfin ⊢
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · rw [ite_eq_left hlive] at hfin ⊢
+    unfold sealActor at hfin ⊢
+    let w1 := releaseWorld D w id (w.st id)
+    have hw1 : w1 = releaseWorld D w id (w.st id) := rfl
+    have hs : s ≠ id := by
+      intro heq
+      subst heq
+      have hdead := releaseWorld_self_dead D w s (w.st s)
+      have halive := enqueueTombstone_life D w1 s s (by simpa [hw1] using hfin)
+      rw [hw1, hdead] at halive
+      cases halive
+    have hp1 : (w1.st s).phase = .run k := by
+      simpa [hw1] using releaseWorld_preserves_run D w id s (w.st id) k hs hp
+    unfold enqueueTombstone at hfin ⊢
+    cases hpar : ((releaseWorld D w id (w.st id)).st id).parent with
+    | none =>
+      simpa [hpar, hw1] using hp1
+    | some parent =>
+      simp only [hpar] at hfin ⊢
+      by_cases hplive : (((releaseWorld D w id (w.st id)).st parent).life != .alive) = true
+      · rw [ite_eq_left hplive] at hfin ⊢
+        simpa [hw1] using hp1
+      · rw [ite_eq_right hplive] at hfin ⊢
+        by_cases hlab : ((tombstoneMsg D ((releaseWorld D w id (w.st id)).st parent) id).label == "") = true
+        · rw [ite_eq_left hlab] at hfin ⊢
+          rw [crashWorld_alive_st (releaseWorld D w id (w.st id)) s hfin]
+          simpa [hw1] using hp1
+        · rw [ite_eq_right hlab] at hfin ⊢
+          unfold offerPrio at hfin ⊢
+          by_cases hfull :
+              decide (prioLoad ((releaseWorld D w id (w.st id)).st parent).prio >=
+                  capPrio D (releaseWorld D w id (w.st id)).N parent) = true
+          · rw [ite_eq_left hfull] at hfin ⊢
+            rw [crashWorld_alive_st (releaseWorld D w id (w.st id)) s hfin]
+            simpa [hw1] using hp1
+          · rw [ite_eq_right hfull] at hfin ⊢
+            by_cases hsp : s = parent
+            · subst hsp
+              rw [setActor_self]
+              simpa [hw1] using hp1
+            · rw [setActor_other _ _ _ _ hsp]
+              simpa [hw1] using hp1
+  · rw [ite_eq_right hlive]
+    exact hp
 
 /-- Sealing a branch keeps the running continuation of every actor it leaves alive.
 A sealed actor is dead, so the final-alive hypothesis excludes it. -/
@@ -516,11 +523,11 @@ theorem sealBranch_preserves_run (fuel : Nat) (D : Description) (s : InstId) (k 
       · exact hp0
     let sealed := w.roster.foldl step w
     have hfold := foldl_keeps_run step s k hprev hkeep w.roster w hp
-    change ((if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+    change ((if (sealed.st id).life == .alive then
       releaseWorld D sealed id (sealed.st id) else sealed).st s).life = .alive at hfin
-    change ((if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+    change ((if (sealed.st id).life == .alive then
       releaseWorld D sealed id (sealed.st id) else sealed).st s).phase = .run k
-    by_cases hgo : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = true
+    by_cases hgo : ((sealed.st id).life == .alive) = true
     · rw [ite_eq_left hgo] at hfin ⊢
       by_cases hsid : s = id
       · rw [hsid, releaseWorld_self_dead] at hfin
@@ -729,6 +736,7 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
         simp [execRun, hliveB, hk, setActor, hs, hp]
       | abort =>
         simp only [execRun, hliveB, hk, ite_true] at halive ⊢
+        rw [setActor_other _ _ _ _ hs] at halive ⊢
         exact abortChildren_preserves_run I.desc w id s k0 hp halive
       | spawn child =>
         simp only [execRun, hliveB, hk, ite_true] at halive ⊢

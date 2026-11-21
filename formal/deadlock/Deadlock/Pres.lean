@@ -224,13 +224,13 @@ theorem crashWorld_ty (w : World) (i : InstId) :
   · simp [h, crashActor_ty]
   · simp [h]
 
-theorem crash_go {a : Actor} (h : a.life = .alive ∨ a.life = .shuttingDown) :
+theorem crash_go {a : Actor} (h : a.life = .alive) :
     crashActor a = { a with life := .dead, phase := .crashed } := by
-  rcases h with h | h <;> simp [crashActor, h]
+  simp [crashActor, h]
 
-theorem crash_stay {a : Actor} (ha : a.life ≠ .alive) (hs : a.life ≠ .shuttingDown) :
+theorem crash_stay {a : Actor} (ha : a.life ≠ .alive) :
     crashActor a = a := by
-  simp [crashActor, ha, hs]
+  simp [crashActor, ha]
 
 theorem crash_at (w : World) (i : InstId) (h : i ∈ w.roster) :
     (crashWorld w).st i = crashActor (w.st i) := by
@@ -257,65 +257,57 @@ theorem crash_sem (I : Impl) (w : World) (hS : SemInv I w) : SemInv I (crashWorl
     · intro r hr
       rcases (hS.live g hg).2 r hr with ha | hh
       · have hmem : InstId.core r ∈ w.roster := hS.rostered _ ha
-        rw [crash_at w (InstId.core r) hmem, crash_go (Or.inl ha)]
-        exact Or.inr (Or.inr rfl)
+        rw [crash_at w (InstId.core r) hmem, crash_go ha]
+        exact Or.inr rfl
       · by_cases hmem : InstId.core r ∈ w.roster
-        · rcases hh with hshut | hdead
-          · rw [crash_at w (InstId.core r) hmem, crash_go (Or.inr hshut)]
-            exact Or.inr (Or.inr rfl)
-          · rw [crash_at w (InstId.core r) hmem, crash_stay (by rw [hdead]; intro h; cases h)
-              (by rw [hdead]; intro h; cases h)]
-            exact Or.inr (Or.inr hdead)
+        · have hdead : (w.st (InstId.core r)).life = .dead := hh
+          rw [crash_at w (InstId.core r) hmem, crash_stay (by rw [hdead]; intro h; cases h)]
+          exact Or.inr hh
         · rw [crash_off w (InstId.core r) hmem]
           exact Or.inr hh
   · intro i
     by_cases hmem : i ∈ w.roster
-    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+    · by_cases hgo : (w.st i).life = .alive
       · rw [crash_at w i hmem, crash_go hgo]
         simp [contTy]
-      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
-          (by intro h; exact hgo (Or.inr h))]
+      · rw [crash_at w i hmem, crash_stay hgo]
         exact hS.cont i
     · rw [crash_off w i hmem]
       exact hS.cont i
   · intro i
     by_cases hmem : i ∈ w.roster
-    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+    · by_cases hgo : (w.st i).life = .alive
       · rw [crash_at w i hmem, crash_go hgo]
         simp [programOk]
-      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
-          (by intro h; exact hgo (Or.inr h))]
+      · rw [crash_at w i hmem, crash_stay hgo]
         exact hS.prog i
     · rw [crash_off w i hmem]
       exact hS.prog i
   · intro i
     by_cases hmem : i ∈ w.roster
-    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+    · by_cases hgo : (w.st i).life = .alive
       · rw [crash_at w i hmem, crash_go hgo]
         simp [waitEdge]
-      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
-          (by intro h; exact hgo (Or.inr h))]
+      · rw [crash_at w i hmem, crash_stay hgo]
         exact hS.waited i
     · rw [crash_off w i hmem]
       exact hS.waited i
   · intro i hn
     by_cases hmem : i ∈ w.roster
-    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+    · by_cases hgo : (w.st i).life = .alive
       · rw [crash_at w i hmem, crash_go hgo] at hn ⊢
         simp at hn
         exact Or.inr rfl
-      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
-          (by intro h; exact hgo (Or.inr h))] at hn ⊢
+      · rw [crash_at w i hmem, crash_stay hgo] at hn ⊢
         exact hS.idleOff i hn
     · rw [crash_off w i hmem] at hn ⊢
       exact hS.idleOff i hn
   · intro i hlive
     by_cases hmem : i ∈ w.roster
-    · by_cases hgo : (w.st i).life = .alive ∨ (w.st i).life = .shuttingDown
+    · by_cases hgo : (w.st i).life = .alive
       · rw [crash_at w i hmem, crash_go hgo] at hlive
         simp at hlive
-      · rw [crash_at w i hmem, crash_stay (by intro h; exact hgo (Or.inl h))
-          (by intro h; exact hgo (Or.inr h))] at hlive
+      · rw [crash_at w i hmem, crash_stay hgo] at hlive
         exact hS.rostered i hlive
     · rw [crash_off w i hmem] at hlive
       exact hS.rostered i hlive
@@ -418,10 +410,6 @@ theorem alive_if_busy (I : Impl) (w : World) (hS : SemInv I w) (id : InstId)
   cases hlife : (w.st id).life with
   | alive => exact Or.inl rfl
   | absent =>
-    rcases hS.idleOff id (by rw [hlife]; intro he; cases he) with hidle | hc
-    · exact absurd hidle h
-    · exact Or.inr hc
-  | shuttingDown =>
     rcases hS.idleOff id (by rw [hlife]; intro he; cases he) with hidle | hc
     · exact absurd hidle h
     · exact Or.inr hc

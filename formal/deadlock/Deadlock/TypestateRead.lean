@@ -320,9 +320,9 @@ theorem isChild_mask (w : World) (parent child : InstId) :
 
 theorem crashActor_mask (a : Actor) :
     maskActor (crashActor a) = maskActor (crashActor (maskActor a)) := by
-  cases hlive : (a.life == .alive || a.life == .shuttingDown) with
+  cases hlive : (a.life == .alive) with
   | true =>
-    have hlive' : ((maskActor a).life == .alive || (maskActor a).life == .shuttingDown) = true := by
+    have hlive' : ((maskActor a).life == .alive) = true := by
       simpa [maskActor_life] using hlive
     unfold crashActor
     rw [hlive, hlive']
@@ -336,7 +336,7 @@ theorem crashActor_mask (a : Actor) :
     | true => rw [maskActor_keep a ht]
     | false => rw [maskActor_clear a ht]
   | false =>
-    have hlive' : ((maskActor a).life == .alive || (maskActor a).life == .shuttingDown) = false := by
+    have hlive' : ((maskActor a).life == .alive) = false := by
       simpa [maskActor_life] using hlive
     unfold crashActor
     rw [hlive, hlive']
@@ -608,36 +608,7 @@ theorem wakeReaders_mask (D : Description) (w : World) (dst label : String) (wri
   intro v id
   exact tryWake_mask D v id label writer
 
-/-- Marking shutdown lands in a phase the mask does not read, so the previous
-typestate is erased on both sides. -/
-theorem mask_shutdown (a : Actor) :
-    maskActor { a with life := .shuttingDown, phase := .idle } =
-      maskActor { maskActor a with life := .shuttingDown, phase := .idle } := by
-  have hs : tyRead { a with life := .shuttingDown, phase := .idle } = false := by simp [tyRead]
-  have hs2 : tyRead { maskActor a with life := .shuttingDown, phase := .idle } = false := by
-    simp [tyRead]
-  rw [maskActor_clear _ hs, maskActor_clear _ hs2]
-  cases ht : tyRead a with
-  | true => rw [maskActor_keep a ht]
-  | false => rw [maskActor_clear a ht]
-
-theorem markShutdown_mask (w : World) (id : InstId) :
-    maskWorld (markShutdown w id) = maskWorld (markShutdown (maskWorld w) id) := by
-  unfold markShutdown
-  simp only [maskWorld_st, maskActor_life]
-  cases hlive : ((w.st id).life == .alive) with
-  | false =>
-    rw [if_neg (by simp), if_neg (by simp)]
-    exact (maskWorld_idem _).symm
-  | true =>
-    rw [if_pos rfl, if_pos rfl]
-    rw [releaseOutbound_mask, mask_setActor]
-    conv =>
-      rhs
-      rw [releaseOutbound_mask, mask_setActor, maskWorld_idem]
-    exact congrArg (fun a => maskWorld (releaseOutbound (setActor (maskWorld w) id a) id))
-      (mask_shutdown (w.st id))
-
+/-- `pendingTombstone` is not an input of the mask. Setting it leaves `tyRead`. -/
 theorem mask_arm (a : Actor) :
     maskActor { a with pendingTombstone := true } =
       maskActor { maskActor a with pendingTombstone := true } := by
@@ -649,12 +620,6 @@ theorem mask_arm (a : Actor) :
     rw [maskActor_keep _ (hs.trans ht), maskActor_keep _ (hs2.trans ht), maskActor_keep a ht]
   | false =>
     rw [maskActor_clear _ (hs.trans ht), maskActor_clear _ (hs2.trans ht), maskActor_clear a ht]
-
-theorem armTombstone_mask (w : World) (id : InstId) :
-    maskWorld (armTombstone w id) = maskWorld (armTombstone (maskWorld w) id) := by
-  unfold armTombstone
-  rw [mask_setActor, mask_setActor, maskWorld_idem, maskWorld_st]
-  exact congrArg (setActor (maskWorld w) id) (mask_arm (w.st id))
 
 def killed (a : Actor) : Actor :=
   { a with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
@@ -754,14 +719,10 @@ theorem enqueueTombstone_mask (D : Description) (w : World) (child : InstId) :
 theorem sealActor_mask (D : Description) (w : World) (id : InstId) (a : Actor) :
     maskWorld (sealActor D w id a) = maskWorld (sealActor D (maskWorld w) id (maskActor a)) := by
   unfold sealActor
-  simp only [maskActor_pending]
-  cases hpend : a.pendingTombstone with
-  | false =>
-    rw [if_neg (by simp), if_neg (by simp)]
-    exact releaseWorld_mask D w id a
-  | true =>
-    rw [if_pos rfl, if_pos rfl]
-    rw [enqueueTombstone_mask, releaseWorld_mask, ← enqueueTombstone_mask]
+  refine (enqueueTombstone_mask D (releaseWorld D w id a) id).trans ?_
+  refine (congrArg (fun u => maskWorld (enqueueTombstone D u id))
+    (releaseWorld_mask D w id a)).trans ?_
+  exact (enqueueTombstone_mask D (releaseWorld D (maskWorld w) id (maskActor a)) id).symm
 
 theorem shutdownActor_mask (D : Description) (w : World) (id : InstId) :
     maskWorld (shutdownActor D w id) = maskWorld (shutdownActor D (maskWorld w) id) := by
@@ -770,10 +731,10 @@ theorem shutdownActor_mask (D : Description) (w : World) (id : InstId) :
   cases hlive : ((w.st id).life == .alive) with
   | false =>
     rw [if_neg (by simp), if_neg (by simp)]
-    exact markShutdown_mask w id
+    exact (maskWorld_idem _).symm
   | true =>
     rw [if_pos rfl, if_pos rfl]
-    rw [armTombstone_mask, markShutdown_mask, ← armTombstone_mask]
+    exact sealActor_mask D w id (w.st id)
 
 theorem sealBranch_mask (fuel : Nat) (D : Description) (w : World) (id : InstId) :
     maskWorld (sealBranch fuel D w id) = maskWorld (sealBranch fuel D (maskWorld w) id) := by
@@ -1525,7 +1486,31 @@ theorem execRun_mask (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
       · rw [mask_setActor, mask_setActor, maskWorld_idem]
         refine congrArg (setActor (maskWorld w) id) ?_
         apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
-      · exact abortChildren_mask I.desc w id
+      · show
+          maskWorld (setActor (abortChildren I.desc w id) id
+            (proceed ((abortChildren I.desc w id).st id) (afterHead k))) =
+          maskWorld (setActor (abortChildren I.desc (maskWorld w) id) id
+            (proceed ((abortChildren I.desc (maskWorld w) id).st id) (afterHead k)))
+        have hchildren := abortChildren_mask I.desc w id
+        have hst : maskActor ((abortChildren I.desc w id).st id) =
+            maskActor ((abortChildren I.desc (maskWorld w) id).st id) := by
+          have hws := congrArg (fun u : World => u.st id) hchildren
+          simpa [maskWorld_st] using hws
+        calc
+          maskWorld (setActor (abortChildren I.desc w id) id
+              (proceed ((abortChildren I.desc w id).st id) (afterHead k)))
+            = maskWorld (setActor (maskWorld (abortChildren I.desc w id)) id
+                (proceed (maskActor ((abortChildren I.desc w id).st id)) (afterHead k))) :=
+              mask_set_proceed (abortChildren I.desc w id) id
+                ((abortChildren I.desc w id).st id) (afterHead k)
+          _ = maskWorld (setActor (maskWorld (abortChildren I.desc (maskWorld w) id)) id
+                (proceed (maskActor ((abortChildren I.desc (maskWorld w) id).st id))
+                  (afterHead k))) := by
+              rw [hchildren, hst]
+          _ = maskWorld (setActor (abortChildren I.desc (maskWorld w) id) id
+                (proceed ((abortChildren I.desc (maskWorld w) id).st id) (afterHead k))) :=
+              (mask_set_proceed (abortChildren I.desc (maskWorld w) id) id
+                ((abortChildren I.desc (maskWorld w) id).st id) (afterHead k)).symm
       · rename_i _x _tail _eff child _heq
         split
         · next w' hw =>
@@ -1567,13 +1552,11 @@ theorem execHead_mask (I : Impl) (w : World) (id : InstId) :
   unfold execHead
   simp only [maskWorld_st, maskActor_life, maskActor_phase]
   split
-  · exact congrArg some (sealActor_mask I.desc w id (w.st id))
+  · rfl
   · split
+    · next k _hk =>
+      exact congrArg some (execRun_mask I w id (w.st id) k)
     · rfl
-    · split
-      · next k _hk =>
-        exact congrArg some (execRun_mask I w id (w.st id) k)
-      · rfl
 
 theorem mask_box (a : Actor) (ms : List Msg) :
     maskActor { a with box := ms } = maskActor { maskActor a with box := ms } := by
@@ -1691,8 +1674,6 @@ theorem receiveIngress_mask (I : Impl) (w : World) (dst : InstId) (label : Strin
       simp only [Bool.or_eq_false_iff, decide_eq_false_iff_not] at hdec
       cases hlife : (w.st dst).life with
       | alive => rfl
-      | shuttingDown =>
-        exact absurd (by rw [hlife]; intro h; cases h) hdec.1
       | dead =>
         exact absurd (by rw [hlife]; intro h; cases h) hdec.1
       | absent =>

@@ -43,8 +43,6 @@ theorem stuck_alive {I : Impl} {N : Nat} (hL : LocalOk I) (ρ : Run I N) (s : In
     exact (h.2 j hj).2
   cases hlife : ((ρ.cfg j).st s).life with
   | alive => rfl
-  | shuttingDown =>
-    exact absurd (waitKind_off _ (hS.idleOff s (by rw [hlife]; intro h; cases h))) hne
   | dead =>
     exact absurd (waitKind_off _ (hS.idleOff s (by rw [hlife]; intro h; cases h))) hne
   | absent =>
