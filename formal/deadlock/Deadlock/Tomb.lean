@@ -6358,6 +6358,65 @@ theorem filter_snoc_rel {α : Type} (p q : α → Bool) (xs : List α) (a : α)
       rw [ite_eq_right (by rw [hpf]; decide), ite_eq_right (by rw [hqf]; decide)]
       exact ih htail
 
+theorem filter_snoc_rel_off {α : Type} (p q : α → Bool) (xs : List α) (a : α)
+    (h : ∀ x, x ∈ xs → p x = q x) (ha : p a = false) :
+    ((xs ++ [a]).filter p).length = (xs.filter q).length := by
+  induction xs with
+  | nil => simp [ha]
+  | cons x xs ih =>
+    simp only [List.cons_append, List.filter_cons]
+    have hx : p x = q x := h x List.mem_cons_self
+    have htail : ∀ y, y ∈ xs → p y = q y := fun y hy => h y (List.mem_cons_of_mem x hy)
+    by_cases hp : p x = true
+    · have hq : q x = true := by rw [← hx]; exact hp
+      rw [ite_eq_left hp, ite_eq_left hq, List.length_cons, List.length_cons, ih htail]
+    · have hpf : p x = false := by
+        cases hbit : p x
+        · rfl
+        · exact absurd hbit hp
+      have hqf : q x = false := by rw [← hx]; exact hpf
+      rw [ite_eq_right (by rw [hpf]; decide), ite_eq_right (by rw [hqf]; decide)]
+      exact ih htail
+
+/-- A new notifying child of `template` under `par` adds exactly one to that
+count. Every other template under the same parent is unchanged. -/
+theorem census_born (D : Description) (w w' : World) (id par : InstId) (template : String)
+    (hst : ∀ i, w'.st i = if i = id then w'.st id else w.st i)
+    (hros : w'.roster = w.roster ++ [id]) (hnew : id ∉ w.roster)
+    (hbit : namedChild D w' par template id = true)
+    (hprio : (w'.st par).prio = (w.st par).prio) :
+    namedOpen D w' par template = namedOpen D w par template + 1 := by
+  have hagree : ∀ c, c ∈ w.roster → namedChild D w' par template c = namedChild D w par template c := by
+    intro c hc
+    have hne : c ≠ id := fun heq => hnew (heq ▸ hc)
+    have heq := hst c
+    simp [hne] at heq
+    simp [namedChild, childOpen, lifeHold, isChild, heq]
+  have hfilter := filter_snoc_rel (namedChild D w' par template) (namedChild D w par template)
+    w.roster id hagree hbit
+  have htombs : namedTombs ((w'.st par).prio) template = namedTombs ((w.st par).prio) template := by
+    simp [namedTombs, hprio]
+  rw [namedOpen, namedOpen, hros, hfilter, htombs]
+  omega
+
+theorem census_born_other (D : Description) (w w' : World) (id par : InstId) (name : String)
+    (hst : ∀ i, w'.st i = if i = id then w'.st id else w.st i)
+    (hros : w'.roster = w.roster ++ [id]) (hnew : id ∉ w.roster)
+    (hbit : namedChild D w' par name id = false)
+    (hprio : (w'.st par).prio = (w.st par).prio) :
+    namedOpen D w' par name = namedOpen D w par name := by
+  have hagree : ∀ c, c ∈ w.roster → namedChild D w' par name c = namedChild D w par name c := by
+    intro c hc
+    have hne : c ≠ id := fun heq => hnew (heq ▸ hc)
+    have heq := hst c
+    simp [hne] at heq
+    simp [namedChild, childOpen, lifeHold, isChild, heq]
+  have hfilter := filter_snoc_rel_off (namedChild D w' par name) (namedChild D w par name)
+    w.roster id hagree hbit
+  have htombs : namedTombs ((w'.st par).prio) name = namedTombs ((w.st par).prio) name := by
+    simp [namedTombs, hprio]
+  rw [namedOpen, namedOpen, hros, hfilter, htombs]
+
 theorem filter_snoc_off {α : Type} (p : α → Bool) (xs : List α) (a : α) (ha : p a = false) :
     ((xs ++ [a]).filter p).length = (xs.filter p).length := by
   induction xs with
