@@ -482,7 +482,8 @@ def mailImpl : Impl where
   desc := mailDesc
   transitions := [tr "S" "idle" "Go" "idle" [.send "H" "M" 0, .terminate]]
 
-/-- A second scheduler birth takes the next subtree key, not generation 1. -/
+/-- The dead root still occupies the one population slot while its message
+sits on `H`, so the next birth is not enabled. -/
 def S0 : InstId := .peer "S" 0 0
 def S1 : InstId := .peer "S" 1 0
 def Hc : InstId := .core "H"
@@ -492,9 +493,10 @@ def mailActs : List Action :=
 
 private theorem r7_old_mail_charged :
     ((runAt mailImpl 1 [.spawn "S"]).map fun w => (w.st S0).tokens "H") = some 1 ∧
-    ((runAt mailImpl 1 mailActs).map fun w =>
-      (lifeTag (w.st S0).life, lifeTag (w.st S1).life,
-       (w.st Hc).box.length, (w.st S1).tokens "H")) = some (3, 1, 1, 1) := by decide
+    ((runAt mailImpl 1 (mailActs.dropLast)).map fun w =>
+      (lifeTag (w.st S0).life, (w.st Hc).box.length, loneOutstanding mailDesc w "S")) =
+        some (3, 1, 1) ∧
+    runAt mailImpl 1 mailActs = none := by decide
 
 
 /-! # Round 8 probes (N5, N15, N16). Definitions above are copied from the
@@ -524,20 +526,21 @@ theorem stale_runs_base_handler :
     ((runAt staleTree 1 (.spawn "Conn" :: hcycle 0 ++ [.recvPrio C0])).map fun w =>
       ((w.st C0).prio.length, (w.st C0).typestate)) = some (0, "up") := by decide
 
-/-! ## N16: the charge goes to the new generation, the credit to the dead one. -/
+/-! ## N16: core mail holds the population slot. Self mail does not. -/
 
-/-- On the branch's own `mailImpl` (not `LocalOk`). Each scheduler birth takes
-a fresh subtree key, so the third birth is not charged for the mail queued
-at the keys before it. That mail is still in the core's box, one message
-from each old key, and the new key holds the budget. -/
+/-- On the branch's own `mailImpl` (not `LocalOk`). The dead root's message
+is still in the core's box, and that root still occupies the one slot, so
+no later key is born. -/
 theorem mail_not_local : localOkB mailImpl = false := by decide
 def S2 : InstId := .peer "S" 2 0
 def mailActs2 : List Action :=
   mailActs ++ [.ingress S1 "Go", .recvBulk S1, .exec S1, .exec S1, .exec S1, .spawn "S"]
 theorem nat_truncation :
-    ((runAt mailImpl 1 mailActs2).map fun w =>
-      ((w.st Hc).box.length, queuedFromKey w "S" 0 "H", queuedFromKey w "S" 1 "H",
-        (w.st S2).tokens "H", lifeTag (w.st S2).life)) = some (2, 1, 1, 1, 1) := by decide
+    ((runAt mailImpl 1 (mailActs.dropLast)).map fun w =>
+      ((w.st Hc).box.length, queuedFromKey w "S" 0 "H",
+        loneOutstanding mailDesc w "S", lifeTag (w.st S0).life)) = some (1, 1, 1, 3) ∧
+    runAt mailImpl 1 mailActs = none ∧
+    runAt mailImpl 1 mailActs2 = none := by decide
 
 /-! ### N16 on the self budget.
 `R` sends itself two `Self` and terminates before reading them. The scheduler

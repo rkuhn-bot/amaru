@@ -9,9 +9,9 @@ next `X` parks on `K`. Each core then runs `Ping`, whose program is a blocking
 send of `P` to the other core, and that send parks. The checker accepts the
 description: a non-terminable member is not confined to its subtree.
 
-Each birth is generation 0 of a fresh subtree key, not a later occupant of
-an old slot. `slotCoreMail` does not refuse these spawns. The mail in `H`
-and `K` is from five different slots, and the cores still park on each other.
+Each birth is generation 0 of a fresh subtree key. A dead root still occupies
+one of the `N` population slots while any member of that subtree key has mail
+on a core. `N` is 2, so the third birth is not enabled. The cores never fill.
 -/
 import Deadlock.Graph
 import Deadlock.Local
@@ -169,11 +169,6 @@ def gen (k : Nat) : List Action :=
    .ingress (Xk k) "Go", .recvBulk (Xk k), .exec (Xk k), .exec (Xk k),
    .ingress (Rk k) "Go", .recvBulk (Rk k), .exec (Rk k), .exec (Rk k)]
 
-def parkedOn (a : Actor) (dst : InstId) : Bool :=
-  match a.phase with
-  | .parked d _ _ => d == dst
-  | _ => false
-
 def early : List Action :=
   [.ingress Hc "Ping", .ingress Kc "Ping"] ++ gen 0 ++ gen 1 ++ gen 2 ++ gen 3
 
@@ -193,28 +188,27 @@ theorem outlive_checked : GraphOk outDesc ∧ LocalOk outImpl ∧ render outDesc
   refine ⟨checkBool_sound _ hcheck, by decide, ?_, by decide, by decide⟩
   simp [render, hcheck]
 
-/-- Both cores are parked on each other, each mailbox holds five messages, and
-the roster has not crashed. No runtime step is enabled. Stutter is. -/
-theorem outlive_stuck :
-    (match runAt outliveActs with
+def prefix2 : List Action :=
+  [.ingress Hc "Ping", .ingress Kc "Ping"] ++ gen 0 ++ gen 1
+
+/-- Two roots occupy both population slots. Each is generation 0 of a fresh
+key, and each subtree still has mail on both cores. The next spawn is not
+enabled. The old five-birth run is refused. -/
+theorem outlive_refused :
+    (match runAt prefix2 with
       | none => false
       | some w =>
-        parkedOn (w.st Hc) Kc && parkedOn (w.st Kc) Hc &&
-          decide ((w.st Hc).box.length = 5) && decide ((w.st Kc).box.length = 5) &&
-          !w.crashed && !runtimeBusy outImpl w && (apply outImpl .stutter w).isSome) = true := by
+        decide (loneOutstanding outDesc w "R" = 2) && decide (w.N = 2) &&
+          subtreeCoreMail outDesc w "c" 0 && subtreeCoreMail outDesc w "c" 1 &&
+          decide (maxGen w "R" 0 = 1) && decide (maxGen w "R" 1 = 1) &&
+          decide (maxGen w "X" 0 = 1) && decide (maxGen w "X" 1 = 1)) = true ∧
+      runAt (prefix2 ++ [.spawn "R"]) = none ∧
+      runAt outliveActs = none := by
   decide
 
-/-- Each `X` and `R` in that run is generation 0 of its own key. The respawn
-guard looks at earlier occupants of the same key, so it does not refuse
-these births. -/
-theorem outlive_first_generation :
+/-- The parked-core schedule is not a run. -/
+theorem outlive_stuck :
     (match runAt outliveActs with
-      | none => false
-      | some w =>
-        decide (maxGen w "X" 0 = 1) && decide (maxGen w "X" 1 = 1) &&
-          decide (maxGen w "X" 2 = 1) && decide (maxGen w "X" 3 = 1) &&
-          decide (maxGen w "X" 4 = 1) &&
-          decide (maxGen w "R" 0 = 1) && decide (maxGen w "R" 1 = 1) &&
-          decide (maxGen w "R" 2 = 1) && decide (maxGen w "R" 3 = 1) &&
-          decide (maxGen w "R" 4 = 1)) = true := by
+      | none => true
+      | some _ => false) = true := by
   decide

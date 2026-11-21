@@ -689,49 +689,49 @@ theorem legal_le_affine (D : Description) (parent : InstId) (N : Nat) (sup : Tem
   have h := tmb_fold_le parent sup N hrole D.templates Affine.zero
   simpa [Affine.eval, Affine.zero] using h
 
-theorem freeGo_lt (w : World) (parent : InstId) (name : String) (n fuel k : Nat)
-    (hf : fuel ≤ n) (h : freeGo w parent name n fuel = some k) : k < n := by
+theorem freeGo_lt (D : Description) (w : World) (parent : InstId) (name : String) (n fuel k : Nat)
+    (hf : fuel ≤ n) (h : freeGo D w parent name n fuel = some k) : k < n := by
   induction fuel generalizing k with
   | zero => simp [freeGo] at h
   | succ fuel ih =>
-    by_cases hbit : slotRespawnBlocked w parent name (n - (fuel + 1)) = true
-    · have hrec : freeGo w parent name n fuel = some k := by
+    by_cases hbit : slotRespawnBlocked D w parent name (n - (fuel + 1)) = true
+    · have hrec : freeGo D w parent name n fuel = some k := by
         simpa [freeGo, hbit] using h
       exact ih k (Nat.le_of_succ_le hf) hrec
-    · have hfalse : slotRespawnBlocked w parent name (n - (fuel + 1)) = false := by
-        cases hbb : slotRespawnBlocked w parent name (n - (fuel + 1)) <;> simp_all
+    · have hfalse : slotRespawnBlocked D w parent name (n - (fuel + 1)) = false := by
+        cases hbb : slotRespawnBlocked D w parent name (n - (fuel + 1)) <;> simp_all
       have hk : n - (fuel + 1) = k := by
         simpa [freeGo, hfalse] using h
       subst hk
       have hpos : 0 < n := Nat.lt_of_lt_of_le (Nat.succ_pos fuel) hf
       exact Nat.sub_lt hpos (Nat.succ_pos fuel)
 
-theorem freeGo_fresh (w : World) (parent : InstId) (name : String) (n fuel k : Nat)
-    (h : freeGo w parent name n fuel = some k) :
+theorem freeGo_fresh (D : Description) (w : World) (parent : InstId) (name : String) (n fuel k : Nat)
+    (h : freeGo D w parent name n fuel = some k) :
     slotOccupied w name k = false ∧ slotTombstoneQueued w parent name k = false := by
   induction fuel generalizing k with
   | zero => simp [freeGo] at h
   | succ fuel ih =>
-    by_cases hbit : slotRespawnBlocked w parent name (n - (fuel + 1)) = true
-    · have hrec : freeGo w parent name n fuel = some k := by
+    by_cases hbit : slotRespawnBlocked D w parent name (n - (fuel + 1)) = true
+    · have hrec : freeGo D w parent name n fuel = some k := by
         simpa [freeGo, hbit] using h
       exact ih k hrec
-    · have hfalse : slotRespawnBlocked w parent name (n - (fuel + 1)) = false := by
-        cases hbb : slotRespawnBlocked w parent name (n - (fuel + 1)) <;> simp_all
+    · have hfalse : slotRespawnBlocked D w parent name (n - (fuel + 1)) = false := by
+        cases hbb : slotRespawnBlocked D w parent name (n - (fuel + 1)) <;> simp_all
       have hk : n - (fuel + 1) = k := by
         simpa [freeGo, hfalse] using h
-      have hclear := slotRespawnBlocked_clear w parent name (n - (fuel + 1)) hfalse
+      have hclear := slotRespawnBlocked_clear D w parent name (n - (fuel + 1)) hfalse
       subst hk
       exact ⟨hclear.1, hclear.2.1⟩
 
-theorem freeSlot_lt (w : World) (parent : InstId) (name : String) (n k : Nat)
-    (h : freeSlot w parent name n = some k) : k < n :=
-  freeGo_lt w parent name n n k (Nat.le_refl _) (by simpa [freeSlot] using h)
+theorem freeSlot_lt (D : Description) (w : World) (parent : InstId) (name : String) (n k : Nat)
+    (h : freeSlot D w parent name n = some k) : k < n :=
+  freeGo_lt D w parent name n n k (Nat.le_refl _) (by simpa [freeSlot] using h)
 
-theorem freeSlot_fresh (w : World) (parent : InstId) (name : String) (n k : Nat)
-    (h : freeSlot w parent name n = some k) :
+theorem freeSlot_fresh (D : Description) (w : World) (parent : InstId) (name : String) (n k : Nat)
+    (h : freeSlot D w parent name n = some k) :
     slotOccupied w name k = false ∧ slotTombstoneQueued w parent name k = false :=
-  freeGo_fresh w parent name n n k (by simpa [freeSlot] using h)
+  freeGo_fresh D w parent name n n k (by simpa [freeSlot] using h)
 
 /-! Wired supervisors. -/
 
@@ -5429,12 +5429,13 @@ theorem split_root (child root : Bool) (h : child = true → root = true) :
     (child || (root && !child)) = root := by
   cases child <;> cases root <;> simp_all
 
-def rootBit (w : World) (supervisor name : String) (id : InstId) : Bool :=
+def rootBit (D : Description) (w : World) (supervisor name : String) (id : InstId) : Bool :=
   match id with
   | .peer child k _ =>
     child == name &&
       ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
-        slotTombstoneQueued w (.core supervisor) name k)
+        slotTombstoneQueued w (.core supervisor) name k ||
+        slotMailHeld D w name k)
   | .core _ => false
 
 theorem foldl_congr {α β : Type} (f g : β → α → β) (xs : List α) (start : β)
@@ -5446,28 +5447,29 @@ theorem foldl_congr {α β : Type} (f g : β → α → β) (xs : List α) (star
     rw [h start x]
     exact ih (g start x)
 
-theorem root_step (w : World) (supervisor name : String) (n : Nat) (id : InstId) :
+theorem root_step (D : Description) (w : World) (supervisor name : String) (n : Nat) (id : InstId) :
     (match id with
       | InstId.peer child k _ =>
         if child == name &&
             ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
-              slotTombstoneQueued w (.core supervisor) name k) then n + 1
+              slotTombstoneQueued w (.core supervisor) name k ||
+              slotMailHeld D w name k) then n + 1
         else n
       | InstId.core _ => n) =
-      (if rootBit w supervisor name id then n + 1 else n) := by
+      (if rootBit D w supervisor name id then n + 1 else n) := by
   cases id with
   | core _ => simp [rootBit]
   | peer _ _ _ => simp [rootBit]
 
-theorem root_filter (w : World) (supervisor name : String) :
-    rootOutstanding w supervisor name =
-      (w.roster.filter (rootBit w supervisor name)).length := by
+theorem root_filter (D : Description) (w : World) (supervisor name : String) :
+    rootOutstanding D w supervisor name =
+      (w.roster.filter (rootBit D w supervisor name)).length := by
   unfold rootOutstanding
   refine Eq.trans
-    (foldl_congr _ (fun n id => if rootBit w supervisor name id then n + 1 else n) w.roster 0
-      (fun n id => root_step w supervisor name n id))
+    (foldl_congr _ (fun n id => if rootBit D w supervisor name id then n + 1 else n) w.roster 0
+      (fun n id => root_step D w supervisor name n id))
     ?_
-  exact fold_count (rootBit w supervisor name) w.roster
+  exact fold_count (rootBit D w supervisor name) w.roster
 
 theorem namedChild_parts (D : Description) (w : World) (parent : InstId) (name : String)
     (c : InstId) (h : namedChild D w parent name c = true) :
@@ -5492,7 +5494,7 @@ theorem lifeHold_live (a : Actor) (h : lifeHold a = true) :
 
 theorem named_rootBit (I : Impl) (w : World) (supervisor name : String) (c : InstId)
     (h : namedChild I.desc w (.core supervisor) name c = true) :
-    rootBit w supervisor name c = true := by
+    rootBit I.desc w supervisor name c = true := by
   obtain ⟨_, hhold, _, n, k, g, hc, hname⟩ :=
     namedChild_parts I.desc w (.core supervisor) name c h
   subst hc
@@ -5654,7 +5656,7 @@ theorem any_tomb (ms : List Msg) (m : Msg) (name : String) (k g : Nat)
 
 theorem sender_fit (I : Impl) (w : World) (supervisor name : String) (s : InstId)
     (hH : Hold I w) (h : s ∈ nameSenders ((w.st (.core supervisor)).prio) name) :
-    s ∈ w.roster ∧ rootBit w supervisor name s = true ∧
+    s ∈ w.roster ∧ rootBit I.desc w supervisor name s = true ∧
       namedChild I.desc w (.core supervisor) name s = false := by
   obtain ⟨m, k, g, hm, ht, hs, hid, _⟩ := sender_src _ name s h
   cases hid
@@ -5663,7 +5665,7 @@ theorem sender_fit (I : Impl) (w : World) (supervisor name : String) (s : InstId
   have hqueued : slotTombstoneQueued w (.core supervisor) name k = true := by
     unfold slotTombstoneQueued
     exact any_tomb _ m name k g hm ht hs
-  have hroot : rootBit w supervisor name (.peer name k g) = true := by
+  have hroot : rootBit I.desc w supervisor name (.peer name k g) = true := by
     simp [rootBit, hqueued]
   have hnot : namedChild I.desc w (.core supervisor) name (.peer name k g) = false := by
     cases hbit : namedChild I.desc w (.core supervisor) name (.peer name k g) with
@@ -5682,20 +5684,20 @@ theorem sender_fit (I : Impl) (w : World) (supervisor name : String) (s : InstId
 most the roots still outstanding: each child is alive or shutting down, and each
 tombstone names a different roster id that is not itself still a notifying child. -/
 theorem named_le_root (I : Impl) (w : World) (hH : Hold I w) (supervisor name : String) :
-    namedOpen I.desc w (.core supervisor) name ≤ rootOutstanding w supervisor name := by
+    namedOpen I.desc w (.core supervisor) name ≤ rootOutstanding I.desc w supervisor name := by
   let parent := InstId.core supervisor
   let child := namedChild I.desc w parent name
-  let rest := fun c => rootBit w supervisor name c && !child c
+  let rest := fun c => rootBit I.desc w supervisor name c && !child c
   have hdis : ∀ x, x ∈ w.roster → child x = true → rest x = true → False := by
     intro x _ hc hr
     simp [rest, Bool.and_eq_true] at hr
     exact absurd hc (by simpa using hr.2)
   have hadd := filter_add child rest w.roster hdis
-  have hor : ∀ c, (child c || rest c) = rootBit w supervisor name c := by
+  have hor : ∀ c, (child c || rest c) = rootBit I.desc w supervisor name c := by
     intro c
-    exact split_root (child c) (rootBit w supervisor name c) (fun h => named_rootBit I w supervisor name c h)
+    exact split_root (child c) (rootBit I.desc w supervisor name c) (fun h => named_rootBit I w supervisor name c h)
   have hfilter : w.roster.filter (fun c => child c || rest c) =
-      w.roster.filter (rootBit w supervisor name) := by
+      w.roster.filter (rootBit I.desc w supervisor name) := by
     apply List.filter_congr
     intro c _
     exact hor c
@@ -5710,13 +5712,13 @@ theorem named_le_root (I : Impl) (w : World) (hH : Hold I w) (supervisor name : 
       simp [rest, h.2.1, hnot]⟩
   have hlen := nodup_mem_length _ _ hsenders hfit
   have heq := senders_len (w.st parent).prio name
-  have hroot := root_filter w supervisor name
+  have hroot := root_filter I.desc w supervisor name
   have hopen : namedOpen I.desc w parent name =
       (w.roster.filter child).length + (nameSenders (w.st parent).prio name).length := by
     simp [namedOpen, parent, child, heq]
   rw [hopen, hroot]
   have hsum : (w.roster.filter child).length + (w.roster.filter rest).length =
-      (w.roster.filter (rootBit w supervisor name)).length := by
+      (w.roster.filter (rootBit I.desc w supervisor name)).length := by
     simpa [hfilter] using hadd
   omega
 
@@ -6507,7 +6509,7 @@ theorem queued_sender (ms : List Msg) (child : String) (k : Nat)
 theorem may_root_parts (D : Description) (w : World) (template : String) (t : Template)
     (name : String) (ht : templateOf D template = some t)
     (hmay : maySpawnRoot D w template t = true) (hsup : t.supervisor = some name) :
-    t.multiplicity = .perPeer ∧ t.slots = 0 ∧ rootOutstanding w name template < w.N := by
+    t.multiplicity = .perPeer ∧ t.slots = 0 ∧ rootOutstanding D w name template < w.N := by
   simp only [maySpawnRoot, hsup, Bool.and_eq_true, decide_eq_true_iff] at hmay
   obtain ⟨⟨⟨⟨hmul, hslots⟩, _⟩, _⟩, hlt⟩ := hmay
   refine ⟨?_, ?_, hlt⟩
@@ -6526,7 +6528,7 @@ count for its own template, and nothing to any other count. The allowance is
 theorem census_supervised (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
     (born : Actor) (template : String) (t : Template) (name : String) (k : Nat)
     (ht : templateOf I.desc template = some t) (hslots : t.slots = 0)
-    (hsup : t.supervisor = some name) (hlt : rootOutstanding w name template < w.N)
+    (hsup : t.supervisor = some name) (hlt : rootOutstanding I.desc w name template < w.N)
     (hst : ∀ i, w'.st i = if i = id then born else w.st i)
     (hros : w'.roster = w.roster ++ [id]) (hnew : id ∉ w.roster)
     (hid : id = InstId.peer template k (maxGen w template k))
@@ -6882,7 +6884,7 @@ theorem census_free (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
 /-- `maySpawnRoot` for a template with no supervisor. -/
 theorem may_free_parts (D : Description) (w : World) (template : String) (t : Template)
     (hmay : maySpawnRoot D w template t = true) (hsup : t.supervisor = none) :
-    t.multiplicity = .perPeer ∧ t.slots = 0 ∧ aliveCount w template < w.N := by
+    t.multiplicity = .perPeer ∧ t.slots = 0 ∧ loneOutstanding D w template < w.N := by
   simp only [maySpawnRoot, hsup, Bool.and_eq_true, decide_eq_true_iff] at hmay
   obtain ⟨⟨⟨⟨hmul, hslots⟩, _⟩, _⟩, hlt⟩ := hmay
   refine ⟨?_, ?_, hlt⟩
@@ -7796,10 +7798,10 @@ theorem queued_of_tomb (w : World) (parent : InstId) (name : String) (k : Nat)
 theorem pool_open_lt (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc)
     (hnd : w.roster.Nodup) (parent : InstId) (pname child : String) (t : Template) (k : Nat)
     (hpar : parent = InstId.core pname) (ht : templateOf I.desc child = some t)
-    (hslots : t.slots ≠ 0) (hfree : freeSlot w parent child t.slots = some k) :
+    (hslots : t.slots ≠ 0) (hfree : freeSlot I.desc w parent child t.slots = some k) :
     namedOpen I.desc w parent child < t.slots := by
-  have hpair := freeSlot_fresh w parent child t.slots k hfree
-  have hk : k < t.slots := freeSlot_lt w parent child t.slots k hfree
+  have hpair := freeSlot_fresh I.desc w parent child t.slots k hfree
+  have hk : k < t.slots := freeSlot_lt I.desc w parent child t.slots k hfree
   have hidx : slotIndexed I.desc parent child = true := by
     have hs : (t.slots != 0) = true := by
       simpa [bne, beq_iff_eq] using hslots
@@ -7934,7 +7936,7 @@ theorem hold_child_pool (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.d
     (hnd : w.roster.Nodup) (parent : InstId) (pname child : String) (t : Template) (k : Nat)
     (ht : templateOf I.desc child = some t) (hmul : t.multiplicity = .perPeer)
     (hsup : supNamed t.supervisor pname = true) (hpar : parent = InstId.core pname)
-    (hslots : t.slots ≠ 0) (hfree : freeSlot w parent child t.slots = some k)
+    (hslots : t.slots ≠ 0) (hfree : freeSlot I.desc w parent child t.slots = some k)
     (halive : (w.st parent).life = .alive) (hpre : w.crashed = false)
     (hoff : (w.st (InstId.peer child k (maxGen w child k))).prio = []) :
     Hold I (admitBorn I w (InstId.peer child k (maxGen w child k))
@@ -7945,7 +7947,7 @@ theorem hold_child_pool (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.d
   let born := { bornActor I.desc w child k t.initial with parent := parentO }
   let w' := placePeer I w child k t.initial parentO next
   have hlt := pool_open_lt I w hH hG hnd parent pname child t k hpar ht hslots hfree
-  have hfresh := freeSlot_fresh w parent child t.slots k hfree
+  have hfresh := freeSlot_fresh I.desc w parent child t.slots k hfree
   have hnext : ∀ (u : World) (i : InstId),
       (next u).st i = u.st i ∧ (next u).roster = u.roster ∧ (next u).N = u.N ∧
         (next u).crashed = u.crashed := by
@@ -8130,7 +8132,7 @@ theorem hold_child_pool (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.d
       | true => exact absurd ((beq_iff_eq).mp hbb) hslots
     have hkB : k < (if t.slots == 0 then w.N else t.slots) := by
       simp [hs]
-      exact freeSlot_lt w parent child t.slots k hfree
+      exact freeSlot_lt I.desc w parent child t.slots k hfree
     simpa [hpar] using legal_mem_core I.desc pname child w.N k t hmemT hnameT hsupS htomb hkB
   have hfreeQ : ∀ par, parentO = some par →
       slotTombstoneQueued w par child k = false := by
@@ -8732,7 +8734,7 @@ theorem hold_spawn_child (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.
             intro hz
             have hzB : (t.slots != 0) = false := by simp [bne, hz]
             simp [hzB] at hslotsB
-          cases hfree : freeSlot w (.core pname) child t.slots with
+          cases hfree : freeSlot I.desc w (.core pname) child t.slots with
           | none =>
             have hsc : spawnChild I w (.core pname) child = some w := by
               simp [spawnChild, ht, gate, hok, hslotsB, hfree]
@@ -8762,16 +8764,16 @@ theorem hold_spawn_child (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.
       | peer pname pk pg =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hzeroB : (t.slots == 0) = true
-        · by_cases hbusy : slotRespawnBlocked w (.peer pname pk pg) child pk = true
+        · by_cases hbusy : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk = true
           · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
               simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
             have hrun : execRun I w (.peer pname pk pg) a k =
                 setActor w (.peer pname pk pg) (proceed (w.st (.peer pname pk pg)) k') := by
               simp [execRun, hgo, hk, hsc, k']
             exact hrun.symm ▸ hold_proceed I w hH (.peer pname pk pg) k' hpre (hphase w)
-          · have hfalse : slotRespawnBlocked w (.peer pname pk pg) child pk = false := by
-              cases hbb : slotRespawnBlocked w (.peer pname pk pg) child pk <;> simp_all
-            have hclear := slotRespawnBlocked_clear w (.peer pname pk pg) child pk hfalse
+          · have hfalse : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk = false := by
+              cases hbb : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk <;> simp_all
+            have hclear := slotRespawnBlocked_clear I.desc w (.peer pname pk pg) child pk hfalse
             have hocc : slotOccupied w child pk = false := hclear.1
             have hq : slotTombstoneQueued w (.peer pname pk pg) child pk = false := hclear.2.1
             let bornId := InstId.peer child pk (maxGen w child pk)
@@ -10358,7 +10360,7 @@ theorem spawn_effect_side (I : Impl) (w : World) (hH : Hold I w) (hS : Side I w)
             intro hz
             have hzB : (t.slots != 0) = false := by simp [bne, hz]
             simp [hzB] at hslotsB
-          cases hfree : freeSlot w (.core pname) child t.slots with
+          cases hfree : freeSlot I.desc w (.core pname) child t.slots with
           | none =>
             have hsc : spawnChild I w (.core pname) child = some w := by
               simp [spawnChild, ht, gate, hok, hslotsB, hfree]
@@ -10388,7 +10390,7 @@ theorem spawn_effect_side (I : Impl) (w : World) (hH : Hold I w) (hS : Side I w)
       | peer pname pk pg =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hzeroB : (t.slots == 0) = true
-        · by_cases hbusy : slotRespawnBlocked w (.peer pname pk pg) child pk = true
+        · by_cases hbusy : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk = true
           · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
               simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
             have hrun : execRun I w (.peer pname pk pg) a k =
@@ -10397,8 +10399,8 @@ theorem spawn_effect_side (I : Impl) (w : World) (hH : Hold I w) (hS : Side I w)
             exact hrun.symm ▸ side_frame I w _ hS
               (frame_keep w (.peer pname pk pg) (proceed (w.st (.peer pname pk pg)) k')
                 (by simp [proceed_keeps_prio]))
-          · have hfalse : slotRespawnBlocked w (.peer pname pk pg) child pk = false := by
-              cases hbb : slotRespawnBlocked w (.peer pname pk pg) child pk <;> simp_all
+          · have hfalse : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk = false := by
+              cases hbb : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk <;> simp_all
             let bornId := InstId.peer child pk (maxGen w child pk)
             let born := { bornActor I.desc w child pk t.initial with parent := some (.peer pname pk pg) }
             let wB := admitBorn I w bornId born
@@ -11146,7 +11148,7 @@ theorem spawn_child_wired (I : Impl) (w : World) (hW : Wired I.desc w) (parent :
       | core pname =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hslotsB : (t.slots != 0) = true
-        · cases hfree : freeSlot w (.core pname) child t.slots with
+        · cases hfree : freeSlot I.desc w (.core pname) child t.slots with
           | none =>
             have hsc : spawnChild I w (.core pname) child = some w := by
               simp [spawnChild, ht, gate, hok, hslotsB, hfree]
@@ -11170,13 +11172,13 @@ theorem spawn_child_wired (I : Impl) (w : World) (hW : Wired I.desc w) (parent :
       | peer pname pk pg =>
         have hsup : supNamed t.supervisor pname = true := by simpa [tname] using hsupn
         by_cases hzeroB : (t.slots == 0) = true
-        · by_cases hbusy : slotRespawnBlocked w (.peer pname pk pg) child pk = true
+        · by_cases hbusy : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk = true
           · have hsc : spawnChild I w (.peer pname pk pg) child = some w := by
               simp [spawnChild, ht, gate, hok, hzeroB, hbusy]
             have hw' : w = w' := by simpa [hsc] using h
             exact hw'.symm ▸ hW
-          · have hfalse : slotRespawnBlocked w (.peer pname pk pg) child pk = false := by
-              cases hbb : slotRespawnBlocked w (.peer pname pk pg) child pk <;> simp_all
+          · have hfalse : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk = false := by
+              cases hbb : slotRespawnBlocked I.desc w (.peer pname pk pg) child pk <;> simp_all
             let bornId := InstId.peer child pk (maxGen w child pk)
             let born := { bornActor I.desc w child pk t.initial with
               parent := some (.peer pname pk pg) }

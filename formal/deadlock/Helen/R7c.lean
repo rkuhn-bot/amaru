@@ -481,7 +481,8 @@ def mailImpl : Impl where
   desc := mailDesc
   transitions := [tr "S" "idle" "Go" "idle" [.send "H" "M" 0, .terminate]]
 
-/-- A second scheduler birth takes the next subtree key, not generation 1. -/
+/-- The dead root still occupies the one population slot while its message
+sits on `H`, so the next birth is not enabled. -/
 def S0 : InstId := .peer "S" 0 0
 def S1 : InstId := .peer "S" 1 0
 def Hc : InstId := .core "H"
@@ -491,9 +492,10 @@ def mailActs : List Action :=
 
 theorem old_mail_charged :
     ((runAt mailImpl 1 [.spawn "S"]).map fun w => (w.st S0).tokens "H") = some 1 ∧
-    ((runAt mailImpl 1 mailActs).map fun w =>
-      (lifeTag (w.st S0).life, lifeTag (w.st S1).life,
-       (w.st Hc).box.length, (w.st S1).tokens "H")) = some (3, 1, 1, 1) := by decide
+    ((runAt mailImpl 1 (mailActs.dropLast)).map fun w =>
+      (lifeTag (w.st S0).life, (w.st Hc).box.length, loneOutstanding mailDesc w "S")) =
+        some (3, 1, 1) ∧
+    runAt mailImpl 1 mailActs = none := by decide
 
 end Deadlock.Helen7c
 

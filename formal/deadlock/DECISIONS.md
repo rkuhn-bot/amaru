@@ -271,12 +271,9 @@ restart. This model does not change the Rust node. A restart that births
 the next incarnation while a core still holds the slot's earlier mail
 would not be this semantics.
 
-Helen's E4 (`outlive_stuck`) is still a checked run. Each birth of `R`
-and `X` is generation 0 of a fresh subtree key, not a later occupant of
-an old slot. The guard does not refuse those spawns. The mail in `H` and
-`K` is from five different slots. `outlive_first_generation` is that the
-final roster still has only generation 0 at each of those keys, and
-`outlive_stuck` is the cores parked on each other.
+Helen's E4 is not this same-key guard. Each birth of `R` and `X` is
+generation 0 of a fresh subtree key. The 08:44 entry is the decision on
+that case.
 
 ## 2026-11-21 — Implementation work not covered by the Lean model
 
@@ -293,7 +290,42 @@ The signal is that finite set — the messages that specific slot sent. It i
 not the core's mailbox becoming empty. A mailbox may never empty, because
 unrelated mail can keep arriving. This is net-new functionality in pure-stage.
 
-The Lean guard is the same set. `slotCoreMail` holds while a core still has
-a bulk message, a priority message, or a parked send from an occupant of
-that slot. It does not ask whether the core's mailbox is empty. The drained
-signal itself is not a state of this model.
+The same signal holds a population slot. The scheduler, like a supervisor,
+keeps that root's slot until every core has drained the messages the subtree
+sent. A new root key is not a free slot while that mail remains.
+
+The Lean guard is the same set. `slotMailHeld` is mail still on a core from
+that subtree key: a bulk message, a priority message, or a parked send. It
+does not ask whether the core's mailbox is empty. The drained signal itself
+is not a state of this model.
+
+## 2026-11-21 — A dead root keeps its population slot
+
+Roland, 2026-11-21 08:44 CET, his own answer: a dead root occupies its
+population slot until its core mail is consumed.
+
+The counting unit is the slot. A same-key respawn was already refused while
+that key's mail sat on a core. E4 never reuses a key. Each scheduler birth
+takes a fresh key, and five dead subtrees' mail filled both cores. The root
+population is the account that stops that. `N` is how many roots may occupy
+a slot at once. A root keeps the slot while any member of its subtree at
+that key, any generation, still has mail on a core — bulk box, priority
+lane, or a parked send. That is the same holding as a queued tombstone.
+`rootOutstanding` is the core-supervised count, and it still includes a root
+that is alive, shutting down, or waiting on its tombstone. `loneOutstanding`
+is the unsupervised count: alive, or still holding subtree mail. An
+unsupervised root has no tombstone on a core, and shutting down alone does
+not hold its slot. Fresh keys are unchanged.
+
+A core-supervised pool is the same unit on a different account. Its
+population is `slots`, not `N`, so it does not go through `rootOutstanding`.
+`freeSlot` already skips an index while `slotRespawnBlocked` holds, and that
+guard now uses `slotMailHeld` for the subtree at that key. A per-peer
+parent's one child is the same guard at the parent's key.
+
+`may_root_parts` and `may_free_parts` are the bound: a spawn is enabled only
+when the count is strictly below `N`. Dead subtrees with core mail are
+inside that count, so there are fewer than `N` of them whenever another root
+of that template may be born. `outlive_refused` is E4 under this rule. Two
+roots fill `N = 2` while their mail sits on `H` and `K`, and the third spawn
+is not enabled. `outlive_stuck` is that the old five-birth run is refused.
