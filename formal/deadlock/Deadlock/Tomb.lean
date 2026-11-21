@@ -7,8 +7,8 @@ for the initial world, for a self-schedule, for every scheduler spawn,
 for a per-peer child born at its parent's key, and for a pool slot taken
 from `freeSlot`. An empty subtree's key comes from `IxPast` or `RootPast`,
 and the fresh id's lane is empty because it was off the roster. `exec` of a
-send, a try-send, a call, a reply, and `terminate` keeps it. A cell wake, a
-child spawn, and `callTimeout` are still open, and so is carrying `IxPast`,
+send, a try-send, a call, a reply, a cell wake, and `terminate` keeps it. A
+child spawn and `callTimeout` are still open, and so is carrying `IxPast`,
 `RootPast`, and the off-roster empty lane through every step.
 `no_tombstone_overflow` is not restated: this file does not claim that every
 reachable world stays inside the lane.
@@ -8585,5 +8585,162 @@ theorem hold_reply (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Act
       exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
     | crashed =>
       exact hrun.symm ▸ hplain (by simp [performReply, hto, hphase, k'])
+
+/-- A cell write does not touch an actor, so the lane invariant is the same one. -/
+theorem hold_setCell (I : Impl) (w : World) (hH : Hold I w) (dst label : String) (c : Cell) :
+    Hold I (setCell w dst label c) := by
+  have hlane : ∀ id, LaneOk I (setCell w dst label c) id := by
+    intro id
+    have h := hH.lane id
+    have hst : (setCell w dst label c).st id = w.st id := by simp [setCell]
+    exact ⟨by simpa [hst] using h.ordNodup,
+      fun l hl => h.ordIn l (by simpa [hst] using hl),
+      fun m hm ht => h.peer m (by simpa [hst] using hm) ht,
+      by simpa [hst] using h.tombNodup⟩
+  exact ⟨hH.rostered, hH.pend, hH.deadPrio, hH.role, hH.phase, hlane, hH.legalLife,
+    hH.legalTomb, hH.fresh, hH.occ, hH.rooted, hH.census, hH.tombHere⟩
+
+theorem crash_kills_alive (w : World) (i : InstId) (hmem : i ∈ w.roster)
+    (hlive : (w.st i).life = .alive) : ((crashWorld w).st i).life = .dead := by
+  have hdec : decide (i ∈ w.roster) = true := decide_eq_true hmem
+  have hbit : ((w.st i).life == .alive) = true := (beq_iff_eq).mpr hlive
+  have hor : ((w.st i).life == .alive || (w.st i).life == .shuttingDown) = true := by
+    simp [hbit]
+  simp [crash_life, hdec, hor]
+
+/-- A wake aimed at an actor that is no longer alive leaves the world alone.
+After a full lane crashes the roster, every later reader in the same fold is
+already dead, so the fold stops there. -/
+theorem tryWake_dead (D : Description) (w : World) (id : InstId) (label : String)
+    (writer : InstId) (h : (w.st id).life ≠ .alive) : tryWake D w id label writer = w := by
+  have hbit : ((w.st id).life != .alive) = true := by simpa [bne, beq_iff_eq] using h
+  simp [tryWake, hbit]
+
+theorem wakes_dead (D : Description) (ids : List InstId) (w : World) (label : String)
+    (writer : InstId) (h : ∀ id, id ∈ ids → (w.st id).life ≠ .alive) :
+    ids.foldl (fun acc i => tryWake D acc i label writer) w = w := by
+  induction ids with
+  | nil => rfl
+  | cons id ids ih =>
+    have hhead : id ∈ id :: ids := List.mem_cons_self
+    rw [List.foldl_cons, tryWake_dead D w id label writer (h id hhead)]
+    exact ih fun i hi => h i (List.mem_cons.mpr (Or.inr hi))
+
+/-- One cell wake appends a declared label, or crashes the roster when the lane
+is already full. A label that is already queued is not a second message. -/
+theorem hold_wakes (I : Impl) (ids : List InstId) (w : World) (hH : Hold I w)
+    (label : String) (writer : InstId) (hpre : w.crashed = false)
+    (halive : ∀ id, id ∈ ids → (w.st id).life = .alive)
+    (hmem : ∀ id, id ∈ ids → id ∈ w.roster)
+    (hlabel : ∀ id, id ∈ ids → label ∈ prioLabels I (tname id)) :
+    Hold I (ids.foldl (fun acc i => tryWake I.desc acc i label writer) w) := by
+  induction ids generalizing w with
+  | nil =>
+    simp
+    exact hH
+  | cons i ids ih =>
+    have hhead : i ∈ i :: ids := List.mem_cons_self
+    have hlive : (w.st i).life = .alive := halive i hhead
+    have hbit : ((w.st i).life == .alive) = true := (beq_iff_eq).mpr hlive
+    have hdrop : ((w.st i).life != .alive) = false := by simp [bne, hbit]
+    have tailAlive : ∀ id, id ∈ ids → (w.st id).life = .alive :=
+      fun id hid => halive id (List.mem_cons.mpr (Or.inr hid))
+    have tailMem : ∀ id, id ∈ ids → id ∈ w.roster :=
+      fun id hid => hmem id (List.mem_cons.mpr (Or.inr hid))
+    have tailLabel : ∀ id, id ∈ ids → label ∈ prioLabels I (tname id) :=
+      fun id hid => hlabel id (List.mem_cons.mpr (Or.inr hid))
+    by_cases hqueued : ((w.st i).prio.any fun p => p.label == label) = true
+    · have hor : (((w.st i).life != .alive) ||
+          ((w.st i).prio.any fun p => p.label == label)) = true := by simp [hdrop, hqueued]
+      have hstep : tryWake I.desc w i label writer = w := by simp [tryWake, hor]
+      simp only [List.foldl_cons, hstep]
+      exact ih w hH hpre tailAlive tailMem tailLabel
+    · have hfree : ((w.st i).prio.any fun p => p.label == label) = false := by
+        cases hbitq : (w.st i).prio.any fun p => p.label == label with
+        | false => rfl
+        | true => exact absurd hbitq hqueued
+      have hor : (((w.st i).life != .alive) ||
+          ((w.st i).prio.any fun p => p.label == label)) = false := by simp [hdrop, hfree]
+      let wake : Msg :=
+        { label := label, sender := writer, callFrom := none, reliable := false,
+          mid := (w.st i).nextMid }
+      have htry : tryWake I.desc w i label writer = offerPrio I.desc w i wake := by
+        simp [tryWake, hor, wake]
+      by_cases hfull : prioLoad (w.st i).prio ≥ capPrio I.desc w.N i
+      · have hdec : decide (prioLoad (w.st i).prio ≥ capPrio I.desc w.N i) = true := by
+          simp [hfull]
+        have hcrashW : offerPrio I.desc w i wake = crashWorld w := by simp [offerPrio, hdec]
+        have hdead : ∀ id, id ∈ ids → ((crashWorld w).st id).life ≠ .alive := by
+          intro id hid
+          rw [crash_kills_alive w id (tailMem id hid) (tailAlive id hid)]
+          intro h
+          cases h
+        have hfold := wakes_dead I.desc ids (crashWorld w) label writer hdead
+        simp only [List.foldl_cons, htry, hcrashW, hfold]
+        exact hold_crash I w hH
+      · have hdec : decide (prioLoad (w.st i).prio ≥ capPrio I.desc w.N i) = false :=
+          decide_eq_false hfull
+        have hsnoc : offerPrio I.desc w i wake = tmb_snoc w i wake := by
+          simp [offerPrio, hdec, tmb_snoc]
+        have ht : wake.tombstone = false := by simp [wake]
+        have hnew : wake.label ∉ tmb_laneLabels ((w.st i).prio) := by
+          simpa [wake] using lane_absent (w.st i).prio label hfree
+        have hH' := hold_plain I w hH i wake hpre hlive ht
+          (by simpa [wake] using hlabel i hhead) hnew
+        let w' := tmb_snoc w i wake
+        have hpre' : w'.crashed = false := by simpa [w', tmb_snoc_crash] using hpre
+        have halive' : ∀ id, id ∈ ids → (w'.st id).life = .alive := by
+          intro id hid
+          simpa [w', tmb_snoc_life] using tailAlive id hid
+        have hmem' : ∀ id, id ∈ ids → id ∈ w'.roster := by
+          intro id hid
+          simpa [w', tmb_snoc_roster] using tailMem id hid
+        simp only [List.foldl_cons, htry, hsnoc]
+        exact ih w' hH' hpre' halive' hmem' tailLabel
+
+theorem hold_cell (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (dst label : String) (value : Nat) (es : List Eff) (hpre : w.crashed = false)
+    (_ha : a = w.st id) (hlive : a.life = .alive) (hk : k.rest = .cell dst label value :: es)
+    (hdec : ContDeclared I (tname id) k) : Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  have htail := ContDeclared.after I (tname id) k _ _ hk hdec
+  let previous := w.cell dst label
+  let written := max previous.value value
+  let wC := setCell w dst label { value := written, dirty := true }
+  have hpreC : wC.crashed = false := by simp [wC, setCell, hpre]
+  have hC := hold_setCell I w hH dst label { value := written, dirty := true }
+  have hP := hold_reply_proceed I wC hC id k' hpreC (by simpa [k'] using htail)
+  let wP := setActor wC id (proceed (wC.st id) k')
+  have hread (i : InstId) (hi : i ∈ readersOf wP dst) :
+      i ∈ wP.roster ∧ (wP.st i).life = .alive ∧ tname i = dst := by
+    have hall := List.mem_filter.mp hi
+    have hand := hall.2
+    simp [Bool.and_eq_true, beq_iff_eq] at hand
+    exact ⟨hall.1, hand.2, hand.1⟩
+  have hlabel : ∀ i, i ∈ readersOf wP dst → label ∈ prioLabels I (tname i) := by
+    intro i hi
+    have hwake : label ∈ cellWakeLabels dst k.rest := by
+      rw [hk]
+      simp [cellWakeLabels, effWake]
+    have hin := hdec.rest.wake dst label hwake
+    simpa [(hread i hi).2.2] using hin
+  by_cases hdirty : previous.dirty = true
+  · have hrun : execRun I w id a k = wP := by
+      simp [execRun, hgo, hk, k', previous, written, wC, wP, hdirty]
+    exact hrun.symm ▸ hP
+  · have hclean : previous.dirty = false := by
+      cases hbit : previous.dirty with
+      | false => rfl
+      | true => exact absurd hbit hdirty
+    have hrun : execRun I w id a k = wakeReaders I.desc wP dst label id := by
+      simp [execRun, hgo, hk, k', previous, written, wC, wP, hclean]
+    have halive : ∀ i, i ∈ readersOf wP dst → (wP.st i).life = .alive :=
+      fun i hi => (hread i hi).2.1
+    have hmem : ∀ i, i ∈ readersOf wP dst → i ∈ wP.roster :=
+      fun i hi => (hread i hi).1
+    have hpreP : wP.crashed = false := by simp [wP, setActor, hpreC]
+    have hW := hold_wakes I (readersOf wP dst) wP hP label id hpreP halive hmem hlabel
+    simpa [hrun, wakeReaders] using hW
 
 end Deadlock
