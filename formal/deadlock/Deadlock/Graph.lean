@@ -602,7 +602,7 @@ def coreSupervisedPool (D : Description) (src dst : String) : Bool :=
   match templateOf D dst, templateOf D src with
   | some child, some parent =>
     child.slots != 0 && child.multiplicity == .perPeer &&
-      child.supervisor == src && parent.multiplicity == .one
+      supNamed child.supervisor src && parent.multiplicity == .one
   | _, _ => false
 
 def callTermFails (D : Description) : List String :=
@@ -663,11 +663,14 @@ def pureKillMsg (name : String) : String :=
 
 /-- A per-peer supervisor of the same subtree, or a multiplicity-one core. -/
 def supervisorInSubtree (D : Description) (t : Template) : Bool :=
-  match templateOf D t.supervisor with
+  match t.supervisor with
   | none => false
-  | some s =>
-    (s.multiplicity == .one) ||
-      (s.multiplicity == .perPeer && s.subtree == t.subtree && s.name != t.name)
+  | some name =>
+    match templateOf D name with
+    | none => false
+    | some s =>
+      (s.multiplicity == .one) ||
+        (s.multiplicity == .perPeer && s.subtree == t.subtree && s.name != t.name)
 
 /-- A nonempty subtree is a per-peer cohort. Its supervisor, when it names one,
 is a multiplicity-one core or a per-peer stage of the same subtree. A pool
@@ -677,29 +680,34 @@ and it does not require a `timeoutKills` role: any stage may `terminate`, and
 the tombstone goes to the immediate supervisor. `timeoutKills` on a template
 with no subtree is still rejected: the flag names a subtree kill the template
 does not belong to. -/
-def subtreeFails (D : Description) : List String :=
-  D.templates.filterMap fun t =>
-    if t.slots != 0 && (t.multiplicity != .perPeer || t.supervisor == "") then
-      some s!"fail: pool {t.name} is a per-peer template with a supervisor"
-    else if t.slots != 0 then
-      match templateOf D t.supervisor with
+def subtreeEntry (D : Description) (t : Template) : Option String :=
+  if t.slots != 0 && (t.multiplicity != .perPeer || t.supervisor.isNone) then
+    some s!"fail: pool {t.name} is a per-peer template with a supervisor"
+  else if t.slots != 0 then
+    match t.supervisor with
+    | some name =>
+      match templateOf D name with
       | some s =>
         if s.multiplicity != .one then
           some s!"fail: slots must be 0 under a per-peer parent"
         else if t.subtree != "" && !(supervisorInSubtree D t) then
-          some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not in the subtree"
+          some s!"fail: subtree {t.subtree} supervisor {name} is not in the subtree"
         else none
-      | none => some s!"fail: pool {t.name} names unknown supervisor {t.supervisor}"
-    else if t.subtree == "" then
-      if t.supervisor != "" then some s!"fail: {t.name} names a supervisor without a subtree"
-      else if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
-      else if templatePure D t.name then some (pureKillMsg t.name)
-      else none
-    else if t.multiplicity != .perPeer then
-      some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
-    else if t.supervisor != "" && !supervisorInSubtree D t then
-      some s!"fail: subtree {t.subtree} supervisor {t.supervisor} is not in the subtree"
+      | none => some s!"fail: pool {t.name} names unknown supervisor {name}"
+    | none => some s!"fail: pool {t.name} names unknown supervisor none"
+  else if t.subtree == "" then
+    if t.supervisor.isSome then some s!"fail: {t.name} names a supervisor without a subtree"
+    else if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
+    else if templatePure D t.name then some (pureKillMsg t.name)
     else none
+  else if t.multiplicity != .perPeer then
+    some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
+  else if t.supervisor.isSome && !supervisorInSubtree D t then
+    some s!"fail: subtree {t.subtree} supervisor {supText t.supervisor} is not in the subtree"
+  else none
+
+def subtreeFails (D : Description) : List String :=
+  D.templates.filterMap (subtreeEntry D)
 
 def pureTermMsg (name : String) : String :=
   s!"fail: template {name} is an untimed peer end and is not terminable; a permanent mailbox would stall with the peer"

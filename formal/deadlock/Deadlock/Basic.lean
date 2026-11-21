@@ -154,9 +154,10 @@ structure Template where
   subtree : String := ""
   /-- An `awaitPeer` on this role is the timeout that kills `subtree`. -/
   timeoutKills : Bool := false
-  /-- Permanent core that receives the one tombstone when `subtree` is killed.
+  /-- The role that wired this one, or `none` when the scheduler did.
+  `none` is not a name, so it does not match a template called `""`.
   A per-peer template may name another member of its own subtree. -/
-  supervisor : String := ""
+  supervisor : Option String := none
   /-- Label the supervisor handles when this child terminates. One label per
   child template, chosen when the parent is wired. Empty means no tombstone. -/
   tombstone : String := ""
@@ -165,6 +166,19 @@ structure Template where
   children are indexed by slot below this bound and by generation. -/
   slots : Nat := 0
   deriving DecidableEq, Repr, Inhabited, BEq
+
+/-- `some name` matches that role. `none` matches nothing, including a template
+whose name is empty. -/
+def supNamed (s : Option String) (name : String) : Bool :=
+  match s with
+  | some n => n == name
+  | none => false
+
+/-- Text of a supervisor for a check message. `none` is not a role name. -/
+def supText (s : Option String) : String :=
+  match s with
+  | some n => n
+  | none => "none"
 
 structure Edge where
   src : String

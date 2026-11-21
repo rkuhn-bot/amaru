@@ -375,6 +375,9 @@ structure Actor where
   /-- The seal of this actor owes its supervisor one tombstone. The message is
   queued when the actor becomes dead, not when it is marked shutting down. -/
   pendingTombstone : Bool := false
+  /-- The incarnation that wired this actor. `none` is a scheduler root.
+  The tombstone is delivered to this id, and dropped when that id is not alive. -/
+  parent : Option InstId := none
   deriving Inhabited
 
 def absentActor : Actor where
@@ -555,20 +558,25 @@ def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
       | .one => 1
       | .perPeer =>
         if t.slots != 0 then
-          match templateOf D t.supervisor with
+          match t.supervisor with
           | none => 0
-          | some sup =>
-            match sup.multiplicity with
-            | .one => t.slots
-            | .perPeer => population D t.supervisor N fuel * t.slots
-        else if t.supervisor == "" then N
+          | some name =>
+            match templateOf D name with
+            | none => 0
+            | some sup =>
+              match sup.multiplicity with
+              | .one => t.slots
+              | .perPeer => population D name N fuel * t.slots
         else
-          match templateOf D t.supervisor with
-          | none => 0
-          | some sup =>
-            match sup.multiplicity with
-            | .one => N
-            | .perPeer => population D t.supervisor N fuel
+          match t.supervisor with
+          | none => N
+          | some name =>
+            match templateOf D name with
+            | none => 0
+            | some sup =>
+              match sup.multiplicity with
+              | .one => N
+              | .perPeer => population D name N fuel
 
 /-- How many of `t` one parent instance can have outstanding. `slots = 0` is one
 child at the parent's key; a pool is its `slots`. -/
@@ -585,7 +593,7 @@ def tombstoneAffine (D : Description) (parent : String) : Affine :=
   | none => .zero
   | some sup =>
     D.templates.foldl (fun acc t =>
-      if t.supervisor == parent && t.tombstone != "" then
+      if supNamed t.supervisor parent && t.tombstone != "" then
         match sup.multiplicity with
         | .perPeer => { a := acc.a, b := acc.b + slotCount t }
         | .one =>
@@ -690,7 +698,9 @@ def newerGeneration (w : World) (m : Msg) : Bool :=
     m.tombstone &&
       w.roster.any fun id =>
         match id with
-        | .peer n k g => n == name && k == key && decide (g > gen)
+        | .peer n k g =>
+          n == name && k == key && decide (g > gen) &&
+            decide ((w.st id).parent = (w.st m.sender).parent)
         | .core _ => false
   | .core _ => false
 
@@ -1144,7 +1154,10 @@ def supervisorInst (D : Description) (child : InstId) (supName : String) : Optio
 def supervisorOf (D : Description) (id : InstId) : Option InstId :=
   match templateOf D (tname id) with
   | none => none
-  | some t => if t.supervisor == "" then none else supervisorInst D id t.supervisor
+  | some t =>
+    match t.supervisor with
+    | none => none
+    | some name => supervisorInst D id name
 
 /-- Same role and subtree key. Generations are incarnations, not different slots. -/
 def sameSlot (a b : InstId) : Bool :=
@@ -1153,36 +1166,23 @@ def sameSlot (a b : InstId) : Bool :=
   | .peer n k _, .peer n' k' _ => n == n' && k == k'
   | _, _ => false
 
-/-- `child` is a direct descendant of `parent`. A per-peer member may supervise
-other members of its own subtree. The match ignores generation: a restarted
-parent is still the supervisor of the children at its key. An actor is not
-its own child. -/
-def isChild (D : Description) (parent child : InstId) : Bool :=
-  match supervisorOf D child with
-  | some p => sameSlot p parent && !sameSlot child parent
+/-- `child` recorded `parent` as the incarnation that wired it. The match is
+the id, including generation. An actor is not its own child. -/
+def isChild (w : World) (parent child : InstId) : Bool :=
+  match (w.st child).parent with
+  | some p => p == parent && decide (child ≠ parent)
   | none => false
 
-/-- A per-peer stage supervises the per-peer child that names it, at the same
-subtree key. The child is not required to be on the roster yet: the wiring is
-what makes the parent the supervisor. -/
-theorem isChild_peer (D : Description) (supName childName : String) (k : Nat)
-    (sup child : Template) (hsup : templateOf D supName = some sup)
-    (hchild : templateOf D childName = some child) (hm : sup.multiplicity = .perPeer)
-    (hsub : child.subtree ≠ "") (hsame : child.subtree = sup.subtree)
-    (hname : child.supervisor = supName) (hdiff : childName ≠ supName)
-    (hnamed : supName ≠ "") :
-    isChild D (.peer supName k 0) (.peer childName k 0) = true := by
-  unfold isChild sameSlot supervisorOf supervisorInst
-  simp [tname, hchild, hsup, hm, hname, hsame, hsub, hdiff, hnamed, bne, beq_iff_eq]
-  have hsupSub : sup.subtree ≠ "" := by simpa [hsame] using hsub
-  by_cases hempty : sup.subtree = ""
-  · exact absurd hempty hsupSub
-  · rw [if_neg hempty]
-    simp [hdiff, beq_iff_eq]
+/-- The recorded parent is the child link. -/
+theorem isChild_recorded (w : World) (parent child : InstId)
+    (h : (w.st child).parent = some parent) (hne : child ≠ parent) :
+    isChild w parent child = true := by
+  simp [isChild, h, hne]
 
-/-- Some live actor names `id` as its supervisor. -/
+/-- Some live actor recorded `id` as its parent. -/
 def hasChild (D : Description) (w : World) (id : InstId) : Bool :=
-  w.roster.any fun c => isChild D id c && (w.st c).life == .alive
+  let _desc := D
+  w.roster.any fun c => isChild w id c && (w.st c).life == .alive
 
 /-- The tombstone label the parent wired for this child template.
 A peer's label carries its generation, so a stale tombstone is not the
@@ -1210,35 +1210,32 @@ def tombstoneMsg (D : Description) (parent : Actor) (child : InstId) : Msg :=
   { label := tombstoneLabel D child, sender := child, callFrom := none,
     reliable := true, mid := parent.nextMid, tombstone := true, baseLabel := base }
 
-/-- The supervisor's live incarnation, or the canonical id when none is alive. -/
+/-- The recorded parent, when that incarnation is still alive. A shutting or
+dead parent is not a delivery target: pure-stage has already removed its queue. -/
 def liveSupervisor (D : Description) (w : World) (child : InstId) : Option InstId :=
-  match supervisorOf D child with
+  let _desc := D
+  match (w.st child).parent with
   | none => none
-  | some parent =>
-    match parent with
-    | .core _ => some parent
-    | .peer n k _ =>
-      match findLive w n k with
-      | some id => some id
-      | none => some parent
+  | some p => if (w.st p).life == .alive then some p else none
 
-/-- Hand the parent the child's tombstone. A missing parent is not a delivery:
-the template named no supervisor. A parent that is not alive, or a child with
-no wired label, crashes the roster before the lane is touched. A tombstone
-that does not fit is `offerPrio`'s crash: the message is not added and not
-dropped. The tombstone counts toward that lane's budget. -/
+/-- Hand the recorded parent the child's tombstone. No recorded parent is not a
+delivery. A parent that is shutting down or dead has no queue left, so the
+tombstone is dropped. A live parent with no wired label crashes: a live
+supervisor must have a handler. A tombstone that does not fit is `offerPrio`'s
+crash. The tombstone counts toward that lane's budget. -/
 def enqueueTombstone (D : Description) (w : World) (child : InstId) : World :=
-  match liveSupervisor D w child with
+  match (w.st child).parent with
   | none => w
   | some parent =>
     let p := w.st parent
     let msg := tombstoneMsg D p child
-    if p.life != .alive || msg.label == "" then crashWorld w
+    if p.life != .alive then w
+    else if msg.label == "" then crashWorld w
     else offerPrio D w parent msg
 
-/-- A tombstone enqueue does not crash when the parent is alive, the label is
-non-empty, and the lane has room. A full lane, a dead parent, and an empty
-label still crash. -/
+/-- A tombstone enqueue does not crash when the recorded parent is alive, the
+label is non-empty, and the lane has room. A full lane and an empty label on
+a live parent still crash. A parent that is not alive drops the tombstone. -/
 theorem enqueueTombstone_fits
     (D : Description) (w : World) (child parent : InstId)
     (hsup : liveSupervisor D w child = some parent)
@@ -1247,8 +1244,23 @@ theorem enqueueTombstone_fits
     (hroom : prioLoad (w.st parent).prio < capPrio D w.N parent)
     (hcrash : w.crashed = false) :
     (enqueueTombstone D w child).crashed = false := by
+  have hpar : (w.st child).parent = some parent := by
+    unfold liveSupervisor at hsup
+    cases hparent : (w.st child).parent with
+    | none => simp [hparent] at hsup
+    | some p =>
+      simp only [hparent] at hsup
+      by_cases haliveP : (w.st p).life = .alive
+      · have hbit : ((w.st p).life == .alive) = true := by simpa [beq_iff_eq] using haliveP
+        simp only [hbit, ite_true] at hsup
+        cases hsup
+        rfl
+      · have hbit : ((w.st p).life == .alive) = false := by
+          simpa [beq_iff_eq] using haliveP
+        simp only [hbit, ite_false] at hsup
+        cases hsup
   unfold enqueueTombstone offerPrio
-  simp only [hsup]
+  simp only [hpar]
   have hif : ((w.st parent).life != .alive) = false := by simp [hlife]
   have hlab : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
     simpa [beq_iff_eq] using hlabel
@@ -1345,7 +1357,7 @@ def abortDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : Wor
   | 0 => w
   | fuel + 1 =>
     w.roster.foldl (fun w child =>
-      if isChild D parent child && (w.st child).life == .alive &&
+      if isChild w parent child && (w.st child).life == .alive &&
           childTerminable D child then
         let w := abortDesc fuel D w child
         abortActor D w child (w.st child)
@@ -1384,7 +1396,7 @@ def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : 
   | 0 => w
   | fuel + 1 =>
     w.roster.foldl (fun w child =>
-      if isChild D parent child && (w.st child).life == .alive &&
+      if isChild w parent child && (w.st child).life == .alive &&
           childTerminable D child then
         let w := shutdownDesc fuel D w child
         shutdownActor D w child
@@ -1410,7 +1422,7 @@ def markTree (fuel : Nat) (D : Description) (w : World) (id : InstId) : World :=
   | fuel + 1 =>
     let w := markShutdown w id
     w.roster.foldl (fun w child =>
-      if isChild D id child then markTree fuel D w child else w) w
+      if isChild w id child then markTree fuel D w child else w) w
 
 /-- A stage in the supervision tree terminates. Every descendant, terminable or
 not, begins shutting down, and one tombstone is placed on the immediate
@@ -1428,7 +1440,7 @@ descendants begin shutting down. Each direct child leaves one tombstone on the
 parent. A sibling is not a child, and this step does not touch a sibling's mail. -/
 def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
   w.roster.foldl (fun w child =>
-    if isChild D parent child && (w.st child).life == .alive then
+    if isChild w parent child && (w.st child).life == .alive then
       let marked := markTree w.roster.length D w child
       armTombstone marked child
     else w) w
@@ -1481,14 +1493,15 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
   match templateOf I.desc child with
   | none => none
   | some t =>
-    if t.multiplicity == .perPeer && t.supervisor == tname parent && (w.st parent).life == .alive then
+    if t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) && (w.st parent).life == .alive then
       match parent with
       | .core _ =>
         if t.slots != 0 then
           match freeSlot w parent child t.slots with
           | some k =>
             let id := InstId.peer child k (maxGen w child k)
-            some (admitBorn I w id (bornActor I.desc w child k t.initial))
+            let born := { bornActor I.desc w child k t.initial with parent := some parent }
+            some (admitBorn I w id born)
           | none => some w
         else none
       | .peer _ k _ =>
@@ -1496,9 +1509,10 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
           if slotOccupied w child k || slotTombstoneQueued w parent child k then some w
           else
             let id := InstId.peer child k (maxGen w child k)
-            some (admitBorn I w id (bornActor I.desc w child k t.initial))
+            let born := { bornActor I.desc w child k t.initial with parent := some parent }
+            some (admitBorn I w id born)
         else none
-    else if t.multiplicity == .perPeer && t.supervisor == tname parent then
+    else if t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) then
       some w
     else none
 
@@ -2146,7 +2160,7 @@ def memberEffectOk (D : Description) (src : String) : Eff → Bool
   | .abort => true
   | .spawn child =>
     match templateOf D child with
-    | some ct => ct.supervisor == src && perPeerB D src && perPeerB D child
+    | some ct => supNamed ct.supervisor src && perPeerB D src && perPeerB D child
     | none => false
   | _ => true
 
@@ -2363,62 +2377,84 @@ def openSubtreeKey (D : Description) (w : World) (sub template : String) : Optio
 /-- A scheduler spawn opens a new subtree root. A child of a per-peer stage is
 not a root: that stage births it with `Eff.spawn`, at its own key. -/
 def rootOf (D : Description) (t : Template) : Bool :=
-  if t.supervisor == "" then true
-  else
-    match templateOf D t.supervisor with
+  match t.supervisor with
+  | none => true
+  | some name =>
+    match templateOf D name with
     | some sup => sup.multiplicity == .one
     | none => false
 
 /-- A core supervisor that is not alive admits no new root. -/
 def supervisorLive (D : Description) (w : World) (t : Template) : Bool :=
-  if t.supervisor == "" then true
-  else
-    match templateOf D t.supervisor with
+  match t.supervisor with
+  | none => true
+  | some name =>
+    match templateOf D name with
     | none => false
     | some sup =>
       match sup.multiplicity with
-      | .one => (w.st (.core t.supervisor)).life == .alive
+      | .one => (w.st (.core name)).life == .alive
       | .perPeer => false
 
-/-- A root under a core uses the same slot bound as a pool. Keys are
-`0 ..< N`. A key with a live occupant, or with that template's tombstone
-still on the core, is not free. No such key means the spawn is not enabled. -/
+/-- One past every key any member of subtree `sub` has ever used, and at least
+`nextKey sub`. A key is not reused. An empty subtree has no shared key space. -/
+def freshKey (D : Description) (w : World) (sub : String) : Nat :=
+  w.roster.foldl (fun m id =>
+    match id with
+    | .peer n k _ =>
+      if sub != "" && templateSubtree D n == sub then max m (k + 1) else m
+    | .core _ => m) (w.nextKey sub)
+
+/-- Roots of `name` under this core that still occupy a population slot:
+alive, shutting down, or with a tombstone still queued. -/
+def rootOutstanding (w : World) (supervisor name : String) : Nat :=
+  w.roster.foldl (fun n id =>
+    match id with
+    | .peer child k _ =>
+      if child == name &&
+          ((w.st id).life == .alive || (w.st id).life == .shuttingDown ||
+            slotTombstoneQueued w (.core supervisor) name k) then n + 1
+      else n
+    | .core _ => n) 0
+
+/-- A root under no supervisor is bounded by how many are alive. A root under
+a core is bounded by how many are alive, shutting down, or still have a
+tombstone queued, so the core's lane holds at most `N` of them. The key
+itself is always fresh. -/
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
   t.multiplicity == .perPeer && t.slots == 0 && rootOf D t && supervisorLive D w t &&
-    if t.supervisor != "" then (freeRootSlot w t.supervisor template w.N).isSome
-    else decide (aliveCount w template < w.N)
+    match t.supervisor with
+    | some name => decide (rootOutstanding w name template < w.N)
+    | none => decide (aliveCount w template < w.N)
+
+/-- Install one peer. `next` records the fresh key. The parent is the
+incarnation that wired it, or `none` for a scheduler root. -/
+def placePeer (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World) : World :=
+  let id := InstId.peer template k (maxGen w template k)
+  let born := { bornActor I.desc w template k initial with parent := parent }
+  let w := next { w with roster := w.roster ++ [id] }
+  readCells I.desc (setActor w id born) id
 
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
   | none => none
   | some t =>
     if maySpawnRoot I.desc w template t then
-      let base : Actor :=
-        { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
-          tokens := fun _ => 0 }
-      if t.supervisor != "" then
-        match freeRootSlot w t.supervisor template w.N with
-        | some k =>
-          let id := InstId.peer template k (maxGen w template k)
-          let w := { w with roster := w.roster ++ [id] }
-          some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
-        | none => none
-      else if t.subtree == "" then
-        let k := w.nextIx template
-        let id := InstId.peer template k 0
-        let w := { w with roster := w.roster ++ [id], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n }
-        some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
-      else
-        match openSubtreeKey I.desc w t.subtree template with
-        | some k =>
-          let id := InstId.peer template k (maxGen w template k)
-          let w := { w with roster := w.roster ++ [id] }
-          some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
-        | none =>
-          let k := w.nextKey t.subtree
-          let id := InstId.peer template k (maxGen w template k)
-          let w := { w with roster := w.roster ++ [id], nextKey := fun s => if s = t.subtree then k + 1 else w.nextKey s }
-          some (readCells I.desc (setActor w id (withKeyTokens I.desc w template k base)) id)
+      match t.supervisor with
+      | some name =>
+        let k := freshKey I.desc w t.subtree
+        some (placePeer I w template k t.initial (some (.core name))
+          (fun w => { w with nextKey := fun s => if s = t.subtree then k + 1 else w.nextKey s }))
+      | none =>
+        if t.subtree == "" then
+          let k := w.nextIx template
+          some (placePeer I w template k t.initial none
+            (fun w => { w with nextIx := fun n => if n = template then k + 1 else w.nextIx n }))
+        else
+          let k := freshKey I.desc w t.subtree
+          some (placePeer I w template k t.initial none
+            (fun w => { w with nextKey := fun s => if s = t.subtree then k + 1 else w.nextKey s }))
     else none
 
 inductive Action where
@@ -6910,39 +6946,32 @@ theorem spawn_core_life (I : Impl) (w : World) (template : String) (w' : World) 
     simp only [ht] at h
     by_cases hgo : maySpawnRoot I.desc w template t = true
     · simp only [hgo, ite_true] at h
-      by_cases hsup : (t.supervisor != "") = true
-      · simp only [hsup, ite_true] at h
-        cases hk : freeRootSlot w t.supervisor template w.N with
-        | some k =>
-          simp [hk] at h
-          cases h
-          have hpeer : InstId.core name ≠ InstId.peer template k (maxGen w template k) := by
-            intro h; cases h
-          simp [setActor, cellsSt, hpeer]
-        | none => simp [hk] at h
-      · have hsupF : (t.supervisor != "") = false := by simpa [Bool.not_eq_true] using hsup
-        simp only [hsupF, ite_false] at h
+      cases hsup : t.supervisor with
+      | some supName =>
+        simp only [hsup] at h
+        cases h
+        unfold placePeer
+        have hpeer : InstId.core name ≠
+            InstId.peer template (freshKey I.desc w t.subtree) (maxGen w template (freshKey I.desc w t.subtree)) := by
+          intro h; cases h
+        simp [setActor, cellsSt, hpeer]
+      | none =>
+        simp only [hsup] at h
         by_cases hsub : (t.subtree == "") = true
         · simp only [hsub, ite_true] at h
           cases h
-          have hpeer : InstId.core name ≠ InstId.peer template (w.nextIx template) 0 := by
+          unfold placePeer
+          have hpeer : InstId.core name ≠ InstId.peer template (w.nextIx template) (maxGen w template (w.nextIx template)) := by
             intro h; cases h
           simp [setActor, cellsSt, hpeer]
         · have hsubF : (t.subtree == "") = false := by simpa [Bool.not_eq_true] using hsub
           simp only [hsubF, ite_false] at h
-          cases hk : openSubtreeKey I.desc w t.subtree template with
-          | some k =>
-            simp [hk] at h
-            cases h
-            have hpeer : InstId.core name ≠ InstId.peer template k (maxGen w template k) := by
-              intro h; cases h
-            simp [setActor, cellsSt, hpeer]
-          | none =>
-            simp [hk] at h
-            cases h
-            have hpeer : InstId.core name ≠ InstId.peer template (w.nextKey t.subtree) (maxGen w template (w.nextKey t.subtree)) := by
-              intro h; cases h
-            simp [setActor, cellsSt, hpeer]
+          cases h
+          unfold placePeer
+          have hpeer : InstId.core name ≠
+              InstId.peer template (freshKey I.desc w t.subtree) (maxGen w template (freshKey I.desc w t.subtree)) := by
+            intro h; cases h
+          simp [setActor, cellsSt, hpeer]
     · simp [hgo] at h
 
 theorem releaseOutbound_life (w : World) (dead s : InstId) :
@@ -7104,7 +7133,7 @@ theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent :
   | succ fuel ih =>
     simp only [abortDesc] at h
     let step (w : World) (child : InstId) : World :=
-      if isChild D parent child && (w.st child).life == .alive && childTerminable D child then
+      if isChild w parent child && (w.st child).life == .alive && childTerminable D child then
         let w := abortDesc fuel D w child
         abortActor D w child (w.st child)
       else w
@@ -7117,7 +7146,7 @@ theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent :
       | cons child ids ihids =>
         intro w0 h0
         simp only [List.foldl_cons, step] at h0
-        by_cases hcond : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = true
+        by_cases hcond : (isChild w0 parent child && (w0.st child).life == .alive && childTerminable D child) = true
         · simp only [hcond, ite_true] at h0
           let wDesc := abortDesc fuel D w0 child
           let wAct := abortActor D wDesc child (wDesc.st child)
@@ -7125,8 +7154,8 @@ theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent :
           have hDescAlive :=
             abortActor_core_prev D wDesc child (wDesc.st child) name hActAlive
           exact ih w0 child hDescAlive
-        · have hf : (isChild D parent child && (w0.st child).life == .alive && childTerminable D child) = false := by
-            cases hb : isChild D parent child && (w0.st child).life == .alive && childTerminable D child with
+        · have hf : (isChild w0 parent child && (w0.st child).life == .alive && childTerminable D child) = false := by
+            cases hb : isChild w0 parent child && (w0.st child).life == .alive && childTerminable D child with
             | false => rfl
             | true => exact absurd hb hcond
           simp only [hf, ite_false] at h0
@@ -7158,56 +7187,64 @@ a missing label, or a full lane does not leave an alive actor that was absent. -
 theorem enqueueTombstone_life (D : Description) (w : World) (child i : InstId)
     (h : ((enqueueTombstone D w child).st i).life = .alive) : (w.st i).life = .alive := by
   unfold enqueueTombstone at h
-  cases hsup : liveSupervisor D w child with
-  | none => simpa [hsup] using h
+  cases hpar : (w.st child).parent with
+  | none => simpa [hpar] using h
   | some parent =>
-    simp only [hsup] at h
-    by_cases hbad : ((w.st parent).life != .alive ||
-        (tombstoneMsg D (w.st parent) child).label == "") = true
-    · simp only [hbad, ite_true] at h
-      exact crashWorld_prev w i h
-    · have hok : ((w.st parent).life != .alive ||
-          (tombstoneMsg D (w.st parent) child).label == "") = false := by
-        simpa [Bool.not_eq_true] using hbad
-      simp only [hok, ite_false] at h
-      unfold offerPrio at h
-      by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
-      · simp only [hfull, ite_true] at h
+    simp only [hpar] at h
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · simp only [hlive, ite_true] at h
+      exact h
+    · have hliveF : ((w.st parent).life != .alive) = false := by
+        simpa [Bool.not_eq_true] using hlive
+      simp only [hliveF, ite_false] at h
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true] at h
         exact crashWorld_prev w i h
-      · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
-          simpa [Bool.not_eq_true] using hfull
-        simp only [hroom, ite_false] at h
-        by_cases hi : i = parent
-        · rw [hi] at h ⊢
-          simp [setActor] at h
-          exact h
-        · simpa [setActor, hi] using h
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          simpa [Bool.not_eq_true] using hlab
+        simp only [hlabF, ite_false] at h
+        unfold offerPrio at h
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · simp only [hfull, ite_true] at h
+          exact crashWorld_prev w i h
+        · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+            simpa [Bool.not_eq_true] using hfull
+          simp only [hroom, ite_false] at h
+          by_cases hi : i = parent
+          · rw [hi] at h ⊢
+            simp [setActor] at h
+            exact h
+          · simpa [setActor, hi] using h
 
 theorem enqueueTombstone_keeps_dead (D : Description) (w : World) (child i : InstId)
     (h : (w.st i).life = .dead) : ((enqueueTombstone D w child).st i).life = .dead := by
   unfold enqueueTombstone
-  cases hsup : liveSupervisor D w child with
-  | none => simpa [hsup] using h
+  cases hpar : (w.st child).parent with
+  | none => simpa [hpar] using h
   | some parent =>
-    simp only [hsup]
-    by_cases hbad : ((w.st parent).life != .alive ||
-        (tombstoneMsg D (w.st parent) child).label == "") = true
-    · simp only [hbad, ite_true]
-      exact crashWorld_keeps_dead w i h
-    · have hok : ((w.st parent).life != .alive ||
-          (tombstoneMsg D (w.st parent) child).label == "") = false := by
-        simpa [Bool.not_eq_true] using hbad
-      simp only [hok, ite_false]
-      by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
-      · simp only [hfull, ite_true, offerPrio]
+    simp only [hpar]
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · simp only [hlive, ite_true]
+      exact h
+    · have hliveF : ((w.st parent).life != .alive) = false := by
+        simpa [Bool.not_eq_true] using hlive
+      simp only [hliveF, ite_false]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true]
         exact crashWorld_keeps_dead w i h
-      · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
-          simpa [Bool.not_eq_true] using hfull
-        simp only [hroom, ite_false, offerPrio]
-        by_cases hi : i = parent
-        · rw [hi] at h ⊢
-          simp [setActor, h]
-        · simpa [setActor, hi] using h
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          simpa [Bool.not_eq_true] using hlab
+        simp only [hlabF, ite_false]
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · simp only [hfull, ite_true, offerPrio]
+          exact crashWorld_keeps_dead w i h
+        · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+            simpa [Bool.not_eq_true] using hfull
+          simp only [hroom, ite_false, offerPrio]
+          by_cases hi : i = parent
+          · rw [hi] at h ⊢
+            simp [setActor, h]
+          · simpa [setActor, hi] using h
 
 /-- A tombstone that leaves a core alive did not create that life. Crashing the
 roster kills every alive core, so the equality of lives does not hold. -/
@@ -7264,7 +7301,7 @@ theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (paren
   | succ fuel ih =>
     simp only [shutdownDesc] at h
     let step (w : World) (child : InstId) : World :=
-      if isChild D parent child && (w.st child).life == .alive && childTerminable D child then
+      if isChild w parent child && (w.st child).life == .alive && childTerminable D child then
         let w := shutdownDesc fuel D w child
         shutdownActor D w child
       else w
@@ -7277,7 +7314,7 @@ theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (paren
       | cons child ids ihids =>
         intro w0 h0
         simp only [List.foldl_cons, step] at h0
-        by_cases hcond : (isChild D parent child && (w0.st child).life == .alive &&
+        by_cases hcond : (isChild w0 parent child && (w0.st child).life == .alive &&
             childTerminable D child) = true
         · simp only [hcond, ite_true] at h0
           let wDesc := shutdownDesc fuel D w0 child
@@ -7285,9 +7322,9 @@ theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (paren
             ihids _ h0
           have hDescAlive := shutdownActor_prev D wDesc child (InstId.core name) hActAlive
           exact ih w0 child hDescAlive
-        · have hf : (isChild D parent child && (w0.st child).life == .alive &&
+        · have hf : (isChild w0 parent child && (w0.st child).life == .alive &&
               childTerminable D child) = false := by
-            cases hb : isChild D parent child && (w0.st child).life == .alive &&
+            cases hb : isChild w0 parent child && (w0.st child).life == .alive &&
                 childTerminable D child with
             | false => rfl
             | true => exact absurd hb hcond
@@ -7350,7 +7387,7 @@ theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
   | succ fuel ih =>
     simp only [markTree] at h
     let step (w : World) (child : InstId) : World :=
-      if isChild D id child then markTree fuel D w child else w
+      if isChild w id child then markTree fuel D w child else w
     have hfold : ∀ (ids : List InstId) (w0 : World),
         ((ids.foldl step w0).st i).life = .alive → (w0.st i).life = .alive := by
       intro ids
@@ -7359,11 +7396,11 @@ theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
       | cons child ids ihids =>
         intro w0 h0
         simp only [List.foldl_cons, step] at h0
-        by_cases hc : isChild D id child = true
+        by_cases hc : isChild w0 id child = true
         · simp only [hc, ite_true] at h0
           exact ih w0 child (ihids _ h0)
-        · have hf : isChild D id child = false := by
-            cases hb : isChild D id child with
+        · have hf : isChild w0 id child = false := by
+            cases hb : isChild w0 id child with
             | false => rfl
             | true => exact absurd hb hc
           simp only [hf, ite_false] at h0
@@ -7386,7 +7423,7 @@ theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
     (h : ((abortChildren D w parent).st i).life = .alive) : (w.st i).life = .alive := by
   unfold abortChildren at h
   let step (w0 : World) (child : InstId) : World :=
-    if isChild D parent child && (w0.st child).life == .alive then
+    if isChild w0 parent child && (w0.st child).life == .alive then
       let marked := markTree w0.roster.length D w0 child
       armTombstone marked child
     else w0
@@ -7398,12 +7435,12 @@ theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
     | cons child ids ihids =>
       intro w0 h0
       simp only [List.foldl_cons, step] at h0
-      by_cases hc : (isChild D parent child && (w0.st child).life == .alive) = true
+      by_cases hc : (isChild w0 parent child && (w0.st child).life == .alive) = true
       · simp only [hc, ite_true] at h0
         have hts := armTombstone_prev (markTree w0.roster.length D w0 child) child i (ihids _ h0)
         exact markTree_prev _ D w0 child i hts
-      · have hf : (isChild D parent child && (w0.st child).life == .alive) = false := by
-          cases hb : isChild D parent child && (w0.st child).life == .alive with
+      · have hf : (isChild w0 parent child && (w0.st child).life == .alive) = false := by
+          cases hb : isChild w0 parent child && (w0.st child).life == .alive with
           | false => rfl
           | true => exact absurd hb hc
         simp only [hf, ite_false] at h0
@@ -7766,7 +7803,7 @@ def overflowTpl (name : String) (mult : Multiplicity) (sup tomb : String) : Temp
   untimedPeer := false
   mustFit := true
   subtree := "net"
-  supervisor := sup
+  supervisor := if sup == "" then none else some sup
   tombstone := tomb
 
 def laneOverflowDesc : Description where
@@ -7794,7 +7831,12 @@ def overflowWorld : World where
   N := 1
   roster := overflowIds
   nextIx := fun _ => 0
-  st := fun i => if decide (i ∈ overflowIds) then overflowActor else absentActor
+  st := fun i =>
+    if decide (i ∈ overflowIds) then
+      match i with
+      | .peer _ _ _ => { overflowActor with parent := some (.core "parent") }
+      | .core _ => overflowActor
+    else absentActor
   cell := fun _ _ => cleanCell
   observed := fun _ _ => 0
 

@@ -135,9 +135,9 @@ def spawnEffect (D : Description) (src : String) : Eff → Bool
     match templateOf D child, templateOf D src with
     | some ct, some p =>
       if p.multiplicity == .perPeer then
-        ct.supervisor == src && ct.multiplicity == .perPeer && ct.slots == 0
+        supNamed ct.supervisor src && ct.multiplicity == .perPeer && ct.slots == 0
       else
-        ct.supervisor == src && ct.multiplicity == .perPeer && ct.slots != 0
+        supNamed ct.supervisor src && ct.multiplicity == .perPeer && ct.slots != 0
     | _, _ => false
   | .trySend _ _ _ onFull onGone => spawnScope D src onFull && spawnScope D src onGone
   | .call _ _ _ onNotAdmitted onTimedOut =>
@@ -330,15 +330,16 @@ that label in every state the template declares. A tombstone that arrives in
 a state with no transition stays queued. -/
 def tombstoneHandled (I : Impl) : Bool :=
   I.desc.templates.all fun t =>
-    if t.supervisor == "" then true
-    else
+    match t.supervisor with
+    | none => true
+    | some name =>
       t.tombstone != "" &&
-        match templateOf I.desc t.supervisor with
+        match templateOf I.desc name with
         | none => false
         | some sup =>
           sup.states.all fun st =>
             I.transitions.any fun tr =>
-              tr.template == t.supervisor && tr.fromState == st && tr.label == t.tombstone
+              tr.template == name && tr.fromState == st && tr.label == t.tombstone
 
 /-- `child` is spawned somewhere in this program, including a continuation.
 Fuel keeps the recursion structural, so the checker reduces. Running out of
@@ -388,15 +389,17 @@ spawn is allowed from a state that cannot be reached, without consuming the
 tombstone, from a state in which the child may already be alive. -/
 def restartFails (I : Impl) : List String :=
   I.desc.templates.flatMap fun child =>
-    if child.supervisor == "" || child.tombstone == "" then []
-    else
-      let queued := closeAvoid I child.supervisor child.tombstone
-        (spawnToStates I child.supervisor child.name)
-      I.transitions.filterMap fun tr =>
-        if tr.template == child.supervisor && programSpawns child.name tr.program &&
-            tr.label != child.tombstone && queued.elem tr.fromState then
-          some s!"fail: {child.supervisor} re-spawns {child.name} from {tr.fromState} on {tr.label} while that slot's tombstone may still be queued"
-        else none
+    match child.supervisor with
+    | none => []
+    | some name =>
+      if child.tombstone == "" then []
+      else
+        let queued := closeAvoid I name child.tombstone (spawnToStates I name child.name)
+        I.transitions.filterMap fun tr =>
+          if tr.template == name && programSpawns child.name tr.program &&
+              tr.label != child.tombstone && queued.elem tr.fromState then
+            some s!"fail: {name} re-spawns {child.name} from {tr.fromState} on {tr.label} while that slot's tombstone may still be queued"
+          else none
 
 def restartOk (I : Impl) : Bool := (restartFails I).isEmpty
 
@@ -588,7 +591,7 @@ def peerPoolProgram (D : Description) (src : String) : List Eff → Bool
   | .spawn child :: es =>
     (match templateOf D src, templateOf D child with
       | some p, some ct =>
-        p.multiplicity == .perPeer && ct.slots != 0 && ct.supervisor == src
+        p.multiplicity == .perPeer && ct.slots != 0 && supNamed ct.supervisor src
       | _, _ => false) ||
       peerPoolProgram D src es
   | .trySend _ _ _ onFull onGone :: es =>

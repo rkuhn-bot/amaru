@@ -227,8 +227,10 @@ private def decodeTemplate (v : JVal) : Except String Template := do
     | some x => asString x "subtree"
   let timeoutKills ← decodeBoolField v "timeoutKills" false
   let supervisor ← match jget v "supervisor" with
-    | none => pure ""
-    | some x => asString x "supervisor"
+    | none => pure none
+    | some x =>
+      let s ← asString x "supervisor"
+      pure (if s == "" then none else some s)
   return {
     name, multiplicity := mult, capacity, priorityCapacity, priorityBound, states, initial,
     terminable, untimedPeer, mustFit, subtree, timeoutKills, supervisor
