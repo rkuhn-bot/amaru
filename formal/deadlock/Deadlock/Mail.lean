@@ -890,93 +890,64 @@ theorem enqueue_mail (w : World) (D : Description) (sender dst : InstId) (msg : 
     (isCall : Bool) (k : Cont) (hM : MailInv w) (hfree : notParked (w.st sender).phase)
     (hlive : (w.st sender).life = .alive) :
     MailInv (enqueueOrPark w D sender dst msg isCall k) := by
+  have hchPk : ∀ d, (if isCall then issueCall (chargeSender (w.st sender) d)
+      else chargeSender (w.st sender) d).parked = (w.st sender).parked := by
+    intro d; cases isCall <;> simp [issueCall, chargeSender, bumpToken]
+  have hchLf : ∀ d, (if isCall then issueCall (chargeSender (w.st sender) d)
+      else chargeSender (w.st sender) d).life = (w.st sender).life := by
+    intro d; cases isCall <;> simp [issueCall, chargeSender, bumpToken]
   unfold enqueueOrPark
   dsimp only
   by_cases halive : (w.st dst).life = .alive
-  · simp [halive]
+  · rw [if_neg (fun h => h halive)]
     by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
-    · simp [hroom]
+    · rw [if_pos (by simp [hroom.1, hroom.2])]
       by_cases hsame : sender = dst
       · subst hsame
-        if hcall : isCall = true then
-          simp [hcall]
-          apply mail_set_free w sender _ hM hfree
-          · simp [notParked]
-          · simp [issueCall, chargeSender, bumpToken]
-          · simp [issueCall, chargeSender, bumpToken]
-        else
-          have hcf : isCall = false := by cases hbb : isCall <;> simp_all
-          simp [hcf]
-          apply mail_set_free w sender _ hM hfree
-          · exact proceed_not_parked _ _
-          · simp [proceed_parked, chargeSender, bumpToken]
-          · simp [proceed, chargeSender, bumpToken]
-            split <;> rfl
-      · simp [hsame]
-        rw [← halive, ← hroom.1]
-        have hM1 := mail_set_same w dst { (w.st dst) with
-            box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
-            nextMid := (w.st dst).nextMid + 1 } hM rfl rfl rfl
-        if hcall : isCall = true then
-          simp [hcall]
-          apply mail_set_free (setActor w dst { (w.st dst) with
-              box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
-              nextMid := (w.st dst).nextMid + 1 }) sender _ hM1
-          · rw [setActor_other _ dst sender _ hsame]
-            exact hfree
-          · simp [notParked]
-          · rw [setActor_other _ dst sender _ hsame]
-            simp [issueCall, chargeSender, bumpToken]
-          · rw [setActor_other _ dst sender _ hsame]
-            simp [issueCall, chargeSender, bumpToken]
-        else
-          have hcf : isCall = false := by cases hbb : isCall <;> simp_all
-          simp [hcf]
-          apply mail_set_free (setActor w dst { (w.st dst) with
-              box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
-              nextMid := (w.st dst).nextMid + 1 }) sender _ hM1
-          · rw [setActor_other _ dst sender _ hsame]
-            exact hfree
-          · exact proceed_not_parked _ _
-          · rw [setActor_other _ dst sender _ hsame]
-            simp [proceed_parked, chargeSender, bumpToken]
-          · rw [setActor_other _ dst sender _ hsame]
-            simp [proceed, chargeSender, bumpToken]
-            split <;> rfl
-    · simp [hroom]
+        rw [if_pos (by simp)]
+        cases isCall
+        · rw [if_neg Bool.false_ne_true]
+          exact mail_set_free w sender _ hM hfree (proceed_not_parked _ _)
+            ((proceed_parked _ _).trans (hchPk (tname sender)))
+            ((proceed_keeps_life _ _).trans (hchLf (tname sender)))
+        · rw [if_pos rfl]
+          exact mail_set_free w sender _ hM hfree trivial (hchPk (tname sender)) (hchLf (tname sender))
+      · rw [if_neg (by simpa using hsame)]
+        have hM1 := fun (stored : Actor) (hph : stored.phase = (w.st dst).phase)
+            (hpk : stored.parked = (w.st dst).parked) (hlf : stored.life = (w.st dst).life) =>
+          mail_set_same w dst stored hM hph hpk hlf
+        have hS : ∀ stored : Actor, (setActor w dst stored).st sender = w.st sender :=
+          fun stored => setActor_other _ dst sender stored hsame
+        cases isCall
+        · rw [if_neg Bool.false_ne_true]
+          refine mail_set_free _ sender _ (hM1 _ rfl rfl rfl) (by rw [hS]; exact hfree)
+            (proceed_not_parked _ _) ?_ ?_
+          · rw [hS, proceed_parked]
+            exact hchPk (tname dst)
+          · rw [hS, proceed_keeps_life]
+            exact hchLf (tname dst)
+        · rw [if_pos rfl]
+          refine mail_set_free _ sender _ (hM1 _ rfl rfl rfl) (by rw [hS]; exact hfree) trivial ?_ ?_
+          · rw [hS]
+            exact hchPk (tname dst)
+          · rw [hS]
+            exact hchLf (tname dst)
+    · rw [if_neg (by simpa using hroom)]
       by_cases hsame : sender = dst
       · subst hsame
-        simp
-        apply mail_park_self w sender _
-          { sender := sender,
-            msg := { msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid },
-            isCall := isCall } isCall k hM hfree hlive
-        · simp
-        · simp [issueCall, chargeSender, bumpToken]
-          split <;> exact ⟨rfl, rfl⟩
-        · simp
-        · simp [issueCall, chargeSender, bumpToken]
-          split <;> rfl
-      · simp [hsame]
-        rw [← halive]
-        apply mail_park_other w dst sender
-          { (if isCall then issueCall (chargeSender (w.st sender) (tname dst))
-              else chargeSender (w.st sender) (tname dst)) with
-              phase := .parked dst isCall k }
-          { (w.st dst) with
-            parked := (w.st dst).parked ++
-              [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }],
-            nextMid := (w.st dst).nextMid + 1 }
-          { sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }
-          isCall k hM hsame hfree hlive
+        rw [if_pos (by simp)]
+        apply mail_park_self w sender _ _ isCall k hM hfree hlive rfl
+        · exact congrArg (· ++ _) (hchPk (tname sender))
+        · exact ⟨rfl, rfl⟩
+        · exact hchLf (tname sender)
+      · rw [if_neg (by simpa using hsame)]
+        apply mail_park_other w dst sender _ _ _ isCall k hM hsame hfree hlive
         · rfl
         · rfl
-        · simp
-        · simp
-        · simp [issueCall, chargeSender, bumpToken]
-          split <;> rfl
-        · simp [issueCall, chargeSender, bumpToken]
-          split <;> rfl
+        · exact ⟨rfl, rfl⟩
+        · rfl
+        · exact hchPk (tname dst)
+        · exact hchLf (tname dst)
         · rfl
   · simp [halive]
     by_cases hcall : isCall = true
