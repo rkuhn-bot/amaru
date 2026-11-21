@@ -27,16 +27,17 @@ still crash the roster are:
 - `terminate` of a permanent core
 - a self-schedule that does not fit the priority lane
 - a cell wake that does not fit the priority lane
-- `enqueueTombstone` when the parent is not alive, or when the tombstone
+- `enqueueTombstone` when the recorded parent is alive and the tombstone
   label is empty
 - the `terminate` fall-through, a stage the shutdown cases do not classify
 - a missing template at a step that looks the template up and crashes
 
-The last three are obligations, not a proved absence. Under `GraphOk` and
-`LocalOk` a tombstone is enqueued only for a child whose supervisor is
-alive and whose label is the template's non-empty tombstone; a `LocalOk`
-program's `terminate` meets one of the classified shutdown cases; and a
-step looks up a template the description declares. This note does not
+The last three are obligations, not a proved absence. A seal whose recorded
+parent is shutting down or dead drops the tombstone: pure-stage has already
+discarded that queue in `terminate_stage`. An empty label on a parent that
+is still alive crashes, before the offer. A `LocalOk` program's `terminate`
+is expected to meet one of the classified shutdown cases, and a step is
+expected to look up a template the description declares. This note does not
 prove those sites unreachable. A design that reaches one of them crashes.
 
 `prioSized` is part of `LocalOk`. Per parent it is one tombstone per child
@@ -50,11 +51,14 @@ is still queued. The semantics makes the same spawn a no-op, for a core pool
 and for a per-peer parent, and a root spawn into such a slot is not enabled.
 A slot that is still shutting down is occupied too. The tombstone is queued
 at the seal, so the predecessor is dead before the parent is notified.
-`no_tombstone_overflow` does not hold. `Deadlock/Counterexample.lean` is a
-`GraphOk` and `LocalOk` run, with `prioSized` true, in which the second seal
-of one slot finds the older generation's lane already full and `offerPrio`
-crashes. Tombstone overflow stays a crash source. A self-schedule or a cell
-wake that does not fit still crashes, matching pure-stage's panic.
+`no_tombstone_overflow` is not a theorem. The run that overflowed one lane
+reused a subtree key and delivered both tombstones to the older generation.
+A birth now takes a fresh key, the child records the parent incarnation, and
+a seal drops the tombstone when that incarnation is not alive.
+`Deadlock/Counterexample.lean` runs the schedule that matches that rule: two
+roots, two keys, one tombstone on each live lane. `tmb_seal_room` is the
+numeric fact for a world that already satisfies `Hold`. A self-schedule or a
+cell wake that does not fit still crashes, matching pure-stage's panic.
 `LocalOk`'s spawn scope does rule out the crash from `Eff.spawn` of a
 template its parent is not allowed to birth. `Delivered` says every reliable message in
 the bulk box, the parked list, or the priority lane is later the head

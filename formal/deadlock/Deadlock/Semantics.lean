@@ -1270,8 +1270,8 @@ theorem enqueueTombstone_fits
 
 /-- Under `prioSized`, a tombstone fits when the queued tombstones are strictly
 under the slot bound and the other priority messages are within the static
-sender count. A reachable world need not have that split: two live
-generations of one parent can overflow the older lane. -/
+sender count. That split is the hypothesis here. It is not yet shown for
+every world `GraphOk` and `LocalOk` can reach. -/
 theorem tombstone_offer_room
     (D : Description) (w : World) (child parent : InstId) (parentName : String)
     (other tombs rest : Nat) (t : Template)

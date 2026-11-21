@@ -1,26 +1,21 @@
 /-
-`no_tombstone_overflow` is false.
+The reused-key schedule crashed, and the fresh-key schedule does not.
 
-`prioSized` counts one tombstone per child slot of one parent instance.
-`restartOk` rejects a re-spawn that can run while that slot's tombstone is
-still queued. Neither check sees two live generations of the same
-supervisor.
+Before a birth took a fresh key, this design was run at population 8.
+An empty-named root at key 5 spawned `R` generation 0. Six later births of
+`R` filled keys 0–4 and then took key 5 again, because the fallback in
+`spawn` used `nextKey` with no liveness check. Generation 1 was born while
+generation 0 was alive. Each generation spawned `C`. Both seals offered
+`dead/C` to generation 0, whose lane held one message, and `offerPrio`
+crashed. That action list is not a witness for the semantics below: the
+empty-named root's `spawn "R"` is out of scope (`none` matches no template)
+and the roster crashes there. The schedule that matches pure-stage is the
+one in `faithful`: two scheduler births, two keys, one tombstone on each
+live lane.
 
-The trace below builds both. Six scheduler births of the empty-named root
-leave key 5 alive. That root spawns `R` generation 0 at key 5. Six more
-births of `R` fill keys 0–4 and then key 5 again: `openSubtreeKey` only
-looks below `nextKey`, so the sixth birth is generation 1, and both
-generations stay alive. `findLive` returns generation 0.
-
-Generation 0 spawns `C`, and `C`'s seal queues `dead/C#0` on generation 0.
-The lane's capacity is 1 and its length is then 1. Generation 1 is still
-in `boot`, which `restartOk` treats as a first spawn, and its own lane is
-empty, so it spawns `C` again. The second seal offers another tombstone to
-generation 0. `offerPrio` crashes.
-
-The same trace does not crash when `R`'s priority capacity is 2, so the
-crash is the full lane and not a dead parent, an empty label, or an
-unclassified `terminate`.
+`foreign_tombstone` and `late_seal_drops` are the two probes from the
+review of that crash. A new root is a fresh key, and a seal whose recorded
+parent is shutting down drops the tombstone.
 -/
 
 import Deadlock.Graph
@@ -29,6 +24,7 @@ import Deadlock.Semantics
 
 set_option autoImplicit false
 set_option maxRecDepth 100000
+set_option maxHeartbeats 2000000
 
 namespace Deadlock
 
@@ -57,62 +53,52 @@ def step (t f l to : String) : CompatStep :=
 
 def big : Affine := { a := 4, b := 4 }
 
-def zT : Template := { tpl "" 8 ["idle"] "idle" with capacity := big }
-
 def rT : Template :=
   { tpl "R" 8 ["boot", "up"] "boot" with
       subtree := "S", capacity := big, priorityCapacity := Affine.ofNat 1 }
 
 def cT : Template :=
   { tpl "C" 8 ["idle"] "idle" with
-      terminable := true, subtree := "S", supervisor := "R", tombstone := "dead/C", capacity := big }
+      terminable := true, subtree := "S", supervisor := some "R", tombstone := "dead/C",
+      capacity := big }
 
 def cxDesc : Description where
-  name := "two-live"
+  name := "fresh-root"
   freshNames := true
-  templates := [zT, rT, cT]
-  edges := [ing "" "idle" "Go", ing "R" "boot" "Go", ing "R" "up" "Go", ing "R" "boot" "dead/C",
+  templates := [rT, cT]
+  edges := [ing "R" "boot" "Go", ing "R" "up" "Go", ing "R" "boot" "dead/C",
             ing "R" "up" "dead/C", ing "C" "idle" "Die"]
   compatibility := .all
-  steps := [step "" "idle" "Go" "idle", step "R" "boot" "Go" "up", step "R" "up" "Go" "up",
-            step "R" "boot" "dead/C" "boot", step "R" "up" "dead/C" "up", step "C" "idle" "Die" "idle"]
+  steps := [step "R" "boot" "Go" "up", step "R" "up" "Go" "up",
+            step "R" "boot" "dead/C" "boot", step "R" "up" "dead/C" "up",
+            step "C" "idle" "Die" "idle"]
 
 def cxImpl : Impl where
   desc := cxDesc
   transitions :=
-    [tr "" "idle" "Go" "idle" [.spawn "R"],
-     tr "R" "boot" "Go" "up" [.spawn "C"],
+    [tr "R" "boot" "Go" "up" [.spawn "C"],
      tr "R" "up" "Go" "up" [],
      tr "R" "boot" "dead/C" "boot" [],
      tr "R" "up" "dead/C" "up" [],
      tr "C" "idle" "Die" "idle" [.terminate]]
 
-/-- Population 8. Six empty-named roots, then the births described above, all fit. -/
-def runAt (acts : List Action) : Option World :=
-  acts.foldl (fun w a => w.bind (apply cxImpl a)) (some (initWorld cxImpl 8))
+def runAt (I : Impl) (n : Nat) (acts : List Action) : Option World :=
+  acts.foldl (fun w a => w.bind (apply I a)) (some (initWorld I n))
 
-def r5 : InstId := .peer "R" 5 0
-def r5' : InstId := .peer "R" 5 1
-def c0 : InstId := .peer "C" 5 0
-def c1 : InstId := .peer "C" 5 1
+def r0 : InstId := .peer "R" 0 0
+def r1 : InstId := .peer "R" 1 0
+def c0 : InstId := .peer "C" 0 0
+def c1 : InstId := .peer "C" 1 0
 
-def prelude : List Action :=
-  (List.range 6).map (fun _ => .spawn "") ++
-  [.ingress (.peer "" 5 0) "Go", .recvBulk (.peer "" 5 0), .exec (.peer "" 5 0)] ++
-  (List.range 6).map (fun _ => .spawn "R")
+def spawnC (parent : InstId) : List Action :=
+  [.ingress parent "Go", .recvBulk parent, .exec parent]
 
 def killC (id : InstId) : List Action :=
   [.ingress id "Die", .recvBulk id, .exec id, .exec id]
 
-def spawnC (parent _child : InstId) : List Action :=
-  [.ingress parent "Go", .recvBulk parent, .exec parent]
-
-/-- Through the mark of the second child. The seal is the next `exec`. -/
-def beforeSeal : List Action :=
-  prelude ++ spawnC r5 c0 ++ killC c0 ++ spawnC r5' c1 ++ (killC c1).take 3
-
-def twoLive : List Action :=
-  beforeSeal ++ [.exec c1]
+/-- Two scheduler births. Each root births one child and seals it. -/
+def faithful : List Action :=
+  [.spawn "R"] ++ spawnC r0 ++ killC c0 ++ [.spawn "R"] ++ spawnC r1 ++ killC c1
 
 theorem cx_graph : GraphOk cxDesc :=
   checkBool_sound cxDesc (by decide)
@@ -121,23 +107,73 @@ theorem cx_local : LocalOk cxImpl := by decide
 
 theorem cx_sized : prioSized cxDesc "R" (prioSenderBound cxImpl "R") = true := by decide
 
-theorem cx_cap : capPrio cxDesc 8 r5 = 1 := by decide
-
-/-- Both generations are alive. The older lane already holds this slot's tombstone. -/
-theorem cx_ready :
-    (match runAt beforeSeal with
+/-- Each root is a fresh key. Each lane holds the one tombstone its own child
+sealed, and the roster has not crashed. -/
+theorem faithful_lanes :
+    (match runAt cxImpl 2 faithful with
       | none => false
       | some w =>
-        decide ((w.st c1).life = .shuttingDown) && (w.st c1).pendingTombstone &&
-          decide ((w.st r5).life = .alive) && decide ((w.st r5').life = .alive) &&
-          decide (w.crashed = false) &&
-          decide ((w.st r5).prio.map (·.label) = ["dead/C#0"]) &&
-          decide ((w.st r5').prio.map (·.label) = [])) = true := by decide
+        decide (w.crashed = false) &&
+          decide ((w.st r0).life = .alive) && decide ((w.st r1).life = .alive) &&
+          decide ((w.st r0).prio.map (·.label) = ["dead/C#0"]) &&
+          decide ((w.st r1).prio.map (·.label) = ["dead/C#0"])) = true := by decide
 
-/-- The seal of the second child crashes `offerPrio` on the older generation. -/
-theorem cx_crashes :
-    (match runAt twoLive with
+/-! A child can seal after its parent was marked. The new root is not that parent. -/
+
+def rT2 : Template :=
+  { tpl "R" 8 ["boot", "up"] "boot" with
+      subtree := "S", capacity := { a := 8, b := 4 }, priorityCapacity := Affine.ofNat 1,
+      terminable := true }
+
+def kDesc : Description where
+  name := "late-seal"
+  freshNames := true
+  templates := [rT2, cT]
+  edges := [ing "R" "boot" "Go", ing "R" "up" "Go", ing "R" "up" "Kill", ing "R" "boot" "Kill",
+            ing "R" "boot" "dead/C", ing "R" "up" "dead/C", ing "C" "idle" "Die"]
+  compatibility := .all
+  steps := [step "R" "boot" "Go" "up", step "R" "up" "Go" "up", step "R" "up" "Kill" "up",
+            step "R" "boot" "Kill" "boot", step "R" "boot" "dead/C" "boot",
+            step "R" "up" "dead/C" "up", step "C" "idle" "Die" "idle"]
+
+def kImpl : Impl where
+  desc := kDesc
+  transitions :=
+    [tr "R" "boot" "Go" "up" [.spawn "C"], tr "R" "up" "Go" "up" [],
+     tr "R" "up" "Kill" "up" [.terminate], tr "R" "boot" "Kill" "boot" [],
+     tr "R" "boot" "dead/C" "boot" [], tr "R" "up" "dead/C" "up" [],
+     tr "C" "idle" "Die" "idle" [.terminate]]
+
+/-- `C` marks itself, then `R` marks itself. The child's seal has not run. -/
+def lateBase : List Action :=
+  [.spawn "R", .ingress r0 "Go", .recvBulk r0, .exec r0,
+   .ingress c0 "Die", .recvBulk c0, .exec c0,
+   .ingress r0 "Kill", .recvBulk r0, .exec r0]
+
+theorem k_checks : checkBool kDesc = true ∧ localOkB kImpl = true ∧
+    prioSized kDesc "R" (prioSenderBound kImpl "R") = true := by decide
+
+/-- The seal finds its recorded parent shutting down and drops the tombstone.
+The lane stays empty and the roster does not crash. -/
+theorem late_seal_drops :
+    (match runAt kImpl 2 (lateBase ++ [.exec c0]) with
       | none => false
-      | some w => w.crashed)     = true := by decide
+      | some w =>
+        decide (w.crashed = false) &&
+          decide ((w.st r0).life = .shuttingDown) &&
+          decide ((w.st c0).life = .dead) &&
+          decide ((w.st r0).prio = [])) = true := by decide
+
+/-- A root born while the parent is shutting down takes the next key. The
+child's tombstone is not delivered to that new root. -/
+theorem foreign_tombstone :
+    (match runAt kImpl 2 (lateBase ++ [.spawn "R", .exec c0]) with
+      | none => false
+      | some w =>
+        decide (w.crashed = false) &&
+          decide ((w.st r0).life = .shuttingDown) &&
+          decide ((w.st r1).life = .alive) &&
+          decide ((w.st r1).prio = []) &&
+          decide ((w.st c0).life = .dead)) = true := by decide
 
 end Deadlock

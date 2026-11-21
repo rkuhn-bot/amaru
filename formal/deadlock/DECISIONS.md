@@ -136,33 +136,34 @@ cell-wake senders. A path contributes the sends on one outcome; the two
 branches are not added. The lane also keeps a label from a later transition,
 and it keeps each label once, so the sender term is the larger of the
 single-path count and the number of distinct labels. `prioSizeFails` is part
-of `LocalOk`. That bound does not keep a tombstone inside the lane. A
-self-schedule or a cell wake that does not fit still crashes. That is
-pure-stage's panic.
+of `LocalOk`. That bound is the lane's static account. It is not yet a
+theorem that every reachable seal stays inside it. A self-schedule or a
+cell wake that does not fit still crashes. That is pure-stage's panic.
 
 Pure-stage will be changed to match this bound. Its tombstone queue is an
 unbounded `VecDeque` (`supervisor.tombstones.push_back` in
 `crates/amaru-pure-stage/src/simulation/running/mod.rs:1323` at `34a45300`).
 That is an implementation change to make, not a defect in the model.
 
-## 2026-11-20 — Two live generations overflow one lane
+## 2026-11-20 — A reused key was a fidelity bug
 
-`no_tombstone_overflow` is false, and the semantics are left as they are.
-`Deadlock/Counterexample.lean` is a `GraphOk`, `LocalOk` design whose
-`prioSized` check passes. It runs at population 8.
+The overflow in `Deadlock/Counterexample.lean` reused a subtree key and
+delivered the second child's tombstone to the older generation. pure-stage
+at `34a45300` does not do that. `stage_name` gives every birth a fresh name,
+and `supervised_by` is that exact parent. `terminate_stage` discards a
+child's tombstone when the parent is removed.
 
-An empty-named root at key 5 spawns `R` generation 0. Later scheduler births
-of `R` fill keys 0–4 and then take key 5 again, because `openSubtreeKey`
-only searches below `nextKey`. Generation 1 is born while generation 0 is
-still alive. `findLive` returns generation 0.
+The semantics follow that rule. A scheduler root takes a fresh subtree key.
+A per-peer child is born at its parent's key, and a restart under that same
+live parent is a new generation. The child records the parent incarnation.
+The seal delivers the tombstone to that incarnation, and drops it when the
+incarnation is shutting down or dead. A live parent with an empty tombstone
+label still crashes. A root under no supervisor is bounded by how many are
+alive. A root under a core is bounded by how many are alive, shutting down,
+or still have a tombstone queued. `supervisor` is an `Option`: `none` does
+not match a template, including one whose name is empty.
 
-Generation 0 spawns `C`. The seal queues `dead/C#0` on generation 0, whose
-priority capacity is 1, so the lane is full. Generation 1 is still in
-`boot`. `restartOk` treats the spawn from `boot` as a first birth, and the
-spawn looks at generation 1's own empty lane, so the second `C` is born.
-Its seal offers another tombstone to generation 0, and `offerPrio` crashes.
-The same actions do not crash when that capacity is 2.
-
-`restartOk` and `prioSized` both account for one parent instance. They do
-not count a second live generation of that instance. Refunds still go to
-the live generation, and the tombstone is still queued at the seal.
+`no_tombstone_overflow` is not restated. `tmb_seal_room` still says a world
+that satisfies `Hold` has room for the seal. `Hold` is not yet proved for
+every step. Refunds still go to the live generation, and the tombstone is
+still queued at the seal.
