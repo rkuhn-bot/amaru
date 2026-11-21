@@ -68,26 +68,31 @@ not added, and the lane holds each label once across later transitions.
 is still queued. The semantics makes the same spawn a no-op, for a core pool
 and for a per-peer parent, and a root spawn into such a slot is not enabled.
 A pool slot, and a per-peer parent's one child, also stay blocked while a
-core still holds mail from that subtree key — a bulk message, a priority
-message, or a parked send still on the core, from any member, any
-generation. `slotMailHeld` is that test. `spawnChild` is a no-op until the
-core has consumed it, the same treatment as a queued tombstone. The two
-guards are independent: a per-peer supervisor can consume the tombstone
-while the core mail remains, and a core can consume the mail while the
-tombstone remains. A scheduler root takes a fresh key. It still occupies one
-of the `N` population slots while it is alive, and after that while the
-subtree's core mail remains. `rootOutstanding` is the count under a core,
-including shutting down and a queued tombstone. `loneOutstanding` is the
-count with no supervisor. `may_root_parts` and `may_free_parts` say an
-enabled spawn has that count strictly below `N`. Dead subtrees with core
-mail are inside the same `N`. The restart check in `LocalOk` is still only
-the tombstone, because core mail is not a typestate fact. `GraphOk` does
-not read mailboxes. A respawn can stay disabled for the rest of the run.
-Liveness of respawn is not claimed. pure-stage and Amaru have to enforce
-the same precondition before a restart, and the scheduler has to hold the
-population slot until the drained signal for that subtree. `outlive_refused`
-is E4: two roots fill `N = 2` while their mail sits on the cores, and the
-third spawn is not enabled. `outlive_stuck` is that the old run is refused.
+surviving receiver still holds mail from that subtree key — a bulk
+message, a priority message, or a parked send still on that host, from any
+member, any generation. A surviving receiver is alive or shutting down and
+is not sealed together with the sender. `slotMailHeld` is that test.
+`spawnChild` is a no-op until that host has consumed it, the same treatment
+as a queued tombstone. The two guards are independent: a supervisor can
+consume the tombstone while the mail remains, and a receiver can consume
+the mail while the tombstone remains. A scheduler root takes a fresh key.
+It still occupies one of the `N` population slots while it is alive, and
+after that while the subtree's mail remains on a surviving receiver.
+`rootOutstanding` is the count under a core, including shutting down and a
+queued tombstone. `loneOutstanding` is the count with no supervisor.
+`may_root_parts` and `may_free_parts` say an enabled spawn has that count
+strictly below `N`. Dead subtrees whose mail still sits on a surviving
+receiver are inside the same `N`. The restart check in `LocalOk` is still
+only the tombstone, because that mail is not a typestate fact. `GraphOk`
+does not read mailboxes. A respawn can stay disabled for the rest of the
+run. Liveness of respawn is not claimed. pure-stage and Amaru have to
+enforce the same precondition before a restart, and the scheduler has to
+hold the population slot until every surviving receiver has drained that
+subtree. `outlive_refused` is E4: two roots fill `N = 2` while their mail
+sits on the cores, and the third spawn is not enabled. `child_sub_refused`
+and `pool_sub_refused` are the same hold when the receiver is a sibling or
+a pool child rather than a core. `outlive_stuck` is that the old run is
+refused.
 A slot that is still shutting down is occupied too. The tombstone is queued
 at the seal, so the predecessor is dead before the parent is notified.
 `no_tombstone_overflow` is that account for a reachable world. Under

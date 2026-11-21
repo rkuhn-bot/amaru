@@ -341,7 +341,7 @@ theorem admit_count (sender dead : InstId) (a : Actor)
     rw [hmoved', countParked_filter_other sender dead hs]
     omega
 
-/-- The actor `admitHost` installs: `dead`'s parked sends become ordinary mail. -/
+/-- Parked sends from `dead` become ordinary mail. -/
 def admitActor (a : Actor) (dead : InstId) : Actor :=
   { a with
     box := a.box ++ ((a.parked.filter fun p => p.sender == dead).map (·.msg)),

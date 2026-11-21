@@ -11,7 +11,8 @@ description: a non-terminable member is not confined to its subtree.
 
 Each birth is generation 0 of a fresh subtree key. A dead root still occupies
 one of the `N` population slots while any member of that subtree key has mail
-on a core. `N` is 2, so the third birth is not enabled. The cores never fill.
+on a receiver that is not sealed with the sender. Here that receiver is a
+core. `N` is 2, so the third birth is not enabled. The cores never fill.
 -/
 import Deadlock.Graph
 import Deadlock.Local

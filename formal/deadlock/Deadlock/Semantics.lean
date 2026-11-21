@@ -1361,48 +1361,6 @@ def releaseWorld (D : Description) (w : World) (id : InstId) (a : Actor) : World
     { base with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
   releaseParked (setActor w id dead) id a.parked
 
-/-- A blocked send from `dead` is moved into the target's box. The target stays
-alive and still has to handle it. The dead sender is no longer parked there. -/
-def admitHost (w : World) (dead host : InstId) : World :=
-  if host == dead then w
-  else if ((w.st host).parked.filter fun p => p.sender == dead).isEmpty then w
-  else
-    setActor w host
-      { (w.st host) with
-        box := (w.st host).box ++
-          ((w.st host).parked.filter fun p => p.sender == dead).map (·.msg),
-        parked := (w.st host).parked.filter fun p => p.sender != dead }
-
-/-- Admit every blocked send `dead` still has on the roster. -/
-def admitDead (w : World) (dead : InstId) : World :=
-  w.roster.foldl (fun w host => admitHost w dead host) w
-
-/-- `releaseWorld`, then resume blocking sends still waiting on `id`, then admit
-`id`'s own blocked sends. Parked calls and `awaitReply` callers stay for their
-deadline. -/
-def abortActor (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
-  admitDead (failWaiters (releaseWorld D w id a) id) id
-
-/-- A declared terminable template. Inlined here so the descendant fold can see it. -/
-def childTerminable (D : Description) (child : InstId) : Bool :=
-  match templateOf D (tname child) with
-  | some t => t.terminable
-  | none => false
-
-/-- Abort the live terminable descendants of `parent`, children before grandchildren.
-`fuel` is the roster length, so a chain cannot outrun the fold. A non-terminable
-template is not a descendant the parent may abort: it can be a compat role. -/
-def abortDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : World :=
-  match fuel with
-  | 0 => w
-  | fuel + 1 =>
-    w.roster.foldl (fun w child =>
-      if isChild w parent child && (w.st child).life == .alive &&
-          childTerminable D child then
-        let w := abortDesc fuel D w child
-        abortActor D w child (w.st child)
-      else w) w
-
 /-- Enter shutting-down. Mail stays until `releaseWorld` seals the actor.
 A life that is not alive is left alone. -/
 def markShutdown (w : World) (id : InstId) : World :=
@@ -1427,20 +1385,6 @@ def sealActor (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
 def shutdownActor (D : Description) (w : World) (id : InstId) : World :=
   let marked := markShutdown w id
   if (w.st id).life == .alive then armTombstone marked id else marked
-
-/-- Mark the live terminable descendants of `parent` shutting down, children
-before grandchildren. They stop accepting mail in this step. Each seals
-itself on a later `exec`. -/
-def shutdownDesc (fuel : Nat) (D : Description) (w : World) (parent : InstId) : World :=
-  match fuel with
-  | 0 => w
-  | fuel + 1 =>
-    w.roster.foldl (fun w child =>
-      if isChild w parent child && (w.st child).life == .alive &&
-          childTerminable D child then
-        let w := shutdownDesc fuel D w child
-        shutdownActor D w child
-      else w) w
 
 /-- A core's `terminate`, or a priority-lane overflow, has crashed the roster.
 `crashWorld` sets `w.crashed` and every later action is disabled, so the world
@@ -1519,48 +1463,80 @@ def fromSlot (name : String) (key : Nat) (id : InstId) : Bool :=
   | .peer n k _ => n == name && k == key
   | .core _ => false
 
-/-- Mail from slot `(name, key)` that this actor has not consumed: a bulk
-message, a priority message, or a parked send still sitting here. -/
-def actorHoldsSlotMail (name : String) (key : Nat) (a : Actor) : Bool :=
-  a.box.any (fun m => fromSlot name key m.sender) ||
-    a.prio.any (fun m => fromSlot name key m.sender) ||
-    a.parked.any (fun p => fromSlot name key p.sender || fromSlot name key p.msg.sender)
+/-- `desc` sits under `anc` on the recorded parent chain. `fuel` is the
+roster length, so a cycle stops. The node itself is not a descendant. -/
+def descends (fuel : Nat) (w : World) (anc desc : InstId) : Bool :=
+  match fuel with
+  | 0 => false
+  | fuel + 1 =>
+    if desc == anc then false
+    else
+      match (w.st desc).parent with
+      | none => false
+      | some p =>
+        if p == anc then true
+        else if p == desc then false
+        else descends fuel w anc p
 
-/-- A core still holds mail from any occupant of slot `(name, key)`. -/
+/-- `host` is dropped in the same seal as `sender`. `terminateStage` seals
+the sender's descendants in that step (`dropDescendants`, then `sealBranch`
+and `releaseWorld`) and seals the sender when it later seals. `releaseWorld`
+empties that actor's mailbox. It does not clear a sibling, a parent, or a
+core: those hosts are not in this seal. -/
+def sealedTogether (w : World) (sender host : InstId) : Bool :=
+  sender == host || descends w.roster.length w sender host
+
+/-- `host` still has to consume mail from `sender`. It is alive or shutting
+down, and it is not sealed together with the sender. A dead or absent host
+does not count: a host sealed with the sender is already dead by the time a
+later spawn is checked, and its mailbox was cleared in that seal. -/
+def survivesSender (w : World) (sender host : InstId) : Bool :=
+  ((w.st host).life == .alive || (w.st host).life == .shuttingDown) &&
+    !(sealedTogether w sender host)
+
+/-- Mail from slot `(name, key)` that `host` has not consumed: a bulk
+message, a priority message, or a parked send still sitting here, and only
+when `host` survives that sender. -/
+def actorHoldsSlotMail (w : World) (host : InstId) (name : String) (key : Nat) (a : Actor) : Bool :=
+  let held (sender : InstId) : Bool := fromSlot name key sender && survivesSender w sender host
+  a.box.any (fun m => held m.sender) ||
+    a.prio.any (fun m => held m.sender) ||
+    a.parked.any (fun p => held p.sender || held p.msg.sender)
+
+/-- A surviving receiver still holds mail from any occupant of slot
+`(name, key)`. -/
 def slotCoreMail (w : World) (name : String) (key : Nat) : Bool :=
-  w.roster.any fun id =>
-    match id with
-    | .core _ => actorHoldsSlotMail name key (w.st id)
-    | .peer _ _ _ => false
+  w.roster.any fun host => actorHoldsSlotMail w host name key (w.st host)
 
 /-- `id` is any generation of any template in subtree `sub` at `key`. -/
 def fromSubtree (D : Description) (sub : String) (key : Nat) (id : InstId) : Bool :=
   isMember D id sub key
 
-/-- Mail from subtree `sub` at `key` that this actor has not consumed. -/
-def actorHoldsSubtreeMail (D : Description) (sub : String) (key : Nat) (a : Actor) : Bool :=
-  a.box.any (fun m => fromSubtree D sub key m.sender) ||
-    a.prio.any (fun m => fromSubtree D sub key m.sender) ||
-    a.parked.any (fun p => fromSubtree D sub key p.sender || fromSubtree D sub key p.msg.sender)
+/-- Mail from subtree `sub` at `key` that `host` has not consumed, when
+`host` survives that sender. -/
+def actorHoldsSubtreeMail (D : Description) (w : World) (host : InstId) (sub : String) (key : Nat)
+    (a : Actor) : Bool :=
+  let held (sender : InstId) : Bool := fromSubtree D sub key sender && survivesSender w sender host
+  a.box.any (fun m => held m.sender) ||
+    a.prio.any (fun m => held m.sender) ||
+    a.parked.any (fun p => held p.sender || held p.msg.sender)
 
-/-- A core still holds mail from subtree `sub` at `key`. An empty subtree has
-no members, so this is false. -/
+/-- A surviving receiver still holds mail from subtree `sub` at `key`. An
+empty subtree has no members, so this is false. -/
 def subtreeCoreMail (D : Description) (w : World) (sub : String) (key : Nat) : Bool :=
-  w.roster.any fun id =>
-    match id with
-    | .core _ => actorHoldsSubtreeMail D sub key (w.st id)
-    | .peer _ _ _ => false
+  w.roster.any fun host => actorHoldsSubtreeMail D w host sub key (w.st host)
 
-/-- Core mail that holds slot `(name, key)`. A nonempty subtree holds for every
+/-- Mail that holds slot `(name, key)`. A nonempty subtree holds for every
 member at that key, any generation. A template with no subtree holds for its
-own senders. This is not emptiness of a core mailbox. -/
+own senders. The receiver is any host that survives the sender. This is not
+emptiness of a mailbox, and the drained signal is not a state of this model. -/
 def slotMailHeld (D : Description) (w : World) (name : String) (key : Nat) : Bool :=
   let sub := templateSubtree D name
   if sub == "" then slotCoreMail w name key else subtreeCoreMail D w sub key
 
 /-- No new incarnation of this slot. It is alive or shutting down, its
-tombstone is still queued, or a core still holds mail from the subtree at
-this key. -/
+tombstone is still queued, or a surviving receiver still holds mail from
+the subtree at this key. -/
 def slotRespawnBlocked (D : Description) (w : World) (parent : InstId) (name : String) (key : Nat) : Bool :=
   slotOccupied w name key || slotTombstoneQueued w parent name key || slotMailHeld D w name key
 
@@ -1576,7 +1552,8 @@ theorem slotRespawnBlocked_clear (D : Description) (w : World) (parent : InstId)
 /-- Lowest slot in `0 ..< n` that is not `slotRespawnBlocked`. `fuel` counts
 the indices still to try, from `0` upward. A queued tombstone occupies the
 slot until the supervisor consumes it. Mail any member of the subtree sent
-to a core occupies it until that core consumes the message. -/
+to a receiver that is not sealed with the sender occupies it until that
+receiver consumes the message. -/
 def freeGo (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) : Nat → Option Nat
   | 0 => none
   | fuel + 1 =>
@@ -1595,10 +1572,11 @@ def freeRootSlot (D : Description) (w : World) (supervisor name : String) (n : N
 /-- A per-peer parent births one child at its own key. A core births one pool
 child in a free slot below `slots`. The spawn is a no-op, the same as a full
 pool, while `slotRespawnBlocked` holds: the slot is alive or shutting down,
-its tombstone is still queued, or a core still holds mail from that subtree
-key. The tombstone is queued at the seal, so the predecessor is dead before
-the parent can consume it. Mail already admitted to a core stays there until
-that core consumes it, and that mail blocks the next incarnation on its own.
+its tombstone is still queued, or a surviving receiver still holds mail from
+that subtree key. The tombstone is queued at the seal, so the predecessor is
+dead before the parent can consume it. Mail already admitted to a host that
+is not sealed with the sender stays there until that host consumes it, and
+that mail blocks the next incarnation on its own.
 A parent that is not alive admits nobody. A spawn the template does not
 allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
@@ -2508,7 +2486,8 @@ def freshKey (D : Description) (w : World) (sub : String) : Nat :=
 
 /-- Roots of `name` under this core that still occupy a population slot.
 One slot per such root, up to `N`: alive, shutting down, tombstone still
-queued, or any member of that subtree key still has mail on a core. -/
+queued, or any member of that subtree key still has mail on a surviving
+receiver. -/
 def rootOutstanding (D : Description) (w : World) (supervisor name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with
@@ -2522,8 +2501,9 @@ def rootOutstanding (D : Description) (w : World) (supervisor name : String) : N
 
 /-- Unsupervised roots of `name` that occupy a population slot. Alive counts.
 A root that has left `alive` still counts while any member of its subtree key
-has mail on a core. Shutting down alone does not: there is no supervisor
-tombstone. At most `N` of these roots. -/
+has mail on a surviving receiver. Shutting down alone does not: there is no
+supervisor tombstone, and mail on the root itself does not count. At most
+`N` of these roots. -/
 def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with
@@ -2534,9 +2514,9 @@ def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
     | .core _ => n) 0
 
 /-- A root under no supervisor is bounded by `loneOutstanding`: alive roots,
-plus roots whose subtree mail is still on a core. A root under a core is
-bounded by `rootOutstanding`, so the core's lane and that mail together hold
-at most `N` of them. The key itself is always fresh. -/
+plus roots whose subtree mail is still on a surviving receiver. A root under
+a core is bounded by `rootOutstanding`, so the core's lane and that mail
+together hold at most `N` of them. The key itself is always fresh. -/
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
   t.multiplicity == .perPeer && t.slots == 0 && rootOf D t && supervisorLive D w t &&
     match t.supervisor with
@@ -2555,8 +2535,8 @@ def placePeer (I : Impl) (w : World) (template : String) (k : Nat) (initial : St
 /-- Scheduler birth of a per-peer subtree root. The key is fresh (`freshKey`
 or `nextIx`). The birth is not enabled while `N` roots of this template
 already occupy a population slot, counting a dead root whose subtree still
-has mail on a core. A later incarnation of a pool slot or of a per-peer
-parent's one child is `spawnChild`, which is a no-op while
+has mail on a surviving receiver. A later incarnation of a pool slot or of a
+per-peer parent's one child is `spawnChild`, which is a no-op while
 `slotRespawnBlocked` holds. -/
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
@@ -7181,132 +7161,6 @@ theorem failWaiters_life (w : World) (dead s : InstId) :
     ((failWaiters w dead).st s).life = (w.st s).life := by
   simpa [failWaiters] using failFold_life w dead s w.roster
 
-theorem admitHost_phase (w : World) (dead host s : InstId) :
-    ((admitHost w dead host).st s).phase = (w.st s).phase ∧
-      ((admitHost w dead host).st s).life = (w.st s).life := by
-  unfold admitHost
-  split
-  · exact ⟨rfl, rfl⟩
-  · split
-    · exact ⟨rfl, rfl⟩
-    · by_cases hs : s = host
-      · simp [setActor, hs]
-      · simp [setActor, hs]
-
-theorem admitFold_phase (w : World) (dead s : InstId) (ids : List InstId) :
-    ((ids.foldl (fun w host => admitHost w dead host) w).st s).phase = (w.st s).phase ∧
-      ((ids.foldl (fun w host => admitHost w dead host) w).st s).life = (w.st s).life := by
-  induction ids generalizing w with
-  | nil => exact ⟨rfl, rfl⟩
-  | cons host ids ih =>
-    simp only [List.foldl_cons]
-    have h1 := admitHost_phase w dead host s
-    have h2 := ih (admitHost w dead host)
-    exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
-
-theorem admitDead_phase (w : World) (dead s : InstId) :
-    ((admitDead w dead).st s).phase = (w.st s).phase ∧
-      ((admitDead w dead).st s).life = (w.st s).life := by
-  simpa [admitDead] using admitFold_phase w dead s w.roster
-
-theorem admitHost_skip (w : World) (dead host : InstId)
-    (h : ∀ p ∈ (w.st host).parked, p.sender ≠ dead) : admitHost w dead host = w := by
-  unfold admitHost
-  by_cases hhost : (host == dead) = true
-  · simp [hhost]
-  · have hempty : ((w.st host).parked.filter fun p => p.sender == dead) = [] := by
-      rw [List.filter_eq_nil_iff]
-      intro p hp heq
-      exact h p hp (beq_iff_eq.mp heq)
-    simp [hhost, hempty, List.isEmpty_nil]
-
-theorem admitFold_skip (w : World) (dead : InstId) (ids : List InstId)
-    (h : ∀ host p, p ∈ (w.st host).parked → p.sender ≠ dead) :
-    ids.foldl (fun w host => admitHost w dead host) w = w := by
-  induction ids generalizing w with
-  | nil => rfl
-  | cons host ids ih =>
-    simp only [List.foldl_cons]
-    have hstep : admitHost w dead host = w := admitHost_skip w dead host (h host)
-    have hpark : ∀ host' p, p ∈ ((admitHost w dead host).st host').parked → p.sender ≠ dead := by
-      intro host' p hp
-      rw [hstep] at hp
-      exact h host' p hp
-    rw [hstep]
-    exact ih w h
-
-theorem admitDead_skip (w : World) (dead : InstId)
-    (h : ∀ host p, p ∈ (w.st host).parked → p.sender ≠ dead) : admitDead w dead = w := by
-  simpa [admitDead] using admitFold_skip w dead w.roster h
-
-theorem abortActor_other_life (D : Description) (w : World) (id s : InstId) (a : Actor) (hs : s ≠ id) :
-    ((abortActor D w id a).st s).life = (w.st s).life := by
-  have hrel : ((releaseWorld D w id a).st s).life = (w.st s).life := by
-    simp only [releaseWorld]
-    rw [releaseParked_life]
-    rw [setActor_other _ id s _ hs]
-    rw [releaseOutbound_life]
-    rw [(refundParked_rest _ (tname id) a.parked s).2.1]
-    rw [(refundMsgs_rest _ (tname id) a.box s).2.1]
-    exact congrArg (·.life) (cellsSt D w id s)
-  have hfail := failWaiters_life (releaseWorld D w id a) id s
-  simpa [abortActor] using
-    (admitDead_phase (failWaiters (releaseWorld D w id a) id) id s).2.trans (hfail.trans hrel)
-
-theorem abortActor_core_prev (D : Description) (w : World) (id : InstId) (a : Actor) (name : String)
-    (h : ((abortActor D w id a).st (InstId.core name)).life = .alive) :
-    (w.st (InstId.core name)).life = .alive := by
-  have hfw : ((abortActor D w id a).st (InstId.core name)).life =
-      ((releaseWorld D w id a).st (InstId.core name)).life := by
-    have hfail := failWaiters_life (releaseWorld D w id a) id (InstId.core name)
-    have hadmit := (admitDead_phase (failWaiters (releaseWorld D w id a) id) id
-      (InstId.core name)).2
-    simpa [abortActor] using hadmit.trans hfail
-  rw [hfw] at h
-  by_cases hid : InstId.core name = id
-  · rw [hid] at h
-    have hdead := releaseWorld_self_dead D w id a
-    rw [hdead] at h
-    cases h
-  · exact (releaseWorld_core_life D w id a name hid).symm.trans h
-
-theorem abortDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent : InstId)
-    (name : String) (h : ((abortDesc fuel D w parent).st (InstId.core name)).life = .alive) :
-    (w.st (InstId.core name)).life = .alive := by
-  induction fuel generalizing w parent with
-  | zero => simpa [abortDesc] using h
-  | succ fuel ih =>
-    simp only [abortDesc] at h
-    let step (w : World) (child : InstId) : World :=
-      if isChild w parent child && (w.st child).life == .alive && childTerminable D child then
-        let w := abortDesc fuel D w child
-        abortActor D w child (w.st child)
-      else w
-    have hfold : ∀ (ids : List InstId) (w0 : World),
-        ((ids.foldl step w0).st (InstId.core name)).life = .alive →
-          (w0.st (InstId.core name)).life = .alive := by
-      intro ids
-      induction ids with
-      | nil => intro _ h0; exact h0
-      | cons child ids ihids =>
-        intro w0 h0
-        simp only [List.foldl_cons, step] at h0
-        by_cases hcond : (isChild w0 parent child && (w0.st child).life == .alive && childTerminable D child) = true
-        · simp only [hcond, ite_true] at h0
-          let wDesc := abortDesc fuel D w0 child
-          let wAct := abortActor D wDesc child (wDesc.st child)
-          have hActAlive : (wAct.st (InstId.core name)).life = .alive := ihids wAct h0
-          have hDescAlive :=
-            abortActor_core_prev D wDesc child (wDesc.st child) name hActAlive
-          exact ih w0 child hDescAlive
-        · have hf : (isChild w0 parent child && (w0.st child).life == .alive && childTerminable D child) = false := by
-            cases hb : isChild w0 parent child && (w0.st child).life == .alive && childTerminable D child with
-            | false => rfl
-            | true => exact absurd hb hcond
-          simp only [hf, ite_false] at h0
-          exact ihids w0 h0
-    exact hfold w.roster w h
-
 theorem crashWorld_prev (w : World) (i : InstId)
     (h : ((crashWorld w).st i).life = .alive) : (w.st i).life = .alive := by
   simp only [crashWorld] at h
@@ -7437,45 +7291,6 @@ theorem shutdownActor_prev (D : Description) (w : World) (id i : InstId)
     exact markShutdown_prev w id i (armTombstone_prev (markShutdown w id) id i h)
   · simp only [hlive, ite_false] at h
     exact markShutdown_prev w id i h
-
-theorem shutdownDesc_core_prev (fuel : Nat) (D : Description) (w : World) (parent : InstId)
-    (name : String) (h : ((shutdownDesc fuel D w parent).st (InstId.core name)).life = .alive) :
-    (w.st (InstId.core name)).life = .alive := by
-  induction fuel generalizing w parent with
-  | zero => simpa [shutdownDesc] using h
-  | succ fuel ih =>
-    simp only [shutdownDesc] at h
-    let step (w : World) (child : InstId) : World :=
-      if isChild w parent child && (w.st child).life == .alive && childTerminable D child then
-        let w := shutdownDesc fuel D w child
-        shutdownActor D w child
-      else w
-    have hfold : ∀ (ids : List InstId) (w0 : World),
-        ((ids.foldl step w0).st (InstId.core name)).life = .alive →
-          (w0.st (InstId.core name)).life = .alive := by
-      intro ids
-      induction ids with
-      | nil => intro _ h0; exact h0
-      | cons child ids ihids =>
-        intro w0 h0
-        simp only [List.foldl_cons, step] at h0
-        by_cases hcond : (isChild w0 parent child && (w0.st child).life == .alive &&
-            childTerminable D child) = true
-        · simp only [hcond, ite_true] at h0
-          let wDesc := shutdownDesc fuel D w0 child
-          have hActAlive : ((shutdownActor D wDesc child).st (InstId.core name)).life = .alive :=
-            ihids _ h0
-          have hDescAlive := shutdownActor_prev D wDesc child (InstId.core name) hActAlive
-          exact ih w0 child hDescAlive
-        · have hf : (isChild w0 parent child && (w0.st child).life == .alive &&
-              childTerminable D child) = false := by
-            cases hb : isChild w0 parent child && (w0.st child).life == .alive &&
-                childTerminable D child with
-            | false => rfl
-            | true => exact absurd hb hcond
-          simp only [hf, ite_false] at h0
-          exact ihids w0 h0
-    exact hfold w.roster w h
 
 /-- A cell wake that leaves a core alive did not create that life. A full lane
 crashes the roster instead of dropping the wake. -/

@@ -275,29 +275,39 @@ Helen's E4 is not this same-key guard. Each birth of `R` and `X` is
 generation 0 of a fresh subtree key. The 08:44 entry is the decision on
 that case.
 
+The 09:30 entry generalises the receiver. The same mail holds the slot on
+any host that is not sealed with the sender, not only on a core.
+
 ## 2026-11-21 — Implementation work not covered by the Lean model
 
 Roland, from the 2026-11-21 08:06 CET call. The spawn precondition is a fact
 about one slot's messages. pure-stage cannot observe that fact yet.
 
-pure-stage needs a drained signal. Each message a subtree member sends to a
-core is tagged with the sender's slot and generation. The core tracks
-consumption of those tagged messages per slot. When every message tagged for
-a given slot has been consumed, the core emits a drained signal for that
-slot, and the supervisor uses it as the go-ahead for the next spawn.
+pure-stage needs a drained signal from every receiver, not only from a core.
+Each message an occupant sends is tagged with the sender's slot and
+generation. Every receiver that is not sealed together with that sender
+tracks consumption of those tagged messages per slot. When every such
+message has been consumed, that receiver emits a drained signal for the
+slot. The supervisor and the scheduler wait for the drained signal from
+every such receiver before the next spawn.
 
-The signal is that finite set — the messages that specific slot sent. It is
-not the core's mailbox becoming empty. A mailbox may never empty, because
-unrelated mail can keep arriving. This is net-new functionality in pure-stage.
+The signal is that finite set — the messages that slot sent to receivers
+that outlive the sender. It is not a mailbox becoming empty. A mailbox may
+never empty, because unrelated mail can keep arriving. Mail on a host that
+is sealed together with the sender does not belong to the set: that host
+drops the mailbox in the same seal. This is net-new functionality in
+pure-stage.
 
-The same signal holds a population slot. The scheduler, like a supervisor,
-keeps that root's slot until every core has drained the messages the subtree
-sent. A new root key is not a free slot while that mail remains.
+The same signals hold a population slot. The scheduler, like a supervisor,
+keeps that root's slot until every surviving receiver has drained the
+messages the subtree sent. A new root key is not a free slot while that
+mail remains.
 
-The Lean guard is the same set. `slotMailHeld` is mail still on a core from
-that subtree key: a bulk message, a priority message, or a parked send. It
-does not ask whether the core's mailbox is empty. The drained signal itself
-is not a state of this model.
+The Lean guard is the same set. `slotMailHeld` is mail still on a live or
+shutting-down host that is not sealed together with the sender, from that
+subtree key: a bulk message, a priority message, or a parked send. It does
+not ask whether a mailbox is empty. The drained signal itself is not a
+state of this model.
 
 ## 2026-11-21 — A dead root keeps its population slot
 
@@ -329,3 +339,54 @@ inside that count, so there are fewer than `N` of them whenever another root
 of that template may be born. `outlive_refused` is E4 under this rule. Two
 roots fill `N = 2` while their mail sits on `H` and `K`, and the third spawn
 is not enabled. `outlive_stuck` is that the old five-birth run is refused.
+
+The 09:30 entry is the same generalisation for this population slot:
+the receiver is any host that is not sealed with the sender.
+
+## 2026-11-21 — Mail on any surviving receiver holds the slot
+
+Roland, 2026-11-21 09:30 CET, his own answer: hold the slot while its mail
+sits at any live host that is not sealed together with it. The drained
+signal comes from every receiver.
+
+This generalises the receiver of the 08:04 respawn rule and the 08:44
+population rule. The sender set is unchanged. A nonempty subtree holds for
+every member at that key, any generation. A template with no subtree holds
+for its own senders. The message may be bulk, priority, or a parked send
+still on the host.
+
+A host counts while its life is alive or shutting down, unless it is sealed
+together with the sender. Sealed together means the host is the sender, or
+it sits under the sender on the recorded parent chain. `terminateStage`
+seals those descendants in the same step (`dropDescendants`, `sealBranch`,
+`releaseWorld`) and seals the sender itself at its later seal.
+`releaseWorld` empties that actor's mailbox and does not clear a sibling, a
+parent, or a core. Mail on a host that dies in that seal does not hold the
+slot. At a later spawn check those hosts are already dead, so the life
+filter excludes them as well. A sibling is not in that seal. Its copy stays
+until that sibling consumes it or seals on its own.
+
+`slotMailHeld` is that test. `slotRespawnBlocked`, `freeSlot`,
+`rootOutstanding`, and `loneOutstanding` all use it. A same-key respawn is a
+no-op while the mail remains. A fresh-key root still occupies a population
+slot while it remains. Shutting down alone does not hold an unsupervised
+root: mail on the root itself is sealed with the sender.
+
+`child_sub_refused` is the per-peer witness. `X` mails `A` and `B`,
+terminates, and `R`'s respawn of `X` does not birth the next generation.
+`pool_sub_refused` is the same inside a pool subtree: `X` mails pool
+children `A` and `B`, `C` terminates, and `M`'s respawn of `C` does not
+birth the next generation. `outlive_refused` still holds, because that mail
+sits on cores, and a core is not sealed with the sender.
+
+`GraphOk` is unchanged. `LocalOk` still does not read mailboxes. The step
+no-op is the guard. The drained signal is how pure-stage learns the same
+fact. It is not a state of this model.
+
+## 2026-11-21 — Duplicate tombstone labels across root keys
+
+Noted as N45. `tombstoneLabel` is the template's base label, then `#`, then
+the generation. Two roots of one template at generation 0 and different keys
+therefore share the string `dead/R#0`. The guard counts the sender id, not
+the label, so the slot is held for the right occupant. A handler cannot tell
+the keys apart by the label alone. The spelling is unchanged.
