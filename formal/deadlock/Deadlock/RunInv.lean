@@ -5,15 +5,16 @@ set_option autoImplicit false
 
 namespace Deadlock
 
-/-- The continuation at this program counter is a checked suffix of a transition,
-so a blocking effect here is an edge out of the current typestate. -/
+/-- The continuation is a checked suffix of a transition. `contTy` says the
+actor's typestate is `k.toState`, which is `contAt`'s `here`. Outcome lists
+are checked at their own recorded typestate. -/
 def programOk (D : Description) (id : InstId) (a : Actor) : Prop :=
   match a.phase with
-  | .run k => effectsOk D (tname id) a.typestate k.rest = true
-  | .parked _ _ k => effectsOk D (tname id) a.typestate k.rest = true
-  | .awaitReply _ k => effectsOk D (tname id) a.typestate k.rest = true
-  | .awaitEffect k => effectsOk D (tname id) a.typestate k.rest = true
-  | .awaitPeer k => effectsOk D (tname id) a.typestate k.rest = true
+  | .run k => effectsOk D (tname id) (contAt k) k.rest = true
+  | .parked _ _ k => effectsOk D (tname id) (contAt k) k.rest = true
+  | .awaitReply _ k => effectsOk D (tname id) (contAt k) k.rest = true
+  | .awaitEffect k => effectsOk D (tname id) (contAt k) k.rest = true
+  | .awaitPeer k => effectsOk D (tname id) (contAt k) k.rest = true
   | _ => True
 
 /-- The effect that parked this actor, or the call it is awaiting, is still an
@@ -49,9 +50,10 @@ structure SemInv (I : Impl) (w : World) : Prop where
   /-- A parked entry lives on a roster actor. A kill folds that roster to drop the dead sender. -/
   offEmpty : ∀ id, id ∉ w.roster → (w.st id).parked = []
 
-theorem effectsOk_tail (D : Description) (template state : String) (e : Eff) (es : List Eff)
-    (h : effectsOk D template state (e :: es) = true) : effectsOk D template state es = true := by
-  cases e <;> simp [effectsOk] at h <;> simp [h]
+theorem effectsOk_tail (D : Description) (template : String) (at_ : BranchAt) (e : Eff) (es : List Eff)
+    (h : effectsOk D template at_ (e :: es) = true) : effectsOk D template at_ es = true := by
+  simp only [effectsOk, Bool.and_eq_true] at h
+  exact h.2
 
 theorem readCells_st (D : Description) (w : World) (id i : InstId) :
     (readCells D w id).st i = w.st i := by

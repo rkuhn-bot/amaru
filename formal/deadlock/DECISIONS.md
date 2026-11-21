@@ -309,6 +309,23 @@ mail from the dead stage or a recorded descendant, sitting in a live
 receiver's bulk or priority queue. It does not ask whether a mailbox is
 empty. The drained signal itself is not a state of this model.
 
+Three pure-stage changes sit under that gap (N55).
+
+A receive skips a waiting tombstone in place and goes on to the next
+priority message, then the bulk mailbox. The simulation pops the tombstone
+queue first (`crates/amaru-pure-stage/src/simulation/running/resume.rs:65`)
+and the tokio runtime takes a tombstone before a due timeout, a priority
+message, or bulk (`crates/amaru-pure-stage/src/tokio.rs:452-454`). Neither
+leaves a waiting tombstone queued while it delivers a later message.
+
+The in-flight count is not one mailbox. It is that dead stage's program
+mail in every live mailbox, every live priority queue, and every tokio
+channel that still holds it. A dead or shutting-down receiver is not in
+the count.
+
+The tombstone queue has to fall through to the priority lane and then to
+bulk, instead of stalling the receive on a tombstone that is not yet ready.
+
 ## 2026-11-21 — A dead root keeps its population slot
 
 Roland, 2026-11-21 08:44 CET, his own answer: a dead root occupies its
@@ -437,6 +454,13 @@ unchanged. Shutting down alone does not hold that slot. A shutting-down
 root that still holds a descendant's mail does, until its own seal clears
 that mailbox (N50). The count is transient.
 
+`survivesSender` counts a host that is alive or shutting down, and
+`slotMailHeld` uses that (N56). A supervised slot does not.
+`mailInFlight` requires the receiver's life to be `alive`, so mail at a
+shutting-down host is already consumed there. The unsupervised count is
+the conservative one, and it is transient: that host seals and clears the
+mailbox.
+
 `rootOutstanding`, the core-supervised count, is alive, shutting down, or
 tombstone still queued. The mail term is gone. The tombstone cannot be
 received while that root's in-flight mail remains, so the slot stays
@@ -454,8 +478,11 @@ higher-level protocol liveness question, the same shape as each side
 sending only after the other has sent. It is out of scope. Both parties
 stay responsive to other messages.
 
-The obligation that delivery of the tombstone eventually becomes enabled
-follows from fair receive. It is argued here and is not proved in `FairRun`.
+Deadlock freedom does not need the drain. A waiting tombstone is skipped,
+so it blocks nobody. `fair_delivered` does need it: a tombstone is a
+reliable priority message (N53). The obligation that its delivery
+eventually becomes enabled follows from fair receive. It is argued here
+and is not proved in `FairRun`.
 `mailInFlight` is a finite set of messages already sitting in live actors'
 bulk or priority queues. Each is program mail, not a tombstone, and its
 sender is the dead stage or a recorded descendant. Those senders are dead.

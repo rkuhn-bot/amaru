@@ -75,8 +75,9 @@ waiting tombstone is not a head that stalls the lane. It stays in the lane,
 and `no_tombstone_overflow` still counts it. The handler that consumes it
 therefore runs with that mail already gone, and the spawn is not refused
 for mail. `slotRespawnBlocked` does not consult `slotMailHeld`.
-`receivePrio_tombstone_drained` is the fact that a delivered tombstone was
-not waiting. `child_sub_respawn_enabled` and `pool_sub_respawn_enabled` are
+`receivePrio_tombstone_drained` is that fact for the message `receivePrio`
+removes. The world after the receive is the delivery of that message, and a
+tombstone in that position was not waiting. `child_sub_respawn_enabled` and `pool_sub_respawn_enabled` are
 the birth after the receivers have taken the mail. `child_sub_refused` and
 `pool_sub_refused` do not survive, and they are not a closure of that class.
 A scheduler root takes a fresh key. A core-supervised root occupies one of
@@ -94,10 +95,15 @@ descendant's mail does, until its own seal clears that mailbox.
 strictly below `N`. The restart check in `LocalOk` is still only the
 tombstone, because the mail is not a typestate fact. The one attempt it
 allows now runs when the in-flight set is empty. `GraphOk` does not read
-mailboxes. That delivery eventually becoming enabled follows from fair
-receive: the in-flight set is finite, the dead senders cannot add to it,
-and a fair run dequeues it or the receiver leaves `alive`, after which the
-remainder does not count. That argument is not a theorem of `FairRun`.
+mailboxes. Deadlock freedom does not need that drain. A waiting tombstone
+is skipped, so it blocks nobody. `fair_delivered` does. A tombstone is a
+reliable priority message, and the obligation is that every such message is
+later taken or its receiver has halted while the message is still queued.
+The drain that makes the tombstone receivable is the same fair receive: the
+in-flight set is finite, the dead senders cannot add to it, and a fair run
+dequeues each message or the receiver leaves `alive`. Mail already at a
+host that is not alive is the second case, and it is not in `mailInFlight`.
+That argument is not yet a theorem of `FairRun`.
 pure-stage delays the tombstone until receivers report that consumption.
 The scheduler, for an unsupervised root, holds the population slot until
 every surviving receiver has drained that subtree. `outlive_refused` is E4:
@@ -400,16 +406,19 @@ def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
     | some (.blockingSend _) => True
     | some (.callReply _) => True
     | some .effect => True
-    | some .peer => peerUntimed I.desc s = false
+    | some .peer => True
     | _ => False
 ```
 
-An effect or a timed peer wait is ended by `finish`, which the step relation
-enables without reading `Env`. An untimed peer wait is not a deadlock. When
-`timedCohortEnds` holds, `peerFinishable` is true and `finish` is enabled on
-that waiter too. A pure untimed wait (`peerFinishable = false`) leaves
-`finish` disabled, and the peer may stay silent. That is a chain end, and
-`peerFails` is what keeps it from being interior to another actor's chain.
+An effect or a peer wait is ended by `finish`. The step relation enables it
+on every `awaitPeer` and does not read `Env`. `peerFinishable` is true for
+every actor, including one whose template sets `untimedPeer`, so a peer wait
+that stays stuck is a deadlock. Fairness taking `finish` is what rules that
+out. `peerUntimed` is only the template flag. `peerFails` still rejects a
+pure untimed per-peer that is not terminable, a cell wake of a pure untimed
+template, and a blocking send or call onto an untimed template that no
+subtree kill can end. `timedCohortEnds` is that graph cut. It does not
+disable `finish`.
 
 ### `CellFresh`
 

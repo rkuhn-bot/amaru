@@ -197,6 +197,12 @@ private def decodeBoolField (v : JVal) (k : String) (default : Bool) : Except St
   | none => .ok default
   | some x => asBool x k
 
+/-- Empty means the outcome lands in `to`. The local checker reads the name. -/
+private def decodeStringField (v : JVal) (k : String) (default : String) : Except String String :=
+  match jget v k with
+  | none => .ok default
+  | some x => asString x k
+
 private def decodeCell (v : JVal) : Except String CellFlags := do
   match jget v "cell" with
   | none => return .none
@@ -304,31 +310,50 @@ private def decodeNatField (v : JVal) (k : String) (default : Nat) : Except Stri
   | some (.num n) => pure n
   | some _ => throw s!"{k} must be a number"
 
-/-- One effect of a transition program. `hint` defaults to 0. -/
-private def decodeEff (v : JVal) : Except String Eff := do
-  let op ← asString (← field v "op") "effect.op"
-  match op with
-  | "send" =>
-    return .send (← asString (← field v "dst") "effect.dst")
-      (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
-  | "trySend" =>
-    return .trySend (← asString (← field v "dst") "effect.dst")
-      (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
-  | "call" =>
-    return .call (← asString (← field v "dst") "effect.dst")
-      (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
-  | "reply" => return .reply
-  | "selfSchedule" => return .selfSchedule (← asString (← field v "label") "effect.label")
-  | "cell" =>
-    match jget v "value" with
-    | some (.num n) =>
-      return .cell (← asString (← field v "dst") "effect.dst")
-        (← asString (← field v "label") "effect.label") n
-    | _ => throw "cell.value must be a number"
-  | "internal" => return .internal
-  | "peer" => return .peer
-  | "terminate" => return .terminate
-  | _ => throw s!"unknown effect {op}"
+/- One effect of a transition program. `hint` defaults to 0. A missing
+outcome list is empty: that branch leaves the actor idle. Nesting past 64
+is rejected. The spawn walk in the local checker uses the same fuel. -/
+mutual
+private def decodeEffs : Nat → JVal → String → Except String (List Eff)
+  | n, v, k => do
+    match jget v k with
+    | none => pure []
+    | some xs => (← asArr xs k).mapM (decodeEffFuel n)
+
+private def decodeEffFuel : Nat → JVal → Except String Eff
+  | 0, _ => throw "effect nesting exceeds 64"
+  | n + 1, v => do
+    let op ← asString (← field v "op") "effect.op"
+    match op with
+    | "send" =>
+      return .send (← asString (← field v "dst") "effect.dst")
+        (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
+    | "trySend" =>
+      return .trySend (← asString (← field v "dst") "effect.dst")
+        (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
+        (← decodeEffs n v "onFull") (← decodeEffs n v "onGone")
+    | "call" =>
+      return .call (← asString (← field v "dst") "effect.dst")
+        (← asString (← field v "label") "effect.label") (← decodeNatField v "hint" 0)
+        (← decodeEffs n v "onNotAdmitted") (← decodeEffs n v "onTimedOut")
+    | "reply" => return .reply
+    | "selfSchedule" => return .selfSchedule (← asString (← field v "label") "effect.label")
+    | "cell" =>
+      match jget v "value" with
+      | some (.num n) =>
+        return .cell (← asString (← field v "dst") "effect.dst")
+          (← asString (← field v "label") "effect.label") n
+      | _ => throw "cell.value must be a number"
+    | "internal" => return .internal
+    | "peer" => return .peer (← decodeEffs n v "onTimeout")
+    | "abort" => return .abort
+    | "terminate" => return .terminate
+    | "spawn" => return .spawn (← asString (← field v "template") "effect.template")
+    | _ => throw s!"unknown effect {op}"
+end
+
+private def decodeEff (v : JVal) : Except String Eff :=
+  decodeEffFuel 64 v
 
 /-- The graph check sees the typestate step. Replay sees the same step plus its program. -/
 private def decodeTransition (v : JVal) : Except String (CompatStep × Transition) := do
@@ -341,8 +366,15 @@ private def decodeTransition (v : JVal) : Except String (CompatStep × Transitio
     | some xs => (← asArr xs "program").mapM decodeEff
   let acceptsCall ← decodeBoolField v "acceptsCall" false
   let release ← decodeNatField v "release" 1
+  let toNotAdmitted ← decodeStringField v "toNotAdmitted" ""
+  let toTimedOut ← decodeStringField v "toTimedOut" ""
+  let toTimeout ← decodeStringField v "toTimeout" ""
+  let toFull ← decodeStringField v "toFull" ""
+  let toGone ← decodeStringField v "toGone" ""
   let step : CompatStep := { template, fromState, toState, label }
-  let tr : Transition := { template, fromState, label, program, toState, acceptsCall, release }
+  let tr : Transition :=
+    { template, fromState, label, program, toState, acceptsCall, release,
+      toNotAdmitted, toTimedOut, toTimeout, toFull, toGone }
   return (step, tr)
 
 /-- A description plus the programs the step relation runs. -/
@@ -388,7 +420,7 @@ def wiringImpl (w : Wiring) : Impl where
 
 private def instText : InstId → String
   | .core n => s!"core {n}"
-  | .peer n k => s!"peer {n}#{k}"
+  | .peer n k g => s!"peer {n}#{k}.{g}"
 
 def actionText : Action → String
   | .recvBulk id => s!"recvBulk {instText id}"
@@ -409,7 +441,9 @@ private def decodeId (v : JVal) : Except String InstId := do
     match jget v "peer" with
     | some (.str n) =>
       match jget v "index" with
-      | some (.num k) => return .peer n k
+      | some (.num k) =>
+        -- A trace that names only the key is generation 0, the first incarnation.
+        return .peer n k (← decodeNatField v "gen" 0)
       | _ => throw "id.index must be a number"
     | some _ => throw "id.peer must be a string"
     | none => throw "id needs core or peer"
@@ -424,6 +458,7 @@ private def decodeAction (v : JVal) : Except String Action := do
   | "spawn" => return .spawn (← asString (← field v "template") "template")
   | "ingress" =>
     return .ingress (← decodeId (← field v "id")) (← asString (← field v "label") "label")
+  | "callTimeout" => return .callTimeout (← decodeId (← field v "id"))
   | "stutter" => return .stutter
   | _ => throw s!"unknown step op {op}"
 

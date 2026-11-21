@@ -225,7 +225,7 @@ theorem crashWorld_ty (w : World) (i : InstId) :
   · simp [h]
 
 theorem crash_go {a : Actor} (h : a.life = .alive ∨ a.life = .shuttingDown) :
-    crashActor a = { a with life := .dead, phase := .crashed, box := [], prio := [], parked := [] } := by
+    crashActor a = { a with life := .dead, phase := .crashed } := by
   rcases h with h | h <;> simp [crashActor, h]
 
 theorem crash_stay {a : Actor} (ha : a.life ≠ .alive) (hs : a.life ≠ .shuttingDown) :
@@ -672,19 +672,19 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
       exact hS.offEmpty i hmiss
 
 theorem proceed_ok (D : Description) (id : InstId) (a : Actor) (k : Cont)
-    (hty : a.typestate = k.toState) (hprog : effectsOk D (tname id) a.typestate k.rest = true) :
+    (hty : a.typestate = k.toState) (hprog : effectsOk D (tname id) (contAt k) k.rest = true) :
     (proceed a k).typestate = a.typestate ∧ (proceed a k).life = a.life ∧
       contTy (proceed a k) ∧ programOk D id (proceed a k) ∧ waitEdge D id (proceed a k) := by
   cases hk : k.rest with
   | nil => simp [proceed, hk, contTy, programOk, waitEdge, hty]
   | cons _ _ =>
     simp [proceed, hk, contTy, programOk, waitEdge, hty]
-    rw [← hty, ← hk]
+    rw [← hk]
     exact hprog
 
-theorem effects_tail_of (D : Description) (template state : String) (e : Eff) (es : List Eff)
-    (h : effectsOk D template state (e :: es) = true) : effectsOk D template state es = true :=
-  effectsOk_tail D template state e es h
+theorem effects_tail_of (D : Description) (template : String) (at_ : BranchAt) (e : Eff) (es : List Eff)
+    (h : effectsOk D template at_ (e :: es) = true) : effectsOk D template at_ es = true :=
+  effectsOk_tail D template at_ e es h
 
 theorem ingress_sem (I : Impl) (w w' : World) (dst : InstId) (label : String) (hS : SemInv I w)
     (h : receiveIngress I w dst label = some w') : SemInv I w' := by
@@ -725,7 +725,7 @@ theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
     rcases hph with hph | hph <;> simp [hph]
   have hty : (w.st id).typestate = k.toState := by
     rcases hph with hph | hph <;> simpa [contTy, hph] using hS.cont id
-  have hprog : effectsOk I.desc (tname id) (w.st id).typestate k.rest = true := by
+  have hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true := by
     rcases hph with hph | hph <;> simpa [programOk, hph] using hS.prog id
   have hp := proceed_ok I.desc id (w.st id) k hty hprog
   have hnot : (w.st id).phase ≠ .crashed := by
@@ -737,297 +737,351 @@ theorem finish_sem (I : Impl) (w w' : World) (id : InstId) (hS : SemInv I w)
       · exact ha
       · exact absurd hc hnot)))
 
-theorem peer_ne_core (template : String) (ix : Nat) (r : String) :
-    InstId.peer template ix ≠ InstId.core r := by
+theorem peer_ne_core (template : String) (key gen : Nat) (r : String) :
+    InstId.peer template key gen ≠ InstId.core r := by
   intro h
   cases h
 
+/-- Installing one idle peer keeps the invariant. The new id is not a core
+role, the born actor is idle and alive, and it is appended to the roster.
+`next` only advances key counters. -/
+theorem place_sem (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World)
+    (hnext : ∀ v : World, (next v).st = v.st ∧ (next v).roster = v.roster) (hS : SemInv I w) :
+    SemInv I (placePeer I w template k initial parent next) := by
+  unfold placePeer
+  dsimp only
+  apply cells_sem
+  generalize hid : InstId.peer template k (maxGen w template k) = id
+  generalize hborn : ({ bornActor I.desc w template k initial with parent := parent } : Actor) = born
+  have hst : (next { w with roster := w.roster ++ [id] }).st = w.st := (hnext _).1
+  have hro : (next { w with roster := w.roster ++ [id] }).roster = w.roster ++ [id] := (hnext _).2
+  have hph : born.phase = .idle := by
+    rw [← hborn]
+    simp [bornActor, withKeyTokens]
+  have hlife : born.life = .alive := by
+    rw [← hborn]
+    simp [bornActor, withKeyTokens]
+  have hcore : ∀ r, id ≠ InstId.core r := by
+    intro r
+    rw [← hid]
+    exact peer_ne_core template k _ r
+  have hat : ∀ i, i ≠ id →
+      (setActor (next { w with roster := w.roster ++ [id] }) id born).st i = w.st i := by
+    intro i hi
+    rw [setActor_other _ id i born hi, hst]
+  have hroster : (setActor (next { w with roster := w.roster ++ [id] }) id born).roster =
+      w.roster ++ [id] := hro
+  apply sem_stable I w _ hS
+  · intro _ _ r _
+    rw [hat (.core r) (Ne.symm (hcore r))]
+  · intro _ _ r _
+    rw [hat (.core r) (Ne.symm (hcore r))]
+  · intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self]
+      simp [contTy, hph]
+    · rw [hat i hi]
+      exact hS.cont i
+  · intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self]
+      simp [programOk, hph]
+    · rw [hat i hi]
+      exact hS.prog i
+  · intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self]
+      simp [waitEdge, hph]
+    · rw [hat i hi]
+      exact hS.waited i
+  · intro i hdead
+    by_cases hi : i = id
+    · rw [hi, setActor_self] at hdead
+      exact absurd hlife hdead
+    · rw [hat i hi] at hdead ⊢
+      exact hS.idleOff i hdead
+  · intro i hlive
+    rw [hroster]
+    by_cases hi : i = id
+    · rw [hi]
+      exact List.mem_append_right _ (List.Mem.head _)
+    · rw [hat i hi] at hlive
+      exact List.mem_append_left _ (hS.rostered i hlive)
+  · intro i hmiss
+    rw [hroster] at hmiss
+    have hi : i ≠ id := by
+      intro he
+      rw [he] at hmiss
+      exact hmiss (List.mem_append_right _ (List.Mem.head _))
+    rw [hat i hi]
+    exact hS.offEmpty i (fun hin => hmiss (List.mem_append_left _ hin))
+
+/-- Every enabled scheduler spawn places one fresh peer at generation
+`maxGen w template k` of the key it chose. -/
 theorem spawn_sem (I : Impl) (w w' : World) (template : String) (hS : SemInv I w)
     (h : spawn I w template = some w') : SemInv I w' := by
   unfold spawn at h
   split at h
   · cases h
-  · next t heq =>
-    by_cases hif : (t.multiplicity == .perPeer && decide (aliveCount w template < w.N)) = true
-    · simp [hif] at h
-      cases h
-      apply cells_sem
-      apply sem_stable
-      · exact hS
-      · intro _ _ r _
-        have hne := peer_ne_core template (w.nextIx template) r
-        simp [setActor, hne]
-      · intro _ _ r _
-        have hne := peer_ne_core template (w.nextIx template) r
-        simp [setActor, hne]
-      · intro i
-        by_cases hi : i = InstId.peer template (w.nextIx template)
-        · simp [hi, setActor, withTokens, contTy]
-        · simp [setActor, hi]
-          exact hS.cont i
-      · intro i
-        by_cases hi : i = InstId.peer template (w.nextIx template)
-        · simp [hi, setActor, withTokens, programOk]
-        · simp [setActor, hi]
-          exact hS.prog i
-      · intro i
-        by_cases hi : i = InstId.peer template (w.nextIx template)
-        · simp [hi, setActor, withTokens, waitEdge]
-        · simp [setActor, hi]
-          exact hS.waited i
-      · intro i hdead
-        by_cases hi : i = InstId.peer template (w.nextIx template)
-        · simp [hi, setActor, withTokens] at hdead
-        · simp [setActor, hi] at hdead ⊢
-          exact hS.idleOff i hdead
-      · intro i hlive
-        by_cases hi : i = InstId.peer template (w.nextIx template)
-        · simp [hi, setActor]
-        · simp [setActor, hi] at hlive
-          exact List.mem_append_left _ (hS.rostered i hlive)
-      · intro i hmiss
-        by_cases hi : i = InstId.peer template (w.nextIx template)
-        · simp [hi, setActor] at hmiss
-        · simp [setActor, hi] at hmiss ⊢
-          exact hS.offEmpty i hmiss
-    · simp [hif] at h
+  · split at h
+    · split at h
+      · cases h
+        exact place_sem I w _ _ _ _ _ (fun _ => ⟨rfl, rfl⟩) hS
+      · split at h
+        · cases h
+          exact place_sem I w _ _ _ _ _ (fun _ => ⟨rfl, rfl⟩) hS
+        · cases h
+          exact place_sem I w _ _ _ _ _ (fun _ => ⟨rfl, rfl⟩) hS
+    · cases h
 
 theorem charge_ok (a : Actor) (d : String) :
     (chargeSender a d).typestate = a.typestate ∧ (chargeSender a d).life = a.life ∧
       (chargeSender a d).phase = a.phase := by
   simp [chargeSender, bumpToken]
 
+/-- The `NotAdmitted` outcome of a call: its own program, at its own recorded
+typestate. The actor's typestate does not move on a nonempty outcome, so that
+typestate has to be the one the actor already holds. -/
+theorem notAdmitted_ok (D : Description) (id : InstId) (a : Actor) (k : Cont)
+    (hty : a.typestate = k.toState) (hland : (selectCall k .notAdmitted).toState = k.toState)
+    (hprog : effectsOk D (tname id) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true) :
+    (finishCall a k .notAdmitted).typestate = a.typestate ∧ (finishCall a k .notAdmitted).life = a.life ∧
+      contTy (finishCall a k .notAdmitted) ∧ programOk D id (finishCall a k .notAdmitted) ∧
+      waitEdge D id (finishCall a k .notAdmitted) := by
+  have hat : contAt (selectCall k .notAdmitted) = focus (contAt k) (contAt k).notAdmitted := by
+    simp [contAt, focus, selectCall, pickState]
+  have hp := proceed_ok D id a (selectCall k .notAdmitted) (hty.trans hland.symm)
+    (by rw [hat]; exact hprog)
+  exact hp
+
+/-- A mailbox write on a live actor keeps its phase, typestate, and life. -/
+theorem sem_host (I : Impl) (w : World) (id : InstId) (a : Actor) (hS : SemInv I w)
+    (hph : a.phase = (w.st id).phase) (hty : a.typestate = (w.st id).typestate)
+    (hlife : a.life = (w.st id).life) (halive : (w.st id).life = .alive) :
+    SemInv I (setActor w id a) := by
+  apply sem_set I w id a hS hty hlife
+  · unfold contTy
+    rw [hph, hty]
+    exact hS.cont id
+  · unfold programOk
+    rw [hph]
+    exact hS.prog id
+  · unfold waitEdge
+    rw [hph, hty]
+    exact hS.waited id
+  · exact idleOff_alive hlife halive
+  · exact Or.inr (hS.rostered id halive)
+
+/-- A live sender that resumes its checked continuation. -/
+theorem sem_proceed (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (hS : SemInv I w)
+    (hty : a.typestate = (w.st id).typestate) (hlife : a.life = (w.st id).life)
+    (hk : (w.st id).typestate = k.toState)
+    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true)
+    (halive : (w.st id).life = .alive) : SemInv I (setActor w id (proceed a k)) := by
+  have hp := proceed_ok I.desc id a k (hty.trans hk) hprog
+  exact sem_set I w id _ hS (hp.1.trans hty) (hp.2.1.trans hlife) hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+    (idleOff_alive (hp.2.1.trans hlife) halive) (Or.inr (hS.rostered id halive))
+
+/-- A live sender that awaits the reply of an admitted call. -/
+theorem sem_await (I : Impl) (w : World) (id dst : InstId) (a : Actor) (k : Cont) (hS : SemInv I w)
+    (hph : a.phase = .awaitReply dst k)
+    (hty : a.typestate = (w.st id).typestate) (hlife : a.life = (w.st id).life)
+    (hk : (w.st id).typestate = k.toState)
+    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true)
+    (hedge : ∃ label, hasEdge I.desc (tname id) (w.st id).typestate (tname dst) .call .blocking label = true)
+    (halive : (w.st id).life = .alive) : SemInv I (setActor w id a) := by
+  apply sem_set I w id a hS hty hlife
+  · unfold contTy
+    rw [hph]
+    exact hty.trans hk
+  · unfold programOk
+    rw [hph]
+    exact hprog
+  · unfold waitEdge
+    rw [hph, hty]
+    exact hedge
+  · exact idleOff_alive hlife halive
+  · exact Or.inr (hS.rostered id halive)
+
+/-- A live sender parked on a full or backlogged mailbox. -/
+theorem sem_park (I : Impl) (w : World) (id dst : InstId) (isCall : Bool) (a : Actor) (k : Cont)
+    (hS : SemInv I w) (hph : a.phase = .parked dst isCall k)
+    (hty : a.typestate = (w.st id).typestate) (hlife : a.life = (w.st id).life)
+    (hk : (w.st id).typestate = k.toState)
+    (hprog : effectsOk I.desc (tname id) (contAt k) k.rest = true)
+    (hedge : ∃ label, hasEdge I.desc (tname id) (w.st id).typestate (tname dst)
+      (if isCall then .call else .send) .blocking label = true)
+    (halive : (w.st id).life = .alive) : SemInv I (setActor w id a) := by
+  apply sem_set I w id a hS hty hlife
+  · unfold contTy
+    rw [hph]
+    exact hty.trans hk
+  · unfold programOk
+    rw [hph]
+    exact hprog
+  · unfold waitEdge
+    rw [hph, hty]
+    exact hedge
+  · exact idleOff_alive hlife halive
+  · exact Or.inr (hS.rostered id halive)
+
+/-- A call to a target that is not alive ends as `NotAdmitted` and runs that
+outcome, so the outcome's landing typestate and program are needed only then. -/
 theorem enqueue_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (isCall : Bool)
     (k : Cont) (hS : SemInv I w)
     (hty : (w.st sender).typestate = k.toState)
-    (htail : effectsOk I.desc (tname sender) (w.st sender).typestate k.rest = true)
+    (htail : effectsOk I.desc (tname sender) (contAt k) k.rest = true)
     (hedge : ∃ label, hasEdge I.desc (tname sender) (w.st sender).typestate (tname dst)
       (if isCall then .call else .send) .blocking label = true)
-    (hsender : (w.st sender).life = .alive) :
+    (hsender : (w.st sender).life = .alive)
+    (hland : isCall = true → (w.st dst).life ≠ .alive → (selectCall k .notAdmitted).toState = k.toState)
+    (hna : isCall = true → (w.st dst).life ≠ .alive →
+      effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true) :
     SemInv I (enqueueOrPark w I.desc sender dst msg isCall k) := by
   unfold enqueueOrPark
   dsimp only
   by_cases halive : (w.st dst).life = .alive
-  · simp [halive]
+  · rw [ite_eq_right (fun h => h halive)]
     have hcharge := charge_ok (w.st sender) (tname dst)
-    -- The mailbox write keeps the target's phase and typestate; the sender keeps its typestate.
+    have hissue := issueCall_keeps (chargeSender (w.st sender) (tname dst))
     by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst
-    · simp [hroom]
+    · have hc : (decide ((w.st dst).parked = []) &&
+          decide ((w.st dst).box.length < capBulk I.desc w.N dst)) = true := by
+        simp [hroom.1, hroom.2]
+      rw [ite_eq_left hc]
       by_cases hsame : sender = dst
       · subst hsame
-        -- One actor: charged, box extended, then proceed or await.
-        have hty' : (chargeSender (w.st sender) (tname sender)).typestate = k.toState := by
-          rw [hcharge.1, hty]
-        if hcall : isCall = true then
-          simp [hcall, issueCall]
-          apply sem_set I w sender _ hS
+        cases isCall
+        · simp only [decide_true, ↓reduceIte, Bool.false_eq_true]
+          exact sem_proceed I w sender _ k hS hcharge.1 hcharge.2.1 hty htail hsender
+        · simp only [decide_true, ↓reduceIte]
+          refine sem_await I w sender sender _ k hS ?_ ?_ ?_ hty htail ?_ hsender
+          · rfl
+          · exact hissue.1.trans hcharge.1
+          · exact hissue.2.1.trans hcharge.2.1
+          · simpa using hedge
+      · have hs : decide (sender = dst) = false := by simp [hsame]
+        cases isCall
+        · simp only [hs, ↓reduceIte, Bool.false_eq_true]
+          refine sem_proceed I _ sender _ k ?_ ?_ ?_ ?_ ?_ ?_
+          · exact sem_host I w dst _ hS rfl rfl rfl halive
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hcharge.1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hcharge.2.1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hty
+          · exact htail
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hsender
+        · simp only [hs, ↓reduceIte]
+          refine sem_await I _ sender dst _ k ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+          · exact sem_host I w dst _ hS rfl rfl rfl halive
+          · rfl
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hissue.1.trans hcharge.1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hissue.2.1.trans hcharge.2.1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hty
+          · exact htail
+          · rw [setActor_other _ dst sender _ hsame]
+            simpa using hedge
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hsender
+    · have hc : ¬ (decide ((w.st dst).parked = []) &&
+          decide ((w.st dst).box.length < capBulk I.desc w.N dst)) = true := by
+        simpa [Bool.and_eq_true, decide_eq_true_eq] using hroom
+      rw [ite_eq_right hc]
+      by_cases hsame : sender = dst
+      · subst hsame
+        cases isCall
+        · simp only [decide_true, ↓reduceIte, Bool.false_eq_true]
+          refine sem_park I w sender sender false _ k hS ?_ ?_ ?_ hty htail hedge hsender
+          · rfl
           · exact hcharge.1
           · exact hcharge.2.1
-          · simp [contTy]
-            exact hty'
-          · simp [programOk]
-            rw [hcharge.1]
-            exact htail
-          · simp [waitEdge]
-            rw [hcharge.1]
-            simpa [hcall] using hedge
-          · exact idleOff_life hsender
-          · exact Or.inr (hS.rostered sender hsender)
-        else
-          have hcf : isCall = false := by cases hbb : isCall <;> simp_all
-          simp [hcf]
-          have hp := proceed_ok I.desc sender
-            { chargeSender (w.st sender) (tname sender) with
-                box := (chargeSender (w.st sender) (tname sender)).box ++
-                  [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
-                nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1 }
-            k (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
-          apply sem_set I w sender _ hS
-          · rw [hp.1, hcharge.1]
-          · rw [hp.2.1, hcharge.2.1]
-          · exact hp.2.2.1
-          · exact hp.2.2.2.1
-          · exact hp.2.2.2.2
-          · exact idleOff_alive hp.2.1 hsender
-          · exact Or.inr (hS.rostered sender hsender)
-      · simp [hsame]
-        rw [← halive, ← hroom.1]
-        -- Destination first, then the sender.
-        have hdst : SemInv I (setActor w dst { (w.st dst) with
-            box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
-            nextMid := (w.st dst).nextMid + 1 }) := by
-          apply sem_set I w dst _ hS
+        · simp only [decide_true, ↓reduceIte]
+          refine sem_park I w sender sender true _ k hS ?_ ?_ ?_ hty htail hedge hsender
           · rfl
+          · exact hissue.1.trans hcharge.1
+          · exact hissue.2.1.trans hcharge.2.1
+      · have hs : decide (sender = dst) = false := by simp [hsame]
+        cases isCall
+        · simp only [hs, ↓reduceIte, Bool.false_eq_true]
+          refine sem_park I _ sender dst false _ k ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+          · exact sem_host I w dst _ hS rfl rfl rfl halive
           · rfl
-          · simpa [contTy] using hS.cont dst
-          · simpa [programOk] using hS.prog dst
-          · simpa [waitEdge] using hS.waited dst
-          · exact idleOff_life halive
-          · exact Or.inr (hS.rostered dst halive)
-        have hty' : (chargeSender (w.st sender) (tname dst)).typestate = k.toState := by
-          rw [hcharge.1, hty]
-        if hcall : isCall = true then
-          simp [hcall, issueCall]
-          apply sem_set I _ sender _ hdst
-          · rw [setActor_other _ dst sender _ (hsame)]
+          · rw [setActor_other _ dst sender _ hsame]
             exact hcharge.1
-          · rw [setActor_other _ dst sender _ (hsame)]
+          · rw [setActor_other _ dst sender _ hsame]
             exact hcharge.2.1
-          · simp [contTy, setActor_other _ dst sender _ hsame]
-            exact hty'
-          · simp [programOk, setActor_other _ dst sender _ hsame]
-            rw [hcharge.1]
-            exact htail
-          · simp [waitEdge, setActor_other _ dst sender _ hsame]
-            rw [hcharge.1]
-            simpa [hcall] using hedge
-          · exact idleOff_life hsender
-          · exact Or.inr (hdst.rostered sender
-              (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
-        else
-          have hcf : isCall = false := by cases hbb : isCall <;> simp_all
-          simp [hcf]
-          have hp := proceed_ok I.desc sender (chargeSender (w.st sender) (tname dst)) k
-            (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
-          apply sem_set I _ sender _ hdst
           · rw [setActor_other _ dst sender _ hsame]
-            rw [hp.1, hcharge.1]
+            exact hty
+          · exact htail
           · rw [setActor_other _ dst sender _ hsame]
-            rw [hp.2.1, hcharge.2.1]
-          · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.1
-          · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.1
-          · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.2
-          · exact idleOff_alive (hp.2.1.trans (charge_ok _ _).2.1) hsender
-          · exact Or.inr (hdst.rostered sender
-              (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
-    · simp [hroom]
-      by_cases hsame : sender = dst
-      · subst hsame
-        simp
-        have hk := condIssue_keeps isCall (chargeSender (w.st sender) (tname sender))
-        apply sem_set I w sender _ hS
-        · exact hk.1.trans hcharge.1
-        · exact hk.2.1.trans hcharge.2.1
-        · simp [contTy]
-          rw [hk.1, hcharge.1]
-          exact hty
-        · simp [programOk]
-          rw [hk.1, hcharge.1]
-          exact htail
-        · simp [waitEdge]
-          rw [hk.1, hcharge.1]
-          exact hedge
-        · exact idleOff_life ((hk.2.1.trans hcharge.2.1).trans hsender)
-        · exact Or.inr (hS.rostered sender hsender)
-      · simp [hsame]
-        rw [← halive]
-        have hdst : SemInv I (setActor w dst { (w.st dst) with
-            parked := (w.st dst).parked ++
-              [{ sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }],
-            nextMid := (w.st dst).nextMid + 1 }) := by
-          apply sem_set I w dst _ hS
+            exact hedge
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hsender
+        · simp only [hs, ↓reduceIte]
+          refine sem_park I _ sender dst true _ k ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_
+          · exact sem_host I w dst _ hS rfl rfl rfl halive
           · rfl
-          · rfl
-          · simpa [contTy] using hS.cont dst
-          · simpa [programOk] using hS.prog dst
-          · simpa [waitEdge] using hS.waited dst
-          · exact idleOff_life halive
-          · exact Or.inr (hS.rostered dst halive)
-        have hk := condIssue_keeps isCall (chargeSender (w.st sender) (tname dst))
-        apply sem_set I _ sender _ hdst
-        · rw [setActor_other _ dst sender _ (hsame)]
-          exact hk.1.trans hcharge.1
-        · rw [setActor_other _ dst sender _ (hsame)]
-          exact hk.2.1.trans hcharge.2.1
-        · simp [contTy, setActor_other _ dst sender _ hsame]
-          rw [hk.1, hcharge.1]
-          exact hty
-        · simp [programOk, setActor_other _ dst sender _ hsame]
-          rw [hk.1, hcharge.1]
-          exact htail
-        · simp [waitEdge, setActor_other _ dst sender _ hsame]
-          rw [hk.1, hcharge.1]
-          exact hedge
-        · exact idleOff_life ((hk.2.1.trans hcharge.2.1).trans hsender)
-        · exact Or.inr (hdst.rostered sender
-            (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
-  · simp [halive]
-    by_cases hcall : isCall = true
-    · simp [hcall]
-      have hp := proceed_ok I.desc sender (issueCall (w.st sender)) k
-        ((issueCall_keeps _).1.trans hty) (by simpa [issueCall] using htail)
-      apply sem_set I w sender _ hS
-      · simp [finishCall]
-        exact hp.1.trans (issueCall_keeps _).1
-      · simp [finishCall]
-        exact hp.2.1.trans (issueCall_keeps _).2.1
-      · simp [finishCall]
-        exact hp.2.2.1
-      · simp [finishCall]
-        exact hp.2.2.2.1
-      · simp [finishCall]
-        exact hp.2.2.2.2
-      · exact idleOff_life ((hp.2.1.trans (issueCall_keeps _).2.1).trans hsender)
-      · exact Or.inr (hS.rostered sender hsender)
-    · have hcf : isCall = false := by cases hbb : isCall <;> simp_all
-      simp [hcf]
-      have hp := proceed_ok I.desc sender (w.st sender) k hty htail
-      exact sem_set I w sender (proceed (w.st sender) k) hS hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1
-        hp.2.2.2.2 (idleOff_alive hp.2.1 hsender) (Or.inr (hS.rostered sender hsender))
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hissue.1.trans hcharge.1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hissue.2.1.trans hcharge.2.1
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hty
+          · exact htail
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hedge
+          · rw [setActor_other _ dst sender _ hsame]
+            exact hsender
+  · rw [ite_eq_left halive]
+    cases isCall
+    · rw [ite_eq_right Bool.false_ne_true]
+      exact sem_proceed I w sender _ k hS rfl rfl hty htail hsender
+    · rw [ite_eq_left rfl]
+      have hk := issueCall_keeps (w.st sender)
+      have hp := notAdmitted_ok I.desc sender (issueCall (w.st sender)) k (hk.1.trans hty)
+        (hland rfl halive) (hna rfl halive)
+      exact sem_set I w sender _ hS (hp.1.trans hk.1) (hp.2.1.trans hk.2.1) hp.2.2.1 hp.2.2.2.1
+        hp.2.2.2.2 (idleOff_alive (hp.2.1.trans hk.2.1) hsender) (Or.inr (hS.rostered sender hsender))
 
 /-- A fitting `trySend` is an enqueue of an unreliable message, so it needs no blocking edge. -/
 theorem try_room_sem (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)
     (hS : SemInv I w) (hty : (w.st sender).typestate = k.toState)
-    (htail : effectsOk I.desc (tname sender) (w.st sender).typestate k.rest = true)
+    (htail : effectsOk I.desc (tname sender) (contAt k) k.rest = true)
     (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk I.desc w.N dst)
     (hsender : (w.st sender).life = .alive) :
     SemInv I (enqueueOrPark w I.desc sender dst msg false k) := by
   unfold enqueueOrPark
-  have hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst := ⟨hpark, hcap⟩
-  simp [hlive, hroom]
+  dsimp only
+  rw [ite_eq_right (fun h => h hlive)]
   have hcharge := charge_ok (w.st sender) (tname dst)
+  have hc : (decide ((w.st dst).parked = []) &&
+      decide ((w.st dst).box.length < capBulk I.desc w.N dst)) = true := by
+    simp [hpark, hcap]
+  rw [ite_eq_left hc]
   by_cases hsame : sender = dst
   · subst hsame
-    simp
-    have hp := proceed_ok I.desc sender { chargeSender (w.st sender) (tname sender) with
-        box := (chargeSender (w.st sender) (tname sender)).box ++
-          [{ msg with mid := (chargeSender (w.st sender) (tname sender)).nextMid }],
-        nextMid := (chargeSender (w.st sender) (tname sender)).nextMid + 1 } k
-      (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
-    apply sem_set I w sender _ hS
-    · rw [hp.1, hcharge.1]
-    · rw [hp.2.1, hcharge.2.1]
-    · exact hp.2.2.1
-    · exact hp.2.2.2.1
-    · exact hp.2.2.2.2
-    · exact idleOff_alive hp.2.1 hsender
-    · exact Or.inr (hS.rostered sender hsender)
-  · simp [hsame]
-    rw [← hlive, ← hpark]
-    have hdst : SemInv I (setActor w dst { (w.st dst) with
-        box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
-        nextMid := (w.st dst).nextMid + 1 }) := by
-      apply sem_set I w dst _ hS
-      · rfl
-      · rfl
-      · simpa [contTy] using hS.cont dst
-      · simpa [programOk] using hS.prog dst
-      · simpa [waitEdge] using hS.waited dst
-      · exact idleOff_life hlive
-      · exact Or.inr (hS.rostered dst hlive)
-    have hp := proceed_ok I.desc sender (chargeSender (w.st sender) (tname dst)) k
-      (by rw [hcharge.1, hty]) (by simpa [hcharge.1] using htail)
-    apply sem_set I _ sender _ hdst
+    simp only [decide_true, ↓reduceIte, Bool.false_eq_true]
+    exact sem_proceed I w sender _ k hS hcharge.1 hcharge.2.1 hty htail hsender
+  · have hs : decide (sender = dst) = false := by simp [hsame]
+    simp only [hs, ↓reduceIte, Bool.false_eq_true]
+    refine sem_proceed I _ sender _ k ?_ ?_ ?_ ?_ ?_ ?_
+    · exact sem_host I w dst _ hS rfl rfl rfl hlive
     · rw [setActor_other _ dst sender _ hsame]
-      rw [hp.1, hcharge.1]
+      exact hcharge.1
     · rw [setActor_other _ dst sender _ hsame]
-      rw [hp.2.1, hcharge.2.1]
-    · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.1
-    · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.1
-    · simpa [setActor_other _ dst sender _ hsame] using hp.2.2.2.2
-    · exact idleOff_alive (hp.2.1.trans (charge_ok _ _).2.1) hsender
-    · exact Or.inr (hdst.rostered sender
-        (by rw [setActor_other _ dst sender _ hsame]; exact hsender))
+      exact hcharge.2.1
+    · rw [setActor_other _ dst sender _ hsame]
+      exact hty
+    · exact htail
+    · rw [setActor_other _ dst sender _ hsame]
+      exact hsender
 
 end Deadlock

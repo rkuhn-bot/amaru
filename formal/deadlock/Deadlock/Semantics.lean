@@ -1085,13 +1085,23 @@ theorem receivePrio_spec (I : Impl) (w w' : World) (id : InstId)
       receivePrioFrom_spec I w id [] (w.st id).prio w' h
     exact ⟨m, pre, suf, w1, a1, hlife, hidle, by simpa using happ, hwait, hdel, hw'⟩
 
-/-- A tombstone that `receivePrio` delivers has no program mail left in a
-live queue. The handler that runs next therefore sees that mail already gone. -/
+/-- The message `receivePrio` removes is the one `receivePrio_spec` delivers.
+The world after the receive is that delivery, so the witness is not some
+other message that merely fails to be a waiting tombstone. A tombstone in
+that position has no program mail left in a live queue. -/
 theorem receivePrio_tombstone_drained (I : Impl) (w w' : World) (id : InstId)
     (h : receivePrio I w id = some w') :
-    ∃ m, tombstoneWaits w m = false ∧ (m.tombstone = true → mailInFlight w m.sender = false) := by
-  obtain ⟨m, _, _, _, _, _, _, _, hwait, _, _⟩ := receivePrio_spec I w w' id h
-  exact ⟨m, hwait, fun ht => tombstone_clear_of_take w m hwait ht⟩
+    ∃ m pre suf w1 a1,
+      (w.st id).life = .alive ∧ (w.st id).phase = .idle ∧
+      (w.st id).prio = pre ++ m :: suf ∧
+      tombstoneWaits w m = false ∧
+      deliver I w id { (w.st id) with prio := pre ++ suf } m = some (w1, a1) ∧
+      w' = setActor w1 id a1 ∧
+      (m.tombstone = true → mailInFlight w m.sender = false) := by
+  obtain ⟨m, pre, suf, w1, a1, hlife, hidle, happ, hwait, hdel, hw'⟩ :=
+    receivePrio_spec I w w' id h
+  exact ⟨m, pre, suf, w1, a1, hlife, hidle, happ, hwait, hdel, hw',
+    fun ht => tombstone_clear_of_take w m hwait ht⟩
 
 def enqueueOrPark (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) : World :=
@@ -2600,7 +2610,10 @@ There is no supervisor and no tombstone, so a root that has left `alive`
 still counts while any member of its subtree key has mail on a surviving
 receiver. Shutting down alone does not hold the slot. A shutting-down root
 that still holds a descendant's mail does, until its own seal clears that
-mailbox. Mail on the root itself does not count. At most `N` of these roots. -/
+mailbox. Mail on the root itself does not count. At most `N` of these roots.
+`survivesSender` counts a shutting-down host as still holding that mail.
+A supervised slot does not: `mailInFlight` requires the receiver to be
+`alive`. This count is the conservative one, and it is transient. -/
 def loneOutstanding (D : Description) (w : World) (name : String) : Nat :=
   w.roster.foldl (fun n id =>
     match id with

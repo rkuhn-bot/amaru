@@ -53,14 +53,17 @@ def pairDesc (e : Edge) : Description where
   freshNames := true
   templates :=
     [openerTpl, connRole "timer" false true,
-     { connRole "a" false false with states := ["idle", "busy"] }, connRole "b" false false]
+     { connRole "a" false false (some "timer") with states := ["idle", "busy"] },
+     connRole "b" false false (some "timer")]
   edges := [muxIngress, intraWake, { intraWake with srcState := "idle" }, e, selfPeer "timer" "Timeout"]
   compatibility := .all
   steps :=
     [{ template := "opener", fromState := "idle", toState := "idle", label := "Go" },
      { template := "a", fromState := "idle", toState := "busy", label := "Start" },
      { template := "a", fromState := "busy", toState := "busy", label := "Start" },
-     { template := "b", fromState := "idle", toState := "idle", label := e.label }]
+     { template := "b", fromState := "idle", toState := "idle", label := e.label },
+     { template := "timer", fromState := "idle", toState := "idle", label := "dead/a" },
+     { template := "timer", fromState := "idle", toState := "idle", label := "dead/b" }]
 
 def sendPair : Impl where
   desc := pairDesc intraSend
@@ -68,27 +71,99 @@ def sendPair : Impl where
     [intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1],
      intraTr "a" "idle" "Start" "busy" [.send "b" "M" 0],
      intraTr "a" "busy" "Start" "busy" [],
-     intraTr "b" "idle" "M" "idle" []]
+     intraTr "b" "idle" "M" "idle" [],
+     intraTr "timer" "idle" "dead/a" "idle" [],
+     intraTr "timer" "idle" "dead/b" "idle" []]
 
 def callPair : Impl where
   desc := pairDesc intraCall
   transitions :=
     [intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1],
-     intraTr "a" "idle" "Start" "busy" [.call "b" "Q" 0],
+     intraTr "a" "idle" "Start" "busy" [.call "b" "Q" 0 [] []],
      intraTr "a" "busy" "Start" "busy" [],
-     { intraTr "b" "idle" "Q" "idle" [.reply] with acceptsCall := true }]
+     { intraTr "b" "idle" "Q" "idle" [.reply] with acceptsCall := true },
+     intraTr "timer" "idle" "dead/a" "idle" [],
+     intraTr "timer" "idle" "dead/b" "idle" []]
 
 theorem intra_send_graph : checkBool sendPair.desc = true := by decide
 
 theorem intra_send_local : localOkB sendPair = true := by decide
 
-theorem intra_send_issues : localIssues sendPair = [] := by decide
+theorem intra_send_issues : localIssues sendPair = [] := by
+  have h1 : transitionIssues sendPair (intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h2 : transitionIssues sendPair (intraTr "a" "idle" "Start" "busy" [.send "b" "M" 0]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h3 : transitionIssues sendPair (intraTr "a" "busy" "Start" "busy" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h4 : transitionIssues sendPair (intraTr "b" "idle" "M" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h5 : transitionIssues sendPair (intraTr "timer" "idle" "dead/a" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h6 : transitionIssues sendPair (intraTr "timer" "idle" "dead/b" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have hc : callIssues sendPair = [] := by decide
+  have htg : targetIssues sendPair.desc = [] := by decide
+  have hsh : shapeIssues sendPair.desc = [] := by decide
+  have hcl : closedIssues sendPair = [] := by decide
+  have hp : prioIssues sendPair = [] := by decide
+  have hcv : coverIssues sendPair = [] := by decide
+  have hk : keyIssues sendPair = [] := by decide
+  have hh : handledIssues sendPair = [] := by decide
+  have hpe : permanentIssues sendPair = [] := by decide
+  have hsc : schedIssues sendPair = [] := by decide
+  have hr : restartFails sendPair = [] := by decide
+  have hz : prioSizeFails sendPair = [] := by decide
+  have hts : sendPair.transitions =
+      [intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1],
+       intraTr "a" "idle" "Start" "busy" [.send "b" "M" 0],
+       intraTr "a" "busy" "Start" "busy" [],
+       intraTr "b" "idle" "M" "idle" [],
+       intraTr "timer" "idle" "dead/a" "idle" [],
+       intraTr "timer" "idle" "dead/b" "idle" []] := rfl
+  simp only [localIssues, hts, List.flatMap_cons, List.flatMap_nil, h1, h2, h3, h4, h5, h6,
+    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz]
+  simp
 
 theorem intra_call_graph : checkBool callPair.desc = true := by decide
 
 theorem intra_call_local : localOkB callPair = true := by decide
 
-theorem intra_call_issues : localIssues callPair = [] := by decide
+theorem intra_call_issues : localIssues callPair = [] := by
+  have h1 : transitionIssues callPair (intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h2 : transitionIssues callPair (intraTr "a" "idle" "Start" "busy" [.call "b" "Q" 0 [] []]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h3 : transitionIssues callPair (intraTr "a" "busy" "Start" "busy" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h4 : transitionIssues callPair ({ intraTr "b" "idle" "Q" "idle" [.reply] with acceptsCall := true }) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h5 : transitionIssues callPair (intraTr "timer" "idle" "dead/a" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h6 : transitionIssues callPair (intraTr "timer" "idle" "dead/b" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have hc : callIssues callPair = [] := by decide
+  have htg : targetIssues callPair.desc = [] := by decide
+  have hsh : shapeIssues callPair.desc = [] := by decide
+  have hcl : closedIssues callPair = [] := by decide
+  have hp : prioIssues callPair = [] := by decide
+  have hcv : coverIssues callPair = [] := by decide
+  have hk : keyIssues callPair = [] := by decide
+  have hh : handledIssues callPair = [] := by decide
+  have hpe : permanentIssues callPair = [] := by decide
+  have hsc : schedIssues callPair = [] := by decide
+  have hr : restartFails callPair = [] := by decide
+  have hz : prioSizeFails callPair = [] := by decide
+  have hts : callPair.transitions =
+      [intraTr "opener" "idle" "Go" "idle" [.cell "a" "Start" 1],
+       intraTr "a" "idle" "Start" "busy" [.call "b" "Q" 0 [] []],
+       intraTr "a" "busy" "Start" "busy" [],
+       { intraTr "b" "idle" "Q" "idle" [.reply] with acceptsCall := true },
+       intraTr "timer" "idle" "dead/a" "idle" [],
+       intraTr "timer" "idle" "dead/b" "idle" []] := rfl
+  simp only [localIssues, hts, List.flatMap_cons, List.flatMap_nil, h1, h2, h3, h4, h5, h6,
+    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz]
+  simp
 
 def muxWake : Edge :=
   { (sendEdge "opener" "idle" "mux" "Start" 0) with
@@ -106,9 +181,9 @@ def muxChainDesc : Description where
   freshNames := true
   templates :=
     [openerTpl, connRole "timer" false true,
-     { connRole "mux" false false with states := ["idle", "busy"] },
-     { connRole "handler" false false with states := ["idle", "busy"] },
-     connRole "connection" false false]
+     { connRole "mux" false false (some "timer") with states := ["idle", "busy"] },
+     { connRole "handler" false false (some "timer") with states := ["idle", "busy"] },
+     connRole "connection" false false (some "timer")]
   edges := [muxIngress, muxWake, muxToHandler, handlerToConn, selfPeer "timer" "Timeout"]
   compatibility := .all
   steps :=
@@ -117,7 +192,10 @@ def muxChainDesc : Description where
      { template := "mux", fromState := "busy", toState := "busy", label := "Start" },
      { template := "handler", fromState := "idle", toState := "busy", label := "H" },
      { template := "handler", fromState := "busy", toState := "busy", label := "H" },
-     { template := "connection", fromState := "idle", toState := "idle", label := "Q" }]
+     { template := "connection", fromState := "idle", toState := "idle", label := "Q" },
+     { template := "timer", fromState := "idle", toState := "idle", label := "dead/mux" },
+     { template := "timer", fromState := "idle", toState := "idle", label := "dead/handler" },
+     { template := "timer", fromState := "idle", toState := "idle", label := "dead/connection" }]
 
 /-- `mux` sends to `handler`, which calls `connection`. All three die together. -/
 def muxChain : Impl where
@@ -126,15 +204,61 @@ def muxChain : Impl where
     [intraTr "opener" "idle" "Go" "idle" [.cell "mux" "Start" 1],
      intraTr "mux" "idle" "Start" "busy" [.send "handler" "H" 0],
      intraTr "mux" "busy" "Start" "busy" [],
-     intraTr "handler" "idle" "H" "busy" [.call "connection" "Q" 0],
+     intraTr "handler" "idle" "H" "busy" [.call "connection" "Q" 0 [] []],
      intraTr "handler" "busy" "H" "busy" [],
-     { intraTr "connection" "idle" "Q" "idle" [.reply] with acceptsCall := true }]
+     { intraTr "connection" "idle" "Q" "idle" [.reply] with acceptsCall := true },
+     intraTr "timer" "idle" "dead/mux" "idle" [],
+     intraTr "timer" "idle" "dead/handler" "idle" [],
+     intraTr "timer" "idle" "dead/connection" "idle" []]
 
 theorem mux_chain_graph : checkBool muxChain.desc = true := by decide
 
 theorem mux_chain_local : localOkB muxChain = true := by decide
 
-theorem mux_chain_issues : localIssues muxChain = [] := by decide
+theorem mux_chain_issues : localIssues muxChain = [] := by
+  have h1 : transitionIssues muxChain (intraTr "opener" "idle" "Go" "idle" [.cell "mux" "Start" 1]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h2 : transitionIssues muxChain (intraTr "mux" "idle" "Start" "busy" [.send "handler" "H" 0]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h3 : transitionIssues muxChain (intraTr "mux" "busy" "Start" "busy" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h4 : transitionIssues muxChain (intraTr "handler" "idle" "H" "busy" [.call "connection" "Q" 0 [] []]) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h5 : transitionIssues muxChain (intraTr "handler" "busy" "H" "busy" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h6 : transitionIssues muxChain ({ intraTr "connection" "idle" "Q" "idle" [.reply] with acceptsCall := true }) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h7 : transitionIssues muxChain (intraTr "timer" "idle" "dead/mux" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h8 : transitionIssues muxChain (intraTr "timer" "idle" "dead/handler" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have h9 : transitionIssues muxChain (intraTr "timer" "idle" "dead/connection" "idle" []) = [] := by
+    simp only [transitionIssues, programGap, scopeGap, replyGap, floorGap, branchAt, intraTr]; decide
+  have hc : callIssues muxChain = [] := by decide
+  have htg : targetIssues muxChain.desc = [] := by decide
+  have hsh : shapeIssues muxChain.desc = [] := by decide
+  have hcl : closedIssues muxChain = [] := by decide
+  have hp : prioIssues muxChain = [] := by decide
+  have hcv : coverIssues muxChain = [] := by decide
+  have hk : keyIssues muxChain = [] := by decide
+  have hh : handledIssues muxChain = [] := by decide
+  have hpe : permanentIssues muxChain = [] := by decide
+  have hsc : schedIssues muxChain = [] := by decide
+  have hr : restartFails muxChain = [] := by decide
+  have hz : prioSizeFails muxChain = [] := by decide
+  have hts : muxChain.transitions =
+      [intraTr "opener" "idle" "Go" "idle" [.cell "mux" "Start" 1],
+       intraTr "mux" "idle" "Start" "busy" [.send "handler" "H" 0],
+       intraTr "mux" "busy" "Start" "busy" [],
+       intraTr "handler" "idle" "H" "busy" [.call "connection" "Q" 0 [] []],
+       intraTr "handler" "busy" "H" "busy" [],
+       { intraTr "connection" "idle" "Q" "idle" [.reply] with acceptsCall := true },
+       intraTr "timer" "idle" "dead/mux" "idle" [],
+       intraTr "timer" "idle" "dead/handler" "idle" [],
+       intraTr "timer" "idle" "dead/connection" "idle" []] := rfl
+  simp only [localIssues, hts, List.flatMap_cons, List.flatMap_nil, h1, h2, h3, h4, h5, h6, h7, h8, h9,
+    hc, htg, hsh, hcl, hp, hcv, hk, hh, hpe, hsc, hr, hz]
+  simp
 
 /-- A terminable per-peer with an empty subtree is still not allowed to send. -/
 def loneSend : Impl where
