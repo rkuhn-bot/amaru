@@ -2206,12 +2206,7 @@ theorem one_not_subtree (D : Description) (hG : GraphOk D) (name : String) (t : 
     (ht : templateOf D name = some t) (hne : t.subtree ≠ "") (hone : t.multiplicity = .one) : False := by
   have hmap := hG.subtrees
   simp [subtreeFails] at hmap
-  have hf := hmap t (templateOf_mem D name t ht).1
-  simp [hne] at hf
-  rw [hone] at hf
-  have hper : (Multiplicity.one != Multiplicity.perPeer) = true := by decide
-  rw [hper] at hf
-  simp at hf
+  exact subtreeEntry_not_one D t hne hone (hmap t (templateOf_mem D name t ht).1)
 
 theorem fold_cell_roster (reader : InstId) (labels : List String) (w : World) :
     ((labels.foldl (fun w label =>

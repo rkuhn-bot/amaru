@@ -672,14 +672,25 @@ def supervisorInSubtree (D : Description) (t : Template) : Bool :=
       (s.multiplicity == .one) ||
         (s.multiplicity == .perPeer && s.subtree == t.subtree && s.name != t.name)
 
-/-- A nonempty subtree is a per-peer cohort. Its supervisor, when it names one,
-is a multiplicity-one core or a per-peer stage of the same subtree. A pool
-(`slots` > 0) may name a core supervisor and no subtree: the core births it
-by slot. The step relation does not require every member to be terminable,
-and it does not require a `timeoutKills` role: any stage may `terminate`, and
-the tombstone goes to the immediate supervisor. `timeoutKills` on a template
-with no subtree is still rejected: the flag names a subtree kill the template
-does not belong to. -/
+/-- How many templates of `sub` name no supervisor. -/
+def rootCount (D : Description) (sub : String) : Nat :=
+  (D.templates.filter fun t => t.subtree == sub && t.supervisor.isNone).length
+
+/-- The first template of `sub` that names no supervisor. The failure is
+reported on that one, so a subtree is not listed twice. -/
+def firstRoot (D : Description) (sub : String) : Option String :=
+  (D.templates.find? fun t => t.subtree == sub && t.supervisor.isNone).map (·.name)
+
+/-- A nonempty subtree is a per-peer cohort with at most one unsupervised
+template. That template is the scheduler root: it takes a fresh subtree key,
+and a second root would not share it, so a send between them would not
+resolve. A named supervisor is a multiplicity-one core or a per-peer stage of
+the same subtree. A pool (`slots` > 0) may name a core supervisor and no
+subtree: the core births it by slot. The step relation does not require every
+member to be terminable, and it does not require a `timeoutKills` role: any
+stage may `terminate`, and the tombstone goes to the immediate supervisor.
+`timeoutKills` on a template with no subtree is still rejected: the flag names
+a subtree kill the template does not belong to. -/
 def subtreeEntry (D : Description) (t : Template) : Option String :=
   if t.slots != 0 && (t.multiplicity != .perPeer || t.supervisor.isNone) then
     some s!"fail: pool {t.name} is a per-peer template with a supervisor"
@@ -704,7 +715,23 @@ def subtreeEntry (D : Description) (t : Template) : Option String :=
     some s!"fail: subtree {t.subtree} member {t.name} is not per-peer"
   else if t.supervisor.isSome && !supervisorInSubtree D t then
     some s!"fail: subtree {t.subtree} supervisor {supText t.supervisor} is not in the subtree"
+  else if t.supervisor.isNone && decide (rootCount D t.subtree > 1) &&
+      firstRoot D t.subtree == some t.name then
+    some s!"fail: subtree {t.subtree} has more than one unsupervised root"
   else none
+
+/-- A multiplicity-one template is not a subtree member. The entry is a pool
+failure when it has slots, and a "not per-peer" failure when it does not. -/
+theorem subtreeEntry_not_one (D : Description) (t : Template)
+    (hne : t.subtree ≠ "") (hone : t.multiplicity = .one) :
+    subtreeEntry D t ≠ none := by
+  unfold subtreeEntry
+  have hsub : (t.subtree == "") = false := by simpa using hne
+  have hmult : (t.multiplicity != .perPeer) = true := by
+    rw [hone]; decide
+  by_cases hs : (t.slots != 0) = true
+  · simp [hs, hmult]
+  · simp [hs, hsub, hmult]
 
 def subtreeFails (D : Description) : List String :=
   D.templates.filterMap (subtreeEntry D)

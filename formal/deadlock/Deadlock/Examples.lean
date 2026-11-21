@@ -232,14 +232,15 @@ theorem reliable_try_fails : render reliableTryDesc =
     "fail: reliable trySend Ping may be dropped; mark a self-edge ingress or use superseding" := by
   decide
 
-/-- A connection subtree. `reader` waits, untimed, on the leading edge of a
-segment header. `timer` is the mini-protocol timeout: its peer wait is timed
-and `timeoutKills`, so one kill ends both roles. `opener` is outside the
-subtree and only arms the timer. -/
-def connRole (name : String) (untimed timeout : Bool) : Template :=
+/-- A connection subtree. `timer` is its one unsupervised root and the
+mini-protocol timeout. `reader` is that root's child: it waits, untimed, on
+the leading edge of a segment header, and the timer's `timeoutKills` is the
+cut that ends the wait. `opener` is outside the subtree and only arms the timer. -/
+def connRole (name : String) (untimed timeout : Bool) (supervisor : Option String := none) : Template :=
   { tpl name 2 ["idle"] "idle" false with
       multiplicity := .perPeer, terminable := true, untimedPeer := untimed,
-      subtree := "conn", timeoutKills := timeout }
+      subtree := "conn", timeoutKills := timeout, supervisor := supervisor,
+      tombstone := if supervisor.isSome then "dead/" ++ name else "" }
 
 def openerTpl : Template :=
   { tpl "opener" 2 ["idle"] "idle" true with
@@ -261,7 +262,7 @@ def selfPeer (src label : String) : Edge :=
 def muxDesc : Description where
   name := "mux-conn"
   freshNames := true
-  templates := [openerTpl, connRole "timer" false true, connRole "reader" true false]
+  templates := [openerTpl, connRole "timer" false true, connRole "reader" true false (some "timer")]
   edges := [muxIngress, armEdge, selfPeer "timer" "Timeout", selfPeer "reader" "Header"]
   compatibility := .all
   steps := []
@@ -274,7 +275,7 @@ def muxCrossDesc : Description where
   name := "mux-cross"
   freshNames := true
   templates :=
-    [openerTpl, connRole "timer" false true, connRole "reader" true false,
+    [openerTpl, connRole "timer" false true, connRole "reader" true false (some "timer"),
      tpl "node" 2 ["idle"] "idle" true]
   edges :=
     [muxIngress, armEdge, selfPeer "timer" "Timeout", selfPeer "reader" "Header",
@@ -285,5 +286,18 @@ def muxCrossDesc : Description where
 
 theorem mux_cross_fails : render muxCrossDesc =
     "fail: call Open targets terminable template reader" := by decide
+
+/-- Two unsupervised templates in one subtree are two scheduler roots. They
+do not share a key, so the checker rejects the description. -/
+def twoRootDesc : Description where
+  name := "two-roots"
+  freshNames := true
+  templates := [connRole "timer" false true, connRole "reader" true false]
+  edges := []
+  compatibility := .all
+  steps := []
+
+theorem two_roots_rejected : subtreeFails twoRootDesc =
+    ["fail: subtree conn has more than one unsupervised root"] := by decide
 
 end Deadlock
