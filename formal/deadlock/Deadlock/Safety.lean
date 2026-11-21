@@ -4,11 +4,10 @@ set_option autoImplicit false
 
 namespace Deadlock
 
-/-- Safety invariant used by deadlock freedom.
-`balance` is Lemma 1's accounting: messages a sender has in flight equal the
-slots it has spent. `budgetOk` says the program still to run fits in the slots
-that state is allowed to spend. -/
-structure Hold (I : Impl) (w : World) : Prop where
+/-- Balance invariant of a world. The roster has no duplicates, a live actor is
+on it, a sender's tokens plus the messages it has in flight equal its budget,
+and no actor is crashed. -/
+structure SafetyHold (I : Impl) (w : World) : Prop where
   nodup : w.roster.Nodup
   aliveIn : ∀ id, (w.st id).life = .alive → id ∈ w.roster
   balance : ∀ s d, s ∈ w.roster →
