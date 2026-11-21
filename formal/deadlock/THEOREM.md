@@ -89,9 +89,7 @@ assigned when it accepted the message, or the target had begun shutting down
 or had terminated while the message was still queued. A try-drop send and a
 superseding cell wake are not obligations. An admitted call leaves
 `awaitReply`.
-`Assumptions` is only `rust_refines`. The peer-spawn pace, recorded beside
-that structure, is a deployment constraint. It is not a field, and no
-theorem proves it.
+`Assumptions` is only `rust_refines`.
 
 The parked-call reserve is the ingress gate, not `LocalOk`. `tokenHold`
 counts the call's own message once, through the charge taken when the call
@@ -448,19 +446,6 @@ In this development the transition list is the model, so the field is the
 identity on that list. An internal effect and a timed peer wait complete as
 `finish` steps. An untimed peer wait completes the same way when
 `timedCohortEnds` holds. A pure untimed peer wait does not.
-
-**Peer spawn pace.** Implementation and deployment constraint. The Lean
-theorems do not prove it, and it is not a field of `Assumptions`. The
-implementation admits at most one new peer connection — one new per-peer
-subtree spawn — per second of wall time. The model has no clock and no bound
-on kill-and-spawn cycles. `spawn`, `freshKey`, `nextKey`, and generation
-allocation are unchanged. A slot's next occupant is still born only after
-that slot's tombstone has been consumed. Using the pace inside a proof would
-need a clock, or some other measure of seconds, that the step relation does
-not have. No theorem takes the pace as a hypothesis. `outlive_stuck` is five
-such births on a `GraphOk` and `LocalOk` description: mail a killed child
-left in two cores fills those cores, and the cores then park on each other.
-One birth per second still reaches that world.
 
 **Step termination.** A stage step terminates. A computation inside a stage
 that does not return is excluded, because it cannot be proved of the Rust

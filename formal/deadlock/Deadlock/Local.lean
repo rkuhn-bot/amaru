@@ -441,17 +441,6 @@ structure Assumptions (I : Impl) : Prop where
       tr'.label = tr.label ∧ tr'.program = tr.program ∧ tr'.toState = tr.toState ∧
       tr'.acceptsCall = tr.acceptsCall
 
-/-! ## Peer spawn pace
-
-Deployment constraint, outside `Assumptions`. The implementation admits at
-most one new peer connection — one new per-peer subtree spawn — per second
-of wall time. This model has no clock, so the constraint cannot be a
-hypothesis of a theorem here, and none uses it. `spawn` does not count
-seconds. A killed subtree's mail is left where it was sent. The next
-occupant of a slot is born only after that slot's tombstone has been
-consumed.
--/
-
 /-- After a declared cell label strictly rises, every instance of that template
 which is already alive and stays alive eventually records at least the written
 value. A reader that is dead or never spawned has nothing to observe. -/
