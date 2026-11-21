@@ -188,16 +188,16 @@ def treeSnap (w : Option World) : Option (List Nat × List String) :=
     (w.st (.core "Mgr")).prio.map (·.label))
 
 /-- F3/F5 positive: children are born at the parent's key, a per-peer parent
-supervises them, and `terminate` marks the grandchild too. The tombstone
-reaches `Mgr` when `Conn` seals, which is the next `exec`. -/
+supervises them, and `terminate` seals the descendants in that step. The
+tombstone reaches `Mgr` when `Conn` seals, which is the next `exec`. -/
 theorem terminate_marks_grandchild :
     treeSnap (runAt treeImpl 1 (treeActs.take 7)) = some ([1, 1, 1], []) ∧
-    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 2, 2], []) ∧
+    treeSnap (runAt treeImpl 1 treeActs) = some ([2, 3, 3], []) ∧
     ((runAt treeImpl 1 treeActs).map fun w => isChild w C0 H0 && isChild w H0 K0) = some true := by decide
 
-/-- After the seals, all three are dead. -/
+/-- After `Conn` seals, all three are dead. The descendants were already dead. -/
 theorem tree_sealed :
-    treeSnap (runAt treeImpl 1 (treeActs ++ [.exec C0, .exec H0, .exec K0])) =
+    treeSnap (runAt treeImpl 1 (treeActs ++ [.exec C0])) =
       some ([3, 3, 3], ["dead/Conn#0"]) := by decide
 
 /-- A per-peer supervisor of its own subtree passes `GraphOk`. -/
@@ -267,7 +267,7 @@ def deadActs : List Action :=
   [.spawn "X", .spawn "Y", .spawn "H",
    .ingress X0 "Go", .recvBulk X0, .exec X0,
    .ingress Y0 "Go", .recvBulk Y0, .exec Y0, .exec Y0,
-   .recvPrio Qc, .exec Qc, .exec X0]
+   .recvPrio Qc, .exec Qc]
 
 def deadSnap (w : Option World) : Option (Nat × Nat × String × Nat × Int) :=
   w.map fun w => (lifeTag (w.st X0).life, lifeTag (w.st Hh).life, (w.st Hh).typestate,
@@ -279,9 +279,9 @@ theorem dead_local : LocalOk deadImpl := by
   decide
 
 /-- X's send names H at X's own key. H was born at the next subtree key, so
-the send does not resolve. H stays idle, and X's seal does not crash. -/
+the send does not resolve. `Q`'s terminate seals X in that step. H stays
+idle, and the roster does not crash. -/
 theorem dead_sender_refunded :
-    deadSnap (runAt deadImpl 1 (deadActs.take 12)) = some (2, 1, "idle", 0, 1) ∧
     deadSnap (runAt deadImpl 1 deadActs) = some (3, 1, "idle", 0, 1) ∧
     (runAt deadImpl 1 (deadActs ++ [.recvBulk Hh])) = none := by decide
 

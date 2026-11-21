@@ -1279,9 +1279,12 @@ structure Hold (I : Impl) (w : World) : Prop where
     match c with
     | .peer n k _ => slotTombstoneQueued w parent n k = false
     | .core _ => True
+  /-- Two occupants of one slot are the same actor when they recorded the same
+  parent. A descendant sealed with its parent is dead, so it no longer occupies
+  the slot a restarted parent reuses. -/
   occ : ∀ c1 c2, c1 ∈ w.roster → c2 ∈ w.roster →
     occupant (w.st c1) = true → occupant (w.st c2) = true →
-    sameSlot c1 c2 = true → c1 = c2
+    sameSlot c1 c2 = true → (w.st c1).parent = (w.st c2).parent → c1 = c2
   /-- A core is born with no parent, and no step wires one. -/
   rooted : ∀ name, (w.st (.core name)).parent = none
   /-- Notifying children and queued tombstones of one template stay within that
@@ -2311,12 +2314,13 @@ theorem hold_actors (I : Impl) (w w' : World) (hH : Hold I w)
     cases c with
     | core _ => trivial
     | peer n k g => simpa [slotTombstoneQueued, hprio parent] using hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     have ho1' : occupant (w.st c1) = true := by
       simpa [occupant_eq (w'.st c1) (w.st c1) (hlife c1)] using ho1
     have ho2' : occupant (w.st c2) = true := by
       simpa [occupant_eq (w'.st c2) (w.st c2) (hlife c2)] using ho2
     exact hH.occ c1 c2 (by simpa [hros] using hc1) (by simpa [hros] using hc2) ho1' ho2' hslot
+      ((hpar c1).symm.trans (hpa.trans (hpar c2)))
   · intro name
     simpa [hpar (.core name)] using hH.rooted name
   · intro parent name
@@ -2499,7 +2503,7 @@ theorem hold_crash (I : Impl) (w : World) (hH : Hold I w) : Hold I (crashWorld w
       cases c with
       | core _ => trivial
       | peer n k g => simpa [slotTombstoneQueued, (hf parent).1] using hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     have hocc (c : InstId) (ho : occupant ((crashWorld w).st c) = true) : occupant (w.st c) = true := by
       by_cases hdec : decide (c ∈ w.roster) = true
       · by_cases hlive : ((w.st c).life == .alive || (w.st c).life == .shuttingDown) = true
@@ -2514,6 +2518,7 @@ theorem hold_crash (I : Impl) (w : World) (hH : Hold I w) : Hold I (crashWorld w
         simpa [occupant, (lifeSame c (Or.inl hno)).1] using ho
     exact hH.occ c1 c2 (by simpa [(hf c1).2.2.1] using hc1)
       (by simpa [(hf c2).2.2.1] using hc2) (hocc c1 ho1) (hocc c2 ho2) hslot
+      ((crash_parent w c1).symm.trans (hpa.trans (crash_parent w c2)))
   · intro name
     unfold crashWorld
     dsimp
@@ -2774,7 +2779,7 @@ theorem hold_init (I : Impl) (N : Nat) (hG : GraphOk I.desc) : Hold I (initWorld
     | peer n k g =>
       obtain ⟨_, _, hidc, _⟩ := tmb_core_roster I.desc (.peer n k g) hmem
       cases hidc
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot _hpa
     obtain ⟨_, _, h1, _⟩ := tmb_core_roster I.desc c1 (by simpa [hros] using hc1)
     obtain ⟨_, _, h2, _⟩ := tmb_core_roster I.desc c2 (by simpa [hros] using hc2)
     cases h1
@@ -3036,12 +3041,13 @@ theorem hold_drop (I : Impl) (w w' : World) (hH : Hold I w) (id : InstId)
             cases hbit : slotTombstoneQueued w' parent n k <;> simp_all
           simpa [h] using hf
       · simpa [slotTombstoneQueued, hother parent h] using hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     have ho1' : occupant (w.st c1) = true := by
       simpa [occupant_eq (w'.st c1) (w.st c1) (hlife c1)] using ho1
     have ho2' : occupant (w.st c2) = true := by
       simpa [occupant_eq (w'.st c2) (w.st c2) (hlife c2)] using ho2
     exact hH.occ c1 c2 (by simpa [hros] using hc1) (by simpa [hros] using hc2) ho1' ho2' hslot
+      ((hpar c1).symm.trans (hpa.trans (hpar c2)))
   · intro name
     simpa [hpar] using hH.rooted name
   · intro parent name
@@ -3269,13 +3275,14 @@ theorem hold_marked (I : Impl) (w w' : World) (hH : Hold I w) (hM : Marked w w')
     cases c with
     | core _ => trivial
     | peer n k g => simpa [slotTombstoneQueued, hM.prio parent] using hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     have hold (c : InstId) (ho : occupant (w'.st c) = true) : occupant (w.st c) = true := by
       cases hM.life c with
       | inl heq => simpa [occupant, heq] using ho
       | inr hch => simp [occupant, hch.1]
     exact hH.occ c1 c2 (by simpa [hM.roster] using hc1) (by simpa [hM.roster] using hc2)
       (hold c1 ho1) (hold c2 ho2) hslot
+      ((hM.par c1).symm.trans (hpa.trans (hM.par c2)))
   · intro name
     simpa [hM.par] using hH.rooted name
   · intro parent name
@@ -3659,67 +3666,6 @@ theorem shutdown_marked (D : Description) (w : World) (id : InstId) :
     rw [show shutdownActor D w id = armTombstone (markShutdown w id) id by simp [shutdownActor, hlive]]
     exact arm_after w (markShutdown w id) id (markShutdown_marked w id) hl (mark_shuts w id hl)
 
-theorem terminate_marked (D : Description) (w : World) (id : InstId) (a : Actor)
-    (hmem : id ∈ w.roster) : Marked w (terminateStage D w id a) := by
-  cases hlive : (w.st id).life == .alive
-  · rw [show terminateStage D w id a = markTree w.roster.length D w id by simp [terminateStage, hlive]]
-    exact markTree_marked _ D w id
-  · have hl : (w.st id).life = .alive := by simpa [beq_iff_eq] using hlive
-    cases hr : w.roster with
-    | nil => simp [hr] at hmem
-    | cons x xs =>
-      have hn : w.roster.length = xs.length + 1 := by simp [hr]
-      have hshut := markTree_shuts D w id xs.length hn hl
-      have hM := markTree_marked w.roster.length D w id
-      rw [show terminateStage D w id a =
-          armTombstone (markTree w.roster.length D w id) id by simp [terminateStage, hlive]]
-      exact arm_after w (markTree w.roster.length D w id) id hM hl (by simpa [hn] using hshut)
-
-theorem abort_fold (D : Description) (parent : InstId) (base : List InstId) :
-    ∀ ids : List InstId, ∀ w : World, w.roster = base → (∀ c, c ∈ ids → c ∈ base) →
-      Marked w (ids.foldl (fun w child =>
-        if isChild w parent child && (w.st child).life == .alive then
-          let marked := markTree w.roster.length D w child
-          armTombstone marked child
-        else w) w) := by
-  intro ids
-  induction ids with
-  | nil => intro w _ _; simp; exact Marked.refl w
-  | cons child ids ih =>
-    intro w hros hsub
-    simp only [List.foldl_cons]
-    cases hc : isChild w parent child
-    · have hstep : (if (false && (w.st child).life == .alive) = true then
-          armTombstone (markTree w.roster.length D w child) child else w) = w := by simp
-      rw [hstep]
-      exact ih w hros (fun c hm => hsub c (List.mem_cons_of_mem child hm))
-    · cases hl : (w.st child).life == .alive
-      · have hstep : (if (true && false) = true then
-            armTombstone (markTree w.roster.length D w child) child else w) = w := by simp
-        rw [hstep]
-        exact ih w hros (fun c hm => hsub c (List.mem_cons_of_mem child hm))
-      · have hstep : (if (true && true) = true then
-            armTombstone (markTree w.roster.length D w child) child else w) =
-          armTombstone (markTree w.roster.length D w child) child := by simp
-        rw [hstep]
-        have hlife : (w.st child).life = .alive := by simpa [beq_iff_eq] using hl
-        have hmem : child ∈ w.roster := by
-          simpa [hros] using hsub child (by exact List.mem_cons_self)
-        have hlen : ∃ n, w.roster.length = n + 1 := by
-          cases hr : w.roster with
-          | nil => simp [hr] at hmem
-          | cons _ xs => exact ⟨xs.length, by simp [hr]⟩
-        obtain ⟨n, hn⟩ := hlen
-        have hshut := markTree_shuts D w child n hn hlife
-        have hstep := arm_after w (markTree w.roster.length D w child) child
-          (markTree_marked w.roster.length D w child) hlife (by simpa [hn] using hshut)
-        exact Marked.trans hstep (ih (armTombstone (markTree w.roster.length D w child) child)
-          (by simpa [hros] using hstep.roster)
-          (fun c hm => hsub c (List.mem_cons_of_mem child hm)))
-
-theorem abort_marked (D : Description) (w : World) (parent : InstId) :
-    Marked w (abortChildren D w parent) := by
-  simpa [abortChildren] using abort_fold D parent w.roster w.roster w rfl (fun _ h => h)
 
 theorem cellsCrash (D : Description) (w : World) (id : InstId) :
     (readCells D w id).crashed = w.crashed := by
@@ -4244,15 +4190,19 @@ theorem hold_kill (I : Impl) (w : World) (hH : Hold I w) (id : InstId)
         | core _ => trivial
         | peer n k g =>
           simpa [slotTombstoneQueued, setActor, hp, tmb_dead] using hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     have hold (c : InstId)
         (ho : occupant ((setActor w id (tmb_dead (w.st id))).st c) = true) :
         occupant (w.st c) = true := by
       by_cases hc : c = id
       · simp [setActor, hc, tmb_dead, occupant] at ho
       · simpa [occupant, setActor, hc, tmb_dead] using ho
+    have hpar (c : InstId) :
+        ((setActor w id (tmb_dead (w.st id))).st c).parent = (w.st c).parent := by
+      by_cases hc : c = id <;> simp [setActor, tmb_dead, hc]
     exact hH.occ c1 c2 (by simpa [setActor] using hc1) (by simpa [setActor] using hc2)
       (hold c1 ho1) (hold c2 ho2) hslot
+      ((hpar c1).symm.trans (hpa.trans (hpar c2)))
   · intro name
     by_cases hi : InstId.core name = id
     · simpa [setActor, hi, tmb_dead] using hH.rooted name
@@ -4459,7 +4409,8 @@ theorem hold_snoc (I : Impl) (w : World) (hH : Hold I w) (parent : InstId)
     (ht : msg.tombstone = true) (hs : msg.sender = .peer name k g)
     (hlegal : slotIndexed I.desc parent name = true → (name, k) ∈ legalSlots I.desc parent w.N)
     (hfree : slotTombstoneQueued w parent name k = false)
-    (hnone : ∀ c, c ∈ w.roster → lifeHold (w.st c) = true → notifies I.desc c = true →
+    (hnone : ∀ c, c ∈ w.roster → isChild w parent c = true →
+      lifeHold (w.st c) = true → notifies I.desc c = true →
       match c with
       | .peer n key _ => ¬(n = name ∧ key = k)
       | .core _ => True)
@@ -4559,7 +4510,10 @@ theorem hold_snoc (I : Impl) (w : World) (hH : Hold I w) (parent : InstId)
           (tmb_any_hit (w.st parent).prio n key).symm ▸ hfresh
         by_cases hslot : n = name ∧ key = k
         · exact absurd hslot (hnone (InstId.peer n key gen)
-            (by simpa [w', hros] using hc) hwas hnote)
+            (by simpa [w', hros] using hc)
+            (child_of w (tmb_snoc w parent msg) parent (InstId.peer n key gen)
+              (tmb_snoc_parent w parent msg (InstId.peer n key gen)) hchildP)
+            hwas hnote)
         · rw [hp, tmb_queued_self, tmb_any_snoc, hfresh', Bool.false_or]
           simp only [tmb_hit, ht, hs]
           cases hdec : (name == n) <;> cases hkey : (k == key) <;> simp [hdec, hkey]
@@ -4575,9 +4529,11 @@ theorem hold_snoc (I : Impl) (w : World) (hH : Hold I w) (parent : InstId)
         dsimp
         rw [tmb_queued_other w parent msg p n key hp]
         simpa [slotTombstoneQueued] using hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     exact hH.occ c1 c2 (by simpa [w', hros] using hc1) (by simpa [w', hros] using hc2)
       (by simpa [occupant, w', hlife] using ho1) (by simpa [occupant, w', hlife] using ho2) hslot
+      ((tmb_snoc_parent w parent msg c1).symm.trans
+        (hpa.trans (tmb_snoc_parent w parent msg c2)))
   · intro name
     simpa [w', tmb_snoc_parent w parent msg] using hH.rooted name
   · intro p nm
@@ -4606,7 +4562,8 @@ theorem hold_offer (I : Impl) (w : World) (hH : Hold I w) (parent : InstId)
     (hs : msg.sender = .peer name k g)
     (hlegal : slotIndexed I.desc parent name = true → (name, k) ∈ legalSlots I.desc parent w.N)
     (hfree : slotTombstoneQueued w parent name k = false)
-    (hnone : ∀ c, c ∈ w.roster → lifeHold (w.st c) = true → notifies I.desc c = true →
+    (hnone : ∀ c, c ∈ w.roster → isChild w parent c = true →
+      lifeHold (w.st c) = true → notifies I.desc c = true →
       match c with
       | .peer n key _ => ¬(n = name ∧ key = k)
       | .core _ => True)
@@ -4632,7 +4589,8 @@ theorem hold_enqueue (I : Impl) (w : World) (hH : Hold I w) (child : InstId)
     (hfree : ∀ parent, liveSupervisor I.desc w child = some parent →
       slotTombstoneQueued w parent name k = false)
     (hnone : ∀ parent, liveSupervisor I.desc w child = some parent →
-      ∀ c, c ∈ w.roster → lifeHold (w.st c) = true → notifies I.desc c = true →
+      ∀ c, c ∈ w.roster → isChild w parent c = true →
+        lifeHold (w.st c) = true → notifies I.desc c = true →
         match c with
         | .peer n key _ => ¬(n = name ∧ key = k)
         | .core _ => True)
@@ -4808,13 +4766,15 @@ theorem hold_seal (I : Impl) (w : World) (hH : Hold I w) (id : InstId)
           rw [← hp', hprio.1]
           simp only [hid] at hfresh
           exact hfresh
-        · intro p hp c hc hhold hnote'
+        · intro p hp c hc hchildC hhold hnote'
           simp only [hsup] at hp
           injection hp with hp'
           cases c with
           | core _ => trivial
           | peer cn ck cg =>
             intro hslot
+            have hchildC : isChild sealed parent (InstId.peer cn ck cg) = true := by
+              simpa [hp'] using hchildC
             by_cases hc_id : InstId.peer cn ck cg = id
             · have hdead := releaseWorld_self_dead I.desc w id (w.st id)
               rw [hc_id] at hhold
@@ -4826,15 +4786,21 @@ theorem hold_seal (I : Impl) (w : World) (hH : Hold I w) (id : InstId)
               have hhold0 : lifeHold (w.st (InstId.peer cn ck cg)) = true := by
                 dsimp only [sealed] at hhold
                 simpa [lifeHold, hkeep.1, hkeep.2.1] using hhold
+              have hparC := release_parent I.desc w id (w.st id) (InstId.peer cn ck cg)
+              have hchild0 : isChild w parent (InstId.peer cn ck cg) = true := by
+                exact child_of w sealed parent (InstId.peer cn ck cg) hparC hchildC
               have hsame : sameSlot id (InstId.peer cn ck cg) = true := by
                 simp [hid, sameSlot, hslot, beq_iff_eq]
+              have hparents : (w.st id).parent = (w.st (InstId.peer cn ck cg)).parent := by
+                rw [isChild_parent w parent id hchildW,
+                  isChild_parent w parent (InstId.peer cn ck cg) hchild0]
               have hidc := hH.occ id (InstId.peer cn ck cg) hmem
                 (by simpa [sealed, hros] using hc)
                 (by simp [occupant, hshut])
                 (by simp [occupant, lifeHold] at hhold0; cases hhold0 with
                   | inl h => simp [occupant, h]
                   | inr h => simp [occupant, h.1])
-                hsame
+                hsame hparents
               exact hc_id hidc.symm
         · intro p hp nm
           simp only [hsup] at hp
@@ -4975,21 +4941,147 @@ theorem hold_note (I : Impl) (w : World) (hH : Hold I w) (sender : InstId) (dst 
   hold_same I w (noteStale w sender dst) hH (fun i => noteStale_st w sender dst i) rfl rfl
     (by simp [noteStale, hpre]) hpre
 
+/-- Sealing one actor and its descendants keeps the lane invariant. The
+descendants' tombstones are discarded with the seal. -/
+theorem hold_seal_branch (I : Impl) (fuel : Nat) :
+    ∀ (w : World) (id : InstId), Hold I w → w.crashed = false →
+      Hold I (sealBranch fuel I.desc w id) ∧ (sealBranch fuel I.desc w id).crashed = false := by
+  induction fuel with
+  | zero =>
+    intro w id hH hpre
+    simp [sealBranch]
+    exact ⟨hH, hpre⟩
+  | succ fuel ih =>
+    intro w id hH hpre
+    simp only [sealBranch]
+    let step (w0 : World) (child : InstId) : World :=
+      if isChild w0 id child then sealBranch fuel I.desc w0 child else w0
+    have hfold : ∀ (ids : List InstId) (w0 : World), Hold I w0 → w0.crashed = false →
+        Hold I (ids.foldl step w0) ∧ (ids.foldl step w0).crashed = false := by
+      intro ids
+      induction ids with
+      | nil =>
+        intro w0 hH0 hpre0
+        simp
+        exact ⟨hH0, hpre0⟩
+      | cons child ids ihids =>
+        intro w0 hH0 hpre0
+        simp only [List.foldl_cons, step]
+        by_cases hc : isChild w0 id child = true
+        · have hstep := ih w0 child hH0 hpre0
+          simp only [hc, ite_true]
+          exact ihids _ hstep.1 hstep.2
+        · have hf : isChild w0 id child = false := by
+            cases hb : isChild w0 id child with
+            | false => rfl
+            | true => exact absurd hb hc
+          simp only [hf]
+          exact ihids w0 hH0 hpre0
+    let sealed := w.roster.foldl step w
+    have hmid := hfold w.roster w hH hpre
+    change Hold I (if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+        releaseWorld I.desc sealed id (sealed.st id) else sealed) ∧
+      (if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+        releaseWorld I.desc sealed id (sealed.st id) else sealed).crashed = false
+    by_cases hgo : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = true
+    · have hlive : (sealed.st id).life = .alive ∨ (sealed.st id).life = .shuttingDown := by
+        have hdis := (Bool.or_eq_true _ _).mp hgo
+        cases hdis with
+        | inl h => exact Or.inl ((beq_iff_eq).mp h)
+        | inr h => exact Or.inr ((beq_iff_eq).mp h)
+      simp only [hgo, ite_true]
+      exact ⟨hold_release I sealed hmid.1 id (sealed.st id) hmid.2 hlive,
+        (release_crash I.desc sealed id (sealed.st id)).symm ▸ hmid.2⟩
+    · have hf : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = false := by
+        cases hb : (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown with
+        | false => rfl
+        | true => exact absurd hb hgo
+      simp only [hf]
+      exact hmid
+
+/-- Proper descendants are sealed now. The actor itself is unchanged, and the
+lane invariant holds of the result. -/
+theorem hold_drop_desc (I : Impl) (w : World) (hH : Hold I w) (id : InstId)
+    (hpre : w.crashed = false) :
+    Hold I (dropDescendants I.desc w id) ∧ (dropDescendants I.desc w id).crashed = false := by
+  unfold dropDescendants
+  let step (w0 : World) (child : InstId) : World :=
+    if isChild w0 id child then sealBranch w.roster.length I.desc w0 child else w0
+  have hfold : ∀ (ids : List InstId) (w0 : World), Hold I w0 → w0.crashed = false →
+      Hold I (ids.foldl step w0) ∧ (ids.foldl step w0).crashed = false := by
+    intro ids
+    induction ids with
+    | nil =>
+      intro w0 hH0 hpre0
+      simp
+      exact ⟨hH0, hpre0⟩
+    | cons child ids ih =>
+      intro w0 hH0 hpre0
+      simp only [List.foldl_cons, step]
+      by_cases hc : isChild w0 id child = true
+      · have hstep := hold_seal_branch I w.roster.length w0 child hH0 hpre0
+        simp only [hc, ite_true]
+        exact ih _ hstep.1 hstep.2
+      · have hf : isChild w0 id child = false := by
+          cases hb : isChild w0 id child with
+          | false => rfl
+          | true => exact absurd hb hc
+        simp only [hf]
+        exact ih w0 hH0 hpre0
+  exact hfold w.roster w hH hpre
+
+theorem hold_terminate_stage (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor)
+    (hpre : w.crashed = false) : Hold I (terminateStage I.desc w id a) := by
+  have hD := hold_drop_desc I w hH id hpre
+  simpa [terminateStage] using
+    hold_marked I (dropDescendants I.desc w id)
+      (shutdownActor I.desc (dropDescendants I.desc w id) id) hD.1
+      (shutdown_marked I.desc (dropDescendants I.desc w id) id) hD.2
+
+theorem hold_abort_children (I : Impl) (w : World) (hH : Hold I w) (parent : InstId)
+    (hpre : w.crashed = false) : Hold I (abortChildren I.desc w parent) := by
+  unfold abortChildren
+  suffices ∀ (ids : List InstId) (w0 : World), Hold I w0 → w0.crashed = false →
+      Hold I (ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor I.desc (dropDescendants I.desc w child) child
+        else w) w0) by
+    exact this w.roster w hH hpre
+  intro ids
+  induction ids with
+  | nil =>
+    intro w0 hH0 _
+    simp
+    exact hH0
+  | cons child ids ih =>
+    intro w0 hH0 hpre0
+    simp only [List.foldl_cons]
+    by_cases hc : (isChild w0 parent child && (w0.st child).life == .alive) = true
+    · simp only [hc, ite_true]
+      have hD := hold_drop_desc I w0 hH0 child hpre0
+      have hM := shutdown_marked I.desc (dropDescendants I.desc w0 child) child
+      have hS := hold_marked I (dropDescendants I.desc w0 child)
+        (shutdownActor I.desc (dropDescendants I.desc w0 child) child) hD.1 hM hD.2
+      have hpre1 : (shutdownActor I.desc (dropDescendants I.desc w0 child) child).crashed = false :=
+        hM.crashed.symm ▸ hD.2
+      exact ih _ hS hpre1
+    · have hf : (isChild w0 parent child && (w0.st child).life == .alive) = false := by
+        cases hb : isChild w0 parent child && (w0.st child).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hc
+      simp only [hf]
+      exact ih w0 hH0 hpre0
+
 theorem hold_abort (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
     (hpre : w.crashed = false) (hlive : a.life = .alive)
     (hk : ∃ tail, k.rest = .abort :: tail) : Hold I (execRun I w id a k) := by
   have hgo : (a.life == .alive) = true := by simpa [beq_iff_eq] using hlive
   rcases hk with ⟨tail, hk⟩
-  simpa [execRun, hgo, hk] using
-    hold_marked I w (abortChildren I.desc w id) hH (abort_marked I.desc w id) hpre
+  simpa [execRun, hgo, hk] using hold_abort_children I w hH id hpre
 
 theorem hold_terminate (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor)
-    (k : Cont) (hpre : w.crashed = false) (ha : a = w.st id) (hlive : a.life = .alive)
+    (k : Cont) (hpre : w.crashed = false) (_ha : a = w.st id) (hlive : a.life = .alive)
     (hk : ∃ tail, k.rest = .terminate :: tail) : Hold I (execRun I w id a k) := by
-  have hmem : id ∈ w.roster := hH.rostered id (by
-    intro hbad
-    rw [← ha] at hbad
-    simp [hlive] at hbad)
   rcases execRun_terminate I w id a k hlive hk with hcrash | hrest
   · simpa [hcrash] using hold_crash I w hH
   rcases hrest with hshut | hrest
@@ -4998,11 +5090,9 @@ theorem hold_terminate (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a :
       (shutdown_marked I.desc w id) hpre
   rcases hrest with htree | hcascade
   · obtain ⟨_, _, _, _, heq⟩ := htree
-    simpa [heq] using hold_marked I w (terminateStage I.desc w id a) hH
-      (terminate_marked I.desc w id a hmem) hpre
+    simpa [heq] using hold_terminate_stage I w hH id a hpre
   · obtain ⟨_, _, _, _, _, _, heq⟩ := hcascade
-    simpa [heq] using hold_marked I w (terminateStage I.desc w id a) hH
-      (terminate_marked I.desc w id a hmem) hpre
+    simpa [heq] using hold_terminate_stage I w hH id a hpre
 
 /-- `exec` of an actor that is already shutting down seals it, and the seal
 preserves the lane invariant. -/
@@ -6039,7 +6129,7 @@ theorem hold_born (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (born : A
         | core _ => trivial
         | peer n k g =>
           simpa [slotTombstoneQueued, hst_old parent hp] using hfresh'
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     by_cases h1 : c1 = id
     · by_cases h2 : c2 = id
       · exact h1.trans h2.symm
@@ -6060,6 +6150,8 @@ theorem hold_born (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (born : A
         have ho2' : occupant (w.st c2) = true := by
           simpa [occupant, hst_old c2 h2] using ho2
         exact hH.occ c1 c2 (mem_old c1 hc1 h1) (mem_old c2 hc2 h2) ho1' ho2' hslot
+          ((congrArg Actor.parent (hst_old c1 h1)).symm.trans
+            (hpa.trans (congrArg Actor.parent (hst_old c2 h2))))
   · intro name
     by_cases hc : id = .core name
     · have hstc : w'.st (.core name) = born := by simpa [hc] using hnewSt
@@ -6186,10 +6278,11 @@ theorem hold_plain (I : Impl) (w : World) (hH : Hold I w) (host : InstId) (msg :
         have holdq := (tmb_queued_iff w parent n k).mpr hq
         rw [holdq] at hfresh
         cases hfresh
-  · intro c1 c2 hc1 hc2 ho1 ho2 hslot
+  · intro c1 c2 hc1 hc2 ho1 ho2 hslot hpa
     rw [occupant_eq (w'.st c1) (w.st c1) (hlife c1)] at ho1
     rw [occupant_eq (w'.st c2) (w.st c2) (hlife c2)] at ho2
     exact hH.occ c1 c2 (by simpa [w', hros] using hc1) (by simpa [w', hros] using hc2) ho1 ho2 hslot
+      ((hpar c1).symm.trans (hpa.trans (hpar c2)))
   · intro name
     simpa [w', hpar (.core name)] using hH.rooted name
   · intro parent name
@@ -7803,7 +7896,9 @@ theorem pool_open_lt (I : Impl) (w : World) (hH : Hold I w) (hG : GraphOk I.desc
     have hoccB := life_occupant _ hpartsB.2.1
     have hslot : sameSlot a b = true := by
       simp [sameSlot, haId, hbId, hkeys]
-    exact hH.occ a b (List.mem_filter.mp ha).1 (List.mem_filter.mp hb).1 hoccA hoccB hslot
+    have hpa : (w.st a).parent = (w.st b).parent := by
+      rw [isChild_parent w parent a hpartsA.1, isChild_parent w parent b hpartsB.1]
+    exact hH.occ a b (List.mem_filter.mp ha).1 (List.mem_filter.mp hb).1 hoccA hoccB hslot hpa
   have htombs : tombs.Nodup :=
     nodup_filter _ (tombSlots ((w.st parent).prio)) (hH.lane parent).tombNodup
   have hfst : ∀ s, s ∈ tombs → s.1 = child := by

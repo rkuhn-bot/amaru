@@ -14,8 +14,8 @@ one in `faithful`: two scheduler births, two keys, one tombstone on each
 live lane.
 
 `foreign_tombstone` and `late_seal_drops` are the two probes from the
-review of that crash. A new root is a fresh key, and a seal whose recorded
-parent is shutting down drops the tombstone.
+review of that crash. A new root is a fresh key. A parent that terminates
+seals its child in that step and discards the child's tombstone.
 -/
 
 import Deadlock.Graph
@@ -144,7 +144,7 @@ def kImpl : Impl where
      tr "R" "boot" "dead/C" "boot" [], tr "R" "up" "dead/C" "up" [],
      tr "C" "idle" "Die" "idle" [.terminate]]
 
-/-- `C` marks itself, then `R` marks itself. The child's seal has not run. -/
+/-- `C` marks itself, then `R` terminates and seals `C` in that step. -/
 def lateBase : List Action :=
   [.spawn "R", .ingress r0 "Go", .recvBulk r0, .exec r0,
    .ingress c0 "Die", .recvBulk c0, .exec c0,
@@ -153,10 +153,11 @@ def lateBase : List Action :=
 theorem k_checks : checkBool kDesc = true ∧ localOkB kImpl = true ∧
     prioSized kDesc "R" (prioSenderBound kImpl "R") = true := by decide
 
-/-- The seal finds its recorded parent shutting down and drops the tombstone.
-The lane stays empty and the roster does not crash. -/
+/-- `R`'s terminate seals `C` in that step. The tombstone is discarded because
+the parent is the one shutting down, the lane stays empty, and the roster
+does not crash. `C` is already dead, so a later `exec` of `C` is not enabled. -/
 theorem late_seal_drops :
-    (match runAt kImpl 2 (lateBase ++ [.exec c0]) with
+    (match runAt kImpl 2 lateBase with
       | none => false
       | some w =>
         decide (w.crashed = false) &&
@@ -167,7 +168,7 @@ theorem late_seal_drops :
 /-- A root born while the parent is shutting down takes the next key. The
 child's tombstone is not delivered to that new root. -/
 theorem foreign_tombstone :
-    (match runAt kImpl 2 (lateBase ++ [.spawn "R", .exec c0]) with
+    (match runAt kImpl 2 (lateBase ++ [.spawn "R"]) with
       | none => false
       | some w =>
         decide (w.crashed = false) &&

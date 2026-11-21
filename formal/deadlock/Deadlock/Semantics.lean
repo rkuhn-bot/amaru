@@ -1179,6 +1179,17 @@ theorem isChild_recorded (w : World) (parent child : InstId)
     isChild w parent child = true := by
   simp [isChild, h, hne]
 
+/-- A child link stores the recorded parent. -/
+theorem isChild_parent (w : World) (parent child : InstId)
+    (h : isChild w parent child = true) : (w.st child).parent = some parent := by
+  simp only [isChild] at h
+  split at h
+  · rename_i p hp
+    have hpair := (Bool.and_eq_true _ _).mp h
+    have heq : p = parent := (beq_iff_eq).mp hpair.1
+    simpa [hp, heq]
+  · simp at h
+
 /-- Some live actor recorded `id` as its parent. -/
 def hasChild (D : Description) (w : World) (id : InstId) : Bool :=
   let _desc := D
@@ -1424,25 +1435,42 @@ def markTree (fuel : Nat) (D : Description) (w : World) (id : InstId) : World :=
     w.roster.foldl (fun w child =>
       if isChild w id child then markTree fuel D w child else w) w
 
-/-- A stage in the supervision tree terminates. Every descendant, terminable or
-not, begins shutting down, and one tombstone is placed on the immediate
-supervisor's priority lane. The supervisor may itself be per-peer. This step
-does not terminate it: its own transition decides whether to terminate, which
-is how the failure bubbles up. A sibling is not a descendant, and nothing here
-clears a sibling's mail. -/
+/-- Seal `id` and every recorded descendant in this step. A descendant's
+tombstone is discarded: pure-stage terminates each child, ignores the
+tombstone that child would return, and removes the stage before the parent
+is told. An actor that is already dead or absent is left as it is. `fuel`
+bounds the depth. -/
+def sealBranch (fuel : Nat) (D : Description) (w : World) (id : InstId) : World :=
+  match fuel with
+  | 0 => w
+  | fuel + 1 =>
+    let sealed := w.roster.foldl (fun acc child =>
+      if isChild acc id child then sealBranch fuel D acc child else acc) w
+    if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+      releaseWorld D sealed id (sealed.st id)
+    else sealed
+
+/-- Proper descendants of `id`, sealed now. `id` itself stays for its own
+tombstone. -/
+def dropDescendants (D : Description) (w : World) (id : InstId) : World :=
+  w.roster.foldl (fun acc child =>
+    if isChild acc id child then sealBranch w.roster.length D acc child else acc) w
+
+/-- A stage in the supervision tree terminates. Descendants are sealed in this
+step, and their tombstones are not delivered. The stage itself only begins
+shutting down: its tombstone is queued when it later seals, on the immediate
+supervisor. A sibling is not a descendant. -/
 def terminateStage (D : Description) (w : World) (id : InstId) (a : Actor) : World :=
   let _committed := a
-  let marked := markTree w.roster.length D w id
-  if (w.st id).life == .alive then armTombstone marked id else marked
+  shutdownActor D (dropDescendants D w id) id
 
-/-- The parent's abort. Every live child, terminable or not, and that child's
-descendants begin shutting down. Each direct child leaves one tombstone on the
-parent. A sibling is not a child, and this step does not touch a sibling's mail. -/
+/-- The parent's abort. Every live child is marked and armed, so the parent
+still receives that child's tombstone. The child's own descendants are sealed
+now and do not leave a grandchild occupying the slot. -/
 def abortChildren (D : Description) (w : World) (parent : InstId) : World :=
   w.roster.foldl (fun w child =>
     if isChild w parent child && (w.st child).life == .alive then
-      let marked := markTree w.roster.length D w child
-      armTombstone marked child
+      shutdownActor D (dropDescendants D w child) child
     else w) w
 
 /-- A tombstone for `child` at slot `k` is still on `parent`'s priority lane. -/
@@ -6665,6 +6693,10 @@ theorem set_other_life (w : World) (id : InstId) (a : Actor) (name : String)
     ((setActor w id a).st (InstId.core name)).life = (w.st (InstId.core name)).life := by
   simp [setActor, hne]
 
+theorem setActor_life_ne (w : World) (id : InstId) (a : Actor) (i : InstId) (hne : i ≠ id) :
+    ((setActor w id a).st i).life = (w.st i).life := by
+  simp [setActor, hne]
+
 theorem credit_core_life (w : World) (tmpl : String) (sender : InstId) (name : String) :
     ((creditSender w tmpl sender).st (InstId.core name)).life =
       (w.st (InstId.core name)).life := by
@@ -7031,6 +7063,25 @@ theorem releaseWorld_core_life (D : Description) (w : World) (id : InstId) (a : 
         ((refundParked_core_life _ _ _ name).trans
           ((refundMsgs_core_life _ _ _ name).trans
             (congrArg (fun a => a.life) (cellsSt D w id _))))))
+
+/-- Releasing one actor leaves everyone else's life alone. -/
+theorem releaseWorld_other_life (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (hne : i ≠ id) : ((releaseWorld D w id a).st i).life = (w.st i).life := by
+  simp only [releaseWorld]
+  exact (releaseParked_life _ id a.parked i).trans
+    ((setActor_life_ne _ id _ i hne).trans
+      ((releaseOutbound_life _ id i).trans
+        ((refundParked_phase_life _ _ _ i).2.trans
+          ((refundMsgs_phase_life _ _ _ i).2.trans
+            (congrArg Actor.life (cellsSt D w id i))))))
+
+/-- A release does not bring anyone back to life. -/
+theorem releaseWorld_prev (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (h : ((releaseWorld D w id a).st i).life = .alive) : (w.st i).life = .alive := by
+  by_cases hne : i = id
+  · rw [hne] at h
+    simp [releaseWorld_self_dead D w id a] at h
+  · exact (releaseWorld_other_life D w id a i hne).symm ▸ h
 
 theorem failWaiters_life (w : World) (dead s : InstId) :
     ((failWaiters w dead).st s).life = (w.st s).life := by
@@ -7407,38 +7458,100 @@ theorem markTree_prev (fuel : Nat) (D : Description) (w : World) (id i : InstId)
           exact ihids w0 h0
     exact markShutdown_prev w id i (hfold (markShutdown w id).roster (markShutdown w id) h)
 
-/-- Beginning to shut down does not bring a core to life. -/
-theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
-    (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
-    (w.st (InstId.core name)).life = .alive := by
-  unfold terminateStage at h
-  by_cases hlive : ((w.st id).life == .alive) = true
-  · simp only [hlive, ite_true] at h
-    exact markTree_prev _ D w id (InstId.core name)
-      (armTombstone_prev (markTree w.roster.length D w id) id (InstId.core name) h)
-  · simp only [hlive, ite_false] at h
-    exact markTree_prev _ D w id (InstId.core name) h
+/-- Sealing a branch does not bring anyone back to life. -/
+theorem sealBranch_prev (fuel : Nat) (D : Description) (i : InstId) :
+    ∀ (id : InstId) (w : World),
+      ((sealBranch fuel D w id).st i).life = .alive → (w.st i).life = .alive := by
+  induction fuel with
+  | zero =>
+    intro id w h
+    simpa [sealBranch] using h
+  | succ fuel ih =>
+    intro id w h
+    simp only [sealBranch] at h
+    let step (w0 : World) (child : InstId) : World :=
+      if isChild w0 id child then sealBranch fuel D w0 child else w0
+    have hfold : ∀ (ids : List InstId) (w0 : World),
+        ((ids.foldl step w0).st i).life = .alive → (w0.st i).life = .alive := by
+      intro ids
+      induction ids with
+      | nil => intro _ h0; exact h0
+      | cons child ids ihids =>
+        intro w0 h0
+        simp only [List.foldl_cons, step] at h0
+        by_cases hc : isChild w0 id child = true
+        · simp only [hc, ite_true] at h0
+          exact ih child w0 (ihids _ h0)
+        · have hf : isChild w0 id child = false := by
+            cases hb : isChild w0 id child with
+            | false => rfl
+            | true => exact absurd hb hc
+          simp only [hf] at h0
+          exact ihids w0 h0
+    let sealed := w.roster.foldl step w
+    change ((if (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown then
+      releaseWorld D sealed id (sealed.st id) else sealed).st i).life = .alive at h
+    by_cases hgo : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = true
+    · simp only [hgo, ite_true] at h
+      exact hfold w.roster w (releaseWorld_prev D sealed id (sealed.st id) i h)
+    · have hf : ((sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown) = false := by
+        cases hb : (sealed.st id).life == .alive || (sealed.st id).life == .shuttingDown with
+        | false => rfl
+        | true => exact absurd hb hgo
+      simp only [hf] at h
+      exact hfold w.roster w h
 
-theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
-    (h : ((abortChildren D w parent).st i).life = .alive) : (w.st i).life = .alive := by
-  unfold abortChildren at h
-  let step (w0 : World) (child : InstId) : World :=
-    if isChild w0 parent child && (w0.st child).life == .alive then
-      let marked := markTree w0.roster.length D w0 child
-      armTombstone marked child
-    else w0
+/-- Dropping descendants does not bring anyone back to life. -/
+theorem dropDescendants_prev (D : Description) (w : World) (id i : InstId)
+    (h : ((dropDescendants D w id).st i).life = .alive) : (w.st i).life = .alive := by
+  unfold dropDescendants at h
   have hfold : ∀ (ids : List InstId) (w0 : World),
-      ((ids.foldl step w0).st i).life = .alive → (w0.st i).life = .alive := by
+      ((ids.foldl (fun acc child =>
+        if isChild acc id child then sealBranch w.roster.length D acc child else acc) w0).st i).life =
+        .alive → (w0.st i).life = .alive := by
     intro ids
     induction ids with
     | nil => intro _ h0; exact h0
     | cons child ids ihids =>
       intro w0 h0
-      simp only [List.foldl_cons, step] at h0
+      simp only [List.foldl_cons] at h0
+      by_cases hc : isChild w0 id child = true
+      · simp only [hc, ite_true] at h0
+        exact sealBranch_prev _ D i child w0 (ihids _ h0)
+      · have hf : isChild w0 id child = false := by
+          cases hb : isChild w0 id child with
+          | false => rfl
+          | true => exact absurd hb hc
+        simp only [hf, ite_false] at h0
+        exact ihids w0 h0
+  exact hfold w.roster w h
+
+/-- Beginning to shut down does not bring a core to life. -/
+theorem terminateStage_core_prev (D : Description) (w : World) (id : InstId) (a : Actor)
+    (name : String) (h : ((terminateStage D w id a).st (InstId.core name)).life = .alive) :
+    (w.st (InstId.core name)).life = .alive := by
+  unfold terminateStage at h
+  exact dropDescendants_prev D w id (InstId.core name)
+    (shutdownActor_prev D (dropDescendants D w id) id (InstId.core name) h)
+
+theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
+    (h : ((abortChildren D w parent).st i).life = .alive) : (w.st i).life = .alive := by
+  unfold abortChildren at h
+  have hfold : ∀ (ids : List InstId) (w0 : World),
+      ((ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor D (dropDescendants D w child) child
+        else w) w0).st i).life = .alive → (w0.st i).life = .alive := by
+    intro ids
+    induction ids with
+    | nil => intro _ h0; exact h0
+    | cons child ids ihids =>
+      intro w0 h0
+      simp only [List.foldl_cons] at h0
       by_cases hc : (isChild w0 parent child && (w0.st child).life == .alive) = true
       · simp only [hc, ite_true] at h0
-        have hts := armTombstone_prev (markTree w0.roster.length D w0 child) child i (ihids _ h0)
-        exact markTree_prev _ D w0 child i hts
+        exact dropDescendants_prev D w0 child i
+          (shutdownActor_prev D (dropDescendants D w0 child) child i (ihids _ h0))
       · have hf : (isChild w0 parent child && (w0.st child).life == .alive) = false := by
           cases hb : isChild w0 parent child && (w0.st child).life == .alive with
           | false => rfl
