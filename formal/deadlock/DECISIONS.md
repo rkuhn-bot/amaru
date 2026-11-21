@@ -277,3 +277,23 @@ an old slot. The guard does not refuse those spawns. The mail in `H` and
 `K` is from five different slots. `outlive_first_generation` is that the
 final roster still has only generation 0 at each of those keys, and
 `outlive_stuck` is the cores parked on each other.
+
+## 2026-11-21 — Implementation work not covered by the Lean model
+
+Roland, from the 2026-11-21 08:06 CET call. The spawn precondition is a fact
+about one slot's messages. pure-stage cannot observe that fact yet.
+
+pure-stage needs a drained signal. Each message a subtree member sends to a
+core is tagged with the sender's slot and generation. The core tracks
+consumption of those tagged messages per slot. When every message tagged for
+a given slot has been consumed, the core emits a drained signal for that
+slot, and the supervisor uses it as the go-ahead for the next spawn.
+
+The signal is that finite set — the messages that specific slot sent. It is
+not the core's mailbox becoming empty. A mailbox may never empty, because
+unrelated mail can keep arriving. This is net-new functionality in pure-stage.
+
+The Lean guard is the same set. `slotCoreMail` holds while a core still has
+a bulk message, a priority message, or a parked send from an occupant of
+that slot. It does not ask whether the core's mailbox is empty. The drained
+signal itself is not a state of this model.
