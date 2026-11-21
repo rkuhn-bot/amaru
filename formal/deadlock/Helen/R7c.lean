@@ -112,15 +112,9 @@ theorem tombstone_later_state :
     runAt subImpl 1 tombActs = none ∧
     findTr subImpl "P" "seen" "dead/A" = none := by decide
 
-/-- A and B share subtree `s`, so B is born at key 1 and the next A at key 2.
-A per-peer send resolves the sender's own key, and these two do not share one. -/
+/-- Two scheduler roots of one subtree take different keys. `orig_key_split_refuted`
+uses this list. The resolving route is `respawn_key_split`, on a child. -/
 def splitActs : List Action := [.spawn "A", .spawn "B"] ++ (cycle 0).tail ++ [.recvPrio Pc, .spawn "A"]
-theorem respawn_key_split :
-    ((runAt subImpl 1 splitActs).map fun w =>
-      (lifeTag (w.st A0).life, lifeTag (w.st (.peer "A" 2 0)).life,
-        lifeTag (w.st (.peer "B" 1 0)).life,
-        route w subDesc (.peer "A" 2 0) "B", route w subDesc (.peer "B" 1 0) "A")) =
-    some (3, 1, 1, none, none) := by decide
 
 /-- A permanent core's `terminate` crashes the roster, and nothing runs after that. -/
 def ingP : Edge := { ing "P" "idle" with occupancy := { a := 0, b := 1 } }
@@ -176,6 +170,15 @@ def treeImpl : Impl where
 def C0 : InstId := .peer "Conn" 0 0
 def H0 : InstId := .peer "Hand" 0 0
 def K0 : InstId := .peer "Work" 0 0
+
+/-- Hand is born at Conn's key, so Conn resolves it. The next Conn is a fresh
+key and does not resolve that Hand. Population 2 is what admits the second root. -/
+theorem respawn_key_split :
+    let born : List Action := [.spawn "Conn", .ingress C0 "Go", .recvBulk C0, .exec C0]
+    ((runAt treeImpl 2 born).map fun w => route w treeDesc C0 "Hand") = some (some H0) ∧
+      ((runAt treeImpl 2 (born ++ [.spawn "Conn"])).map fun w =>
+        (route w treeDesc (.peer "Conn" 1 0) "Hand", lifeTag (w.st H0).life,
+          lifeTag (w.st (.peer "Conn" 1 0)).life)) = some (none, 1, 1) := by decide
 def K1 : InstId := .peer "Work" 0 1
 
 def treeActs : List Action :=
@@ -231,7 +234,8 @@ def tY : Template := { tpl "Y" 2 ["idle", "done"] "idle" true with
   multiplicity := .perPeer, capacity := { a := 2, b := 1 }, terminable := true, subtree := "s",
   supervisor := some "Q", tombstone := "dead/Y" }
 def tH : Template := { tpl "H" 0 ["idle", "got"] "idle" false with
-  multiplicity := .perPeer, terminable := true, subtree := "s" }
+  multiplicity := .perPeer, terminable := true, subtree := "s",
+  supervisor := some "X", tombstone := "dead/H" }
 
 def deadDesc : Description where
   name := "dead-sender"
@@ -240,32 +244,37 @@ def deadDesc : Description where
   edges := [ing "X" "idle", ing "X" "sent", ing "Y" "idle", ing "Y" "done",
             { (sendEdge "X" "sent" "H" "M" 1) with occupancy := { a := 1, b := 0 } }]
   compatibility := .all
-  steps := [step "X" "idle" "Go" "sent", step "Y" "idle" "Go" "done", step "Q" "idle" "dead/Y" "gone",
-            step "Q" "idle" "dead/X" "gone", step "Q" "gone" "dead/Y" "gone", step "Q" "gone" "dead/X" "gone",
+  steps := [step "X" "idle" "Go" "sent", step "X" "idle" "dead/H" "idle",
+            step "X" "sent" "dead/H" "sent", step "Y" "idle" "Go" "done",
+            step "Q" "idle" "dead/Y" "gone", step "Q" "idle" "dead/X" "gone",
+            step "Q" "gone" "dead/Y" "gone", step "Q" "gone" "dead/X" "gone",
             step "H" "idle" "M" "got", step "X" "sent" "Go" "sent",
             step "Y" "done" "Go" "done", step "H" "got" "M" "got"]
 
 def deadImpl : Impl where
   desc := deadDesc
-  transitions := [tr "X" "idle" "Go" "sent" [.send "H" "M" 0],
+  transitions := [tr "X" "idle" "Go" "sent" [.spawn "H", .send "H" "M" 0],
                   tr "Y" "idle" "Go" "done" [.terminate],
                   tr "Q" "idle" "dead/Y" "gone" [.terminate],
                   tr "Q" "idle" "dead/X" "gone" [],
                   tr "Q" "gone" "dead/Y" "gone" [],
                   tr "Q" "gone" "dead/X" "gone" [],
                   tr "H" "idle" "M" "got" [],
-                  tr "X" "sent" "Go" "sent" [], tr "Y" "done" "Go" "done" [],
+                  tr "X" "sent" "Go" "sent" [.terminate],
+                  tr "X" "idle" "dead/H" "idle" [],
+                  tr "X" "sent" "dead/H" "sent" [],
+                  tr "Y" "done" "Go" "done" [],
                   tr "H" "got" "M" "got" []]
 
 def X0 : InstId := .peer "X" 0 0
-/-- X, Y and H share subtree `s`, so the three births take keys 0, 1 and 2. -/
+/-- H is X's child, so it is born at X's key. Y is the next subtree key. -/
 def Y0 : InstId := .peer "Y" 1 0
-def Hh : InstId := .peer "H" 2 0
+def Hh : InstId := .peer "H" 0 0
 def Qc : InstId := .core "Q"
 
 def deadActs : List Action :=
-  [.spawn "X", .spawn "Y", .spawn "H",
-   .ingress X0 "Go", .recvBulk X0, .exec X0,
+  [.spawn "X", .spawn "Y",
+   .ingress X0 "Go", .recvBulk X0, .exec X0, .exec X0,
    .ingress Y0 "Go", .recvBulk Y0, .exec Y0, .exec Y0,
    .recvPrio Qc, .exec Qc]
 
@@ -278,12 +287,12 @@ theorem dead_local : LocalOk deadImpl := by
   unfold LocalOk
   decide
 
-/-- X's send names H at X's own key. H was born at the next subtree key, so
-the send does not resolve. `Q`'s terminate seals X in that step. H stays
-idle, and the roster does not crash. -/
+/-- X births H at its own key and the send parks: H's box holds nothing and
+one sender is parked, so X's balance is 0. `Q`'s terminate seals H and refunds
+that sender. The parked list is empty and the balance is back to 1. -/
 theorem dead_sender_refunded :
-    deadSnap (runAt deadImpl 1 deadActs) = some (3, 1, "idle", 0, 1) ∧
-    (runAt deadImpl 1 (deadActs ++ [.recvBulk Hh])) = none := by decide
+    deadSnap (runAt deadImpl 1 (deadActs.take 6)) = some (1, 1, "idle", 1, 0) ∧
+    deadSnap (runAt deadImpl 1 deadActs) = some (3, 3, "idle", 0, 1) := by decide
 
 /-- A dead supervisor admits no new child. The prefix is a live world, and the
 spawn itself is disabled. -/
