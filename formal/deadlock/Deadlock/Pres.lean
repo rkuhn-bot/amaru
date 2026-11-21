@@ -162,7 +162,7 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
         rw [init_base_st]
         simp [hmem, initActor, ht, withTokens, tname]
       rw [htup]
-      exact init_tuple_mem I.desc g hempty hg
+      exact RowOk.raw (init_tuple_mem I.desc g hempty hg)
     · intro g hg
       refine ⟨?_, ?_⟩
       · have hw := (compat_group_closed I.desc g hempty hg).1
@@ -175,7 +175,7 @@ theorem semInv_init (I : Impl) (N : Nat) (hL : LocalOk I) : SemInv I (initWorld 
           rw [init_base_st]
           simp [hmem, initActor, ht, withTokens, tname]
         rw [htup]
-        exact init_tuple_mem I.desc g hempty hg
+        exact RowOk.raw (init_tuple_mem I.desc g hempty hg)
       · intro r hr
         have hw := (compat_group_closed I.desc g hempty hg).1
         obtain ⟨t, ht, _, _, hmem, _⟩ := core_ready I.desc g r hw hr
@@ -557,7 +557,6 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
     (hown : a.parked = (w.st (.core r)).parked ∨ InstId.core r ∈ w.roster) :
     SemInv I (setActor w (.core r) a) := by
   obtain ⟨step, hstep, htmpl, hfroms, htos, _hlab⟩ := stepsCover_of_local I hL tr hmem
-  have hempty := compat_empty_of_local I hL
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro g hg hlive
     by_cases hin : r ∈ g.roles
@@ -577,18 +576,17 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
           have hliver := hlive role hrole
           rw [setActor_other w (.core r) (.core role) a hid] at hliver
           exact hliver
-      have hallowed := hS.compat g hg hold
+      have hpre := hS.compat g hg hold
       have hlook : lookupRole (roleTuple w g) r = some tr.fromState := by
         rw [← hfrom]
         exact lookup_roleTuple w g r hin
-      have hbr := step_in_closure I.desc g step hempty hg hstep
       have hrole : g.roles.elem step.template = true := by
         rw [htmpl, htm]
         exact List.elem_iff.mpr hin
       have hf : lookupRole (roleTuple w g) step.template = some step.fromState := by
         simpa [htmpl, htm, hfroms] using hlook
-      have hclosed := step_on_observed g step (roleTuple w g) hbr hallowed hrole hf
-      simpa [htmpl, htm, htos] using hclosed
+      have hpost := RowOk.step hpre hstep hrole hf
+      simpa [htmpl, htm, htos] using hpost
     · rw [roleTuple_other w (.core r) a g (fun role hrole he => hin (by cases he; exact hrole))]
       have hold : groupLive w g := by
         intro role hrole
@@ -604,18 +602,137 @@ theorem sem_move (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transitio
     refine ⟨?_, ?_⟩
     · by_cases hin : r ∈ g.roles
       · rw [roleTuple_update w r a g, hto]
-        have hallowed := (hS.live g hg).1
+        have hpre := (hS.live g hg).1
         have hlook : lookupRole (roleTuple w g) r = some tr.fromState := by
           rw [← hfrom]
           exact lookup_roleTuple w g r hin
-        have hbr := step_in_closure I.desc g step hempty hg hstep
         have hrole : g.roles.elem step.template = true := by
           rw [htmpl, htm]
           exact List.elem_iff.mpr hin
         have hf : lookupRole (roleTuple w g) step.template = some step.fromState := by
           simpa [htmpl, htm, hfroms] using hlook
-        have hclosed := step_on_observed g step (roleTuple w g) hbr hallowed hrole hf
-        simpa [htmpl, htm, htos] using hclosed
+        have hpost := RowOk.step hpre hstep hrole hf
+        simpa [htmpl, htm, htos] using hpost
+      · rw [roleTuple_other w (.core r) a g (fun role hrole he => hin (by cases he; exact hrole))]
+        exact (hS.live g hg).1
+    · intro role hrole
+      by_cases hq : role = r
+      · subst hq
+        rw [setActor_self]
+        rcases (hS.live g hg).2 role hrole with ha | hh
+        · exact Or.inl (hlife.trans ha)
+        · exact Or.inr (by
+            rw [← hlife] at hh
+            exact hh)
+      · have hid : InstId.core role ≠ InstId.core r := by
+          intro he
+          cases he
+          exact hq rfl
+        rw [setActor_other w (.core r) (.core role) a hid]
+        exact (hS.live g hg).2 role hrole
+  · intro i
+    by_cases h : i = .core r
+    · rw [h, setActor_self]; exact hcont
+    · rw [setActor_other w (.core r) i a h]; exact hS.cont i
+  · intro i
+    by_cases h : i = .core r
+    · rw [h, setActor_self]; exact hprog
+    · rw [setActor_other w (.core r) i a h]; exact hS.prog i
+  · intro i
+    by_cases h : i = .core r
+    · rw [h, setActor_self]; exact hwait
+    · rw [setActor_other w (.core r) i a h]; exact hS.waited i
+  · intro i hdead
+    by_cases h : i = .core r
+    · rw [h, setActor_self] at hdead ⊢
+      exact hoff hdead
+    · rw [setActor_other w (.core r) i a h] at hdead ⊢
+      exact hS.idleOff i hdead
+  · intro i hlive
+    by_cases h : i = .core r
+    · rw [h] at hlive ⊢
+      rw [setActor_self] at hlive
+      exact hS.rostered (.core r) (hlife.symm.trans hlive)
+    · simp only [setActor, h] at hlive ⊢
+      exact hS.rostered i hlive
+  · intro i hmiss
+    by_cases h : i = .core r
+    · rw [h] at hmiss ⊢
+      simp only [setActor] at hmiss
+      rw [setActor_self]
+      rcases hown with hp | hin
+      · rw [hp]
+        exact hS.offEmpty (.core r) hmiss
+      · exact False.elim (hmiss hin)
+    · simp only [setActor] at hmiss
+      rw [setActor_other w (.core r) i a h]
+      exact hS.offEmpty i hmiss
+
+/-- One group role moves inside the landing set of a transition it has entered.
+The checker does not store that tuple. `RowOk.land` does, and a later declared
+step is `RowOk.step` from there. -/
+theorem sem_land (I : Impl) (w : World) (r : String) (a : Actor) (tr : Transition)
+    (s0 s1 : String) (hS : SemInv I w)
+    (hfrom : (w.st (.core r)).typestate = s0) (hto : a.typestate = s1)
+    (hlife : a.life = (w.st (.core r)).life) (htm : tr.template = r)
+    (hmem : tr ∈ I.transitions) (hs0 : landsAt tr s0) (hs1 : landsAt tr s1)
+    (hcont : contTy a) (hprog : programOk I.desc (.core r) a)
+    (hwait : waitEdge I.desc (.core r) a)
+    (hoff : a.life ≠ .alive → a.phase = .idle ∨ a.phase = .crashed)
+    (hown : a.parked = (w.st (.core r)).parked ∨ InstId.core r ∈ w.roster) :
+    SemInv I (setActor w (.core r) a) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro g hg hlive
+    by_cases hin : r ∈ g.roles
+    · rw [roleTuple_update w r a g, hto]
+      have hold : groupLive w g := by
+        intro role hrole
+        by_cases hq : role = r
+        · subst hq
+          have hliver := hlive role hrole
+          rw [setActor_self] at hliver
+          rw [← hlife]
+          exact hliver
+        · have hid : InstId.core role ≠ InstId.core r := by
+            intro he
+            cases he
+            exact hq rfl
+          have hliver := hlive role hrole
+          rw [setActor_other w (.core r) (.core role) a hid] at hliver
+          exact hliver
+      have hpre := hS.compat g hg hold
+      have hlook : lookupRole (roleTuple w g) tr.template = some s0 := by
+        rw [htm, ← hfrom]
+        exact lookup_roleTuple w g r hin
+      have hrole : g.roles.elem tr.template = true := by
+        rw [htm]
+        exact List.elem_iff.mpr hin
+      have hpost := RowOk.land hpre hmem hrole hlook hs0 hs1
+      simpa [htm] using hpost
+    · rw [roleTuple_other w (.core r) a g (fun role hrole he => hin (by cases he; exact hrole))]
+      have hold : groupLive w g := by
+        intro role hrole
+        have hid : InstId.core role ≠ InstId.core r := by
+          intro he
+          cases he
+          exact hin hrole
+        have hliver := hlive role hrole
+        rw [setActor_other w (.core r) (.core role) a hid] at hliver
+        exact hliver
+      exact hS.compat g hg hold
+  · intro g hg
+    refine ⟨?_, ?_⟩
+    · by_cases hin : r ∈ g.roles
+      · rw [roleTuple_update w r a g, hto]
+        have hpre := (hS.live g hg).1
+        have hlook : lookupRole (roleTuple w g) tr.template = some s0 := by
+          rw [htm, ← hfrom]
+          exact lookup_roleTuple w g r hin
+        have hrole : g.roles.elem tr.template = true := by
+          rw [htm]
+          exact List.elem_iff.mpr hin
+        have hpost := RowOk.land hpre hmem hrole hlook hs0 hs1
+        simpa [htm] using hpost
       · rw [roleTuple_other w (.core r) a g (fun role hrole he => hin (by cases he; exact hrole))]
         exact (hS.live g hg).1
     · intro role hrole
@@ -841,8 +958,7 @@ theorem charge_ok (a : Actor) (d : String) :
   simp [chargeSender, bumpToken]
 
 /-- The `NotAdmitted` outcome of a call: its own program, at its own recorded
-typestate. The actor's typestate does not move on a nonempty outcome, so that
-typestate has to be the one the actor already holds. -/
+typestate. `hland` keeps that typestate equal to the one the actor already holds. -/
 theorem notAdmitted_ok (D : Description) (id : InstId) (a : Actor) (k : Cont)
     (hty : a.typestate = k.toState) (hland : (selectCall k .notAdmitted).toState = k.toState)
     (hprog : effectsOk D (tname id) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true) :

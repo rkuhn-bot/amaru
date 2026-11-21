@@ -30,12 +30,13 @@ def waitEdge (D : Description) (id : InstId) (a : Actor) : Prop :=
   | _ => True
 
 structure SemInv (I : Impl) (w : World) : Prop where
-  compat : CompatInv I.desc w
-  /-- The role tuple stays in the allowed set, and every role is alive or has
+  compat : CompatInv I w
+  /-- The role tuple stays in `RowOk`: a stored row, a declared step, or a
+  landing state of the transition that produced it. Every role is alive or has
   halted. Halting freezes the typestate. A crashed roster is halted, so the
   tuple is not re-proved from a live group. -/
   live : ∀ g ∈ compatGroups I.desc.compatibility,
-    tupleMem g.allowed (roleTuple w g) = true ∧
+    RowOk I g (roleTuple w g) ∧
     ∀ r ∈ g.roles, (w.st (InstId.core r)).life = .alive ∨ Halted (w.st (InstId.core r)).life
   cont : ∀ id, contTy (w.st id)
   prog : ∀ id, programOk I.desc id (w.st id)
@@ -117,6 +118,36 @@ theorem role_unchanged (w : World) (id : InstId) (a : Actor) (r : String) (h : i
       ((setActor w id a).st (.core r)).life = (w.st (.core r)).life := by
   rw [setActor_other w id (.core r) a (Ne.symm h)]
   exact ⟨rfl, rfl⟩
+
+theorem substRole_fixed (tup : List RoleState) (role s : String)
+    (h : ∀ rs ∈ tup, rs.role = role → rs.state = s) : substRole tup role s = tup := by
+  induction tup with
+  | nil => rfl
+  | cons hd tl ih =>
+    unfold substRole
+    rw [List.map_cons]
+    by_cases hq : hd.role = role
+    · have hs : hd.state = s := h hd (List.Mem.head _) hq
+      rw [if_pos hq]
+      have hhd : { hd with state := s } = hd := by
+        cases hd
+        subst hs
+        rfl
+      rw [hhd]
+      exact congrArg (fun t => hd :: t) (ih fun rs hrs => h rs (List.Mem.tail _ hrs))
+    · rw [if_neg hq]
+      exact congrArg (fun t => hd :: t) (ih fun rs hrs => h rs (List.Mem.tail _ hrs))
+
+theorem tuple_role_state (a tup : List RoleState) (role s : String)
+    (h : tupleMem [a] tup = true) (hl : lookupRole tup role = some s)
+    (rs : RoleState) (hrs : rs ∈ tup) (hr : rs.role = role) : rs.state = s := by
+  have hA : lookupRole a role = some s := tuple_agree a tup h role s hl
+  simp [tupleMem, List.any_cons, List.any_nil, Bool.and_eq_true, List.all_eq_true] at h
+  have hrs' := h.1 rs hrs
+  simp [hr, beq_iff_eq] at hrs'
+  rw [hA] at hrs'
+  cases hrs'
+  rfl
 
 theorem tupleMem_pick (allowed : List (List RoleState)) (tup : List RoleState)
     (h : tupleMem allowed tup = true) : ∃ a ∈ allowed, tupleMem [a] tup = true := by

@@ -5,8 +5,12 @@ set_option autoImplicit false
 namespace Deadlock
 
 /-! The group relation is untrusted. `compatFails = []` checks the initial tuple
-and closure under the listed typestate steps. Absent and dead roles are not
-read as `initial`: the tuple is required only while every role is alive. -/
+and closure under the listed typestate steps. It does not mention an outcome
+typestate. A reachable tuple may still stand in one: `toState`, or a nonempty
+`toNotAdmitted` / `toTimedOut` / `toTimeout` / `toFull` / `toGone` of a
+transition whose landing set already contains the role's state. Absent and dead
+roles are not read as `initial`: the tuple is required only while every role is
+alive. -/
 
 def roleTuple (w : World) (g : CompatGroup) : List RoleState :=
   g.roles.map fun r => { role := r, state := (w.st (.core r)).typestate }
@@ -14,9 +18,36 @@ def roleTuple (w : World) (g : CompatGroup) : List RoleState :=
 def groupLive (w : World) (g : CompatGroup) : Prop :=
   ∀ r ∈ g.roles, (w.st (.core r)).life = .alive
 
-def CompatInv (D : Description) (w : World) : Prop :=
-  ∀ g ∈ compatGroups D.compatibility, groupLive w g →
-    tupleMem g.allowed (roleTuple w g) = true
+/-- `s` is a state `pickState` can write after `tr` has been entered. Empty
+outcome fields are not states; they mean `toState`. -/
+def landsAt (tr : Transition) (s : String) : Prop :=
+  s = tr.toState ∨
+    s ≠ "" ∧ (s = tr.toNotAdmitted ∨ s = tr.toTimedOut ∨ s = tr.toTimeout ∨
+      s = tr.toFull ∨ s = tr.toGone)
+
+/-- Tuples the checker stored, closed under declared steps and under moves
+inside one transition's landing set. A later partner step is included, because
+the closure is inductive. -/
+inductive RowOk (I : Impl) (g : CompatGroup) : List RoleState → Prop where
+  | raw {tup : List RoleState} : tupleMem g.allowed tup = true → RowOk I g tup
+  | step {tup : List RoleState} {step : CompatStep} :
+      RowOk I g tup →
+      step ∈ I.desc.steps →
+      g.roles.elem step.template = true →
+      lookupRole tup step.template = some step.fromState →
+      RowOk I g (substRole tup step.template step.toState)
+  | land {tup : List RoleState} {tr : Transition} {s0 s1 : String} :
+      RowOk I g tup →
+      tr ∈ I.transitions →
+      g.roles.elem tr.template = true →
+      lookupRole tup tr.template = some s0 →
+      landsAt tr s0 →
+      landsAt tr s1 →
+      RowOk I g (substRole tup tr.template s1)
+
+def CompatInv (I : Impl) (w : World) : Prop :=
+  ∀ g ∈ compatGroups I.desc.compatibility, groupLive w g →
+    RowOk I g (roleTuple w g)
 
 def contTy (a : Actor) : Prop :=
   match a.phase with
@@ -27,8 +58,8 @@ def contTy (a : Actor) : Prop :=
   | .awaitPeer k => a.typestate = k.toState
   | _ => True
 
-def CInv (D : Description) (w : World) : Prop :=
-  CompatInv D w ∧ ∀ id, contTy (w.st id)
+def CInv (I : Impl) (w : World) : Prop :=
+  CompatInv I w ∧ ∀ id, contTy (w.st id)
 
 def stepsCover (I : Impl) : Prop :=
   ∀ tr ∈ I.transitions,

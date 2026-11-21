@@ -100,8 +100,8 @@ theorem resolve_tname (D : Description) (w : World) (sender : InstId) (dst : Str
             rfl
 
 /-- Every outcome typestate a continuation carries is empty or its own `toState`.
-`proceed` keeps the typestate on a nonempty outcome, so an outcome that named a
-different typestate would leave the actor in a state its program was not checked in. -/
+`proceed` writes `k.toState` on both arms, so an outcome that named a different
+typestate is a different state. -/
 def contLands (k : Cont) : Prop :=
   pickState k.toState k.toNotAdmitted = k.toState ∧ pickState k.toState k.toTimedOut = k.toState ∧
     pickState k.toState k.toTimeout = k.toState ∧ pickState k.toState k.toFull = k.toState ∧
@@ -135,6 +135,64 @@ def OutcomesLand (I : Impl) : Prop :=
     pickState tr.toState tr.toNotAdmitted = tr.toState ∧ pickState tr.toState tr.toTimedOut = tr.toState ∧
       pickState tr.toState tr.toTimeout = tr.toState ∧ pickState tr.toState tr.toFull = tr.toState ∧
       pickState tr.toState tr.toGone = tr.toState
+
+theorem pick_named (fallback specific : String) (h : specific ≠ "") :
+    pickState fallback specific = specific := by
+  unfold pickState
+  by_cases hb : (specific == "") = true
+  · exact absurd (beq_iff_eq.mp hb) h
+  · rw [if_neg hb]
+
+theorem lands_toState (I : Impl) (hO : OutcomesLand I) (tr : Transition) (htr : tr ∈ I.transitions)
+    (s : String) (hs : landsAt tr s) : s = tr.toState := by
+  rcases hs with rfl | ⟨hne, hfield⟩
+  · rfl
+  · rcases hfield with h | h | h | h | h
+    · have hne' : tr.toNotAdmitted ≠ "" := by rw [← h]; exact hne
+      have hp := (hO tr htr).1
+      rw [pick_named tr.toState tr.toNotAdmitted hne'] at hp
+      rw [h]; exact hp
+    · have hne' : tr.toTimedOut ≠ "" := by rw [← h]; exact hne
+      have hp := (hO tr htr).2.1
+      rw [pick_named tr.toState tr.toTimedOut hne'] at hp
+      rw [h]; exact hp
+    · have hne' : tr.toTimeout ≠ "" := by rw [← h]; exact hne
+      have hp := (hO tr htr).2.2.1
+      rw [pick_named tr.toState tr.toTimeout hne'] at hp
+      rw [h]; exact hp
+    · have hne' : tr.toFull ≠ "" := by rw [← h]; exact hne
+      have hp := (hO tr htr).2.2.2.1
+      rw [pick_named tr.toState tr.toFull hne'] at hp
+      rw [h]; exact hp
+    · have hne' : tr.toGone ≠ "" := by rw [← h]; exact hne
+      have hp := (hO tr htr).2.2.2.2
+      rw [pick_named tr.toState tr.toGone hne'] at hp
+      rw [h]; exact hp
+
+/-- While every outcome field is empty or `toState`, a `RowOk` derivation is a
+stored tuple. A landing step does not move the tuple, and a declared step stays
+inside the checked closure. -/
+theorem row_mem (I : Impl) (hL : LocalOk I) (hO : OutcomesLand I) (g : CompatGroup)
+    (hg : g ∈ compatGroups I.desc.compatibility) {tup : List RoleState} (hR : RowOk I g tup) :
+    tupleMem g.allowed tup = true := by
+  induction hR with
+  | raw hmem => exact hmem
+  | step hpre hstep hrole hf ih =>
+    rename_i tup st
+    exact step_on_observed g st tup
+      (step_in_closure I.desc g st (compat_empty_of_local I hL) hg hstep) ih hrole hf
+  | land hpre htr hrole hlook hs0 hs1 ih =>
+    rename_i tup tr s0 s1
+    have hs0e := lands_toState I hO tr htr s0 hs0
+    have hs1e := lands_toState I hO tr htr s1 hs1
+    have heq : s1 = s0 := hs1e.trans hs0e.symm
+    have hfix : substRole tup tr.template s1 = tup := by
+      rw [heq]
+      apply substRole_fixed
+      intro rs hrs hr
+      obtain ⟨a, _, hag⟩ := tupleMem_pick g.allowed tup ih
+      exact tuple_role_state a tup tr.template s0 hag hlook rs hrs hr
+    simpa [hfix] using ih
 
 def Inv (I : Impl) (w : World) : Prop :=
   SemInv I w ∧ MailInv w ∧ OpenSlots w ∧ OutcomeInv I.desc w

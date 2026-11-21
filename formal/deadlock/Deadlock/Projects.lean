@@ -266,8 +266,8 @@ theorem failWaiter_ty (w : World) (dead i s : InstId) (hc : contTy (w.st s)) :
             | cons _ _ =>
               have hty : (w.st i).typestate = k.toState := by simpa [contTy, hph] using hc
               refine ⟨?_, ?_⟩
-              · simp [setActor_self, proceed, hk]
-              · simpa [contTy, setActor_self, proceed, hk] using hty
+              · simp [setActor_self, proceed, hk, hty]
+              · simp [contTy, setActor_self, proceed, hk]
           · simp [hph, hd]
             exact hc
         | true =>
@@ -1402,7 +1402,8 @@ theorem partner_mem (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hO : Outc
     · intro g hg hs hd
       have hgG : g ∈ compatGroups I.desc.compatibility := by simp [compatGroups, hmode, hg]
       have htup := (hI.1.live g hgG).1
-      obtain ⟨a, ha, hag⟩ := tupleMem_pick g.allowed (roleTuple w g) htup
+      have hraw := row_mem I hL hO g hgG htup
+      obtain ⟨a, ha, hag⟩ := tupleMem_pick g.allowed (roleTuple w g) hraw
       have hlookS := lookup_roleTuple w g e.src (List.elem_iff.mp hs)
       have hss' : lookupRole (roleTuple w g) e.src = some e.srcState := by
         rw [hlookS, ← hcoreS, ← hss]
