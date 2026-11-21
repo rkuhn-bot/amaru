@@ -6690,6 +6690,122 @@ theorem hold_spawn_core (I : Impl) (w : World) (hH : Hold I w) (template : Strin
     ⟨t, ht, hmul⟩ hocc hfit hfree (by simpa [w', k] using hcensus)
   simpa [w', k, parent, next] using hHold
 
+theorem lane_absent (ms : List Msg) (label : String)
+    (h : (ms.any fun p => p.label == label) = false) : label ∉ tmb_laneLabels ms := by
+  intro hmem
+  simp [tmb_laneLabels, List.mem_map] at hmem
+  obtain ⟨m, hm, hl⟩ := hmem
+  have hany : (ms.any fun p => p.label == label) = true :=
+    List.any_eq_true.mpr ⟨m, hm.1, by rw [hl]; exact (beq_iff_eq).mpr rfl⟩
+  simp [hany] at h
+
+/-- Re-arming a label already on the lane leaves the count alone. A new label
+appends when the lane has room, and a full lane crashes. Neither grows a
+tombstone count past the births already accounted for. -/
+theorem hold_self (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor)
+    (k : Cont) (label : String) (es : List Eff) (hpre : w.crashed = false)
+    (ha : a = w.st id) (hlive : a.life = .alive) (hph : a.phase = .run k)
+    (hk : k.rest = .selfSchedule label :: es) (hdec : ContDeclared I (tname id) k) :
+    Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  have htail : ContDeclared I (tname id) k' := ContDeclared.after I (tname id) k _ _ hk hdec
+  have hphase : phaseDeclared I (tname id) (proceed a k').phase := by
+    cases hr : k'.rest with
+    | nil => simp [proceed, hr, phaseDeclared]
+    | cons _ _ =>
+      simp [proceed, hr, phaseDeclared]
+      exact htail
+  have hpresent : (a.prio.any fun p => p.label == label) = true →
+      Hold I (setActor w id (proceed a k')) := by
+    intro _
+    have hph' : id ∈ w.roster → phaseDeclared I (tname id) (proceed (w.st id) k').phase := by
+      intro _
+      simpa [ha] using hphase
+    simpa [ha] using hold_proceed I w hH id k' hpre hph'
+  by_cases hqueued : (a.prio.any fun p => p.label == label) = true
+  · have hrun : execRun I w id a k = setActor w id (proceed a k') := by
+      simp [execRun, hgo, hk, hqueued, k']
+    exact hrun ▸ hpresent hqueued
+  · have hfree : (a.prio.any fun p => p.label == label) = false := by
+      cases hbit : (a.prio.any fun p => p.label == label) with
+      | false => rfl
+      | true => exact absurd hbit hqueued
+    let msg : Msg :=
+      { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
+    have htomb : msg.tombstone = false := by simp [msg]
+    have hlabel : msg.label ∈ prioLabels I (tname id) := by
+      have hmem : label ∈ selfLabels k.rest := by rw [hk]; exact tmb_self_head label es
+      simpa [msg] using hdec.rest.sched label hmem
+    by_cases hroom : prioLoad a.prio < capPrio I.desc w.N id
+    · have hrun : execRun I w id a k =
+          setActor w id (proceed { a with prio := a.prio ++ [msg], nextMid := a.nextMid + 1 } k') := by
+        simp [execRun, hgo, hk, hfree, hroom, upsertPrio, msg, k']
+      have hnew : msg.label ∉ tmb_laneLabels ((w.st id).prio) := by
+        rw [← ha]
+        simpa [msg] using lane_absent a.prio label hfree
+      have hH' := hold_plain I w hH id msg hpre (by simpa [ha] using hlive) htomb hlabel hnew
+      let updated := { a with prio := a.prio ++ [msg], nextMid := a.nextMid + 1 }
+      have hsame : (tmb_snoc w id msg).st id = updated := by
+        simp [tmb_snoc, setActor, updated, ha, msg]
+      have hkeep := proceed_keep updated k'
+      have hphEq : (proceed updated k').phase = (proceed a k').phase := by
+        cases hr : k'.rest <;> simp [proceed, hr]
+      have hH'' := hold_set I (tmb_snoc w id msg) hH' id (proceed updated k')
+        (by rw [hkeep.1, hsame])
+        (by rw [hkeep.2.1, hsame])
+        (by rw [hkeep.2.2, hsame])
+        (by rw [proceed_parent updated k', hsame])
+        (fun _ => by simpa [hphEq] using hphase) hpre
+      have heq : setActor (tmb_snoc w id msg) id (proceed updated k') =
+          setActor w id (proceed updated k') := by
+        simp [tmb_snoc, setActor, updated]
+        funext i
+        by_cases hi : i = id <;> simp [hi]
+      simpa [hrun, updated] using (heq ▸ hH'')
+    · have hrun : execRun I w id a k = crashWorld w := by
+        simp [execRun, hgo, hk, hfree, hroom]
+      exact hrun ▸ hold_crash I w hH
+
+theorem hold_idle (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (hpre : w.crashed = false) (ha : a = w.st id) (hlive : a.life = .alive) (hk : k.rest = []) :
+    Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  have hrun : execRun I w id a k =
+      setActor w id { a with phase := .idle, typestate := k.toState } := by
+    simp [execRun, hgo, hk]
+  exact hrun ▸ hold_set I w hH id { a with phase := .idle, typestate := k.toState }
+    (by simp [ha]) (by simp [ha]) (by simp [ha]) (by simp [ha])
+    (fun _ => phaseDeclared_idle I (tname id)) hpre
+
+theorem hold_internal (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (es : List Eff) (hpre : w.crashed = false) (ha : a = w.st id) (hlive : a.life = .alive)
+    (hk : k.rest = .internal :: es) (hdec : ContDeclared I (tname id) k) :
+    Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  have htail := ContDeclared.after I (tname id) k _ _ hk hdec
+  have hrun : execRun I w id a k = setActor w id { a with phase := .awaitEffect k' } := by
+    simp [execRun, hgo, hk, k']
+  exact hrun ▸ hold_set I w hH id { a with phase := .awaitEffect k' }
+    (by simp [ha]) (by simp [ha]) (by simp [ha]) (by simp [ha])
+    (fun _ => by simpa [phaseDeclared] using htail) hpre
+
+theorem hold_peer (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor) (k : Cont)
+    (onTimeout es : List Eff) (hpre : w.crashed = false) (ha : a = w.st id)
+    (hlive : a.life = .alive) (hk : k.rest = .peer onTimeout :: es)
+    (hdec : ContDeclared I (tname id) k) :
+    Hold I (execRun I w id a k) := by
+  have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
+  let k' := afterHead k
+  have hwait := ContDeclared.peerWait I (tname id) k onTimeout es hk hdec
+  have hrun : execRun I w id a k =
+      setActor w id { a with phase := .awaitPeer { k' with onTimeout := onTimeout } } := by
+    simp [execRun, hgo, hk, k']
+  exact hrun ▸ hold_set I w hH id { a with phase := .awaitPeer { k' with onTimeout := onTimeout } }
+    (by simp [ha]) (by simp [ha]) (by simp [ha]) (by simp [ha])
+    (fun _ => by simpa [phaseDeclared, k'] using hwait) hpre
+
 theorem filter_snoc_off {α : Type} (p : α → Bool) (xs : List α) (a : α) (ha : p a = false) :
     ((xs ++ [a]).filter p).length = (xs.filter p).length := by
   induction xs with
