@@ -760,7 +760,8 @@ step is unchanged.
 
 ## 2026-11-22 — A refund counts the live holder
 
-Refunding a mailbox credits the live generation of each message's key, the
-same holder a delivery credits. The count is that holder, not the generation
-that sent the message. Draining the box one message at a time is the same
-world. The step is unchanged.
+Refunding a mailbox, or the messages parked behind it, credits the live
+generation of each message's key, the same holder a delivery credits. The
+count is that holder, not the generation that sent the message. Draining the
+box or the parked lane one message at a time is the same world. The step is
+unchanged.

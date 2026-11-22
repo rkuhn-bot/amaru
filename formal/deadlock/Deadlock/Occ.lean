@@ -9867,14 +9867,14 @@ theorem drain_eq_refund_park (w : World) (id : InstId) (dst : String) (ps : List
 
 theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : List Parked)
     (hO : OccInv I w) (hmem : id ∈ w.roster) (hpark : (w.st id).parked = p :: ps)
-    (hmsg : p.sender = p.msg.sender) :
-    OccInv I (creditSender (setActor w id { (w.st id) with parked := ps }) (tname id) p.msg.sender) := by
+    (hmsg : p.sender = p.msg.sender) (hcr : w.crashed = false) :
+    OccInv I (creditLive (setActor w id { (w.st id) with parked := ps }) (tname id) p.msg.sender) := by
   have hsend : p.msg.sender ∈ w.roster := by
     rw [← hmsg]
     exact hO.parkFrom id p (by rw [hpark]; exact List.Mem.head _)
   let a1 : Actor := { (w.st id) with parked := ps }
-  apply occ_consume I w w id p.msg.sender a1 hO (fun _ => rfl) rfl rfl (fun _ => rfl) rfl (fun _ => rfl)
-    hmem hsend
+  apply occ_consume I w w id p.msg.sender a1 hO (fun _ => rfl) rfl rfl (fun _ => rfl) rfl
+    (by simp [a1]) (fun _ => rfl) hmem hsend
   · intro s
     by_cases hs : s = p.msg.sender
     · rw [hs]
@@ -9885,8 +9885,24 @@ theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : Li
       simpa [a1, hs] using hkeep
   · intro d hd s
     exact owed_off w.st id a1 d s w.roster hO.nodup hmem (fun h => hd h.symm)
+  · intro name key d
+    have hdelta :
+        ((w.st id).box.filter (keyPred name key)).length +
+          ((w.st id).parked.filter fun q => keyPred name key q.msg).length =
+        (a1.box.filter (keyPred name key)).length +
+          (a1.parked.filter fun q => keyPred name key q.msg).length +
+          (if keyPred name key p.msg = true then 1 else 0) := by
+      simp [a1, hpark, List.filter]
+      cases hk : keyPred name key p.msg <;> simp [hk] <;> omega
+    have hrep := queuedFromKey_replace w id a1 name key d
+      (if keyPred name key p.msg = true then 1 else 0) hO.nodup hmem hdelta
+    rw [hrep, Int.natCast_add, cast_keybit (tname id) d (keyPred name key p.msg),
+      queueDrop_msg p.msg.sender p.msg name key d (tname id) rfl]
+    omega
   · intro d
-    simp [a1, pending]
+    have hsame : tokenHold I.desc (tname id) d a1 = tokenHold I.desc (tname id) d (w.st id) := by
+      simp [a1, tokenHold]
+    exact Nat.le_of_eq hsame
   · intro m hm
     exact hO.sentFrom id m (by simpa [a1] using hm)
   · intro q hq
@@ -9899,10 +9915,6 @@ theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : Li
       have hq0 : q ∈ ps := by simpa [a1] using hq
       rw [hpark]
       exact List.mem_cons.mpr (Or.inr hq0))
-  · intro hl1
-    have hnil := hO.clear id hl1
-    rw [hpark] at hnil
-    cases hnil
   · intro m hm
     exact (hO.sameKey id).1 m (by simpa [a1] using hm)
   · intro q hq
@@ -9911,13 +9923,15 @@ theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : Li
       rw [hpark]
       exact List.mem_cons.mpr (Or.inr hq0))
   · intro hdead
-    rcases hdead with hdead | hdead
-    · have hempty := (hO.deadEmpty id (Or.inl (by simpa [a1] using hdead))).2
-      rw [hpark] at hempty
-      simp at hempty
-    · have hempty := (hO.deadEmpty id (Or.inr (by simpa [a1] using hdead))).2
-      rw [hpark] at hempty
-      simp at hempty
+    simp [a1] at hdead
+    have hlife : (w.st id).life = .absent ∨ (w.st id).life = .dead := by
+      cases h : (w.st id).life
+      · exact Or.inl rfl
+      · exact absurd h hdead
+      · exact Or.inr rfl
+    have hempty := (hO.deadEmpty hcr id hlife).2
+    rw [hpark] at hempty
+    simp at hempty
   · intro hk m hm
     exact (hO.coreFrom id hk).1 m (by simpa [a1] using hm)
   · intro hk q hq
@@ -9926,24 +9940,24 @@ theorem occ_drop_park (I : Impl) (w : World) (id : InstId) (p : Parked) (ps : Li
 
 theorem occ_drain_park (I : Impl) (w : World) (id : InstId) (ps : List Parked) (hO : OccInv I w)
     (hmem : id ∈ w.roster) (hpark : (w.st id).parked = ps)
-    (hmsg : ∀ p ∈ ps, p.sender = p.msg.sender) :
+    (hmsg : ∀ p ∈ ps, p.sender = p.msg.sender) (hcr : w.crashed = false) :
     OccInv I (drainPark w id (tname id) ps) := by
   induction ps generalizing w with
   | nil =>
     have hempty : (w.st id).parked = [] := hpark
     apply occ_keep I w id ({ (w.st id) with parked := [] }) hO rfl rfl (by simp [hempty])
-      (fun _ => rfl) rfl
-    intro _
-    simp [pending]
+      (fun _ => rfl)
+    intro _ _
+    simp [tokenHold]
   | cons p ps ih =>
-    have hstep := occ_drop_park I w id p ps hO hmem hpark (hmsg p (List.Mem.head _))
-    let w1 := creditSender (setActor w id { (w.st id) with parked := ps }) (tname id) p.msg.sender
+    have hstep := occ_drop_park I w id p ps hO hmem hpark (hmsg p (List.Mem.head _)) hcr
+    let w1 := creditLive (setActor w id { (w.st id) with parked := ps }) (tname id) p.msg.sender
     have hpark1 : (w1.st id).parked = ps := by
-      rw [credit_park]
-      simp [w1, setActor]
-    have hmem1 : id ∈ w1.roster := by simpa [w1, creditSender, setActor] using hmem
+      simp [w1, creditLive, credit_park, setActor]
+    have hmem1 : id ∈ w1.roster := by simpa [w1, creditLive, creditSender, setActor] using hmem
     have hmsg1 : ∀ q ∈ ps, q.sender = q.msg.sender := fun q hq => hmsg q (List.Mem.tail _ hq)
-    simpa [drainPark, w1] using ih w1 hstep hmem1 hpark1 hmsg1
+    have hcr1 : w1.crashed = w.crashed := by simp [w1, creditLive, creditSender, setActor]
+    simpa [drainPark, w1] using ih w1 hstep hmem1 hpark1 hmsg1 (hcr1.trans hcr)
 
 /-- Queues are already empty and this actor owes nothing. Marking it dead
 does not change anyone's account. -/
@@ -10292,7 +10306,8 @@ theorem occ_term_kill (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
     exact hp
   have hmemB : id ∈ (drainBox w id name ms).roster := by
     simpa [(frame_drain w id name ms).2.1] using hmem
-  have hOp := occ_drain_park I (drainBox w id name ms) id ps hOb hmemB hparkB hmsg
+  have hcrB : (drainBox w id name ms).crashed = false := (kept_drain w id name ms).2.trans hcr
+  have hOp := occ_drain_park I (drainBox w id name ms) id ps hOb hmemB hparkB hmsg hcrB
   have hmemD : id ∈ drained.roster := by
     simpa [drained, (frame_drainP (drainBox w id name ms) id name ps).2.1] using hmemB
   have hboxD : (drained.st id).box = [] := by
@@ -11809,7 +11824,8 @@ theorem occ_killOne (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) 
     simpa [ps] using drain_park wF id name ms id
   have hmemD : id ∈ (drainBox wF id name ms).roster := by
     simpa [(frame_drain wF id name ms).2.1] using hmemF
-  have hDp := occ_drain_park I (drainBox wF id name ms) id ps hDb hmemD hparkB hmsg
+  have hcrD : (drainBox wF id name ms).crashed = false := (kept_drain wF id name ms).2.trans hcrF
+  have hDp := occ_drain_park I (drainBox wF id name ms) id ps hDb hmemD hparkB hmsg hcrD
   let drained := drainPark (drainBox wF id name ms) id name ps
   have hmemDr : id ∈ drained.roster := by
     simpa [drained, (frame_drainP (drainBox wF id name ms) id name ps).2.1] using hmemD
