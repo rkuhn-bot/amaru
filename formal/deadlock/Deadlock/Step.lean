@@ -3034,6 +3034,54 @@ theorem mail_unpark (w w' : World) (dead : InstId) (hM : MailInv w)
     · rw [h]
       exact nodup_filter _ (hM.once mb)
 
+theorem outHost_queues (w : World) (dead host i : InstId) :
+    ((outHost w dead host).st i).box = (w.st i).box ∧
+      ((outHost w dead host).st i).prio = (w.st i).prio ∧
+      ((outHost w dead host).st i).parent = (w.st i).parent ∧
+      (outHost w dead host).crashed = w.crashed := by
+  unfold outHost
+  by_cases hh : (host == dead) = true
+  · rw [ite_eq_left hh]
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  · rw [ite_eq_right hh]
+    dsimp only
+    by_cases he : ((w.st host).parked.filter fun p => p.sender == dead).isEmpty = true
+    · rw [ite_eq_left he]
+      exact ⟨rfl, rfl, rfl, rfl⟩
+    · rw [ite_eq_right he]
+      by_cases hi : i = host
+      · subst hi
+        have hne : i ≠ dead := fun hd => hh (beq_iff_eq.mpr hd)
+        refine ⟨?_, ?_, ?_, rfl⟩
+        all_goals simp [setActor_self, setActor_other, addTokens, hne]
+      · by_cases hd : i = dead
+        · subst hd
+          refine ⟨?_, ?_, ?_, rfl⟩
+          all_goals simp [setActor_self, setActor_other, addTokens, hi]
+        · refine ⟨?_, ?_, ?_, rfl⟩
+          all_goals simp [setActor_other, addTokens, hi, hd]
+
+theorem outFold_queues (dead : InstId) (ids : List InstId) (w : World) (i : InstId) :
+    ((ids.foldl (fun w host => outHost w dead host) w).st i).box = (w.st i).box ∧
+      ((ids.foldl (fun w host => outHost w dead host) w).st i).prio = (w.st i).prio ∧
+      ((ids.foldl (fun w host => outHost w dead host) w).st i).parent = (w.st i).parent ∧
+      (ids.foldl (fun w host => outHost w dead host) w).crashed = w.crashed := by
+  induction ids generalizing w with
+  | nil => exact ⟨rfl, rfl, rfl, rfl⟩
+  | cons h hs ih =>
+    simp only [List.foldl_cons]
+    obtain ⟨b1, p1, a1, c1⟩ := ih (outHost w dead h)
+    obtain ⟨b0, p0, a0, c0⟩ := outHost_queues w dead h i
+    exact ⟨b1.trans b0, p1.trans p0, a1.trans a0, c1.trans c0⟩
+
+theorem releaseOutbound_queues (w : World) (dead i : InstId) :
+    ((releaseOutbound w dead).st i).box = (w.st i).box ∧
+      ((releaseOutbound w dead).st i).prio = (w.st i).prio ∧
+      ((releaseOutbound w dead).st i).parent = (w.st i).parent ∧
+      (releaseOutbound w dead).crashed = w.crashed := by
+  rw [releaseOutbound_eq]
+  exact outFold_queues dead w.roster w i
+
 theorem releaseOutbound_inv (I : Impl) (w : World) (dead : InstId) (h : Inv I w)
     (hfree : notParked (w.st dead).phase) : Inv I (releaseOutbound w dead) := by
   have hf := releaseOutbound_fields w dead
@@ -3053,13 +3101,46 @@ theorem releaseOutbound_inv (I : Impl) (w : World) (dead : InstId) (h : Inv I w)
   · exact open_shape w _ h.2.2.1 (fun i hi => by rw [(hf i).1]; exact hi) (fun i => (hf i).2.1)
   · exact outcome_shape I w _ h.2.2.2.1 (fun i => (hf i).2.2.2.1) (fun i => (hf i).2.2.1)
   · exact ParentForest.parents h.forest (fun i => releaseOutbound_parent w dead i) (hf dead).1
-  · exact ⟨parkedLive_sub h.seal.liveParked (fun i => (hf i).2.1) (fun host p hp => by
-      rw [(hf host).2.2.2.2] at hp
-      by_cases hc : host ∈ w.roster ∧ host ≠ dead
-      · rw [ite_eq_left hc] at hp
-        exact (List.mem_filter.mp hp).1
-      · rw [ite_eq_right hc] at hp
-        exact hp)⟩
+  · have hq := fun i => releaseOutbound_queues w dead i
+    exact {
+      liveParked := parkedLive_sub h.seal.liveParked (fun i => (hf i).2.1) (fun host p hp => by
+        rw [(hf host).2.2.2.2] at hp
+        by_cases hc : host ∈ w.roster ∧ host ≠ dead
+        · rw [ite_eq_left hc] at hp
+          exact (List.mem_filter.mp hp).1
+        · rw [ite_eq_right hc] at hp
+          exact hp)
+      quiet := by
+        rcases h.seal.quiet with hcr | hq0
+        · exact Or.inl ((hq dead).2.2.2.trans hcr)
+        · refine Or.inr fun id hna => ?_
+          have hna0 : (w.st id).life ≠ .alive := by
+            intro ha
+            exact hna ((hf id).2.1 ▸ ha)
+          rcases hq0 id hna0 with ⟨hb, hp⟩
+          refine ⟨by rw [(hq id).1, hb], ?_⟩
+          rw [(hf id).2.2.2.2]
+          split
+          · simp [hp]
+          · rw [hp]
+      childless := childless_stable h.seal.childless (hq dead).2.2.2 (fun i => (hf i).2.1)
+        (fun i => releaseOutbound_parent w dead i)
+      chain := chain_edit h.seal.chain h.seal.childless h.forest (hq dead).2.2.2 (hf dead).1
+        (fun i => (hf i).2.1) (fun i => releaseOutbound_parent w dead i)
+        (fun i m hm => Or.inl ⟨m, (hq i).1 ▸ hm, rfl, rfl⟩)
+        (fun i m hm => Or.inl ⟨m, (hq i).2.1 ▸ hm, rfl, rfl⟩)
+        (fun parent id ht => Or.inl (by
+          obtain ⟨m, hm, htomb, hsnd⟩ := ht
+          exact ⟨m, (hq parent).2.1.symm ▸ hm, htomb, hsnd⟩))
+      parkedFrom := parkedFrom_sub h.seal.parkedFrom (fun host p hp => by
+        rw [(hf host).2.2.2.2] at hp
+        by_cases hc : host ∈ w.roster ∧ host ≠ dead
+        · rw [ite_eq_left hc] at hp
+          exact (List.mem_filter.mp hp).1
+        · rw [ite_eq_right hc] at hp
+          exact hp)
+      hostedMail := hostedMail_same h.seal.hostedMail (hf dead).1 (fun i => (hq i).1)
+        (fun i => (hq i).2.1) }
 
 /-- The seal of a live actor, after its outbound entries are gone. -/
 theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
@@ -3724,16 +3805,27 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
               (seal_grow_prio w h.seal h.forest id msg (Or.inr ha)
                 (h.2.2.1 id (by rw [ha]; intro hna; cases hna)))
           rw [happ]
-          simpa [grown, setActor_self, withPrio] using
-            inv_proceed I grown id (grown.st id) (afterHead k) h1
-              (by simp [grown, setActor, withPrio, ha])
-              (by simpa [grown, setActor, withPrio] using hfree)
-              (by simp [grown, setActor, withPrio, ha])
-              (by simp [grown, setActor, withPrio])
-              (by simp [grown, setActor, withPrio])
-              rfl rfl (by simpa [grown, setActor, withPrio, afterHead] using hty) htail
-              (src_ty I id (afterHead k) (by simp [grown, setActor, withPrio]) hsrc)
-              (by simp [grown, setActor, withPrio])
+          have hover (b : Actor) :
+              setActor (setActor w id (withPrio (w.st id) msg)) id b = setActor w id b := by
+            simp only [setActor]
+            congr
+            funext j
+            by_cases hj : j = id <;> simp [hj]
+          change Inv I (setActor w id (proceed (withPrio (w.st id) msg) (afterHead k)))
+          rw [← hover (proceed (withPrio (w.st id) msg) (afterHead k))]
+          have hst : grown.st id = withPrio (w.st id) msg := by simp [grown, setActor]
+          rw [← hst]
+          have hback : setActor w id (grown.st id) = grown := by simp [grown, setActor, hst]
+          rw [hback]
+          exact inv_proceed I grown id (grown.st id) (afterHead k) h1
+            (by simp [grown, setActor, withPrio, ha])
+            (by simp [grown, setActor, withPrio]; exact hfree)
+            (by simp [grown, setActor, withPrio, ha])
+            (by simp [grown, setActor, withPrio])
+            (by simp [grown, setActor, withPrio])
+            rfl rfl (by simp [grown, setActor, withPrio, afterHead]; exact hty) htail
+            (src_ty I id (afterHead k) (by simp [grown, setActor, withPrio]) hsrc)
+            (by simp [grown, setActor, withPrio])
         · exact crash_inv I w h
     | cell dst label value =>
       simp only [execRun, hgo, hk, ite_true]
@@ -4195,7 +4287,8 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId
           cases hs
           have hd' := deliver_ok I hL w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
           exact inv_same I _ _ (inv_deliver I w w1 id _ a1 h hd' hidle halive rfl (by simp [hpk]) rfl)
-            (same_credit _ _ _)
+            (same_credit _ _ _) (fun i => (credit_fields _ _ _ i).2.2.1)
+            (fun i => (credit_fields _ _ _ i).2.2.2.2) (by simp [creditSender, setActor])
       | cons p ps =>
         simp only [hbox, hpk] at hs
         split at hs
