@@ -802,3 +802,19 @@ then itself. The step is unchanged.
 actor's mailbox and then releasing outbound is the same world as refunding
 and then releasing outbound. The final dead record overwrites the mailbox
 either way. The step is unchanged.
+
+## 2026-11-22 — Killing one member does not crash the roster
+
+`killOne` refunds the mailbox, fails plain waits, returns outbound slots, and
+leaves the member dead and idle. It does not set the crashed flag. The same
+flag on the drain-then-forget account is the original flag, so the two
+worlds agree. The step is unchanged.
+
+## 2026-11-22 — A killed member's plain waits are resumed
+
+A non-call parked on the member runs its continuation before the mailbox is
+cleared, so the entry and the park disappear together. A parked call stays
+parked, and a call parked on a target that is now dead needs no entry. The
+roster does not change, and the member's life becomes dead rather than
+absent. Semantic compatibility, mail, and the open-slot roster all hold of
+the result. The step is unchanged.
