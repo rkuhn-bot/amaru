@@ -705,3 +705,10 @@ is alive, `MailInv.fwd` says the parked flag is the phase's flag, so that
 resume does not occur. A resume that is not a call never raises `tokenHold`.
 The occupancy step takes that side condition. It does not change
 `resumeSender`.
+
+## 2026-11-22 — A spent token is bounded by the reserve
+
+`tokenHold` is the reserve the ingress gate checked. `pending` is a send
+count, and a parked call counts its own message there again. Spending one
+token keeps `tokenHold` plus that token under the reserve the actor already
+held. The occupancy step uses that inequality. It does not change the charge.
