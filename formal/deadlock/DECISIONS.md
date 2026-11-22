@@ -712,3 +712,12 @@ The occupancy step takes that side condition. It does not change
 count, and a parked call counts its own message there again. Spending one
 token keeps `tokenHold` plus that token under the reserve the actor already
 held. The occupancy step uses that inequality. It does not change the charge.
+
+## 2026-11-22 — A call waits on its own outcomes
+
+`execRun` of a call stores that call's `onNotAdmitted` and `onTimedOut` on
+`afterHead`. Waiting on the outer continuation would reserve the outer
+timeout, which the call's reserve does not cover. The occupancy step follows
+the continuation the step stores. A send still proceeds on `afterHead`, and
+the spent token plus that tail stays under the head effect's reserve. Neither
+fact changes the step.
