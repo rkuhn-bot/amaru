@@ -5545,6 +5545,9 @@ structure DeliverOk (I : Impl) (w : World) (id : InstId) (a a' : Actor) (w' : Wo
   roster : w'.roster = w.roster
   out : outcomeOk I id a'
   parent : a'.parent = a.parent
+  box : a'.box = a.box
+  prio : a'.prio = a.prio
+  crashed : w'.crashed = w.crashed
 
 theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
     (a : Actor) (m : Msg) (w' : World) (a' : Actor) (hS : SemInv I w)
@@ -5562,9 +5565,11 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
     have hmem : id ∈ w.roster := hS.rostered id (hlife.symm.trans halive)
     have hmem1 : id ∈ (readCells I.desc w id).roster := by rw [hro]; exact hmem
     have hidle : ∀ b : Actor, b.phase = .idle → b.life = a.life → b.typestate = a.typestate →
-        b.parked = a.parked → b.parent = a.parent → DeliverOk I w id a b (readCells I.desc w id) := by
-      intro b hp hl ht hk hpar
-      refine ⟨?_, hl, hk, by rw [hp]; trivial, hst, hro, by unfold outcomeOk; rw [hp]; trivial, hpar⟩
+        b.parked = a.parked → b.parent = a.parent → b.box = a.box → b.prio = a.prio →
+        DeliverOk I w id a b (readCells I.desc w id) := by
+      intro b hp hl ht hk hpar hbox hprio
+      refine ⟨?_, hl, hk, by rw [hp]; trivial, hst, hro, by unfold outcomeOk; rw [hp]; trivial, hpar,
+        hbox, hprio, readCells_crashed I.desc w id⟩
       apply sem_set I _ id b hS1
       · rw [hst, ht, hty]
       · rw [hst, hl, hlife]
@@ -5575,12 +5580,12 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
       · exact Or.inr hmem1
     split at h
     · cases h
-      exact hidle _ rfl rfl rfl rfl rfl
+      exact hidle _ rfl rfl rfl rfl rfl rfl rfl
     · split at h
       · split at h
         · cases h
         · cases h
-          exact hidle _ rfl rfl rfl rfl rfl
+          exact hidle _ rfl rfl rfl rfl rfl rfl rfl
       · next tr htr =>
         split at h
         · cases h
@@ -5592,7 +5597,7 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
             intro i hi
             rw [hst, hi, hfm.2.2, hty]
           split
-          · refine ⟨?_, rfl, rfl, trivial, hst, hro, trivial, rfl⟩
+          · refine ⟨?_, rfl, rfl, trivial, hst, hro, trivial, rfl, rfl, rfl, readCells_crashed I.desc w id⟩
             cases id with
             | core r =>
               exact sem_move I _ r _ tr hS1 hL (hfrom _ rfl) rfl (by rw [hst]; exact hlife) hfm.2.1
@@ -5600,7 +5605,7 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
             | peer n k g =>
               exact sem_noncore I _ _ _ hS1 (fun r => peer_ne_core n k g r) trivial trivial trivial
                 (idleOff_now _ rfl) hmem1
-          · refine ⟨?_, rfl, rfl, trivial, hst, hro, ?_, rfl⟩
+          · refine ⟨?_, rfl, rfl, trivial, hst, hro, ?_, rfl, rfl, rfl, readCells_crashed I.desc w id⟩
             · cases id with
               | core r =>
                 exact sem_move I _ r _ tr hS1 hL (hfrom _ rfl) rfl (by rw [hst]; exact hlife) hfm.2.1
@@ -5615,9 +5620,34 @@ theorem deliver_ok (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
 theorem inv_deliver (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (h : Inv I w)
     (hd : DeliverOk I w id a a1 w1) (hidle : (w.st id).phase = .idle)
     (halive : (w.st id).life = .alive) (hlife : a.life = (w.st id).life)
-    (hpk : a.parked = (w.st id).parked) (hpar : a.parent = (w.st id).parent) :
+    (hpk : a.parked = (w.st id).parked) (hpar : a.parent = (w.st id).parent)
+    (hbox : ∀ m, m ∈ a.box → m ∈ (w.st id).box)
+    (hprio : ∀ m, m ∈ a.prio → m ∈ (w.st id).prio)
+    (hkeep : ∀ parent dead, HoldsTomb w parent dead →
+      HoldsTomb (setActor w1 id a1) parent dead ∨ mailInFlight w dead = false) :
     Inv I (setActor w1 id a1) := by
   have hM1 := mail_copy w w1 h.2.1 hd.st
+  have hl : ∀ i, ((setActor w1 id a1).st i).life = (w.st i).life := by
+    intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self, hd.life, hlife]
+    · rw [setActor_other w1 id i a1 hi, hd.st]
+  have hparAll : ∀ i, ((setActor w1 id a1).st i).parent = (w.st i).parent := by
+    intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self, hd.parent, hpar]
+    · rw [setActor_other w1 id i a1 hi, hd.st]
+  have hpkAll : ∀ i, ((setActor w1 id a1).st i).parked = (w.st i).parked := by
+    intro i
+    by_cases hi : i = id
+    · rw [hi, setActor_self, hd.parked, hpk]
+    · rw [setActor_other w1 id i a1 hi, hd.st]
+  have hcrW : (setActor w1 id a1).crashed = w.crashed := by
+    simp only [setActor]
+    exact hd.crashed
+  have hroW : (setActor w1 id a1).roster = w.roster := by
+    simp only [setActor]
+    exact hd.roster
   refine ⟨hd.sem, ?_, ?_, ?_, ?_, ?_⟩
   · exact mail_set_free w1 id a1 hM1 (by rw [hd.st, hidle]; trivial) hd.free
       (by rw [hd.parked, hd.st, hpk]) (by rw [hd.st]; exact hd.life.trans hlife)
@@ -5628,11 +5658,52 @@ theorem inv_deliver (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (h : 
   · exact ParentForest.setActor
       (ParentForest.parents h.forest (fun i => by rw [hd.st]) hd.roster)
       (by rw [hd.st, hd.parent]; exact hpar)
-  · exact ⟨parkedLive_set w1 id a1
+  · refine ⟨parkedLive_set w1 id a1
       (parkedLive_same h.seal.liveParked (fun i => congrArg Actor.life (hd.st i))
         (fun i => congrArg Actor.parked (hd.st i)))
       ((hd.life.trans hlife).trans (congrArg Actor.life (hd.st id)).symm)
-      (by rw [hd.parked, hd.st, hpk])⟩
+      (by rw [hd.parked, hd.st, hpk]), ?_, ?_, ?_, ?_, ?_⟩
+    · rcases h.seal.quiet with hcr0 | hq
+      · exact Or.inl (hcrW.trans hcr0)
+      · refine Or.inr fun i hna => ?_
+        have hi : i ≠ id := by
+          intro he
+          exact hna (by rw [he]; exact (hl id).trans halive)
+        rcases hq i (fun ha => hna ((hl i).trans ha)) with ⟨hb, hp⟩
+        exact ⟨by rw [setActor_other w1 id i a1 hi, hd.st]; exact hb, by rw [hpkAll i]; exact hp⟩
+    · exact childless_stable h.seal.childless hcrW hl hparAll
+    · exact chain_edit h.seal.chain h.seal.childless h.forest hcrW hroW hl hparAll
+        (by
+          intro i msg hm
+          by_cases hi : i = id
+          · subst hi
+            rw [setActor_self, hd.box] at hm
+            exact Or.inl ⟨msg, hbox msg hm, rfl, rfl⟩
+          · rw [setActor_other w1 id i a1 hi, hd.st] at hm
+            exact Or.inl ⟨msg, hm, rfl, rfl⟩)
+        (by
+          intro i msg hm
+          by_cases hi : i = id
+          · subst hi
+            rw [setActor_self, hd.prio] at hm
+            exact Or.inl ⟨msg, hprio msg hm, rfl, rfl⟩
+          · rw [setActor_other w1 id i a1 hi, hd.st] at hm
+            exact Or.inl ⟨msg, hm, rfl, rfl⟩)
+        hkeep
+    · exact parkedFrom_set w1 id a1
+        (parkedFrom_same h.seal.parkedFrom (fun i => congrArg Actor.parked (hd.st i)))
+        (by rw [hd.parked, hd.st, hpk])
+    · exact hostedMail_set w1 id a1
+        (hostedMail_same h.seal.hostedMail hd.roster (fun i => congrArg Actor.box (hd.st i))
+          (fun i => congrArg Actor.prio (hd.st i)))
+        (fun msg hm => Or.inl (by
+          rw [hd.st]
+          rw [hd.box] at hm
+          exact hbox msg hm))
+        (fun msg hm => Or.inl (by
+          rw [hd.st]
+          rw [hd.prio] at hm
+          exact hprio msg hm))
 
 theorem resume_call_ok (D : Description) (sid : InstId) (a : Actor) (dst : InstId) (k : Cont)
     (hc : contTy a) (hg : programOk D sid a) (hw : waitEdge D sid a)
@@ -5837,8 +5908,32 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId
         · cases hs
         · next w1 a1 hd =>
           cases hs
-          have hd' := deliver_ok I hL w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
-          exact inv_same I _ _ (inv_deliver I w w1 id _ a1 h hd' hidle halive rfl (by simp [hpk]) rfl)
+          have hd' := deliver_ok I hL w id ({ (w.st id) with box := ms, parked := [] }) m w1 a1 h.1
+            (by rfl) (by rfl) hd
+          have hsubB : ∀ msg, msg ∈ ({ (w.st id) with box := ms, parked := [] } : Actor).box →
+              msg ∈ (w.st id).box := by
+            intro msg hm
+            simp at hm
+            rw [hbox]
+            exact List.mem_cons_of_mem _ hm
+          have hsubP : ∀ msg, msg ∈ ({ (w.st id) with box := ms, parked := [] } : Actor).prio →
+              msg ∈ (w.st id).prio := by
+            intro msg hm
+            simpa using hm
+          have hkeep : ∀ parent dead, HoldsTomb w parent dead →
+              HoldsTomb (setActor w1 id a1) parent dead ∨ mailInFlight w dead = false := by
+            intro parent dead ht
+            rcases ht with ⟨msg, hm, htom, hsnd⟩
+            refine Or.inl ⟨msg, ?_, htom, hsnd⟩
+            by_cases hp : parent = id
+            · rw [hp] at hm ⊢
+              rw [setActor_self, hd'.prio]
+              simpa using hm
+            · rw [setActor_other w1 id parent a1 hp, hd'.st]
+              exact hm
+          exact inv_same I _ _
+            (inv_deliver I w w1 id ({ (w.st id) with box := ms, parked := [] }) a1 h hd' hidle halive
+              rfl (hpk.symm) rfl hsubB hsubP hkeep)
             (same_credit _ _ _) (fun i => (credit_fields _ _ _ i).2.2.1)
             (fun i => (credit_fields _ _ _ i).2.2.2.2) (by simp [creditSender, setActor])
       | cons p ps =>
@@ -5856,10 +5951,46 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId
 
 theorem receive_prio_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     (h : Inv I w) (hs : receivePrio I w id = some w') : Inv I w' := by
-  obtain ⟨m, pre, suf, w1, a1, halive, hidle, _, _, hd, hw'⟩ := receivePrio_spec I w w' id hs
+  obtain ⟨m, pre, suf, w1, a1, halive, hidle, hsplit, hwait, hd, hw'⟩ :=
+    receivePrio_spec I w w' id hs
   subst hw'
-  have hd' := deliver_ok I hL w id _ m w1 a1 h.1 (by rfl) (by rfl) hd
-  exact inv_deliver I w w1 id _ a1 h hd' hidle halive rfl rfl rfl
+  have hd' := deliver_ok I hL w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 h.1
+    (by rfl) (by rfl) hd
+  have hsubB : ∀ msg, msg ∈ ({ (w.st id) with prio := pre ++ suf } : Actor).box →
+      msg ∈ (w.st id).box := by
+    intro msg hm
+    simpa using hm
+  have hsubP : ∀ msg, msg ∈ ({ (w.st id) with prio := pre ++ suf } : Actor).prio →
+      msg ∈ (w.st id).prio := by
+    intro msg hm
+    rw [hsplit]
+    simp only [List.mem_append] at hm
+    rcases hm with hm | hm
+    · exact List.mem_append_left _ hm
+    · exact List.mem_append_right _ (List.mem_cons_of_mem _ hm)
+  have hkeep : ∀ parent dead, HoldsTomb w parent dead →
+      HoldsTomb (setActor w1 id a1) parent dead ∨ mailInFlight w dead = false := by
+    intro parent dead ht
+    rcases ht with ⟨msg, hm, htom, hsnd⟩
+    by_cases hp : parent = id
+    · rw [hp, hsplit] at hm
+      simp only [List.mem_append, List.mem_cons] at hm
+      rcases hm with hm | hm | hm
+      · refine Or.inl ⟨msg, ?_, htom, hsnd⟩
+        rw [hp, setActor_self, hd'.prio]
+        simp only [List.mem_append]
+        exact Or.inl hm
+      · rw [hm] at htom hsnd
+        exact Or.inr (by rw [← hsnd]; exact tombstone_clear_of_take w m hwait htom)
+      · refine Or.inl ⟨msg, ?_, htom, hsnd⟩
+        rw [hp, setActor_self, hd'.prio]
+        simp only [List.mem_append]
+        exact Or.inr hm
+    · refine Or.inl ⟨msg, ?_, htom, hsnd⟩
+      rw [setActor_other w1 id parent a1 hp, hd'.st]
+      exact hm
+  exact inv_deliver I w w1 id ({ (w.st id) with prio := pre ++ suf }) a1 h hd' hidle halive rfl rfl
+    rfl hsubB hsubP hkeep
 
 theorem clear_cont (caller : InstId) (k : Cont) : ∃ r, clearReplyCont caller k = { k with replyTo := r } := by
   unfold clearReplyCont
