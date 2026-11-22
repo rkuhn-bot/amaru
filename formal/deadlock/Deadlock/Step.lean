@@ -5722,6 +5722,33 @@ theorem resume_off (a : Actor) (b : Bool) (dst : InstId) (h : a.phase = .idle �
     resumeSender a b dst = a := by
   rcases h with h | h <;> simp [resumeSender, h]
 
+/-- Resuming a parked sender does not touch its mailbox. -/
+theorem resume_queues (a : Actor) (c : Bool) (dst : InstId) :
+    (resumeSender a c dst).box = a.box ∧ (resumeSender a c dst).prio = a.prio := by
+  unfold resumeSender
+  split
+  · split
+    · simp
+    · unfold proceed
+      split <;> simp
+  · simp
+
+/-- A parked entry on a live host names a live sender. A halted sender was
+already dropped, and a parked phase is not how an absent or dead actor stands. -/
+theorem parked_sender_alive (I : Impl) (w : World) (host : InstId) (p : Parked)
+    (hS : SemInv I w) (hM : MailInv w) (hP : ParkedFromLive w)
+    (hlive : (w.st host).life = .alive) (hp : p ∈ (w.st host).parked) :
+    (w.st p.sender).life = .alive := by
+  have hnd := hP host p hlive hp
+  rcases hM.fwd host p hp with ⟨_, hph⟩ | hhalt
+  · exact Classical.byContradiction fun hna => by
+      rcases hS.idleOff p.sender hna with hi | hi
+      · rw [hph] at hi
+        cases hi
+      · rw [hph] at hi
+        cases hi
+  · exact absurd hhalt hnd
+
 /-- One parked entry is admitted after the receiver is installed: the sender is credited,
 and a sender still parked on this mailbox resumes. -/
 theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Parked) (ps : List Parked)
@@ -5729,7 +5756,9 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
     (hro : w1.roster = w.roster) (hidle : (w.st id).phase = .idle) (halive : (w.st id).life = .alive)
     (hqueue : (w.st id).parked = p :: ps)     (hcurPk : cur.parked = ps) (hcurPh : notParked cur.phase)
     (hcurLife : cur.life = (w.st id).life) (hcurOut : outcomeOk I id cur)
-    (hcurPar : cur.parent = (w1.st id).parent) :
+    (hcurPar : cur.parent = (w1.st id).parent) (hcr1 : w1.crashed = w.crashed)
+    (hbox : ∀ m, m ∈ cur.box → m ∈ (w.st id).box ∨ m.sender = p.sender)
+    (hprio : cur.prio = (w.st id).prio) :
     Inv I (setActor (creditSender (setActor w1 id cur) (tname id) who) p.sender
       (resumeSender ((creditSender (setActor w1 id cur) (tname id) who).st p.sender) p.isCall id)) := by
   have hM := h.2.1
@@ -5842,20 +5871,149 @@ theorem resume_one (I : Impl) (w w1 : World) (id : InstId) (cur : Actor) (p : Pa
       rw [← hcred]
       exact ParentForest.parents hfBase (fun i => creditSender_parent _ _ _ i) rfl
     exact ParentForest.setActor hfCred (by rw [← hr]; exact resumeSender_parent _ _ _)
-  · refine ⟨parkedLive_sub h.seal.liveParked hlifeAll ?_⟩
-    intro host q hq
-    by_cases hh : host = p.sender
-    · rw [hh] at hq ⊢
-      rw [setActor_self, hres.2.2.2.2.2.2, hsk] at hq
-      exact hq
-    · rw [setActor_other cred p.sender host r hh] at hq
-      by_cases hid : host = id
-      · rw [hid] at hq ⊢
-        rw [hcr.parked, hbid, hcurPk] at hq
-        rw [hqueue]
-        exact List.mem_cons_of_mem _ hq
-      · rw [hcr.parked, hbo host hid] at hq
+  · have hsender := parked_sender_alive I w id p h.1 h.2.1 h.seal.liveParked halive hmemp
+    have hcrW : (setActor cred p.sender r).crashed = w.crashed := by
+      simp only [setActor]
+      rw [← hcred]
+      simp only [creditSender, setActor]
+      rw [← hbase]
+      simp only [setActor]
+      exact hcr1
+    have hroW : (setActor cred p.sender r).roster = w.roster := by
+      simp only [setActor]
+      rw [← hcred]
+      simp only [creditSender, setActor]
+      rw [← hbase]
+      simp only [setActor]
+      exact hro
+    have hparAll : ∀ i, ((setActor cred p.sender r).st i).parent = (w.st i).parent := by
+      intro i
+      by_cases hs : i = p.sender
+      · subst hs
+        rw [setActor_self, ← hr, resumeSender_parent, ← hcred, creditSender_parent, ← hbase,
+          setActor_other w1 id p.sender cur hsnd, hst]
+      · rw [setActor_other cred p.sender i r hs, ← hcred, creditSender_parent, ← hbase]
+        by_cases hi : i = id
+        · subst hi
+          rw [setActor_self, hcurPar, hst]
+        · rw [setActor_other w1 id i cur hi, hst]
+    have hboxKeep : ∀ i, i ≠ id → ((setActor cred p.sender r).st i).box = (w.st i).box := by
+      intro i hi
+      by_cases hs : i = p.sender
+      · subst hs
+        rw [setActor_self, ← hr, (resume_queues _ _ _).1, ← hcred]
+        rw [(credit_fields base (tname id) who p.sender).2.2.1, ← hbase,
+          setActor_other w1 id p.sender cur hsnd, hst]
+      · rw [setActor_other cred p.sender i r hs, ← hcred]
+        rw [(credit_fields base (tname id) who i).2.2.1, ← hbase, setActor_other w1 id i cur hi, hst]
+    have hprioKeep : ∀ i, i ≠ id → ((setActor cred p.sender r).st i).prio = (w.st i).prio := by
+      intro i hi
+      by_cases hs : i = p.sender
+      · subst hs
+        rw [setActor_self, ← hr, (resume_queues _ _ _).2, ← hcred]
+        rw [(credit_fields base (tname id) who p.sender).2.2.2.2, ← hbase,
+          setActor_other w1 id p.sender cur hsnd, hst]
+      · rw [setActor_other cred p.sender i r hs, ← hcred]
+        rw [(credit_fields base (tname id) who i).2.2.2.2, ← hbase, setActor_other w1 id i cur hi, hst]
+    have hprioId : ((setActor cred p.sender r).st id).prio = (w.st id).prio := by
+      rw [setActor_other cred p.sender id r (Ne.symm hsnd), ← hcred]
+      rw [(credit_fields base (tname id) who id).2.2.2.2, ← hbase, setActor_self, hprio]
+    have hboxId : ∀ m, m ∈ ((setActor cred p.sender r).st id).box → m ∈ cur.box := by
+      intro m hm
+      rw [setActor_other cred p.sender id r (Ne.symm hsnd), ← hcred] at hm
+      rw [(credit_fields base (tname id) who id).2.2.1, ← hbase, setActor_self] at hm
+      exact hm
+    refine ⟨parkedLive_sub h.seal.liveParked hlifeAll ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · intro host q hq
+      by_cases hh : host = p.sender
+      · rw [hh] at hq ⊢
+        rw [setActor_self, hres.2.2.2.2.2.2, hsk] at hq
         exact hq
+      · rw [setActor_other cred p.sender host r hh] at hq
+        by_cases hid : host = id
+        · rw [hid] at hq ⊢
+          rw [hcr.parked, hbid, hcurPk] at hq
+          rw [hqueue]
+          exact List.mem_cons_of_mem _ hq
+        · rw [hcr.parked, hbo host hid] at hq
+          exact hq
+    · rcases h.seal.quiet with hcr0 | hq
+      · exact Or.inl (hcrW.trans hcr0)
+      · refine Or.inr fun i hna => ?_
+        have hi : i ≠ id := by
+          intro he
+          rw [he] at hna
+          exact hna ((hlifeAll id).trans halive)
+        rcases hq i (fun ha => hna ((hlifeAll i).trans ha)) with ⟨hb, hp⟩
+        refine ⟨by rw [hboxKeep i hi]; exact hb, ?_⟩
+        by_cases hs : i = p.sender
+        · rw [hs] at hp ⊢
+          rw [setActor_self, hres.2.2.2.2.2.2, hsk]
+          exact hp
+        · rw [setActor_other cred p.sender i r hs, ← hcred,
+            (credit_fields base (tname id) who i).2.2.2.1, ← hbase, setActor_other w1 id i cur hi, hst]
+          exact hp
+    · exact childless_stable h.seal.childless hcrW hlifeAll hparAll
+    · exact chain_edit h.seal.chain h.seal.childless h.forest hcrW hroW hlifeAll hparAll
+        (by
+          intro host m hm
+          by_cases hid : host = id
+          · subst hid
+            rcases hbox m (hboxId m hm) with hold | hsend
+            · exact Or.inl ⟨m, hold, rfl, rfl⟩
+            · exact Or.inr (Or.inr (by rw [hsend]; exact hsender))
+          · rw [hboxKeep host hid] at hm
+            exact Or.inl ⟨m, hm, rfl, rfl⟩)
+        (by
+          intro host m hm
+          by_cases hid : host = id
+          · subst hid
+            rw [hprioId] at hm
+            exact Or.inl ⟨m, hm, rfl, rfl⟩
+          · rw [hprioKeep host hid] at hm
+            exact Or.inl ⟨m, hm, rfl, rfl⟩)
+        (by
+          intro parent dead ht
+          rcases ht with ⟨msg, hm, htom, hs⟩
+          refine Or.inl ⟨msg, ?_, htom, hs⟩
+          by_cases hid : parent = id
+          · subst hid
+            rw [hprioId]
+            exact hm
+          · rw [hprioKeep parent hid]
+            exact hm)
+    · exact parkedFrom_sub h.seal.parkedFrom (by
+        intro host q hq
+        by_cases hs : host = p.sender
+        · rw [hs] at hq ⊢
+          rw [setActor_self, hres.2.2.2.2.2.2, hsk] at hq
+          exact hq
+        · rw [setActor_other cred p.sender host r hs] at hq
+          by_cases hid : host = id
+          · rw [hid] at hq ⊢
+            rw [← hcred, (credit_fields base (tname id) who id).2.2.2.1, ← hbase, setActor_self,
+              hcurPk] at hq
+            rw [hqueue]
+            exact List.mem_cons_of_mem _ hq
+          · rw [← hcred, (credit_fields base (tname id) who host).2.2.2.1, ← hbase,
+              setActor_other w1 id host cur hid, hst] at hq
+            exact hq)
+    · intro host m hm
+      rw [hroW]
+      by_cases hid : host = id
+      · rw [hid] at hm
+        rcases hm with hm | hm
+        · rcases hbox m (hboxId m hm) with hold | hsend
+          · exact h.seal.hostedMail id m (Or.inl hold)
+          · rw [hsend]
+            exact h.1.rostered p.sender hsender
+        · rw [hprioId] at hm
+          exact h.seal.hostedMail id m (Or.inr hm)
+      · rcases hm with hm | hm
+        · rw [hboxKeep host hid] at hm
+          exact h.seal.hostedMail host m (Or.inl hm)
+        · rw [hprioKeep host hid] at hm
+          exact h.seal.hostedMail host m (Or.inr hm)
 
 theorem sem_requeue (I : Impl) (w : World) (id : InstId) (a b : Actor) (hS : SemInv I (setActor w id a))
     (hl : b.life = a.life) (ht : b.typestate = a.typestate) (hp : b.phase = a.phase)
@@ -5899,7 +6057,14 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId
           cases hs
           have hd' := deliver_ok I hL w id _ p.msg w1 a1 h.1 (by rfl) (by rfl) hd
           exact resume_one I w w1 id a1 p ps _ h hd'.sem hd'.st hd'.roster hidle halive hpk hd'.parked
-            hd'.free hd'.life hd'.out (by rw [hd'.parent, hd'.st])
+            hd'.free hd'.life hd'.out (by rw [hd'.parent, hd'.st]) hd'.crashed
+            (by
+              intro msg hm
+              exact Or.inl (by
+                rw [hd'.box] at hm
+                rw [hbox]
+                exact hm))
+            (by rw [hd'.prio])
     | cons m ms =>
       cases hpk : (w.st id).parked with
       | nil =>
@@ -5947,7 +6112,20 @@ theorem receive_bulk_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId
             sem_requeue I w1 id a1 _ hd'.sem rfl rfl rfl (by rw [hd'.roster]; exact hmem)
           exact resume_one I w w1 id { a1 with box := a1.box ++ [p.msg], parked := ps } p ps _ h hS2 hd'.st
             hd'.roster hidle halive hpk rfl hd'.free hd'.life (outcome_congr I id rfl rfl hd'.out)
-            (by rw [hd'.parent, hd'.st])
+            (by rw [hd'.parent, hd'.st]) hd'.crashed
+            (by
+              intro msg hm
+              simp only [List.mem_append, List.mem_singleton] at hm
+              rcases hm with hm | hm
+              · refine Or.inl ?_
+                rw [hd'.box] at hm
+                rw [hbox]
+                exact List.mem_cons_of_mem _ hm
+              · refine Or.inr ?_
+                have hfrom := h.seal.parkedFrom id p (by rw [hpk]; exact List.mem_cons_self)
+                rw [hm]
+                exact hfrom.symm)
+            (by rw [hd'.prio])
 
 theorem receive_prio_inv (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId)
     (h : Inv I w) (hs : receivePrio I w id = some w') : Inv I w' := by
