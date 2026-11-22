@@ -1072,14 +1072,18 @@ theorem exec_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w : World)
       simp only [execRun, hgo, hk, ite_true]
       exact good_frame hG (frame_keep w id _ rfl rfl)
     | abort =>
-      simp only [execRun, hgo, hk, ite_true]
-      exact good_frame hG (frame_trans (frame_abort I I.desc w id h)
-        (frame_set (abortChildren I.desc w id) id
-          (proceed ((abortChildren I.desc w id).st id) (afterHead k)) (fun hl => by
-            have hlife : ((abortChildren I.desc w id).st id).life = .alive :=
-              (proceed_life _ _).symm.trans hl
-            have htyW := (frame_abort I I.desc w id h id hlife).2
-            exact ⟨hlife, proceed_keeps_ty _ _ (htyW.trans hty')⟩)))
+      simp only [execRun, hgo, hk, ite_true, commitCont]
+      by_cases hcr : (abortChildren I.desc w id).crashed = true
+      · rw [ite_eq_left hcr]
+        exact good_frame hG (frame_abort I I.desc w id h)
+      · rw [ite_eq_right hcr]
+        exact good_frame hG (frame_trans (frame_abort I I.desc w id h)
+          (frame_set (abortChildren I.desc w id) id
+            (proceed ((abortChildren I.desc w id).st id) (afterHead k)) (fun hl => by
+              have hlife : ((abortChildren I.desc w id).st id).life = .alive :=
+                (proceed_life _ _).symm.trans hl
+              have htyW := (frame_abort I I.desc w id h id hlife).2
+              exact ⟨hlife, proceed_keeps_ty _ _ (htyW.trans hty')⟩)))
     | terminate =>
       have hstep := exec_term_step I w id (w.st id) k ha ⟨es, hk⟩
       generalize execRun I w id (w.st id) k = wR at hstep ⊢
@@ -1095,10 +1099,14 @@ theorem exec_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w : World)
         simp only [execRun, hgo, hk, hsp, ite_true]
         exact good_frame hG (frame_crash w)
       | some w' =>
-        simp only [execRun, hgo, hk, hsp, ite_true]
-        have hst := spawnChild_other_st I w w' id child id hsp (h.1.rostered id ha)
-        exact good_frame (spawnChild_good I hGr w w' id child hG hsp)
-          (frame_keep w' id _ (proceed_life _ _) (by rw [hst]; exact proceed_keeps_ty _ _ hty'))
+        simp only [execRun, hgo, hk, hsp, ite_true, commitCont]
+        by_cases hcr : w'.crashed = true
+        · rw [ite_eq_left hcr]
+          exact spawnChild_good I hGr w w' id child hG hsp
+        · rw [ite_eq_right hcr]
+          have hst := spawnChild_other_st I w w' id child id hsp (h.1.rostered id ha)
+          exact good_frame (spawnChild_good I hGr w w' id child hG hsp)
+            (frame_keep w' id _ (proceed_life _ _) (by rw [hst]; exact proceed_keeps_ty _ _ hty'))
 
 theorem head_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w w' : World) (id : InstId)
     (h : Inv I w) (hG : Good I.desc w) (hs : execHead I w id = some w') : Good I.desc w' := by
@@ -1106,14 +1114,11 @@ theorem head_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w w' : Wor
   dsimp only at hs
   split at hs
   · cases hs
-    exact good_frame hG (frame_seal I.desc w id _ h.1.cont)
   · split at hs
+    · next k hph =>
+      cases hs
+      exact exec_good I hL hGr w id k h hG hph
     · cases hs
-    · split at hs
-      · next k hph =>
-        cases hs
-        exact exec_good I hL hGr w id k h hG hph
-      · cases hs
 
 theorem finish_good (I : Impl) (w w' : World) (id : InstId) (h : Inv I w) (hG : Good I.desc w)
     (hs : finishWait I w id = some w') : Good I.desc w' := by
@@ -1130,7 +1135,7 @@ theorem ingress_good (I : Impl) (w w' : World) (dst : InstId) (label : String) (
 
 theorem callTimeout_good (I : Impl) (hL : LocalOk I) (w w' : World) (id : InstId) (h : Inv I w)
     (hG : Good I.desc w) (hs : callTimeout w id = some w') : Good I.desc w' := by
-  have hO := h.2.2.2 id
+  have hO := h.2.2.2.1 id
   have hC := h.1.cont id
   unfold callTimeout at hs
   dsimp only at hs

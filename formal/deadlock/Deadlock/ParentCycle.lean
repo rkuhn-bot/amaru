@@ -1,8 +1,10 @@
 /-
-A parent pointer cycle is not a crash. Aborting one actor seals it as a
-descendant of its child, then the crash guard still installs the
-continuation, because the world is not crashed. The parent is dead and
-`.run`.
+A parent pointer cycle is not a crash, and it is not a reachable world.
+`R` parents `C` and `C` parents `R`. Aborting `R` seals `C`, and sealing
+`C` seals `R` as its descendant. The world is not crashed, so `commitCont`
+installs the continuation: the parent is dead and `.run`. The pre-state is
+a `SemInv` and a `MailInv`, and it is not `ParentAcyclic`, so it is outside
+`Inv`.
 -/
 import Deadlock.Mail
 import Deadlock.RunInv
@@ -186,6 +188,20 @@ theorem parent_src :
 
 theorem child_idle : (w0.st cId).phase = .idle := by
   rfl
+
+theorem edge_cr : ParentEdge w0 cId rId := by
+  refine ⟨?_, child_ne⟩
+  simp [w0, aC, child_ne]
+
+theorem edge_rc : ParentEdge w0 rId cId := by
+  refine ⟨?_, child_ne.symm⟩
+  simp [w0, aR]
+
+/-- The pre-state is its own ancestor, so it is not the parent forest `Inv` requires. -/
+theorem pre_not_acyclic : ¬ ParentAcyclic w0 := by
+  intro h
+  exact ParentAcyclic.no_self h rId
+    (StrictAncestor.tail edge_rc (StrictAncestor.edge edge_cr))
 
 theorem post_not_sem (h : SemInv cycleImpl wAbort) : False := by
   have hdead : (wAbort.st rId).life ≠ .alive := by

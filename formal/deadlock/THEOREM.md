@@ -5,13 +5,13 @@ Nothing in the development uses `sorry` or `admit`.
 
 ## What is proved
 
-The headline chain does not build. `Deadlock.Proof`, `Deadlock.RunInv`,
-`Deadlock.Intra`, and `Deadlock.Json` fail to elaborate, and so does every
-module that imports them (`CallTag`, `Inv2`, `Mail`, `Occ`, `Pres`,
-`Projects`, `Step`, `Chain`, `Counter`, `Deliver`, `FairRun`, `Progress`,
-`Rank`, `Witness`, `Theorem`). The names below are the statements that
-chain is meant to carry. They are not theorems of this tree until it builds
-again. `no_tombstone_overflow` is not part of that chain. It is a theorem of
+`Deadlock.Step` builds. `Inv` is `SemInv`, `MailInv`, `OpenSlots`,
+`OutcomeInv`, and `ParentForest`: the parent relation of a reachable world
+is well-founded, an actor off the roster has no parent, and every recorded
+parent is on the roster. The modules past `Step` (`Projects`, `CallTag`,
+`Occ`, `Inv2`, `Rank`, `Progress`, `Chain`, `Deliver`, `FairRun`,
+`Theorem`) are not claimed by this paragraph. `no_tombstone_overflow` is
+not part of that chain. It is a theorem of
 `Deadlock.Tomb`: a reachable world under `GraphOk` and `LocalOk` does not
 overflow a live parent's lane. `GraphOk` rejects a supervised template whose
 tombstone is empty, and a recorded parent on a reachable world is the

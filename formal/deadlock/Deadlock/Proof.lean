@@ -735,9 +735,13 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
       | peer onTimeout =>
         simp [execRun, hliveB, hk, setActor, hs, hp]
       | abort =>
-        simp only [execRun, hliveB, hk, ite_true] at halive ⊢
-        rw [setActor_other _ _ _ _ hs] at halive ⊢
-        exact abortChildren_preserves_run I.desc w id s k0 hp halive
+        simp only [execRun, hliveB, hk, ite_true, commitCont] at halive ⊢
+        by_cases hcr : (abortChildren I.desc w id).crashed = true
+        · rw [ite_eq_left hcr] at halive ⊢
+          exact abortChildren_preserves_run I.desc w id s k0 hp halive
+        · rw [ite_eq_right hcr] at halive ⊢
+          rw [setActor_other _ _ _ _ hs] at halive ⊢
+          exact abortChildren_preserves_run I.desc w id s k0 hp halive
       | spawn child =>
         simp only [execRun, hliveB, hk, ite_true] at halive ⊢
         cases hsp : spawnChild I w id child with
@@ -746,9 +750,14 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
           rw [crashWorld_alive_st w s halive]
           exact hp
         | some w' =>
-          simp only
-          rw [setActor_other _ _ _ _ hs, spawnChild_other_st I w w' id child s hsp hmem]
-          exact hp
+          simp only [hsp, commitCont] at halive ⊢
+          by_cases hcr : w'.crashed = true
+          · rw [ite_eq_left hcr] at halive ⊢
+            rw [spawnChild_other_st I w w' id child s hsp hmem] at halive ⊢
+            exact hp
+          · rw [ite_eq_right hcr] at halive ⊢
+            rw [setActor_other _ _ _ _ hs, spawnChild_other_st I w w' id child s hsp hmem]
+            exact hp
       | terminate =>
         have hprop : a.life = .alive := by simpa [beq_iff_eq] using hliveB
         have hstep := exec_term_step I w id a k hprop ⟨es, hk⟩

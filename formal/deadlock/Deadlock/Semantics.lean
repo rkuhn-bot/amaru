@@ -1472,6 +1472,148 @@ theorem isChild_parent (w : World) (parent child : InstId)
     simpa [hp, heq]
   · simp at h
 
+/-- `parent` is the recorded parent of `child`. A self-loop is not an edge. -/
+def ParentEdge (w : World) (child parent : InstId) : Prop :=
+  (w.st child).parent = some parent ∧ child ≠ parent
+
+/-- `anc` is a strict ancestor of `desc` along recorded parent links. -/
+inductive StrictAncestor (w : World) : InstId → InstId → Prop where
+  | edge {desc anc : InstId} : ParentEdge w desc anc → StrictAncestor w desc anc
+  | tail {desc mid anc : InstId} : ParentEdge w desc mid →
+      StrictAncestor w mid anc → StrictAncestor w desc anc
+
+/-- Ancestry is well-founded: following a parent link terminates, so no actor
+is its own strict ancestor. The relation steps from a parent to its child. -/
+def ParentAcyclic (w : World) : Prop :=
+  WellFounded (fun anc desc => ParentEdge w desc anc)
+
+/-- A parent link, an actor off the roster with no parent, and every recorded
+parent on the roster. Spawn is the only step that adds a link, and it adds
+one from a fresh id to a roster actor. -/
+structure ParentForest (w : World) : Prop where
+  wf : ParentAcyclic w
+  off : ∀ id, id ∉ w.roster → (w.st id).parent = none
+  hosted : ∀ id p, (w.st id).parent = some p → p ∈ w.roster
+
+theorem isChild_edge (w : World) (parent child : InstId)
+    (h : isChild w parent child = true) : ParentEdge w child parent := by
+  have hp := isChild_parent w parent child h
+  refine ⟨hp, ?_⟩
+  intro heq
+  rw [heq] at hp h
+  simp [isChild, hp] at h
+
+theorem StrictAncestor.trans {w : World} {desc mid anc : InstId}
+    (h1 : StrictAncestor w desc mid) (h2 : StrictAncestor w mid anc) : StrictAncestor w desc anc := by
+  induction h1 with
+  | edge h => exact StrictAncestor.tail h h2
+  | tail h _ ih => exact StrictAncestor.tail h (ih h2)
+
+theorem ParentEdge.parents {w w' : World} (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    {c p : InstId} (h : ParentEdge w c p) : ParentEdge w' c p := by
+  exact ⟨by rw [hp, h.1], h.2⟩
+
+theorem StrictAncestor.parents {w w' : World} (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    {desc anc : InstId} (h : StrictAncestor w desc anc) : StrictAncestor w' desc anc := by
+  induction h with
+  | edge he => exact StrictAncestor.edge (ParentEdge.parents hp he)
+  | tail he _ ih => exact StrictAncestor.tail (ParentEdge.parents hp he) ih
+
+theorem parentAcyclic_parents {w w' : World} (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hw : ParentAcyclic w) : ParentAcyclic w' := by
+  refine ⟨fun id => ?_⟩
+  have hacc : ∀ id, Acc (fun anc desc => ParentEdge w desc anc) id →
+      Acc (fun anc desc => ParentEdge w' desc anc) id := by
+    intro id ha
+    induction ha with
+    | intro id _ ih =>
+      refine Acc.intro id fun anc hanc => ih anc ?_
+      exact ⟨by rw [← hp, hanc.1], hanc.2⟩
+  exact hacc id (hw.apply id)
+
+theorem ParentAcyclic.no_self {w : World} (hw : ParentAcyclic w) (id : InstId) :
+    ¬ StrictAncestor w id id := by
+  have hacc : ∀ id, Acc (fun anc desc => ParentEdge w desc anc) id → ¬ StrictAncestor w id id := by
+    intro id ha
+    induction ha with
+    | intro id _ ih =>
+      intro hself
+      cases hself with
+      | edge he => exact he.2 rfl
+      | tail he hrest =>
+        exact ih _ ⟨he.1, he.2⟩ (StrictAncestor.trans hrest (StrictAncestor.edge he))
+  exact hacc id (hw.apply id)
+
+/-- Replace `born`'s parent. `born` was unwired, and nothing already points at it,
+so the new link does not close a cycle. -/
+theorem parentAcyclic_link (w : World) (born : InstId) (a : Actor) (hw : ParentAcyclic w)
+    (hold : (w.st born).parent = none) (hfree : ∀ i, (w.st i).parent ≠ some born)
+    (hne : ∀ p, a.parent = some p → p ≠ born) : ParentAcyclic (setActor w born a) := by
+  by_cases hpar : a.parent = none
+  · apply parentAcyclic_parents (w' := setActor w born a) _ hw
+    intro i
+    by_cases hi : i = born
+    · simp [hi, setActor_self, hpar, hold]
+    · simp [setActor_other w born i a hi]
+  · cases hpa : a.parent with
+    | none => exact absurd hpa hpar
+    | some p =>
+      have hpne : p ≠ born := hne p hpa
+      let w' := setActor w born a
+      have lift : ∀ id, Acc (fun anc desc => ParentEdge w desc anc) id → id ≠ born →
+          Acc (fun anc desc => ParentEdge w' desc anc) id := by
+        intro id ha
+        induction ha with
+        | intro id _ ih =>
+          intro hid
+          refine Acc.intro id fun anc hanc => ?_
+          have hancw : ParentEdge w id anc := by
+            have hst : (w'.st id).parent = (w.st id).parent := by
+              simpa [w', setActor_other w born id a hid]
+            exact ⟨by rw [← hst, hanc.1], hanc.2⟩
+          have hancne : anc ≠ born := by
+            intro heq
+            exact hfree id (by simpa [heq] using hancw.1)
+          exact ih anc hancw hancne
+      refine ⟨fun id => ?_⟩
+      by_cases hidB : id = born
+      · rw [hidB]
+        refine Acc.intro born fun anc hanc => ?_
+        have hancp : anc = p := by
+          have h1 := hanc.1
+          simp [w', setActor_self, hpa] at h1
+          exact h1.symm
+        exact lift anc (hw.apply anc) (by rw [hancp]; exact hpne)
+      · exact lift id (hw.apply id) hidB
+
+theorem ParentForest.parents {w w' : World} (h : ParentForest w)
+    (hp : ∀ i, (w'.st i).parent = (w.st i).parent) (hr : w'.roster = w.roster) : ParentForest w' where
+  wf := parentAcyclic_parents hp h.wf
+  off := fun id hid => by
+    have hid' : id ∉ w.roster := by rw [hr] at hid; exact hid
+    rw [hp]
+    exact h.off id hid'
+  hosted := fun id p hsome => by
+    rw [hp id] at hsome
+    rw [hr]
+    exact h.hosted id p hsome
+
+theorem ParentForest.setActor {w : World} {id : InstId} {a : Actor} (h : ParentForest w)
+    (hp : a.parent = (w.st id).parent) : ParentForest (setActor w id a) := by
+  refine h.parents ?_ rfl
+  intro i
+  by_cases hi : i = id
+  · simp [hi, setActor_self, hp]
+  · simp [setActor_other w id i a hi]
+
+/-- Appending an id does not add a parent edge. An id that was already off the
+roster stays unwired. -/
+theorem ParentForest.grow {w : World} (h : ParentForest w) (id : InstId) :
+    ParentForest { w with roster := w.roster ++ [id] } where
+  wf := parentAcyclic_parents (fun _ => rfl) h.wf
+  off := fun i hi => h.off i (fun hm => hi (List.mem_append_left _ hm))
+  hosted := fun i p hp => List.mem_append_left _ (h.hosted i p hp)
+
 /-- Some live actor recorded `id` as its parent. -/
 def hasChild (D : Description) (w : World) (id : InstId) : Bool :=
   let _desc := D
@@ -7639,6 +7781,608 @@ theorem abortChildren_prev (D : Description) (w : World) (parent i : InstId)
         simp only [hf, ite_false] at h0
         exact ihids w0 h0
   exact hfold w.roster w h
+
+theorem setActor_parent_keep (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (hp : a.parent = (w.st id).parent) : ((setActor w id a).st i).parent = (w.st i).parent := by
+  by_cases hi : i = id
+  · simp [hi, setActor_self, hp]
+  · simp [setActor_other w id i a hi]
+
+theorem setActor_crashed (w : World) (id : InstId) (a : Actor) :
+    (setActor w id a).crashed = w.crashed := rfl
+
+theorem bumpToken_parent (a : Actor) (dst : String) (d : Int) :
+    (bumpToken a dst d).parent = a.parent := rfl
+
+theorem addTokens_parent (a : Actor) (name : String) (n : Nat) :
+    (addTokens a name n).parent = a.parent := rfl
+
+theorem proceed_parent (a : Actor) (k : Cont) : (proceed a k).parent = a.parent := by
+  cases hk : k.rest <;> simp [proceed, hk]
+
+theorem chargeSender_parent (a : Actor) (dst : String) : (chargeSender a dst).parent = a.parent := rfl
+
+theorem issueCall_parent (a : Actor) : (issueCall a).parent = a.parent := rfl
+
+theorem finishCall_parent (a : Actor) (k : Cont) (r : CallResult) :
+    (finishCall a k r).parent = a.parent := by
+  simp [finishCall, proceed_parent]
+
+theorem detachHost_parent (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).parent = a.parent := by
+  unfold detachReply detachBox
+  split <;> rfl
+
+theorem resumeSender_parent (a : Actor) (isCall : Bool) (dst : InstId) :
+    (resumeSender a isCall dst).parent = a.parent := by
+  unfold resumeSender
+  split
+  · split
+    · rfl
+    · exact proceed_parent _ _
+  · rfl
+
+theorem creditSender_parent (w : World) (tmpl : String) (s i : InstId) :
+    ((creditSender w tmpl s).st i).parent = (w.st i).parent := by
+  unfold creditSender
+  exact setActor_parent_keep w s _ i (bumpToken_parent _ _ _)
+
+theorem creditSender_crashed (w : World) (tmpl : String) (s : InstId) :
+    (creditSender w tmpl s).crashed = w.crashed := rfl
+
+theorem creditFold_parent (w : World) (name : String) (sender : InstId) (ps : List Parked)
+    (i : InstId) :
+    ((ps.foldl (fun w _ => creditSender w name sender) w).st i).parent = (w.st i).parent := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons _ ps ih =>
+    simp only [List.foldl_cons]
+    exact (ih _).trans (creditSender_parent w name sender i)
+
+theorem refundCall_parent (w : World) (caller dst i : InstId) :
+    ((refundParkedCall w caller dst).st i).parent = (w.st i).parent := by
+  unfold refundParkedCall
+  dsimp only
+  split
+  · rfl
+  · exact (creditFold_parent _ (tname dst) caller _ i).trans (setActor_parent_keep _ _ _ _ rfl)
+
+theorem creditLive_parent (w : World) (tmpl : String) (s i : InstId) :
+    ((creditLive w tmpl s).st i).parent = (w.st i).parent :=
+  creditSender_parent w tmpl _ i
+
+theorem creditLive_crashed (w : World) (tmpl : String) (s : InstId) :
+    (creditLive w tmpl s).crashed = w.crashed := rfl
+
+theorem refundMsgs_parent (w : World) (name : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w name ms).st i).parent = (w.st i).parent := by
+  induction ms generalizing w with
+  | nil => rfl
+  | cons m ms ih =>
+    rw [show refundMsgs w name (m :: ms) = refundMsgs (creditLive w name m.sender) name ms from rfl]
+    rw [ih, creditLive_parent]
+
+theorem refundMsgs_crashed (w : World) (name : String) (ms : List Msg) :
+    (refundMsgs w name ms).crashed = w.crashed := by
+  induction ms generalizing w with
+  | nil => rfl
+  | cons m ms ih =>
+    rw [show refundMsgs w name (m :: ms) = refundMsgs (creditLive w name m.sender) name ms from rfl]
+    rw [ih, creditLive_crashed]
+
+theorem refundParked_parent (w : World) (name : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w name ps).st i).parent = (w.st i).parent := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    rw [show refundParked w name (p :: ps) = refundParked (creditLive w name p.msg.sender) name ps from rfl]
+    rw [ih, creditLive_parent]
+
+theorem refundParked_crashed (w : World) (name : String) (ps : List Parked) :
+    (refundParked w name ps).crashed = w.crashed := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    rw [show refundParked w name (p :: ps) = refundParked (creditLive w name p.msg.sender) name ps from rfl]
+    rw [ih, creditLive_crashed]
+
+theorem readCells_parent (D : Description) (w : World) (id i : InstId) :
+    ((readCells D w id).st i).parent = (w.st i).parent :=
+  congrArg (fun a : Actor => a.parent) (cellsSt D w id i)
+
+theorem readCells_crashed (D : Description) (w : World) (id : InstId) :
+    (readCells D w id).crashed = w.crashed := by
+  unfold readCells
+  induction cellLabels D (tname id) generalizing w with
+  | nil => rfl
+  | cons _ _ ih =>
+    simp only [List.foldl_cons]
+    exact ih _
+
+private theorem releaseOutbound_step_parent (w : World) (dead host i : InstId) :
+    ((if host == dead then w
+      else
+        let dropped := (w.st host).parked.filter fun p => p.sender == dead
+        if dropped.isEmpty then w
+        else
+          let w := setActor w host
+            { (w.st host) with parked := (w.st host).parked.filter fun p => p.sender != dead }
+          setActor w dead (addTokens (w.st dead) (tname host) dropped.length)).st i).parent =
+      (w.st i).parent := by
+  by_cases hd : (host == dead) = true
+  · rw [ite_eq_left hd]
+  · rw [ite_eq_right hd]
+    by_cases he : ((w.st host).parked.filter fun p => p.sender == dead).isEmpty = true
+    · rw [ite_eq_left he]
+    · rw [ite_eq_right he]
+      rw [setActor_parent_keep _ dead _ i (addTokens_parent _ _ _)]
+      exact setActor_parent_keep _ host _ i rfl
+
+private theorem releaseOutbound_step_crashed (w : World) (dead host : InstId) :
+    (if host == dead then w
+      else
+        let dropped := (w.st host).parked.filter fun p => p.sender == dead
+        if dropped.isEmpty then w
+        else
+          let w := setActor w host
+            { (w.st host) with parked := (w.st host).parked.filter fun p => p.sender != dead }
+          setActor w dead (addTokens (w.st dead) (tname host) dropped.length)).crashed =
+      w.crashed := by
+  by_cases hd : (host == dead) = true
+  · rw [ite_eq_left hd]
+  · rw [ite_eq_right hd]
+    by_cases he : ((w.st host).parked.filter fun p => p.sender == dead).isEmpty = true
+    · rw [ite_eq_left he]
+    · rw [ite_eq_right he]
+      rw [setActor_crashed, setActor_crashed]
+
+theorem releaseOutbound_parent (w : World) (dead i : InstId) :
+    ((releaseOutbound w dead).st i).parent = (w.st i).parent := by
+  unfold releaseOutbound
+  generalize w.roster = ids
+  induction ids generalizing w with
+  | nil => rfl
+  | cons host ids ih =>
+    simp only [List.foldl_cons]
+    exact (ih _).trans (releaseOutbound_step_parent w dead host i)
+
+theorem releaseOutbound_crashed (w : World) (dead : InstId) :
+    (releaseOutbound w dead).crashed = w.crashed := by
+  unfold releaseOutbound
+  generalize w.roster = ids
+  induction ids generalizing w with
+  | nil => rfl
+  | cons host ids ih =>
+    simp only [List.foldl_cons]
+    exact (ih _).trans (releaseOutbound_step_crashed w dead host)
+
+theorem releaseParked_parent (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
+    ((releaseParked w id ps).st i).parent = (w.st i).parent := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    unfold releaseParked
+    simp only [List.foldl_cons]
+    split
+    · exact ih _
+    · exact (ih _).trans (setActor_parent_keep _ p.sender _ i (resumeSender_parent _ _ _))
+
+theorem releaseParked_crashed (w : World) (id : InstId) (ps : List Parked) :
+    (releaseParked w id ps).crashed = w.crashed := by
+  induction ps generalizing w with
+  | nil => rfl
+  | cons p ps ih =>
+    unfold releaseParked
+    simp only [List.foldl_cons]
+    split
+    · exact ih _
+    · exact (ih _).trans (setActor_crashed _ _ _)
+
+theorem releaseWorld_parent (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId) :
+    ((releaseWorld D w id a).st i).parent = (w.st i).parent := by
+  simp only [releaseWorld]
+  rw [releaseParked_parent, setActor_parent_keep]
+  · rw [releaseOutbound_parent, refundParked_parent, refundMsgs_parent, readCells_parent]
+  · rfl
+
+theorem releaseWorld_crashed (D : Description) (w : World) (id : InstId) (a : Actor) :
+    (releaseWorld D w id a).crashed = w.crashed := by
+  simp only [releaseWorld]
+  rw [releaseParked_crashed, setActor_crashed, releaseOutbound_crashed, refundParked_crashed,
+    refundMsgs_crashed, readCells_crashed]
+
+theorem crashWorld_parent (w : World) (i : InstId) :
+    ((crashWorld w).st i).parent = (w.st i).parent := by
+  simp only [crashWorld]
+  by_cases hm : decide (i ∈ w.roster) = true
+  · simp only [hm, ite_true, crashActor]
+    by_cases ha : ((w.st i).life == .alive) = true
+    · simp [ha]
+    · simp [ha]
+  · simp [hm]
+
+theorem crashWorld_is_crashed (w : World) : (crashWorld w).crashed = true := rfl
+
+theorem offerPrio_parent (D : Description) (w : World) (host : InstId) (msg : Msg) (i : InstId) :
+    ((offerPrio D w host msg).st i).parent = (w.st i).parent := by
+  unfold offerPrio
+  by_cases hfull : decide (prioLoad (w.st host).prio >= capPrio D w.N host) = true
+  · simp only [hfull, ite_true]
+    exact crashWorld_parent w i
+  · have hf : decide (prioLoad (w.st host).prio >= capPrio D w.N host) = false := by
+      simpa [Bool.not_eq_true] using hfull
+    simp only [hf, ite_false]
+    exact setActor_parent_keep _ host _ i rfl
+
+theorem enqueueTombstone_parent (D : Description) (w : World) (child i : InstId) :
+    ((enqueueTombstone D w child).st i).parent = (w.st i).parent := by
+  unfold enqueueTombstone
+  cases hpar : (w.st child).parent with
+  | none => simp [hpar]
+  | some parent =>
+    simp only [hpar]
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · simp [hlive]
+    · have hf : ((w.st parent).life != .alive) = false := by
+        simpa [Bool.not_eq_true] using hlive
+      simp only [hf, ite_false]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true]
+        exact crashWorld_parent w i
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          simpa [Bool.not_eq_true] using hlab
+        simp only [hlabF, ite_false]
+        exact offerPrio_parent D w parent _ i
+
+/-- A tombstone that does not crash leaves every life where it was. -/
+theorem enqueueTombstone_life_stable (D : Description) (w : World) (child i : InstId)
+    (hcr : (enqueueTombstone D w child).crashed = false) :
+    ((enqueueTombstone D w child).st i).life = (w.st i).life := by
+  unfold enqueueTombstone at hcr ⊢
+  cases hpar : (w.st child).parent with
+  | none => simp [hpar]
+  | some parent =>
+    simp only [hpar] at hcr ⊢
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · simp [hlive]
+    · have hf : ((w.st parent).life != .alive) = false := by
+        simpa [Bool.not_eq_true] using hlive
+      simp only [hf, ite_false] at hcr ⊢
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true] at hcr
+        simp [crashWorld_is_crashed] at hcr
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          simpa [Bool.not_eq_true] using hlab
+        simp only [hlabF, ite_false] at hcr ⊢
+        unfold offerPrio at hcr ⊢
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · simp only [hfull, ite_true] at hcr
+          simp [crashWorld_is_crashed] at hcr
+        · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+            simpa [Bool.not_eq_true] using hfull
+          simp only [hroom, ite_false]
+          by_cases hi : i = parent
+          · simp [hi, setActor]
+          · simp [setActor, hi]
+
+theorem sealActor_parent (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId) :
+    ((sealActor D w id a).st i).parent = (w.st i).parent := by
+  unfold sealActor
+  rw [enqueueTombstone_parent, releaseWorld_parent]
+
+theorem shutdownActor_parent (D : Description) (w : World) (id i : InstId) :
+    ((shutdownActor D w id).st i).parent = (w.st i).parent := by
+  unfold shutdownActor
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · simp only [hlive, ite_true]
+    exact sealActor_parent D w id (w.st id) i
+  · simp [hlive]
+
+/-- Shutting one actor down leaves everyone else at the same life, unless the
+tombstone crashes the roster. -/
+theorem shutdownActor_other_life (D : Description) (w : World) (id i : InstId) (hne : i ≠ id)
+    (hcr : (shutdownActor D w id).crashed = false) :
+    ((shutdownActor D w id).st i).life = (w.st i).life := by
+  unfold shutdownActor at hcr ⊢
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · simp only [hlive, ite_true] at hcr ⊢
+    unfold sealActor at hcr ⊢
+    have hrel : ((releaseWorld D w id (w.st id)).st i).life = (w.st i).life :=
+      releaseWorld_other_life D w id (w.st id) i hne
+    rw [enqueueTombstone_life_stable D (releaseWorld D w id (w.st id)) id i hcr, hrel]
+  · simp [hlive]
+
+theorem enqueueTombstone_crashed_back (D : Description) (w : World) (child : InstId)
+    (hcr : (enqueueTombstone D w child).crashed = false) : w.crashed = false := by
+  unfold enqueueTombstone at hcr
+  cases hpar : (w.st child).parent with
+  | none =>
+    simp only [hpar] at hcr
+    exact hcr
+  | some parent =>
+    simp only [hpar] at hcr
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · rw [ite_eq_left hlive] at hcr
+      exact hcr
+    · rw [ite_eq_right hlive] at hcr
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · rw [ite_eq_left hlab] at hcr
+        simp [crashWorld_is_crashed] at hcr
+      · rw [ite_eq_right hlab] at hcr
+        unfold offerPrio at hcr
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · rw [ite_eq_left hfull] at hcr
+          simp [crashWorld_is_crashed] at hcr
+        · rw [ite_eq_right hfull] at hcr
+          rw [setActor_crashed] at hcr
+          exact hcr
+
+theorem shutdownActor_crashed_back (D : Description) (w : World) (id : InstId)
+    (hcr : (shutdownActor D w id).crashed = false) : w.crashed = false := by
+  unfold shutdownActor at hcr
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · rw [ite_eq_left hlive] at hcr
+    unfold sealActor at hcr
+    exact (releaseWorld_crashed D w id (w.st id)).symm.trans
+      (enqueueTombstone_crashed_back D (releaseWorld D w id (w.st id)) id hcr)
+  · rw [ite_eq_right hlive] at hcr
+    exact hcr
+
+theorem isChild_parents {w w' : World} (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (parent child : InstId) : isChild w' parent child = isChild w parent child := by
+  simp [isChild, hp]
+
+/-- Sealing a branch keeps parent links and the crash flag, and it changes a
+life only for the sealed actor or one of its strict descendants. -/
+theorem sealBranch_stable (fuel : Nat) (D : Description) :
+    ∀ (root : InstId) (w : World),
+      (∀ i, ((sealBranch fuel D w root).st i).parent = (w.st i).parent) ∧
+      (sealBranch fuel D w root).crashed = w.crashed ∧
+      ∀ id, ((sealBranch fuel D w root).st id).life = (w.st id).life ∨
+        id = root ∨ StrictAncestor w id root := by
+  induction fuel with
+  | zero =>
+    intro root w
+    refine ⟨fun _ => rfl, rfl, fun _ => Or.inl rfl⟩
+  | succ fuel ih =>
+    intro root w
+    simp only [sealBranch]
+    let step (w0 : World) (child : InstId) : World :=
+      if isChild w0 root child then sealBranch fuel D w0 child else w0
+    have hfold : ∀ (ids : List InstId) (w0 : World),
+        (∀ i, (w0.st i).parent = (w.st i).parent) →
+        w0.crashed = w.crashed →
+        (∀ id, (w0.st id).life = (w.st id).life ∨ id = root ∨ StrictAncestor w id root) →
+        (∀ i, ((ids.foldl step w0).st i).parent = (w.st i).parent) ∧
+        (ids.foldl step w0).crashed = w.crashed ∧
+        ∀ id, ((ids.foldl step w0).st id).life = (w.st id).life ∨
+          id = root ∨ StrictAncestor w id root := by
+      intro ids
+      induction ids with
+      | nil =>
+        intro w0 hp hc hl
+        exact ⟨hp, hc, hl⟩
+      | cons child ids ihids =>
+        intro w0 hp hc hl
+        simp only [List.foldl_cons, step]
+        by_cases hch : isChild w0 root child = true
+        · simp only [hch, ite_true]
+          have hch0 : isChild w root child = true := by
+            rw [← isChild_parents hp, hch]
+          have ihc := ih child w0
+          have hp1 : ∀ i, ((sealBranch fuel D w0 child).st i).parent = (w.st i).parent := by
+            intro i
+            rw [ihc.1 i, hp i]
+          have hc1 : (sealBranch fuel D w0 child).crashed = w.crashed := by
+            rw [ihc.2.1, hc]
+          have hl1 : ∀ id, ((sealBranch fuel D w0 child).st id).life = (w.st id).life ∨
+              id = root ∨ StrictAncestor w id root := by
+            intro id
+            rcases ihc.2.2 id with heq | hid | hanc
+            · rcases hl id with h0 | hroot | hanc0
+              · exact Or.inl (heq.trans h0)
+              · exact Or.inr (Or.inl hroot)
+              · exact Or.inr (Or.inr hanc0)
+            · exact Or.inr (Or.inr (by
+                rw [hid]
+                exact StrictAncestor.edge (isChild_edge w root child hch0)))
+            · exact Or.inr (Or.inr
+                (StrictAncestor.trans (StrictAncestor.parents (fun i => (hp i).symm) hanc)
+                  (StrictAncestor.edge (isChild_edge w root child hch0))))
+          exact ihids _ hp1 hc1 hl1
+        · have hf : isChild w0 root child = false := by
+            cases hb : isChild w0 root child with
+            | false => rfl
+            | true => exact absurd hb hch
+          simp only [hf, ite_false]
+          exact ihids w0 hp hc hl
+    have hsealed := hfold w.roster w (fun _ => rfl) rfl (fun _ => Or.inl rfl)
+    let sealed := w.roster.foldl step w
+    have hsealed_id : sealed = w.roster.foldl step w := rfl
+    split
+    · next hgo =>
+      refine ⟨?_, ?_, ?_⟩
+      · intro i
+        rw [releaseWorld_parent, hsealed.1 i]
+      · rw [releaseWorld_crashed, hsealed.2.1]
+      · intro id
+        by_cases hid : id = root
+        · exact Or.inr (Or.inl hid)
+        · have hlife := releaseWorld_other_life D sealed root (sealed.st root) id hid
+          rcases hsealed.2.2 id with heq | hroot | hanc
+          · exact Or.inl (hlife.trans heq)
+          · exact Or.inr (Or.inl hroot)
+          · exact Or.inr (Or.inr hanc)
+    · next hgo =>
+      exact hsealed
+
+theorem dropDescendants_stable (D : Description) (w : World) (root : InstId) :
+    (∀ i, ((dropDescendants D w root).st i).parent = (w.st i).parent) ∧
+    (dropDescendants D w root).crashed = w.crashed ∧
+    ∀ id, ((dropDescendants D w root).st id).life = (w.st id).life ∨
+      StrictAncestor w id root := by
+  unfold dropDescendants
+  have hfold : ∀ (ids : List InstId) (w0 : World),
+      (∀ i, (w0.st i).parent = (w.st i).parent) →
+      w0.crashed = w.crashed →
+      (∀ id, (w0.st id).life = (w.st id).life ∨ StrictAncestor w id root) →
+      (∀ i, ((ids.foldl (fun acc child =>
+        if isChild acc root child then sealBranch w.roster.length D acc child else acc) w0).st i).parent =
+          (w.st i).parent) ∧
+      (ids.foldl (fun acc child =>
+        if isChild acc root child then sealBranch w.roster.length D acc child else acc) w0).crashed =
+        w.crashed ∧
+      ∀ id, ((ids.foldl (fun acc child =>
+        if isChild acc root child then sealBranch w.roster.length D acc child else acc) w0).st id).life =
+          (w.st id).life ∨ StrictAncestor w id root := by
+    intro ids
+    induction ids with
+    | nil =>
+      intro w0 hp hc hl
+      exact ⟨hp, hc, hl⟩
+    | cons child ids ih =>
+      intro w0 hp hc hl
+      simp only [List.foldl_cons]
+      by_cases hch : isChild w0 root child = true
+      · simp only [hch, ite_true]
+        have hch0 : isChild w root child = true := by rw [← isChild_parents hp, hch]
+        have ihc := sealBranch_stable w.roster.length D child w0
+        have hp1 : ∀ i, ((sealBranch w.roster.length D w0 child).st i).parent = (w.st i).parent :=
+          fun i => (ihc.1 i).trans (hp i)
+        have hc1 : (sealBranch w.roster.length D w0 child).crashed = w.crashed :=
+          (ihc.2.1).trans hc
+        have hl1 : ∀ id, ((sealBranch w.roster.length D w0 child).st id).life = (w.st id).life ∨
+            StrictAncestor w id root := by
+          intro id
+          rcases ihc.2.2 id with heq | hid | hanc
+          · rcases hl id with h0 | hanc0
+            · exact Or.inl (heq.trans h0)
+            · exact Or.inr hanc0
+          · exact Or.inr (by
+              rw [hid]
+              exact StrictAncestor.edge (isChild_edge w root child hch0))
+          · exact Or.inr (StrictAncestor.trans
+              (StrictAncestor.parents (fun i => (hp i).symm) hanc)
+              (StrictAncestor.edge (isChild_edge w root child hch0)))
+        exact ih _ hp1 hc1 hl1
+      · have hf : isChild w0 root child = false := by
+          cases hb : isChild w0 root child with
+          | false => rfl
+          | true => exact absurd hb hch
+        simp only [hf, ite_false]
+        exact ih w0 hp hc hl
+  exact hfold w.roster w (fun _ => rfl) rfl (fun _ => Or.inl rfl)
+
+theorem abortChildren_parent (D : Description) (w : World) (parent i : InstId) :
+    ((abortChildren D w parent).st i).parent = (w.st i).parent := by
+  unfold abortChildren
+  have hfold : ∀ (ids : List InstId) (w0 : World),
+      (∀ j, (w0.st j).parent = (w.st j).parent) →
+      ∀ j, ((ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor D (dropDescendants D w child) child
+        else w) w0).st j).parent = (w.st j).parent := by
+    intro ids
+    induction ids with
+    | nil => intro w0 hp j; exact hp j
+    | cons child ids ih =>
+      intro w0 hp j
+      simp only [List.foldl_cons]
+      by_cases hc : (isChild w0 parent child && (w0.st child).life == .alive) = true
+      · simp only [hc, ite_true]
+        have hdrop := dropDescendants_stable D w0 child
+        exact ih _ (fun k => (shutdownActor_parent D _ child k).trans ((hdrop.1 k).trans (hp k))) j
+      · have hf : (isChild w0 parent child && (w0.st child).life == .alive) = false := by
+          cases hb : isChild w0 parent child && (w0.st child).life == .alive with
+          | false => rfl
+          | true => exact absurd hb hc
+        simp only [hf, ite_false]
+        exact ih w0 hp j
+  exact hfold w.roster w (fun _ => rfl) i
+
+/-- Aborting under a forest leaves the parent alive unless the enqueue crashes
+the roster. A child cannot seal the parent: that would make the parent its own
+ancestor. -/
+theorem abort_parent_alive (D : Description) (w : World) (parent : InstId)
+    (hacy : ParentAcyclic w) (hlive : (w.st parent).life = .alive)
+    (hcr : (abortChildren D w parent).crashed = false) :
+    ((abortChildren D w parent).st parent).life = .alive := by
+  unfold abortChildren at hcr ⊢
+  have hfold : ∀ (ids : List InstId) (w0 : World),
+      ParentAcyclic w0 → (w0.st parent).life = .alive →
+      ((ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor D (dropDescendants D w child) child
+        else w) w0).crashed = false) →
+      ((ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor D (dropDescendants D w child) child
+        else w) w0).st parent).life = .alive := by
+    intro ids
+    induction ids with
+    | nil =>
+      intro w0 _ hlive0 _
+      exact hlive0
+    | cons child ids ih =>
+      intro w0 hacy0 hlive0 hcr0
+      simp only [List.foldl_cons] at hcr0 ⊢
+      by_cases hc : (isChild w0 parent child && (w0.st child).life == .alive) = true
+      · simp only [hc, ite_true] at hcr0 ⊢
+        have hparts := (Bool.and_eq_true _ _).mp hc
+        have hchild : isChild w0 parent child = true := hparts.1
+        have hne : child ≠ parent := (isChild_edge w0 parent child hchild).2
+        have hdrop := dropDescendants_stable D w0 child
+        let w1 := dropDescendants D w0 child
+        have hsh : (shutdownActor D w1 child).crashed = false := by
+          -- The tail fold does not clear a crash, so a clear result started clear.
+          revert hcr0
+          generalize hW : shutdownActor D w1 child = wS
+          intro hcr0
+          have hback : ∀ (ids : List InstId) (acc : World),
+              ((ids.foldl (fun w c =>
+                if isChild w parent c && (w.st c).life == .alive then
+                  shutdownActor D (dropDescendants D w c) c else w) acc).crashed = false) →
+              acc.crashed = false := by
+            intro ids
+            induction ids with
+            | nil => intro acc h; exact h
+            | cons c cs ihc =>
+              intro acc h
+              simp only [List.foldl_cons] at h
+              by_cases hcc : (isChild acc parent c && (acc.st c).life == .alive) = true
+              · simp only [hcc, ite_true] at h
+                have hshut : (shutdownActor D (dropDescendants D acc c) c).crashed = false := ihc _ h
+                have hd := dropDescendants_stable D acc c
+                have hdropCr := shutdownActor_crashed_back D (dropDescendants D acc c) c hshut
+                rw [hd.2.1] at hdropCr
+                exact hdropCr
+              · have hf : (isChild acc parent c && (acc.st c).life == .alive) = false := by
+                  cases hb : isChild acc parent c && (acc.st c).life == .alive with
+                  | false => rfl
+                  | true => exact absurd hb hcc
+                simp only [hf, ite_false] at h
+                exact ihc acc h
+          exact hback ids wS (by simpa [hW] using hcr0)
+        have hlife1 : (w1.st parent).life = .alive := by
+          rcases hdrop.2.2 parent with heq | hanc
+          · rw [heq]; exact hlive0
+          · exact absurd (StrictAncestor.trans hanc (StrictAncestor.edge (isChild_edge w0 parent child hchild)))
+              (ParentAcyclic.no_self hacy0 parent)
+        have hlife2 : ((shutdownActor D w1 child).st parent).life = .alive := by
+          rw [shutdownActor_other_life D w1 child parent (Ne.symm hne) hsh]
+          exact hlife1
+        have hacy2 : ParentAcyclic (shutdownActor D w1 child) := by
+          apply parentAcyclic_parents (w' := shutdownActor D w1 child) _ hacy0
+          intro j
+          rw [shutdownActor_parent, hdrop.1 j]
+        exact ih _ hacy2 hlife2 hcr0
+      · have hf : (isChild w0 parent child && (w0.st child).life == .alive) = false := by
+          cases hb : isChild w0 parent child && (w0.st child).life == .alive with
+          | false => rfl
+          | true => exact absurd hb hc
+        simp only [hf, ite_false] at hcr0 ⊢
+        exact ih w0 hacy0 hlive0 hcr0
+  exact hfold w.roster w hacy hlive hcr
 
 theorem spawnChild_core_life (I : Impl) (w w' : World) (parent : InstId) (child name : String)
     (h : spawnChild I w parent child = some w') :

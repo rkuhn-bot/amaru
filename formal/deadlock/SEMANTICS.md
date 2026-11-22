@@ -175,6 +175,14 @@ crashed phase and does not take the continuation. The same guard is the
 continuation of `spawn`. A crash that is itself the effect, with no later
 continuation, is unchanged.
 
+A reachable world's parent links are a forest. No actor is its own strict
+ancestor, an actor off the roster records no parent, and every recorded
+parent is on the roster. The initial world has no parent links. `spawn` is
+the only step that adds one, from a fresh id to a parent already on the
+roster. A parent pointer cycle is not a reachable world. `abort` on a
+forest does not seal the actor that is running it, unless the tombstone
+enqueue crashes the roster.
+
 `releaseWorld` is `readCells`, `refundMsgs` (`creditLive`), `refundParked`,
 `releaseOutbound`, the dead empty actor, and `releaseParked` for non-call
 parked senders. `markShutdown` is not a step. A crashed world has

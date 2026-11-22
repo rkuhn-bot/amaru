@@ -583,7 +583,9 @@ the parent is dead, `.crashed`, and not in `.run`.
 
 ## 2026-11-22 — A parent cycle still continues
 
-The guard above stops only when the effect world is crashed. A parent
+Superseded by the 2026-11-22 07:01 entry. Kept as the record of the step
+`Deadlock/ParentCycle.lean` reduces. The guard above stops only when the
+effect world is crashed. A parent
 pointer cycle is not a crash. `R` parents `C` and `C` parents `R`, both
 alive, and `R` runs `.abort`. `abortChildren` seals `C`, and sealing `C`
 seals `R` as its descendant, through `releaseWorld`, so `R` is dead and
@@ -595,3 +597,18 @@ crashed, the parent is dead, and its phase is `.run` of `.internal`.
 `idleOff` rejects that phase, so the post-state is not a `SemInv`.
 `exec_run_inv` is false for this world. No further change to the step
 relation was made.
+
+## 2026-11-22 — A reachable parent link is a forest
+
+Roland, 2026-11-22 07:01 CET. Parent acyclicity is a reachable invariant,
+not a change to the step. `ParentForest` is a conjunct of `Inv`: the parent
+relation is well-founded, an actor off the roster has no parent, and every
+recorded parent is on the roster. No actor is its own strict ancestor.
+`spawn` is the only step that adds a link, and it adds one from a fresh id
+to a parent already on the roster. The initial world has no parent links.
+
+`Deadlock/ParentCycle.lean` is the cycle the step still reduces. Its
+pre-state is a `SemInv` and a `MailInv`, and it is not `ParentAcyclic`, so
+it is not a reachable `Inv`. On a forest, the actor running `abort` is not
+a descendant of its own child, so it stays alive through `abortChildren`
+unless the enqueue crashes, where `commitCont` returns that crashed world.
