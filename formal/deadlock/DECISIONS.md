@@ -662,3 +662,15 @@ the live generation's tokens are the rest of the same equation. The sum
 over a pool's keys is not bounded by `capBulk`. `enqueueOrPark` parks when
 the box is full; that branch is reachable, and the occupancy proof has to
 follow it.
+
+## 2026-11-22 — A delivery reserves the checked path
+
+`sendsOk` does not compare `sendsTo` of the main tail plus `floor(toState)`
+with `floor(fromState)`. It checks `pathReserve` of the transition, the
+maximum of `sends + floor(landing)` over the reply and every outcome branch,
+against the floor of `fromState`. Delivering a priority message leaves the
+receiver idle at `toState`, or running that program. In both cases the new
+`tokenHold` is that `pathReserve`, and the tokens do not move. The slack
+bound is the inequality the checker already proved. A name with no template
+has floor 0, and a checked program has no edge there, so its reserve is 0
+as well.

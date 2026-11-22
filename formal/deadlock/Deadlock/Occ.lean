@@ -3510,21 +3510,22 @@ theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (_h
   | crashed => simp [finishWait, hph] at h
 
 theorem occ_same (I : Impl) (w w' : World) (hO : OccInv I w) (hst : ∀ i, w'.st i = w.st i)
-    (hr : w'.roster = w.roster) (hN : w'.N = w.N) (hix : ∀ n, w'.nextIx n = w.nextIx n) :
-    OccInv I w' := by
+    (hr : w'.roster = w.roster) (hN : w'.N = w.N) (_hix : ∀ n, w'.nextIx n = w.nextIx n)
+    (hcr : w'.crashed = w.crashed) : OccInv I w' := by
   have hq : ∀ i ∈ w'.roster, (w'.st i).box = (w.st i).box ∧ (w'.st i).parked = (w.st i).parked := by
     intro i _
     rw [hst]
     exact ⟨rfl, rfl⟩
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hr]; exact hO.nodup
   · intro id hl
     rw [hst] at hl
     rw [hr]
     exact hO.aliveIn id hl
-  · intro template i hi
-    rw [hix]
-    exact hO.indexed template i (by rw [hr] at hi; exact hi)
+  · intro nm k g1 g2 ha hb hla hlb
+    apply hO.indexed nm k g1 g2 (by rw [hr] at ha; exact ha) (by rw [hr] at hb; exact hb)
+    · simpa [hst] using hla
+    · simpa [hst] using hlb
   · intro template ht
     have hc : aliveCount w' template = aliveCount w template := by
       rw [aliveCount_sum, aliveCount_sum, hr]
@@ -3557,38 +3558,59 @@ theorem occ_same (I : Impl) (w w' : World) (hO : OccInv I w) (hst : ∀ i, w'.st
   · intro id p hp
     rw [hst] at hp
     exact hO.parkMsg id p hp
-  · intro s d hs
-    have howed := owed_mail_eq w'.st w.st d s w'.roster hq
-    rw [howed, hr, hst]
-    exact hO.balance s d (by rw [← hr]; exact hs)
-  · intro s d hs hl
+  · refine ⟨⟨?_, ?_⟩, ?_⟩
+    · intro nm k live d hfind
+      have hfind0 : findLive w nm k = some live := by
+        simpa [findLive, hr, hst] using hfind
+      have hbal := hO.balance.1.1 nm k live d hfind0
+      have htok : (w'.st live).tokens d = (w.st live).tokens d := by simp [hst]
+      have hqk : queuedFromKey w' nm k d = queuedFromKey w nm k d := by
+        simp [queuedFromKey, hr, hst]
+      rw [htok, hqk]
+      exact hbal
+    · intro nm d hl hmem
+      have hl0 : (w.st (.core nm)).life = .alive := by simpa [hst] using hl
+      have hmem0 : InstId.core nm ∈ w.roster := by rw [← hr]; exact hmem
+      have hbal := hO.balance.1.2 nm d hl0 hmem0
+      have htok : (w'.st (.core nm)).tokens d = (w.st (.core nm)).tokens d := by simp [hst]
+      have howed := owed_mail_eq w'.st w.st d (.core nm) w'.roster hq
+      rw [htok, howed, hr]
+      exact hbal
+    · intro nm k d hnone
+      have hnone0 : findLive w nm k = none := by
+        simpa [findLive, hr, hst] using hnone
+      have hbal := hO.balance.2 nm k d hnone0
+      have hqk : queuedFromKey w' nm k d = queuedFromKey w nm k d := by
+        simp [queuedFromKey, hr, hst]
+      rw [hqk]
+      exact hbal
+  · intro s d hl
     rw [hst] at hl ⊢
-    exact hO.slack s d (by rw [← hr]; exact hs) hl
+    exact hO.slack s d hl
   · intro s d hs hterm
     have howed := owed_mail_eq w'.st w.st d s w'.roster hq
     rw [howed, hr]
     exact hO.still s d (by rw [← hr]; exact hs) hterm
-  · intro s d hs hdead
+  · intro hcrash s d hs hdead
+    have hc : w.crashed = false := hcr.symm.trans hcrash
     have howed := owed_mail_eq w'.st w.st d s w'.roster hq
-    rw [hst] at hdead
+    have hdead0 : (w.st s).life ≠ .alive := by simpa [hst] using hdead
     rw [howed, hr]
-    exact hO.quiet s d (by rw [← hr]; exact hs) hdead
-  · intro id hl1
-    rw [hst]
-    exact hO.clear id hl1
-  · intro id hdead
+    exact hO.quiet hc s d (by rw [← hr]; exact hs) hdead0
+  · intro hcrash i hdead
+    have hc : w.crashed = false := hcr.symm.trans hcrash
     rw [hst] at hdead ⊢
-    exact hO.deadEmpty id hdead
+    exact hO.deadEmpty hc i hdead
   · intro host
     refine ⟨?_, ?_⟩
     · intro m hm
       rw [hst] at hm
-      have hmem := (hO.sameKey host).1 m hm
-      exact (queueOk_life w w' m.sender host (by rw [hst])).1 hmem
+      unfold queueOk
+      exact (hO.sameKey host).1 m hm
     · intro p hp
       rw [hst] at hp
-      have hmem := (hO.sameKey host).2 p hp
-      exact (queueOk_life w w' p.sender host (by rw [hst])).1 hmem
+      unfold queueOk
+      exact (hO.sameKey host).2 p hp
   · intro i hi
     exact hO.shaped i (by rw [← hr]; exact hi)
   · intro host hk
@@ -3600,35 +3622,39 @@ theorem occ_same (I : Impl) (w w' : World) (hO : OccInv I w) (hst : ∀ i, w'.st
       rw [hst] at hp
       exact (hO.coreFrom host hk).2 p hp
 
-theorem deliver_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
-    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : w1.roster = w.roster := by
+
+theorem deliver_base (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : w1 = readCells I.desc w id := by
   simp only [deliver] at h
   split at h
   · cases h
   · split at h
+    · cases h
+      rfl
     · split at h
-      · cases h
-      · cases h
-        exact readCells_roster I.desc w id
-    · split at h
-      · cases h
-      · cases h
-        exact readCells_roster I.desc w id
+      · split at h
+        · cases h
+        · cases h
+          rfl
+      · split at h
+        · cases h
+        · cases h
+          rfl
+
+theorem deliver_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : w1.roster = w.roster := by
+  rw [deliver_base I w id a m w1 a1 h]
+  exact readCells_roster I.desc w id
 
 theorem deliver_N (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
     (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : w1.N = w.N := by
-  simp only [deliver] at h
-  split at h
-  · cases h
-  · split at h
-    · split at h
-      · cases h
-      · cases h
-        exact readCells_N I.desc w id
-    · split at h
-      · cases h
-      · cases h
-        exact readCells_N I.desc w id
+  rw [deliver_base I w id a m w1 a1 h]
+  exact readCells_N I.desc w id
+
+theorem deliver_crashed (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
+    (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) : w1.crashed = w.crashed := by
+  rw [deliver_base I w id a m w1 a1 h]
+  exact readCells_crashed I.desc w id
 
 theorem findSome_name (xs : List Template) (name : String) (t : Template)
     (h : xs.findSome? (fun u => if u.name == name then some u else none) = some t) : t.name = name := by
@@ -3745,185 +3771,208 @@ theorem floor_unknown (D : Description) (hG : GraphOk D) (template state dst : S
   simp [floorState, hbud, hdebt]
 
 theorem tr_prog (I : Impl) (hL : LocalOk I) (tr : Transition) (hm : tr ∈ I.transitions) :
-    sendsOk I.desc tr.template tr.fromState tr.toState tr.program = true ∧
-      effectsOk I.desc tr.template tr.toState tr.program = true := by
+    sendsOk I.desc tr.template tr = true ∧
+      effectsOk I.desc tr.template (branchAt tr) tr.program = true := by
   have hok := transitionOk_of_mem I hL tr hm
   unfold transitionOk at hok
   cases ht : templateOf I.desc tr.template with
   | none => simp [ht] at hok
   | some _ =>
-    simp only [ht] at hok
-    rw [Bool.and_eq_true] at hok; replace hok := hok.1
-    rw [Bool.and_eq_true] at hok; replace hok := hok.1
-    rw [Bool.and_eq_true] at hok; replace hok := hok.1
-    rw [Bool.and_eq_true] at hok; replace hok := hok.1
-    rw [Bool.and_eq_true] at hok
-    have heff := hok.2
-    replace hok := hok.1
-    rw [Bool.and_eq_true] at hok
-    exact ⟨hok.2, heff⟩
+    simp only [transitionOk, ht, Bool.and_eq_true] at hok
+    exact ⟨hok.1.1.1.1.1.1.2, hok.1.1.1.1.1.2⟩
 
-theorem sends_named (D : Description) (template fromState toState : String) (prog : List Eff) (dst : String)
-    (t : Template) (h : sendsOk D template fromState toState prog = true)
-    (ht : templateOf D dst = some t) :
-    sendsTo dst prog + floorState D template toState dst ≤ floorState D template fromState dst := by
+theorem reserve_named (D : Description) (tr : Transition) (dst : String) (t : Template)
+    (h : sendsOk D tr.template tr = true) (ht : templateOf D dst = some t) :
+    pathReserve D tr.template dst (branchAt tr) tr.program ≤
+      floorState D tr.template tr.fromState dst := by
   have hname := templateOf_name D dst t ht
   unfold sendsOk at h
   have hmem := template_mem D dst t ht
   have hall := (List.all_eq_true _ _).mp h t hmem
   simpa [hname] using hall
 
-theorem sends_outside (D : Description) (template state dst : String) (es : List Eff)
-    (hok : effectsOk D template state es = true) (hno : ∀ e ∈ D.edges, e.dst ≠ dst) : sendsTo dst es = 0 := by
-  induction es with
-  | nil => rfl
-  | cons e es ih =>
-    cases e with
-    | send d label n =>
-      simp [effectsOk, sendsTo, Bool.and_eq_true] at hok ⊢
-      have ⟨edge, he, hsrc, hss, hdst, _, _, _⟩ :=
-        hasEdge_mem D template state d .send .blocking label hok.1
-      have hne : d ≠ dst := by
-        intro heq
-        exact hno edge he (by rw [← heq]; exact hdst)
-      have hb : (d == dst) = false := by
-        cases hbb : d == dst with
-        | false => rfl
-        | true => exact absurd ((beq_iff_eq).mp hbb) hne
-      simp [hne]
-      exact ih hok.2
-    | trySend d label n _ _ =>
-      simp [effectsOk, sendsTo, Bool.and_eq_true] at hok ⊢
-      have ⟨edge, he, _, _, hdst, _, _, _⟩ :=
-        hasEdge_mem D template state d .trySend .nonBlocking label hok.1.1
-      have hne : d ≠ dst := fun heq => hno edge he (by rw [← heq]; exact hdst)
-      have hb : (d == dst) = false := by
-        cases hbb : d == dst with
-        | false => rfl
-        | true => exact absurd ((beq_iff_eq).mp hbb) hne
-      simp [hne]
-      exact ih hok.2
-    | call d label n _ _ =>
-      simp [effectsOk, sendsTo, Bool.and_eq_true] at hok ⊢
-      have ⟨edge, he, _, _, hdst, _, _, _⟩ :=
-        hasEdge_mem D template state d .call .blocking label hok.1
-      have hne : d ≠ dst := fun heq => hno edge he (by rw [← heq]; exact hdst)
-      have hb : (d == dst) = false := by
-        cases hbb : d == dst with
-        | false => rfl
-        | true => exact absurd ((beq_iff_eq).mp hbb) hne
-      simp [hne]
-      exact ih hok.2
-    | cell _ _ _ =>
-      simp [effectsOk, sendsTo, Bool.and_eq_true] at hok
-      exact ih hok.2
-    | _ =>
-      simp [effectsOk, sendsTo] at hok ⊢
-      exact ih hok
+private def nestSize : List Eff → Nat
+  | [] => 0
+  | .trySend _ _ _ f g :: es => 1 + nestSize f + nestSize g + nestSize es
+  | .call _ _ _ a b :: es => 1 + nestSize a + nestSize b + nestSize es
+  | .peer o :: es => 1 + nestSize o + nestSize es
+  | _ :: es => 1 + nestSize es
 
-theorem send_budget (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (tr : Transition)
+theorem pathReserve_unknown (D : Description) (hG : GraphOk D) (template dst : String)
+    (at_ : BranchAt) (es : List Eff) (hok : effectsOk D template at_ es = true)
+    (hdst : templateOf D dst = none) : pathReserve D template dst at_ es = 0 := by
+  match es with
+  | [] =>
+    simpa [pathReserve, landFloor, floorState] using floor_unknown D hG template at_.here dst hdst
+  | .send d label n :: es =>
+    obtain ⟨hedge, htail⟩ := head_send D template d label at_ n es hok
+    obtain ⟨edge, he, _, _, hd, _, _, _⟩ :=
+      hasEdge_mem D template at_.here d .send .blocking label hedge
+    have hne : d ≠ dst := fun heq => no_edge_unknown D hG dst hdst edge he (heq ▸ hd)
+    have hb : (d == dst) = false := by
+      cases hbb : d == dst with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hbb) hne
+    have htail0 := pathReserve_unknown D hG template dst at_ es htail hdst
+    simp [pathReserve, effReserve, hb, htail0]
+  | .trySend d label n onFull onGone :: es =>
+    have hsplit := by
+      simp only [effectsOk, effectOk, Bool.and_eq_true] at hok
+      exact hok
+    obtain ⟨edge, he, _, _, hd, _, _, _⟩ :=
+      hasEdge_mem D template at_.here d .trySend .nonBlocking label hsplit.1.1.1.1
+    have hne : d ≠ dst := fun heq => no_edge_unknown D hG dst hdst edge he (heq ▸ hd)
+    have hb : (d == dst) = false := by
+      cases hbb : d == dst with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hbb) hne
+    have hfull0 := pathReserve_unknown D hG template dst (focus at_ at_.full) onFull hsplit.1.1.2 hdst
+    have hgone0 := pathReserve_unknown D hG template dst (focus at_ at_.gone) onGone hsplit.1.2 hdst
+    have htail0 := pathReserve_unknown D hG template dst at_ es hsplit.2 hdst
+    simp [pathReserve, effReserve, hb, hfull0, hgone0, htail0]
+  | .call d label n onNotAdmitted onTimedOut :: es =>
+    obtain ⟨hedge, hna, hto, htail⟩ := head_call D template d label at_ n onNotAdmitted onTimedOut es hok
+    obtain ⟨edge, he, _, _, hd, _, _, _⟩ :=
+      hasEdge_mem D template at_.here d .call .blocking label hedge
+    have hne : d ≠ dst := fun heq => no_edge_unknown D hG dst hdst edge he (heq ▸ hd)
+    have hb : (d == dst) = false := by
+      cases hbb : d == dst with
+      | false => rfl
+      | true => exact absurd ((beq_iff_eq).mp hbb) hne
+    have hna0 :=
+      pathReserve_unknown D hG template dst (focus at_ at_.notAdmitted) onNotAdmitted hna hdst
+    have hto0 := pathReserve_unknown D hG template dst (focus at_ at_.timedOut) onTimedOut hto hdst
+    have htail0 := pathReserve_unknown D hG template dst at_ es htail hdst
+    simp [pathReserve, effReserve, hb, hna0, hto0, htail0]
+  | .peer onTimeout :: es =>
+    obtain ⟨hto, htail⟩ := head_peer D template at_ onTimeout es hok
+    have hto0 := pathReserve_unknown D hG template dst (focus at_ at_.timeout) onTimeout hto hdst
+    have htail0 := pathReserve_unknown D hG template dst at_ es htail hdst
+    simp [pathReserve, effReserve, hto0, htail0]
+  | .cell d label value :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ (.cell d label value) es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+  | .reply :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ .reply es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+  | .selfSchedule label :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ (.selfSchedule label) es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+  | .internal :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ .internal es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+  | .abort :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ .abort es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+  | .terminate :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ .terminate es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+  | .spawn child :: es =>
+    have htail0 := pathReserve_unknown D hG template dst at_ es
+      (head_rest D template at_ (.spawn child) es hok) hdst
+    simp [pathReserve, effReserve, htail0]
+termination_by nestSize es
+decreasing_by
+  all_goals simp [nestSize]
+  all_goals omega
+
+theorem reserve_le (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (tr : Transition)
     (hm : tr ∈ I.transitions) (dst : String) :
-    sendsTo dst tr.program + floorState I.desc tr.template tr.toState dst ≤
+    pathReserve I.desc tr.template dst (branchAt tr) tr.program ≤
       floorState I.desc tr.template tr.fromState dst := by
   obtain ⟨hs, he⟩ := tr_prog I hL tr hm
-  cases hd : templateOf I.desc dst with
-  | some t => exact sends_named I.desc tr.template tr.fromState tr.toState tr.program dst t hs hd
+  cases ht : templateOf I.desc dst with
+  | some t => exact reserve_named I.desc tr dst t hs ht
   | none =>
-    have hz := sends_outside I.desc tr.template tr.toState dst tr.program he
-      (fun e hee => no_edge_unknown I.desc hG dst hd e hee)
-    have hto := floor_unknown I.desc hG tr.template tr.toState dst hd
-    have hfrom := floor_unknown I.desc hG tr.template tr.fromState dst hd
-    simp [hz, hto, hfrom]
+    have hz := pathReserve_unknown I.desc hG tr.template dst (branchAt tr) tr.program he ht
+    have hfrom := floor_unknown I.desc hG tr.template tr.fromState dst ht
+    simp [hz, hfrom]
 
 theorem deliver_account (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
     (a : Actor) (m : Msg) (w1 : World) (a1 : Actor) (halive : a.life = .alive) (hph : a.phase = .idle)
     (h : deliver I w id a m = some (w1, a1)) :
     a1.life = a.life ∧ a1.box = a.box ∧ a1.parked = a.parked ∧ (∀ d, a1.tokens d = a.tokens d) ∧
-      ∀ d, floorState I.desc (tname id) a1.typestate d + pending a1 d ≤
-        floorState I.desc (tname id) a.typestate d := by
+      ∀ d, tokenHold I.desc (tname id) d a1 ≤ tokenHold I.desc (tname id) d a := by
   unfold deliver at h
-  simp [halive] at h
-  cases hf : findTr I (tname id) a.typestate m.label with
-  | none =>
-    by_cases hc : m.callFrom.isSome = true
-    · simp [hf, hc] at h
-    · have hc' : m.callFrom.isSome = false := by
-        cases hsome : m.callFrom.isSome
-        · rfl
-        · exact False.elim (hc hsome)
-      simp [hf, hc'] at h
-      rcases h with ⟨rfl, rfl⟩
-      refine ⟨halive.symm, rfl, rfl, fun _ => rfl, ?_⟩
+  dsimp only at h
+  split at h
+  · cases h
+  · split at h
+    · injection h with hpair
+      cases hpair
+      refine ⟨rfl, rfl, rfl, fun _ => rfl, ?_⟩
       intro d
-      simp [pending, contRest, hph, sendsTo]
-  | some tr =>
-    simp only [hf] at h
-    by_cases href : m.callFrom.isSome = true ∧ tr.acceptsCall = false
-    · rw [ite_eq_left href] at h
-      cases h
-    · rw [ite_eq_right href] at h
-      have hmem := findTr_mem I (tname id) a.typestate m.label tr hf
-      have hbud := send_budget I hL hG tr hmem.1
-      cases hp : tr.program with
-      | nil =>
-        simp [hp, List.isEmpty_nil] at h
-        rcases h with ⟨rfl, rfl⟩
-        refine ⟨halive.symm, rfl, rfl, fun _ => rfl, ?_⟩
-        intro d
-        have hb := hbud d
-        simp [hp, sendsTo, Nat.zero_add, pending, contRest, hmem.2.1, hmem.2.2.1] at hb ⊢
-        exact hb
-      | cons e es =>
-        simp [hp, List.isEmpty_cons] at h
-        rcases h with ⟨rfl, rfl⟩
-        refine ⟨halive.symm, rfl, rfl, fun _ => rfl, ?_⟩
-        intro d
-        have hb := hbud d
-        simp [Nat.add_comm, hmem.2.1, hmem.2.2.1, hp] at hb
-        exact hb
+      simp [tokenHold, hph]
+    · split at h
+      · split at h
+        · cases h
+        · injection h with hpair
+          cases hpair
+          refine ⟨rfl, rfl, rfl, fun _ => rfl, ?_⟩
+          intro d
+          simp [tokenHold, hph]
+      · split at h
+        · cases h
+        · rename_i tr hfind _
+          injection h with hpair
+          cases hpair
+          have hmem := findDeliver_mem I (tname id) a.typestate m tr hfind
+          refine ⟨?_, ?_, ?_, ?_, ?_⟩
+          · cases hp : tr.program.isEmpty <;> simp [hp]
+          · cases hp : tr.program.isEmpty <;> simp [hp]
+          · cases hp : tr.program.isEmpty <;> simp [hp]
+          · intro d
+            cases hp : tr.program.isEmpty <;> simp [hp]
+          · intro d
+            have hres := reserve_le I hL hG tr hmem.1 d
+            rw [hmem.2.1, hmem.2.2] at hres
+            cases hp : tr.program.isEmpty with
+            | true =>
+              have hempty : tr.program = [] := list_isEmpty_nil _ hp
+              simp [tokenHold, hph, pathReserve, branchAt, contAt, landFloor, floorState, hempty] at hres ⊢
+              exact hres
+            | false =>
+              simp [tokenHold, hph, pathReserve, branchAt, contAt, landFloor, floorState, hp] at hres ⊢
+              exact hres
 
 theorem occ_prio (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId) (w' : World)
     (hO : OccInv I w) (h : receivePrio I w id = some w') : OccInv I w' := by
-  have hready := prio_ready I w id w' h
-  unfold receivePrio at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    simp only [hp, hready.1, hready.2] at h
-    split at h
-    · cases h
-    · split at h
-      · cases h
-      · next w1 a1 hd =>
-        cases h
-        let a0 : Actor := {
-          life := .alive, typestate := (w.st id).typestate, phase := .idle, box := (w.st id).box, prio := ms,
-          parked := (w.st id).parked, tokens := (w.st id).tokens, nextMid := (w.st id).nextMid,
-          waitId := (w.st id).waitId, nextCall := (w.st id).nextCall, oweId := (w.st id).oweId,
-          lastCall := (w.st id).lastCall }
-        have hacc := deliver_account I hL hG w id a0 m w1 a1 rfl rfl hd
-        obtain ⟨hl, hbox, hpark, htok, hfloor⟩ := hacc
-        have hO1 := occ_same I w w1 hO (fun i => deliver_st I w id a0 m w1 a1 i hd)
-          (deliver_roster I w id a0 m w1 a1 hd) (deliver_N I w id a0 m w1 a1 hd)
-          (fun n => deliver_ix I w id a0 m w1 a1 n hd)
-        exact occ_set I w1 id a1 hO1
-          (by
-            rw [deliver_st I w id a0 m w1 a1 id hd, hl]
-            simp [a0, hready.1])
-          (by rw [deliver_st I w id a0 m w1 a1 id hd, hbox])
-          (by rw [deliver_st I w id a0 m w1 a1 id hd, hpark])
-          (by
-            intro d
-            rw [deliver_st I w id a0 m w1 a1 id hd, htok d])
-          (by
-            intro d hlive
-            have hmem := hO.aliveIn id hready.1
-            have hold := hO.slack id d hmem hready.1
-            have hpend : pending (w.st id) d = 0 := by simp [pending, contRest, hready.2, sendsTo]
-            rw [hpend, Nat.add_zero] at hold
-            rw [htok d]
-            simp [a0]
-            exact Nat.le_trans (hfloor d) hold)
+  obtain ⟨m, pre, suf, w1, a1, hlife, hidle, _hprio, _hwait, hdel, hw'⟩ :=
+    receivePrio_spec I w w' id h
+  let a0 : Actor := { (w.st id) with prio := pre ++ suf }
+  have hacc := deliver_account I hL hG w id a0 m w1 a1 hlife (by simp [a0, hidle]) hdel
+  obtain ⟨hl, hbox, hpark, htok, hhold⟩ := hacc
+  have hO1 := occ_same I w w1 hO (fun i => deliver_st I w id a0 m w1 a1 i hdel)
+    (deliver_roster I w id a0 m w1 a1 hdel) (deliver_N I w id a0 m w1 a1 hdel)
+    (fun n => by
+      rw [deliver_base I w id a0 m w1 a1 hdel]
+      exact readCells_nextIx I.desc w id n)
+    (deliver_crashed I w id a0 m w1 a1 hdel)
+  rw [hw']
+  exact occ_set I w1 id a1 hO1
+    (by rw [deliver_st I w id a0 m w1 a1 id hdel, hl])
+    (by rw [deliver_st I w id a0 m w1 a1 id hdel, hbox])
+    (by rw [deliver_st I w id a0 m w1 a1 id hdel, hpark])
+    (by
+      intro d
+      rw [deliver_st I w id a0 m w1 a1 id hdel, htok d])
+    (by
+      intro d _hlive
+      have hold := hO.slack id d hlife
+      have htok0 : a0.tokens d = (w.st id).tokens d := by simp [a0]
+      have hsame : tokenHold I.desc (tname id) d a0 = tokenHold I.desc (tname id) d (w.st id) := by
+        simp [tokenHold, a0, hidle]
+      have hstep : (tokenHold I.desc (tname id) d a1 : Int) ≤ tokenHold I.desc (tname id) d a0 :=
+        Int.ofNat_le.mpr (hhold d)
+      rw [hsame] at hstep
+      rw [htok d, htok0]
+      exact Int.le_trans hstep hold)
 
 theorem slot_drop_box (st : InstId → Actor) (dst : String) (sender id : InstId) (m : Msg) (ms : List Msg)
     (hname : tname id = dst) (hs : m.sender = sender) (hbox : (st id).box = m :: ms) :
@@ -4021,8 +4070,8 @@ theorem consume_tokens (w w1 : World) (id sender : InstId) (a1 : Actor) (s : Ins
   · rw [creditSender, setActor_other (setActor w1 id a1) sender s _ hs]
     by_cases hid : s = id
     · have hne : id ≠ sender := fun heq => hs (hid.trans heq)
-      rw [hid, setActor_self, htok, if_neg hne, Nat.add_zero]
-    · rw [setActor_other w1 id s a1 hid, hst, if_neg hs, Nat.add_zero]
+      rw [hid, setActor_self, htok, ite_eq_right hne, Int.add_zero]
+    · rw [setActor_other w1 id s a1 hid, hst, ite_eq_right hs, Int.add_zero]
 
 /-- Install `a1` for `id` and return one token to `sender`. `a1` keeps life and
 tokens. At `tname id` it owes `sender` one message less; every other account is
@@ -6608,6 +6657,7 @@ theorem occ_cell (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label : St
     (occ_cell_roster w dst label { value := written, dirty := true }).1
     (occ_cell_roster w dst label { value := written, dirty := true }).2
     (fun n => occ_cell_ix w dst label { value := written, dirty := true } n)
+    (by simp [w1, setCell])
   have hO2 := occ_advance I w1 id k hO1
     (by simpa [w1, occ_cell_st] using hty) (by simpa [w1, occ_cell_st] using hph)
   let w2 := setActor w1 id (proceed (w1.st id) (afterHead k))
@@ -9024,6 +9074,7 @@ theorem occ_releaseWorld (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
   let wR := readCells I.desc w id
   have hOR := occ_same I w wR hO (fun i => readCells_st I.desc w id i)
     (read_roster I.desc w id).1 (read_roster I.desc w id).2 (fun n => read_ix I.desc w id n)
+    (readCells_crashed I.desc w id)
   have hcontR : ∀ i, contTy (wR.st i) := by
     intro i
     have hs := readCells_st I.desc w id i
@@ -9867,7 +9918,7 @@ theorem occ_killOne (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) 
   let D := I.desc
   let base := readCells D w id
   have hObase := occ_same I w base hO (fun i => readCells_st D w id i) (read_roster D w id).1
-    (read_roster D w id).2 fun n => readCells_nextIx D w id n
+    (read_roster D w id).2 (fun n => readCells_nextIx D w id n) (readCells_crashed D w id)
   have hCbase : ∀ i, contTy (base.st i) := by
     intro i
     exact (contTy_match _ _ (congrArg Actor.phase (readCells_st D w id i))
@@ -9988,7 +10039,9 @@ theorem occ_killOne (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) 
       congrFun (by simpa [wF, failWaiters] using failWaiters_nextIx base id base.roster) n
     rw [hdie, congrFun (frame_drainP (drainBox wF id name ms) id name ps).2.2.1 n,
       congrFun (frame_drain wF id name ms).2.2.1 n, hF, readCells_nextIx]
-  exact occ_same I died (killOne w D id) hOd hst hr hN hix
+  exact occ_same I died (killOne w D id) hOd hst hr hN hix (by
+    simp [died, killOne, readCells, setCell, setObserved, setActor, refundMsgs, refundParked,
+      failWaiters, forgetSender])
 
 theorem occ_killFold (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (key : Nat)
     (ids : List InstId) (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hSlots : OpenSlots w) :
@@ -10016,7 +10069,7 @@ theorem occ_kill (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (ke
     (fun i => by simp [killSubtree])
     (by simp [killSubtree, killMembers_roster])
     (by simp [killSubtree, killMembers_N])
-    (fun n => by simp [killSubtree, killMembers_nextIx])
+    (fun n => by simp [killSubtree, killMembers_nextIx]) rfl
 
 theorem occ_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
     (k : Cont) (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w) (hM : MailInv w)
@@ -10129,6 +10182,7 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (
               let wR := readCells I.desc w id
               have hOR := occ_same I w wR hO (fun i => readCells_st I.desc w id i)
                 (read_roster I.desc w id).1 (read_roster I.desc w id).2 (fun n => read_ix I.desc w id n)
+                (readCells_crashed I.desc w id)
               have hcontR : ∀ i, contTy (wR.st i) := by
                 intro i
                 have hs := readCells_st I.desc w id i
