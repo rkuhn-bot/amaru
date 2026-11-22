@@ -765,3 +765,40 @@ generation of each message's key, the same holder a delivery credits. The
 count is that holder, not the generation that sent the message. Draining the
 box or the parked lane one message at a time is the same world. The step is
 unchanged.
+
+## 2026-11-22 — A parked call reserves the tight count
+
+The occupancy reserve of a parked call is the tail, the not-admitted path
+without its own token, and the timed-out path. The ingress gate keeps the
+older, larger count, including a stale timeout, under the name `gateHold`.
+Refusing an ingress that would pass the tight count and fail the gate is not
+a fairness obligation. The step is unchanged.
+
+## 2026-11-22 — A lone terminable is charged on its own slot
+
+A lone terminable may `trySend` or `call` when its branches are mute. The
+charge stays on its own slot, and `still` is the bound. It does not follow
+that such an actor has no parked mail. The step is unchanged.
+
+## 2026-11-22 — Marking the live holder dead weakens the slot equation
+
+While a generation is alive, its tokens plus the key's queued mail equal the
+budget. Marking that holder dead drops the equation to the inequality: the
+queue is at most the budget, because the holder's tokens were nonnegative.
+The step is unchanged.
+
+## 2026-11-22 — Sealing refunds before the actor is marked dead
+
+`releaseWorld` and `forgetHost` credit the actor itself, not whichever
+generation happens to be live. That credit is the live holder's only while
+the actor is still alive, which is when both steps run. A descendant seal
+and a shutdown both check the life first. `admitHost`, `abortActor`, and
+`abortDesc` are not steps. A stage terminates by sealing its descendants and
+then itself. The step is unchanged.
+
+## 2026-11-22 — Draining then releasing outbound is the seal
+
+`releaseOutbound` never reads the actor it is crediting, so draining that
+actor's mailbox and then releasing outbound is the same world as refunding
+and then releasing outbound. The final dead record overwrites the mailbox
+either way. The step is unchanged.

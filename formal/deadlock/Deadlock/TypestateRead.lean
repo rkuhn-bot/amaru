@@ -212,6 +212,19 @@ theorem tokenHold_running (D : Description) (template dst : String) (a : Actor) 
   | awaitReply dstK k => simp [tokenHold, hph]
   | parked dstK c k => cases c <;> simp [tokenHold, hph]
 
+/-- `gateHold` reads `typestate` only for an idle or crashed phase. -/
+theorem gateHold_running (D : Description) (template dst : String) (a : Actor) (s : String)
+    (h : phaseAnchored a.phase = false) :
+    gateHold D template dst { a with typestate := s } = gateHold D template dst a := by
+  cases hph : a.phase with
+  | idle => simp [hph, phaseAnchored] at h
+  | crashed => simp [hph, phaseAnchored] at h
+  | run k => simp [gateHold, tokenHold, hph]
+  | awaitEffect k => simp [gateHold, tokenHold, hph]
+  | awaitPeer k => simp [gateHold, tokenHold, hph]
+  | awaitReply dstK k => simp [gateHold, tokenHold, hph]
+  | parked dstK c k => cases c <;> simp [gateHold, tokenHold, hph]
+
 /-- A bulk receive that fires was an alive idle actor, so `deliver`'s
 `findDeliver` read an idle typestate. -/
 theorem receiveBulk_idle (I : Impl) (w w' : World) (id : InstId)
@@ -1678,8 +1691,8 @@ theorem receiveIngress_mask (I : Impl) (w : World) (dst : InstId) (label : Strin
         exact absurd (by rw [hlife]; intro h; cases h) hdec.1
       | absent =>
         exact absurd (by rw [hlife]; intro h; cases h) hdec.1
-    have hhold : tokenHold I.desc (tname dst) (tname dst) (maskActor (w.st dst)) =
-        tokenHold I.desc (tname dst) (tname dst) (w.st dst) := by
+    have hhold : gateHold I.desc (tname dst) (tname dst) (maskActor (w.st dst)) =
+        gateHold I.desc (tname dst) (tname dst) (w.st dst) := by
       cases ht : tyRead (w.st dst) with
       | true => rw [maskActor_keep _ ht]
       | false =>
@@ -1687,7 +1700,7 @@ theorem receiveIngress_mask (I : Impl) (w : World) (dst : InstId) (label : Strin
         have hph : phaseAnchored (w.st dst).phase = false := by
           simp [tyRead, hlive] at ht
           exact ht
-        exact tokenHold_running I.desc (tname dst) (tname dst) (w.st dst) "" hph
+        exact gateHold_running I.desc (tname dst) (tname dst) (w.st dst) "" hph
     simp only [hhold]
     split
     · rfl

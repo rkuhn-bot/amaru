@@ -2527,9 +2527,11 @@ def pending (a : Actor) (dst : String) : Nat :=
   | .awaitPeer k => max (sendsTo dst k.rest) (sendsTo dst k.onTimeout)
   | .idle | .crashed => 0
 
-/-- What the ingress gate reserves: the same maximum `sends + floor(landing)`
-that `sendsOk` checks, over the paths still open in this phase. Idle reserves
-the current typestate's floor. -/
+/-- What an actor must still be able to spend: `sends + floor(landing)` over
+the paths still open in this phase. A parked call has already been charged
+for its own message, `NotAdmitted` is refunded before it runs, and a stale
+peer timeout is not one of its branches. Idle reserves the current
+typestate's floor. The ingress gate checks `gateHold`. -/
 def tokenHold (D : Description) (template dst : String) (a : Actor) : Nat :=
   match a.phase with
   | .idle | .crashed => landFloor D template a.typestate dst
@@ -2541,14 +2543,51 @@ def tokenHold (D : Description) (template dst : String) (a : Actor) : Nat :=
     max (pathReserve D template dst (contAt k) k.rest)
       (pathReserve D template dst (focus (contAt k) k.toTimedOut) k.onTimedOut)
   | .parked _ false k => pathReserve D template dst (contAt k) k.rest
+  | .parked target true k =>
+    let at_ := contAt k
+    let own := if tname target == dst then 1 else 0
+    max (pathReserve D template dst at_ k.rest)
+      (max (pathReserve D template dst (focus at_ at_.notAdmitted) k.onNotAdmitted - own)
+        (pathReserve D template dst (focus at_ at_.timedOut) k.onTimedOut))
+
+/-- The reserve `receiveIngress` checks. It is `tokenHold` on every phase but
+a parked call. There it also counts a stale peer timeout and the full
+not-admitted path: the count the gate has always used. A successful ingress
+still leaves `tokenHold` under the tokens, because that count is smaller. -/
+def gateHold (D : Description) (template dst : String) (a : Actor) : Nat :=
+  match a.phase with
   | .parked _ true k =>
-    -- The call's own message was charged when it was parked, so the reserve
-    -- counts it only through that charge, not again here.
     let at_ := contAt k
     max (pathReserve D template dst at_ k.rest)
       (max (pathReserve D template dst (focus at_ at_.notAdmitted) k.onNotAdmitted)
         (max (pathReserve D template dst (focus at_ at_.timedOut) k.onTimedOut)
           (pathReserve D template dst (focus at_ at_.timeout) k.onTimeout)))
+  | _ => tokenHold D template dst a
+
+theorem tokenHold_le_gate (D : Description) (template dst : String) (a : Actor) :
+    tokenHold D template dst a ≤ gateHold D template dst a := by
+  cases h : a.phase with
+  | parked target c k =>
+    cases c with
+    | false => simp [tokenHold, gateHold, h]
+    | true =>
+      unfold tokenHold gateHold
+      simp only [h]
+      by_cases ho : (tname target == dst) = true
+      · simp [ho]
+        omega
+      · have hf : (tname target == dst) = false := by
+          cases hbb : tname target == dst with
+          | false => rfl
+          | true => exact absurd hbb ho
+        simp [hf]
+        omega
+  | idle => simp [tokenHold, gateHold, h]
+  | crashed => simp [tokenHold, gateHold, h]
+  | run _ => simp [tokenHold, gateHold, h]
+  | awaitEffect _ => simp [tokenHold, gateHold, h]
+  | awaitPeer _ => simp [tokenHold, gateHold, h]
+  | awaitReply _ _ => simp [tokenHold, gateHold, h]
 
 /-- Idle, parked, waiting, or running. A message for a running actor waits in
 the box until the continuation finishes. A crashed actor does not take ingress. -/
@@ -2666,7 +2705,7 @@ ingress. The allowance is `ingressLegal` evaluated at `w.N`. -/
 def receiveIngress (I : Impl) (w : World) (dst : InstId) (label : String) : Option World :=
   let a := w.st dst
   let cap := capBulk I.desc w.N dst
-  let need := tokenHold I.desc (tname dst) (tname dst) a + 1
+  let need := gateHold I.desc (tname dst) (tname dst) a + 1
   if a.life ≠ .alive || ingressOpen a.phase = false then none
   else if hasIngress I.desc (tname dst) label = false then none
   else if cap ≤ a.box.length then none
@@ -2770,13 +2809,12 @@ theorem ingress_ty_eq (I : Impl) (w w' : World) (dst : InstId) (label : String) 
 
 /-- A successful ingress is the charged, appended world, and the guards that
 make the charge safe have already held. The actor may be parked, waiting, or
-running; the reservation is the maximum of `sends + floor(landing)` over the
-paths still open. -/
+running; the reservation is `gateHold`. -/
 theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
     (h : receiveIngress I w dst label = some w') :
     (w.st dst).life = .alive ∧ ingressOpen (w.st dst).phase = true ∧
       loneTerminableB I.desc (tname dst) = false ∧
-      (tokenHold I.desc (tname dst) (tname dst) (w.st dst) : Int) + 1 ≤ (w.st dst).tokens (tname dst) ∧
+      (gateHold I.desc (tname dst) (tname dst) (w.st dst) : Int) + 1 ≤ (w.st dst).tokens (tname dst) ∧
       w' = setActor w dst { chargeSender (w.st dst) (tname dst) with
         box := (w.st dst).box ++
           [{ label := label, sender := dst, callFrom := none, reliable := true, mid := (w.st dst).nextMid }],
@@ -2814,7 +2852,7 @@ theorem ingress_open (I : Impl) (w w' : World) (dst : InstId) (label : String)
                 intro hbad
                 apply htok
                 have hdec : decide ((w.st dst).tokens (tname dst) <
-                    (tokenHold I.desc (tname dst) (tname dst) (w.st dst) : Int) + 1) = true :=
+                    (gateHold I.desc (tname dst) (tname dst) (w.st dst) : Int) + 1) = true :=
                   decide_eq_true_iff.mpr hbad
                 simp [hdec])
 

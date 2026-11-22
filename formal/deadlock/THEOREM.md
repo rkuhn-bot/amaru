@@ -135,13 +135,15 @@ superseding cell wake are not obligations. An admitted call leaves
 `awaitReply`.
 `Assumptions` is only `rust_refines`.
 
-The parked-call reserve is the ingress gate, not `LocalOk`. `tokenHold`
-counts the call's own message once, through the charge taken when the call
-was parked, and counts the `TimedOut` continuation's future sends on top.
-`receiveIngress` refuses a message that would leave `tokens` short of that
-reserve. A Rust ingress adapter that checked only mailbox room would accept
-a self-park the gate refuses. Keeping that gate is an obligation on the
-exporter and the runtime, beside `rust_refines`.
+The parked-call reserve checked by `receiveIngress` is the ingress gate, not
+`LocalOk`. `gateHold` counts every continuation still stored on the parked
+call, including a stale peer timeout, and counts the call's own message once
+through the charge taken when the call was parked. `receiveIngress` refuses
+a message that would leave `tokens` short of that reserve. The occupancy
+account is tighter: `NotAdmitted` is one slot lower until the refund, and a
+stale timeout is not a live branch. A Rust ingress adapter that checked only
+mailbox room would accept a self-park the gate refuses. Keeping that gate is
+an obligation on the exporter and the runtime, beside `rust_refines`.
 
 The handled half is not a separate obligation. Once a stage has returned its
 next state, the runtime gives it the next message and the stage cannot refuse.
