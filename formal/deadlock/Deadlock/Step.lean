@@ -506,6 +506,62 @@ theorem parkedLive_init (I : Impl) (N : Nat) : ParkedFromLive (initWorld I N) :=
   rw [hempty] at hp
   cases hp
 
+theorem parkedFrom_same {w w' : World}
+    (h : ∀ host p, p ∈ (w.st host).parked → p.sender = p.msg.sender)
+    (hk : ∀ i, (w'.st i).parked = (w.st i).parked) :
+    ∀ host p, p ∈ (w'.st host).parked → p.sender = p.msg.sender := by
+  intro host p hp
+  exact h host p (by rw [hk host] at hp; exact hp)
+
+theorem parkedFrom_sub {w w' : World}
+    (h : ∀ host p, p ∈ (w.st host).parked → p.sender = p.msg.sender)
+    (hk : ∀ host p, p ∈ (w'.st host).parked → p ∈ (w.st host).parked) :
+    ∀ host p, p ∈ (w'.st host).parked → p.sender = p.msg.sender :=
+  fun host p hp => h host p (hk host p hp)
+
+theorem parkedFrom_set (w : World) (id : InstId) (a : Actor)
+    (h : ∀ host p, p ∈ (w.st host).parked → p.sender = p.msg.sender)
+    (hpk : a.parked = (w.st id).parked) :
+    ∀ host p, p ∈ ((setActor w id a).st host).parked → p.sender = p.msg.sender := by
+  intro host p hp
+  by_cases hh : host = id
+  · rw [hh, setActor_self, hpk] at hp
+    exact h id p hp
+  · rw [setActor_other w id host a hh] at hp
+    exact h host p hp
+
+theorem hostedMail_same {w w' : World}
+    (h : ∀ host m, (m ∈ (w.st host).box ∨ m ∈ (w.st host).prio) → m.sender ∈ w.roster)
+    (hro : w'.roster = w.roster)
+    (hbox : ∀ i, (w'.st i).box = (w.st i).box) (hprio : ∀ i, (w'.st i).prio = (w.st i).prio) :
+    ∀ host m, (m ∈ (w'.st host).box ∨ m ∈ (w'.st host).prio) → m.sender ∈ w'.roster := by
+  intro host m hm
+  rw [hro]
+  rcases hm with hm | hm
+  · exact h host m (Or.inl (by rw [hbox] at hm; exact hm))
+  · exact h host m (Or.inr (by rw [hprio] at hm; exact hm))
+
+theorem hostedMail_set (w : World) (id : InstId) (a : Actor)
+    (h : ∀ host m, (m ∈ (w.st host).box ∨ m ∈ (w.st host).prio) → m.sender ∈ w.roster)
+    (hbox : ∀ m, m ∈ a.box → m ∈ (w.st id).box ∨ m.sender ∈ w.roster)
+    (hprio : ∀ m, m ∈ a.prio → m ∈ (w.st id).prio ∨ m.sender ∈ w.roster) :
+    ∀ host m, (m ∈ ((setActor w id a).st host).box ∨ m ∈ ((setActor w id a).st host).prio) →
+      m.sender ∈ (setActor w id a).roster := by
+  intro host m hm
+  show m.sender ∈ w.roster
+  by_cases hh : host = id
+  · rw [hh] at hm
+    rw [setActor_self] at hm
+    rcases hm with hm | hm
+    · rcases hbox m hm with hold | hnew
+      · exact h id m (Or.inl hold)
+      · exact hnew
+    · rcases hprio m hm with hold | hnew
+      · exact h id m (Or.inr hold)
+      · exact hnew
+  · rw [setActor_other w id host a hh] at hm
+    exact h host m hm
+
 theorem quiet_of_crash {w : World} (h : w.crashed = true) : DeadQuiet w := Or.inl h
 
 theorem childless_of_crash {w : World} (h : w.crashed = true) : DeadChildless w := Or.inl h
@@ -572,17 +628,63 @@ theorem chain_init (I : Impl) (N : Nat) : TombChain (initWorld I N) := by
   intro id _ hd _
   exact absurd hd (init_not_dead I N id)
 
-theorem seal_crash (I : Impl) (w : World) (hS : SemInv I w) : SealInv (crashWorld w) where
+theorem seal_crash (I : Impl) (w : World) (h : SealInv w) (hS : SemInv I w) :
+    SealInv (crashWorld w) where
   liveParked := parkedLive_crash I w hS
   quiet := quiet_of_crash (by simp [crashWorld])
   childless := childless_of_crash (by simp [crashWorld])
   chain := chain_of_crash (by simp [crashWorld])
+  parkedFrom := by
+    intro host p hp
+    have hpk : ((crashWorld w).st host).parked = (w.st host).parked := by
+      by_cases hm : host ∈ w.roster
+      · rw [crash_at w host hm]
+        unfold crashActor
+        split <;> rfl
+      · rw [crash_off w host hm]
+    exact h.parkedFrom host p (by rw [← hpk]; exact hp)
+  hostedMail := by
+    intro host m hm
+    have hbox : ((crashWorld w).st host).box = (w.st host).box := by
+      by_cases hi : host ∈ w.roster
+      · rw [crash_at w host hi]
+        unfold crashActor
+        split <;> rfl
+      · rw [crash_off w host hi]
+    have hprio : ((crashWorld w).st host).prio = (w.st host).prio := by
+      by_cases hi : host ∈ w.roster
+      · rw [crash_at w host hi]
+        unfold crashActor
+        split <;> rfl
+      · rw [crash_off w host hi]
+    have hro : (crashWorld w).roster = w.roster := by simp [crashWorld]
+    rw [hro]
+    rcases hm with hm | hm
+    · exact h.hostedMail host m (Or.inl (by rw [hbox] at hm; exact hm))
+    · exact h.hostedMail host m (Or.inr (by rw [hprio] at hm; exact hm))
 
 theorem seal_init (I : Impl) (N : Nat) : SealInv (initWorld I N) where
   liveParked := parkedLive_init I N
   quiet := quiet_init I N
   childless := childless_init I N
   chain := chain_init I N
+  parkedFrom := by
+    intro host p hp
+    rw [init_parked I N host] at hp
+    cases hp
+  hostedMail := by
+    intro host m hm
+    have hempty : ((initWorld I N).st host).box = [] ∧ ((initWorld I N).st host).prio = [] := by
+      rw [init_base_st]
+      split
+      · simp [initActor, absentActor, withTokens]
+        split <;> simp [withTokens, absentActor]
+      · simp [absentActor]
+    rcases hm with hm | hm
+    · rw [hempty.1] at hm
+      cases hm
+    · rw [hempty.2] at hm
+      cases hm
 
 theorem descends_parent (fuel : Nat) {w w' : World}
     (hpar : ∀ i, (w'.st i).parent = (w.st i).parent) (anc desc : InstId) :
@@ -751,7 +853,350 @@ theorem seal_set_keep {w : World} {id : InstId} {a : Actor} (h : SealInv w)
     quiet := quiet_stable h.quiet rfl hlift hboxA hpkA
     childless := childless_stable h.childless rfl hlift hparA
     chain := chain_stable h.chain rfl rfl hlift hboxA hprioA hparA
+    parkedFrom := parkedFrom_set w id a h.parkedFrom hpk
+    hostedMail := hostedMail_set w id a h.hostedMail
+      (fun m hm => Or.inl (by rw [hbox] at hm; exact hm))
+      (fun m hm => Or.inl (by rw [hprio] at hm; exact hm))
   }
+
+
+/-- A non-alive actor keeps an empty mailbox when only live actors change queues. -/
+theorem quiet_live {w w' : World} (h : DeadQuiet w) (hcr : w'.crashed = w.crashed)
+    (hl : ∀ i, (w'.st i).life ≠ .alive → (w.st i).life ≠ .alive)
+    (hbox : ∀ i, (w.st i).life ≠ .alive → (w'.st i).box = (w.st i).box)
+    (hpk : ∀ i, (w.st i).life ≠ .alive → (w'.st i).parked = (w.st i).parked) :
+    DeadQuiet w' := by
+  rcases h with hcrW | h
+  · exact Or.inl (hcr.trans hcrW)
+  · refine Or.inr fun id hna => ?_
+    have hna0 : (w.st id).life ≠ .alive := hl id hna
+    rcases h id hna0 with ⟨hb, hp⟩
+    exact ⟨(hbox id hna0).trans hb, (hpk id hna0).trans hp⟩
+
+theorem nodup_length_le {α : Type} [DecidableEq α] (xs ys : List α) (hnd : xs.Nodup)
+    (hsub : ∀ x, x ∈ xs → x ∈ ys) : xs.length ≤ ys.length := by
+  induction ys generalizing xs with
+  | nil =>
+    cases xs with
+    | nil => exact Nat.le_refl 0
+    | cons x _ =>
+      exact absurd (hsub x (List.mem_cons_self (a := x))) (List.not_mem_nil (a := x))
+  | cons y ys ih =>
+    by_cases hy : y ∈ xs
+    · have hsub' : ∀ x, x ∈ xs.erase y → x ∈ ys := by
+        intro x hx
+        have hx0 : x ∈ xs := List.mem_of_mem_erase hx
+        have hne : x ≠ y := by
+          intro hxy
+          rw [hxy] at hx
+          exact List.Nodup.not_mem_erase hnd hx
+        cases List.mem_cons.mp (hsub x hx0) with
+        | inl hxy => exact absurd hxy hne
+        | inr h => exact h
+      have hlen := ih (xs.erase y) (List.Nodup.erase y hnd) hsub'
+      have h1 := List.length_erase_of_mem hy
+      have hpos : 0 < xs.length := List.length_pos_of_mem hy
+      rw [List.length_cons]
+      have hxs : xs.length = (xs.erase y).length + 1 := by omega
+      omega
+    · have hsub' : ∀ x, x ∈ xs → x ∈ ys := by
+        intro x hx
+        cases List.mem_cons.mp (hsub x hx) with
+        | inl hxy =>
+          rw [hxy] at hx
+          exact absurd hx hy
+        | inr h => exact h
+      rw [List.length_cons]
+      exact Nat.le_succ_of_le (ih xs hnd hsub')
+
+theorem roster_of_parent {w : World} (hF : ParentForest w) {id p : InstId}
+    (hp : (w.st id).parent = some p) : id ∈ w.roster := by
+  exact Classical.byContradiction fun h => by
+    rw [hF.off id h] at hp
+    cases hp
+
+theorem strict_of_descends (w : World) (fuel : Nat) (anc desc : InstId)
+    (hd : descends fuel w anc desc = true) : StrictAncestor w desc anc := by
+  induction fuel generalizing desc with
+  | zero => simp [descends] at hd
+  | succ fuel ih =>
+    simp only [descends] at hd
+    by_cases heq : (desc == anc) = true
+    · rw [ite_eq_left heq] at hd
+      cases hd
+    · rw [ite_eq_right heq] at hd
+      cases hp : (w.st desc).parent with
+      | none =>
+        rw [hp] at hd
+        cases hd
+      | some p =>
+        rw [hp] at hd
+        dsimp at hd
+        by_cases hpa : (p == anc) = true
+        · rw [ite_eq_left hpa] at hd
+          have hpe : p = anc := beq_iff_eq.mp hpa
+          have hne : desc ≠ anc := by
+            intro h
+            exact heq (beq_iff_eq.mpr h)
+          exact StrictAncestor.edge ⟨by rw [hp, hpe], hne⟩
+        · rw [ite_eq_right hpa] at hd
+          by_cases hself : (p == desc) = true
+          · rw [ite_eq_left hself] at hd
+            cases hd
+          · rw [ite_eq_right hself] at hd
+            have hne : p ≠ desc := by
+              intro h
+              exact hself (beq_iff_eq.mpr h)
+            exact StrictAncestor.tail ⟨hp, hne.symm⟩ (ih p hd)
+
+/-- The ancestor walk is a duplicate-free roster chain, and `descends` accepts it
+once the fuel covers that chain. -/
+theorem anc_chain (w : World) (hF : ParentForest w) {desc anc : InstId}
+    (h : StrictAncestor w desc anc) :
+    ∃ xs : List InstId, xs.Nodup ∧ desc ∈ xs ∧ anc ∈ xs ∧
+      (∀ x, x ∈ xs → x ∈ w.roster) ∧
+      (∀ x, x ∈ xs → x = desc ∨ StrictAncestor w desc x) ∧
+      (∀ fuel, xs.length - 1 ≤ fuel → descends fuel w anc desc = true) := by
+  induction h
+  case edge d a he =>
+    refine ⟨[d, a], ?_, ?_, ?_, ?_, ?_, ?_⟩
+    · refine List.nodup_cons.mpr ⟨?_, List.nodup_cons.mpr ⟨List.not_mem_nil (a := a), List.nodup_nil⟩⟩
+      intro hx
+      simp only [List.mem_cons] at hx
+      rcases hx with hx | hx
+      · exact he.2 hx
+      · cases hx
+    · exact List.mem_cons_self
+    · exact List.mem_cons_of_mem _ List.mem_cons_self
+    · intro x hx
+      simp only [List.mem_cons] at hx
+      rcases hx with hx | hx
+      · rw [hx]
+        exact roster_of_parent hF he.1
+      · rcases hx with hx | hx
+        · rw [hx]
+          exact hF.hosted d a he.1
+        · cases hx
+    · intro x hx
+      simp only [List.mem_cons] at hx
+      rcases hx with hx | hx
+      · exact Or.inl hx
+      · rcases hx with hx | hx
+        · exact Or.inr (by rw [hx]; exact StrictAncestor.edge he)
+        · cases hx
+    · intro fuel hf
+      cases fuel with
+      | zero => simp at hf
+      | succ _ =>
+        simp only [descends]
+        have hne : ¬ ((d == a) = true) := by
+          intro hb
+          exact he.2 (beq_iff_eq.mp hb)
+        rw [ite_eq_right hne, he.1]
+        dsimp
+        rw [ite_eq_left (by simp : (a == a) = true)]
+  case tail d mid a he rest ih =>
+    obtain ⟨xs, hnd, hmid, hancM, hsub, hrel, hfuel⟩ := ih
+    have hnew : d ∉ xs := by
+      intro hx
+      rcases hrel d hx with hxm | hancD
+      · exact he.2 hxm
+      · exact ParentAcyclic.no_self hF.wf mid
+          (StrictAncestor.trans hancD (StrictAncestor.edge he))
+    refine ⟨d :: xs, List.nodup_cons.mpr ⟨hnew, hnd⟩, List.mem_cons_self,
+        List.mem_cons_of_mem _ hancM, ?_, ?_, ?_⟩
+    · intro x hx
+      simp only [List.mem_cons] at hx
+      rcases hx with hx | hx
+      · rw [hx]
+        exact roster_of_parent hF he.1
+      · exact hsub x hx
+    · intro x hx
+      simp only [List.mem_cons] at hx
+      rcases hx with hx | hx
+      · exact Or.inl hx
+      · rcases hrel x hx with hxm | hancX
+        · exact Or.inr (by rw [hxm]; exact StrictAncestor.edge he)
+        · exact Or.inr (StrictAncestor.tail he hancX)
+    · intro fuel hf
+      cases fuel with
+      | zero =>
+        simp only [List.length_cons] at hf
+        have hempty : xs = [] := List.length_eq_zero_iff.mp (Nat.le_zero.mp hf)
+        rw [hempty] at hmid
+        cases hmid
+      | succ fuel =>
+        simp only [descends]
+        have hne : ¬ ((d == a) = true) := by
+          intro hb
+          exact ParentAcyclic.no_self hF.wf a
+            (by
+              have hpath : StrictAncestor w d a := StrictAncestor.tail he rest
+              rw [beq_iff_eq.mp hb] at hpath
+              exact hpath)
+        rw [ite_eq_right hne, he.1]
+        dsimp
+        have hpm : ¬ ((mid == a) = true) := by
+          intro hb
+          exact ParentAcyclic.no_self hF.wf a (by rw [beq_iff_eq.mp hb] at rest; exact rest)
+        rw [ite_eq_right hpm]
+        have hps : ¬ ((mid == d) = true) := by
+          intro hb
+          exact he.2 (beq_iff_eq.mp hb).symm
+        rw [ite_eq_right hps]
+        apply hfuel
+        simp only [List.length_cons] at hf
+        omega
+
+theorem descends_of_strict (w : World) (hF : ParentForest w) {desc anc : InstId}
+    (h : StrictAncestor w desc anc) : descends w.roster.length w anc desc = true := by
+  obtain ⟨xs, hnd, _, _, hsub, _, hfuel⟩ := anc_chain w hF h
+  apply hfuel
+  have hlen : xs.length ≤ w.roster.length := nodup_length_le xs w.roster hnd hsub
+  omega
+
+/-- A child of `p`, and anyone sealed with that child, is sealed with `p`. -/
+theorem sealed_parent (w : World) (hF : ParentForest w) (id p s : InstId)
+    (hpar : (w.st id).parent = some p) (hs : sealedTogether w id s = true) :
+    sealedTogether w p s = true := by
+  simp only [sealedTogether, Bool.or_eq_true] at hs ⊢
+  rcases hs with heq | hd
+  · have hids : id = s := beq_iff_eq.mp heq
+    by_cases hid : id = p
+    · exact Or.inl (beq_iff_eq.mpr (hid.symm.trans hids))
+    · have hdsc := descends_of_strict w hF (StrictAncestor.edge ⟨hpar, hid⟩)
+      rw [hids] at hdsc
+      exact Or.inr hdsc
+  · have hstrict := strict_of_descends w _ _ _ hd
+    by_cases hid : id = p
+    · rw [hid] at hstrict
+      exact Or.inr (descends_of_strict w hF hstrict)
+    · exact Or.inr (descends_of_strict w hF
+        (StrictAncestor.trans hstrict (StrictAncestor.edge ⟨hpar, hid⟩)))
+
+theorem sealed_eq {w w' : World} (hro : w'.roster = w.roster)
+    (hpar : ∀ i, (w'.st i).parent = (w.st i).parent) (a b : InstId) :
+    sealedTogether w' a b = sealedTogether w a b := by
+  simp only [sealedTogether]
+  rw [hro]
+  exact congrArg (fun d => (a == b) || d) (descends_parent w.roster.length hpar a b)
+
+theorem flight_of_msg (w : World) (origin host : InstId) (m : Msg)
+    (hhost : host ∈ w.roster) (hlive : (w.st host).life = .alive)
+    (ht : m.tombstone = false) (hs : sealedTogether w origin m.sender = true)
+    (hm : m ∈ (w.st host).box ∨ m ∈ (w.st host).prio) : mailInFlight w origin = true := by
+  simp only [mailInFlight]
+  apply _root_.List.any_eq_true.mpr
+  refine ⟨host, hhost, ?_⟩
+  have hlB : ((w.st host).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  have hhit : (!m.tombstone && sealedTogether w origin m.sender) = true := by simp [ht, hs]
+  have hqs : ((w.st host).box.any fun m => !m.tombstone && sealedTogether w origin m.sender) = true ∨
+      ((w.st host).prio.any fun m => !m.tombstone && sealedTogether w origin m.sender) = true := by
+    rcases hm with hm | hm
+    · exact Or.inl (_root_.List.any_eq_true.mpr ⟨m, hm, hhit⟩)
+    · exact Or.inr (_root_.List.any_eq_true.mpr ⟨m, hm, hhit⟩)
+  rw [hlB, Bool.true_and]
+  rcases hqs with hqs | hqs
+  · simp [hqs]
+  · simp [hqs]
+
+theorem flight_witness (w : World) (origin : InstId) (hf : mailInFlight w origin = true) :
+    ∃ host m, host ∈ w.roster ∧ (w.st host).life = .alive ∧ m.tombstone = false ∧
+      sealedTogether w origin m.sender = true ∧
+      (m ∈ (w.st host).box ∨ m ∈ (w.st host).prio) := by
+  simp only [mailInFlight, _root_.List.any_eq_true, Bool.and_eq_true, Bool.or_eq_true] at hf
+  obtain ⟨host, hhost, hlB, hqs⟩ := hf
+  have hlive : (w.st host).life = .alive := beq_iff_eq.mp hlB
+  rcases hqs with hb | hp
+  · obtain ⟨m, hm, hnot, hs⟩ := hb
+    have ht : m.tombstone = false := by simpa [Bool.not_eq_true'] using hnot
+    exact ⟨host, m, hhost, hlive, ht, hs, Or.inl hm⟩
+  · obtain ⟨m, hm, hnot, hs⟩ := hp
+    have ht : m.tombstone = false := by simpa [Bool.not_eq_true'] using hnot
+    exact ⟨host, m, hhost, hlive, ht, hs, Or.inr hm⟩
+
+/-- Mail of a child is mail of its parent: the sender is sealed with both. -/
+theorem flight_ancestor (w : World) (hF : ParentForest w) (id p : InstId)
+    (hpar : (w.st id).parent = some p) (hf : mailInFlight w id = true) :
+    mailInFlight w p = true := by
+  obtain ⟨host, m, hhost, hlive, ht, hs, hm⟩ := flight_witness w id hf
+  exact flight_of_msg w p host m hhost hlive ht (sealed_parent w hF id p m.sender hpar hs) hm
+
+theorem fresh_miss (w : World) (hC : DeadChildless w) (hcr : w.crashed = false)
+    (origin : InstId) (m : Msg) (hdead : (w.st origin).life ≠ .alive)
+    (hfresh : m.tombstone = true ∨ (w.st m.sender).life = .alive) :
+    (!m.tombstone && sealedTogether w origin m.sender) = false := by
+  rcases hfresh with ht | ha
+  · simp [ht]
+  · rw [sealed_live_false w hC hcr origin m.sender hdead ha]
+    simp
+
+/-- A queue edit that only adds a tombstone or mail from a live sender, and that
+drops a tombstone only once that sender's mail is already gone. Lives and
+parents stay. The parent's flight is the child's flight, via `sealed_parent`. -/
+theorem chain_edit {w w' : World} (h : TombChain w) (hC : DeadChildless w) (hF : ParentForest w)
+    (hcr : w'.crashed = w.crashed) (hro : w'.roster = w.roster)
+    (hl : ∀ i, (w'.st i).life = (w.st i).life)
+    (hpar : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hnewB : ∀ i m, m ∈ (w'.st i).box →
+      (∃ m', m' ∈ (w.st i).box ∧ m'.sender = m.sender ∧ m'.tombstone = m.tombstone) ∨
+        m.tombstone = true ∨ (w.st m.sender).life = .alive)
+    (hnewP : ∀ i m, m ∈ (w'.st i).prio →
+      (∃ m', m' ∈ (w.st i).prio ∧ m'.sender = m.sender ∧ m'.tombstone = m.tombstone) ∨
+        m.tombstone = true ∨ (w.st m.sender).life = .alive)
+    (hkeep : ∀ parent id, HoldsTomb w parent id →
+      HoldsTomb w' parent id ∨ mailInFlight w id = false) : TombChain w' := by
+  intro id hc hd hf
+  have hc0 : w.crashed = false := by rw [← hcr]; exact hc
+  have hd0 : (w.st id).life = .dead := by rw [← hl id]; exact hd
+  have hna : (w.st id).life ≠ .alive := by
+    intro ha
+    rw [hd0] at ha
+    cases ha
+  have hF' : ParentForest w' := ParentForest.parents hF hpar hro
+  have hback : mailInFlight w id = true := by
+    obtain ⟨host, m, hhost, hlive, ht, hs, hm⟩ := flight_witness w' id hf
+    have hhost0 : host ∈ w.roster := by rw [← hro]; exact hhost
+    have hlive0 : (w.st host).life = .alive := by rw [← hl host]; exact hlive
+    have hseal : sealedTogether w id m.sender = true := by
+      rw [← sealed_eq hro hpar id m.sender]; exact hs
+    rcases hm with hm | hm
+    · rcases hnewB host m hm with ⟨m', hm', hsnd, htom⟩ | hfresh
+      · have ht' : m'.tombstone = false := by rw [htom]; exact ht
+        have hs' : sealedTogether w id m'.sender = true := by rw [hsnd]; exact hseal
+        exact flight_of_msg w id host m' hhost0 hlive0 ht' hs' (Or.inl hm')
+      · have hbad := fresh_miss w hC hc0 id m hna hfresh
+        have hhit : (!m.tombstone && sealedTogether w' id m.sender) = true := by simp [ht, hs]
+        rw [sealed_eq hro hpar id m.sender] at hhit
+        rw [hbad] at hhit
+        cases hhit
+    · rcases hnewP host m hm with ⟨m', hm', hsnd, htom⟩ | hfresh
+      · have ht' : m'.tombstone = false := by rw [htom]; exact ht
+        have hs' : sealedTogether w id m'.sender = true := by rw [hsnd]; exact hseal
+        exact flight_of_msg w id host m' hhost0 hlive0 ht' hs' (Or.inr hm')
+      · have hbad := fresh_miss w hC hc0 id m hna hfresh
+        have hhit : (!m.tombstone && sealedTogether w' id m.sender) = true := by simp [ht, hs]
+        rw [sealed_eq hro hpar id m.sender] at hhit
+        rw [hbad] at hhit
+        cases hhit
+  have hstep := h id hc0 hd0 hback
+  cases hp : (w'.st id).parent with
+  | none =>
+    have hnone : (w.st id).parent = none := by rw [← hpar id, hp]
+    simp [hnone] at hstep
+    simp [hp]
+  | some p =>
+    have hsome : (w.st id).parent = some p := by rw [← hpar id, hp]
+    simp [hsome] at hstep
+    simp [hp]
+    rcases hstep with ⟨ha, htomb⟩ | ⟨hdeadP, _⟩
+    · rcases hkeep p id htomb with hhold | hgone
+      · exact Or.inl ⟨by rw [hl p]; exact ha, hhold⟩
+      · simp [hback] at hgone
+    · exact Or.inr ⟨by
+        intro ha
+        exact hdeadP (by rw [← hl p]; exact ha),
+        flight_ancestor w' hF' id p (by rw [hp]) hf⟩
 
 def Step (I : Impl) (w w' : World) : Prop :=
   ∃ a, apply I a w = some w'
@@ -889,19 +1334,25 @@ theorem outcome_shape (I : Impl) (w w' : World) (hO : OutcomeInv I w)
     (ht : ∀ i, (w'.st i).typestate = (w.st i).typestate) : OutcomeInv I w' :=
   fun i => outcome_congr I i (hp i) (ht i) (hO i)
 
-theorem inv_same (I : Impl) (w w' : World) (h : Inv I w) (hs : Same w w')
-    (hbox : ∀ i, (w'.st i).box = (w.st i).box)
-    (hprio : ∀ i, (w'.st i).prio = (w.st i).prio)
-    (hcr : w'.crashed = w.crashed) : Inv I w' :=
+theorem inv_frame (I : Impl) (w w' : World) (h : Inv I w) (hs : Same w w') (hseal : SealInv w') :
+    Inv I w' :=
   ⟨sem_shape I w w' h.1 hs.roster hs.life hs.ty hs.phase (fun i _ => hs.parked i),
     mail_shape w w' h.2.1 hs.life hs.phase hs.parked,
     open_shape w w' h.2.2.1 (fun i hi => by rw [hs.roster]; exact hi) hs.life,
     outcome_shape I w w' h.2.2.2.1 hs.phase hs.ty,
-    ParentForest.parents h.forest hs.parent hs.roster,
+    ParentForest.parents h.forest hs.parent hs.roster, hseal⟩
+
+theorem inv_same (I : Impl) (w w' : World) (h : Inv I w) (hs : Same w w')
+    (hbox : ∀ i, (w'.st i).box = (w.st i).box)
+    (hprio : ∀ i, (w'.st i).prio = (w.st i).prio)
+    (hcr : w'.crashed = w.crashed) : Inv I w' :=
+  inv_frame I w w' h hs
     { liveParked := parkedLive_same h.seal.liveParked hs.life hs.parked
       quiet := quiet_stable h.seal.quiet hcr hs.life hbox hs.parked
       childless := childless_stable h.seal.childless hcr hs.life hs.parent
-      chain := chain_stable h.seal.chain hcr hs.roster hs.life hbox hprio hs.parent }⟩
+      chain := chain_stable h.seal.chain hcr hs.roster hs.life hbox hprio hs.parent
+      parkedFrom := parkedFrom_same h.seal.parkedFrom hs.parked
+      hostedMail := hostedMail_same h.seal.hostedMail hs.roster hbox hprio }
 
 theorem same_actor (w : World) (id : InstId) (a : Actor) (hl : a.life = (w.st id).life)
     (ht : a.typestate = (w.st id).typestate) (hp : a.phase = (w.st id).phase)
@@ -1425,6 +1876,333 @@ theorem parkedLive_enqueue (w : World) (D : Description) (sender dst : InstId) (
         rw [proceed_keeps_parked]
         simp [issueCall]
 
+theorem seal_grow_box (w : World) (h : SealInv w) (hF : ParentForest w) (host : InstId)
+    (a : Actor) (msg : Msg) (halive : (w.st host).life = .alive)
+    (hl : a.life = (w.st host).life) (hparA : a.parent = (w.st host).parent)
+    (hpk : a.parked = (w.st host).parked) (hprio : a.prio = (w.st host).prio)
+    (hboxA : a.box = (w.st host).box ++ [msg])
+    (hfrom : msg.tombstone = true ∨ (w.st msg.sender).life = .alive)
+    (hmem : msg.sender ∈ w.roster) : SealInv (setActor w host a) := by
+  let w' := setActor w host a
+  have hlift : ∀ i, (w'.st i).life = (w.st i).life := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hl]
+    · rw [setActor_other w host i a hi]
+  have hpar : ∀ i, (w'.st i).parent = (w.st i).parent := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hparA]
+    · rw [setActor_other w host i a hi]
+  have hprioA : ∀ i, (w'.st i).prio = (w.st i).prio := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hprio]
+    · rw [setActor_other w host i a hi]
+  have hpkA : ∀ i, (w'.st i).parked = (w.st i).parked := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hpk]
+    · rw [setActor_other w host i a hi]
+  have hdead : ∀ i, (w.st i).life ≠ .alive → (w'.st i).box = (w.st i).box := by
+    intro i hna
+    by_cases hi : i = host
+    · exact absurd (by rw [hi]; exact halive) hna
+    · rw [setActor_other w host i a hi]
+  refine ⟨parkedLive_same h.liveParked hlift hpkA,
+    quiet_live h.quiet rfl (fun i hna ha => hna (by rw [hlift i]; exact ha)) hdead
+      (fun i _ => hpkA i),
+    childless_stable h.childless rfl hlift hpar,
+    chain_edit h.chain h.childless hF rfl rfl hlift hpar ?_ ?_ ?_,
+    parkedFrom_same h.parkedFrom hpkA, ?_⟩
+  · intro i m hm
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hboxA] at hm
+      rcases List.mem_append.mp hm with hm | hm
+      · exact Or.inl ⟨m, by rw [hi]; exact hm, rfl, rfl⟩
+      · have hm' : m = msg := by simpa [List.mem_singleton] using hm
+        rw [hm']
+        exact Or.inr hfrom
+    · rw [setActor_other w host i a hi] at hm
+      exact Or.inl ⟨m, hm, rfl, rfl⟩
+  · intro i m hm
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hprio] at hm
+      exact Or.inl ⟨m, by rw [hi]; exact hm, rfl, rfl⟩
+    · rw [setActor_other w host i a hi] at hm
+      exact Or.inl ⟨m, hm, rfl, rfl⟩
+  · intro parent id ht
+    refine Or.inl ?_
+    obtain ⟨m, hm, htomb, hsnd⟩ := ht
+    refine ⟨m, ?_, htomb, hsnd⟩
+    by_cases hp : parent = host
+    · rw [hp, setActor_self, hprio]
+      exact (by rw [← hp]; exact hm)
+    · rw [setActor_other w host parent a hp]
+      exact hm
+  · intro host' m hm
+    rcases hm with hm | hm
+    · by_cases hi : host' = host
+      · rw [hi, setActor_self, hboxA] at hm
+        rcases List.mem_append.mp hm with hm | hm
+        · exact h.hostedMail host' m (Or.inl (by rw [hi]; exact hm))
+        · have hm' : m = msg := by simpa [List.mem_singleton] using hm
+          rw [hm']
+          exact hmem
+      · rw [setActor_other w host host' a hi] at hm
+        exact h.hostedMail host' m (Or.inl hm)
+    · by_cases hi : host' = host
+      · rw [hi, setActor_self, hprio] at hm
+        exact h.hostedMail host' m (Or.inr (by rw [hi]; exact hm))
+      · rw [setActor_other w host host' a hi] at hm
+        exact h.hostedMail host' m (Or.inr hm)
+
+theorem seal_park_snoc (w : World) (h : SealInv w) (hF : ParentForest w) (host : InstId)
+    (a : Actor) (entry : Parked) (halive : (w.st host).life = .alive)
+    (hl : a.life = (w.st host).life) (hparA : a.parent = (w.st host).parent)
+    (hboxA : a.box = (w.st host).box) (hprio : a.prio = (w.st host).prio)
+    (hpk : a.parked = (w.st host).parked ++ [entry])
+    (hfrom : entry.sender = entry.msg.sender)
+    (hsend : (w.st entry.sender).life ≠ .dead) : SealInv (setActor w host a) := by
+  let w' := setActor w host a
+  have hlift : ∀ i, (w'.st i).life = (w.st i).life := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hl]
+    · rw [setActor_other w host i a hi]
+  have hpar : ∀ i, (w'.st i).parent = (w.st i).parent := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hparA]
+    · rw [setActor_other w host i a hi]
+  have hbox : ∀ i, (w'.st i).box = (w.st i).box := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hboxA]
+    · rw [setActor_other w host i a hi]
+  have hprioA : ∀ i, (w'.st i).prio = (w.st i).prio := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi, setActor_self, hprio]
+    · rw [setActor_other w host i a hi]
+  have hdeadP : ∀ i, (w.st i).life ≠ .alive → (w'.st i).parked = (w.st i).parked := by
+    intro i hna
+    by_cases hi : i = host
+    · exact absurd (by rw [hi]; exact halive) hna
+    · rw [setActor_other w host i a hi]
+  refine ⟨?_, quiet_live h.quiet rfl (fun i hna ha => hna (by rw [hlift i]; exact ha))
+      (fun i _ => hbox i) hdeadP,
+    childless_stable h.childless rfl hlift hpar,
+    chain_edit h.chain h.childless hF rfl rfl hlift hpar
+      (fun i m hm => Or.inl ⟨m, by rw [hbox i] at hm; exact hm, rfl, rfl⟩)
+      (fun i m hm => Or.inl ⟨m, by rw [hprioA i] at hm; exact hm, rfl, rfl⟩)
+      (fun parent id ht => Or.inl (by
+        obtain ⟨m, hm, htomb, hsnd⟩ := ht
+        exact ⟨m, by rw [hprioA parent]; exact hm, htomb, hsnd⟩)),
+    ?_, hostedMail_same h.hostedMail rfl hbox hprioA⟩
+  · intro host' p ha hp
+    by_cases hh : host' = host
+    · rw [hh, setActor_self, hpk] at hp
+      rcases List.mem_append.mp hp with hp | hp
+      · have hold := h.liveParked host p halive hp
+        by_cases hs : p.sender = host
+        · rw [hs, setActor_self, hl]
+          rw [hs] at hold
+          exact hold
+        · rw [setActor_other w host p.sender a hs]
+          exact hold
+      · have hp' : p = entry := by simpa [List.mem_singleton] using hp
+        rw [hp']
+        by_cases hs : entry.sender = host
+        · rw [hs, setActor_self, hl]
+          rw [hs] at hsend
+          exact hsend
+        · rw [setActor_other w host entry.sender a hs]
+          exact hsend
+    · rw [setActor_other w host host' a hh] at hp
+      rw [setActor_other w host host' a hh] at ha
+      have hold := h.liveParked host' p ha hp
+      by_cases hs : p.sender = host
+      · rw [hs, setActor_self, hl]
+        rw [hs] at hold
+        exact hold
+      · rw [setActor_other w host p.sender a hs]
+        exact hold
+  · intro host' p hp
+    by_cases hh : host' = host
+    · rw [hh, setActor_self, hpk] at hp
+      rcases List.mem_append.mp hp with hp | hp
+      · exact h.parkedFrom host p hp
+      · have hp' : p = entry := by simpa [List.mem_singleton] using hp
+        rw [hp']
+        exact hfrom
+    · rw [setActor_other w host host' a hh] at hp
+      exact h.parkedFrom host' p hp
+
+
+theorem enqueue_seal (D : Description) (w : World) (h : SealInv w) (hF : ParentForest w)
+    (hO : OpenSlots w) (sender dst : InstId) (msg : Msg) (isCall : Bool) (k : Cont)
+    (hlive : (w.st sender).life = .alive) (hfrom : msg.sender = sender) :
+    SealInv (enqueueOrPark w D sender dst msg isCall k) := by
+  have hmem : sender ∈ w.roster := hO sender (by rw [hlive]; intro hna; cases hna)
+  have hsend : (w.st sender).life ≠ .dead := by
+    rw [hlive]
+    intro hd
+    cases hd
+  unfold enqueueOrPark
+  dsimp only
+  by_cases halive : (w.st dst).life = .alive
+  · rw [ite_eq_right (fun hne => hne halive)]
+    by_cases hroom : (decide ((w.st dst).parked = []) &&
+        decide ((w.st dst).box.length < capBulk D w.N dst)) = true
+    · rw [ite_eq_left hroom]
+      by_cases hsame : sender = dst
+      · subst hsame
+        cases isCall
+        · simp only [decide_true, ↓reduceIte, Bool.false_eq_true]
+          let issued := Msg.mk msg.label msg.sender msg.callFrom (w.st sender).nextMid
+            msg.reliable msg.callId msg.tombstone msg.baseLabel
+          apply seal_grow_box (msg := issued)
+          · exact h
+          · exact hF
+          · exact halive
+          · simp [proceed_keeps_life, chargeSender, bumpToken]
+          · simp [proceed_parent, chargeSender, bumpToken]
+          · simp [proceed_keeps_parked, chargeSender, bumpToken]
+          · simp [proceed_keeps_prio, chargeSender, bumpToken]
+          · simp [proceed_keeps_box, chargeSender, bumpToken]
+            rfl
+          · exact Or.inr (by simpa [issued, hfrom] using halive)
+          · rw [hfrom]
+            exact hmem
+        · simp only [decide_true, ↓reduceIte]
+          let issued := Msg.mk msg.label msg.sender msg.callFrom (w.st sender).nextMid
+            msg.reliable (some (w.st sender).nextCall) msg.tombstone msg.baseLabel
+          apply seal_grow_box (msg := issued)
+          · exact h
+          · exact hF
+          · exact halive
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · rfl
+          · exact Or.inr (by simpa [issued, hfrom] using halive)
+          · rw [hfrom]
+            exact hmem
+      · have hdec : decide (sender = dst) = false := by simp [hsame]
+        cases isCall
+        · simp only [hdec, ↓reduceIte, Bool.false_eq_true]
+          apply seal_set_keep
+          · apply seal_grow_box w h hF dst
+            · exact halive
+            · rfl
+            · rfl
+            · rfl
+            · rfl
+            · rfl
+            · exact Or.inr (by simpa [hfrom] using hlive)
+            · rw [hfrom]
+              exact hmem
+          · rw [setActor_other w dst sender _ hsame]
+            simp [proceed_keeps_life, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [proceed_keeps_box, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [proceed_keeps_prio, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [proceed_keeps_parked, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [proceed_parent, chargeSender, bumpToken]
+        · simp only [hdec, ↓reduceIte]
+          apply seal_set_keep
+          · apply seal_grow_box w h hF dst
+            · exact halive
+            · rfl
+            · rfl
+            · rfl
+            · rfl
+            · rfl
+            · exact Or.inr (by simpa [hfrom] using hlive)
+            · rw [hfrom]
+              exact hmem
+          · rw [setActor_other w dst sender _ hsame]
+            simp [issueCall, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [issueCall, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [issueCall, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [issueCall, chargeSender, bumpToken]
+          · rw [setActor_other w dst sender _ hsame]
+            simp [issueCall, chargeSender, bumpToken]
+    · rw [ite_eq_right hroom]
+      by_cases hsame : sender = dst
+      · subst hsame
+        cases isCall
+        · simp only [decide_true, ↓reduceIte, Bool.false_eq_true]
+          let issued := Msg.mk msg.label msg.sender msg.callFrom (w.st sender).nextMid
+            msg.reliable msg.callId msg.tombstone msg.baseLabel
+          apply seal_park_snoc (entry := Parked.mk sender issued false)
+          · exact h
+          · exact hF
+          · exact halive
+          · simp [chargeSender, bumpToken]
+          · simp [chargeSender, bumpToken]
+          · simp [chargeSender, bumpToken]
+          · simp [chargeSender, bumpToken]
+          · rfl
+          · simp [issued, hfrom]
+          · simpa [issued, hfrom] using hsend
+        · simp only [decide_true, ↓reduceIte]
+          let issued := Msg.mk msg.label msg.sender msg.callFrom (w.st sender).nextMid
+            msg.reliable (some (w.st sender).nextCall) msg.tombstone msg.baseLabel
+          apply seal_park_snoc (entry := Parked.mk sender issued true)
+          · exact h
+          · exact hF
+          · exact halive
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · rfl
+          · simp [issued, issueCall, hfrom]
+          · simpa [issued, issueCall, hfrom] using hsend
+      · have hdec : decide (sender = dst) = false := by simp [hsame]
+        simp only [hdec, ↓reduceIte, Bool.false_eq_true]
+        apply seal_set_keep
+        · apply seal_park_snoc w h hF dst
+          · exact halive
+          · rfl
+          · rfl
+          · rfl
+          · rfl
+          · rfl
+          · simp [hfrom]
+          · simpa [hfrom] using hsend
+        · rw [setActor_other w dst sender _ hsame]
+          cases isCall <;> simp [issueCall, chargeSender, bumpToken]
+        · rw [setActor_other w dst sender _ hsame]
+          cases isCall <;> simp [issueCall, chargeSender, bumpToken]
+        · rw [setActor_other w dst sender _ hsame]
+          cases isCall <;> simp [issueCall, chargeSender, bumpToken]
+        · rw [setActor_other w dst sender _ hsame]
+          cases isCall <;> simp [issueCall, chargeSender, bumpToken]
+        · rw [setActor_other w dst sender _ hsame]
+          cases isCall <;> simp [issueCall, chargeSender, bumpToken]
+  · rw [ite_eq_left halive]
+    cases isCall
+    · rw [ite_eq_right Bool.false_ne_true]
+      exact seal_set_keep h (proceed_keeps_life _ _) (proceed_keeps_box _ _)
+        (proceed_keeps_prio _ _) (proceed_keeps_parked _ _) (proceed_parent _ _)
+    · rw [ite_eq_left rfl]
+      exact seal_set_keep h
+        (by simp [finishCall, issueCall, proceed_keeps_life])
+        (by simp [finishCall, issueCall, proceed_keeps_box])
+        (by simp [finishCall, issueCall, proceed_keeps_prio])
+        (by simp [finishCall, issueCall, proceed_keeps_parked])
+        (by simp [finishCall, issueCall, proceed_parent])
+
 /-- The mailbox write of a send or call, given the running sender's `SemInv` result. -/
 theorem enqueue_inv (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (isCall : Bool)
     (k : Cont) (h : Inv I w) (hS : SemInv I (enqueueOrPark w I.desc sender dst msg isCall k))
@@ -1432,7 +2210,8 @@ theorem enqueue_inv (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
     (hs : srcOk I sender (w.st sender) k)
     (hcall : isCall = true →
       effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).notAdmitted) k.onNotAdmitted = true ∧
-      effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true) :
+      effectsOk I.desc (tname sender) (focus (contAt k) (contAt k).timedOut) k.onTimedOut = true)
+    (hfrom : msg.sender = sender) :
     Inv I (enqueueOrPark w I.desc sender dst msg isCall k) :=
   ⟨hS, enqueue_mail w I.desc sender dst msg isCall k h.2.1 hfree hlive,
     open_shape w _ h.2.2.1 (fun i hi => by rw [enqueue_roster]; exact hi)
@@ -1441,7 +2220,7 @@ theorem enqueue_inv (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (is
     ParentForest.parents h.forest
       (enqueue_parent w I.desc sender dst msg isCall k)
       (enqueue_roster w I.desc sender dst msg isCall k),
-    ⟨parkedLive_enqueue w I.desc sender dst msg isCall k h.seal.liveParked hlive⟩⟩
+    enqueue_seal I.desc w h.seal h.forest h.2.2.1 sender dst msg isCall k hlive hfrom⟩
 
 theorem crash_parked (w : World) (i : InstId) : ((crashWorld w).st i).parked = (w.st i).parked := by
   by_cases hm : i ∈ w.roster
@@ -1512,48 +2291,217 @@ theorem crash_inv (I : Impl) (w : World) (h : Inv I w) : Inv I (crashWorld w) :=
     · rw [crash_off w i hm]
       exact h.2.2.2.1 i
   · exact ParentForest.parents h.forest (fun i => crashWorld_parent w i) rfl
-  · exact seal_crash I w hS
+  · exact seal_crash I w h.seal hS
+
+def withPrio (a : Actor) (msg : Msg) : Actor :=
+  { a with prio := a.prio ++ [msg], nextMid := a.nextMid + 1 }
+
+theorem seal_grow_prio (w : World) (h : SealInv w) (hF : ParentForest w) (host : InstId) (msg : Msg)
+    (hfrom : msg.tombstone = true ∨ (w.st msg.sender).life = .alive)
+    (hmem : msg.sender ∈ w.roster) :
+    SealInv (setActor w host
+      { (w.st host) with prio := (w.st host).prio ++ [msg], nextMid := (w.st host).nextMid + 1 }) := by
+  let w' := setActor w host (withPrio (w.st host) msg)
+  have hl : ∀ i, (w'.st i).life = (w.st i).life := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi]
+      simp [w', setActor, withPrio]
+    · simp [w', setActor, withPrio, hi]
+  have hpar : ∀ i, (w'.st i).parent = (w.st i).parent := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi]
+      simp [w', setActor, withPrio]
+    · simp [w', setActor, withPrio, hi]
+  have hbox : ∀ i, (w'.st i).box = (w.st i).box := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi]
+      simp [w', setActor, withPrio]
+    · simp [w', setActor, withPrio, hi]
+  have hpk : ∀ i, (w'.st i).parked = (w.st i).parked := by
+    intro i
+    by_cases hi : i = host
+    · rw [hi]
+      simp [w', setActor, withPrio]
+    · simp [w', setActor, withPrio, hi]
+  refine ⟨parkedLive_same h.liveParked hl hpk,
+    quiet_stable h.quiet rfl hl hbox hpk,
+    childless_stable h.childless rfl hl hpar,
+    chain_edit h.chain h.childless hF rfl rfl hl hpar ?_ ?_ ?_,
+    parkedFrom_same h.parkedFrom hpk,
+    ?_⟩
+  · intro i m hm
+    by_cases hi : i = host
+    · rw [hi, setActor_self] at hm
+      simp [withPrio] at hm
+      exact Or.inl ⟨m, by rw [hi]; exact hm, rfl, rfl⟩
+    · rw [setActor_other w host i _ hi] at hm
+      exact Or.inl ⟨m, hm, rfl, rfl⟩
+  · intro i m hm
+    by_cases hi : i = host
+    · rw [hi, setActor_self] at hm
+      rcases List.mem_append.mp hm with hm | hm
+      · exact Or.inl ⟨m, by rw [hi]; exact hm, rfl, rfl⟩
+      · have hm' : m = msg := by simpa [List.mem_singleton] using hm
+        rw [hm']
+        exact Or.inr hfrom
+    · rw [setActor_other w host i _ hi] at hm
+      exact Or.inl ⟨m, hm, rfl, rfl⟩
+  · intro parent id ht
+    refine Or.inl ?_
+    obtain ⟨m, hm, htomb, hsnd⟩ := ht
+    refine ⟨m, ?_, htomb, hsnd⟩
+    by_cases hp : parent = host
+    · rw [hp, setActor_self]
+      exact List.mem_append_left _ (by rw [← hp]; exact hm)
+    · rw [setActor_other w host parent _ hp]
+      exact hm
+  · intro host' m hm
+    rcases hm with hm | hm
+    · by_cases hi : host' = host
+      · rw [hi, setActor_self] at hm
+        simp [withPrio] at hm
+        exact h.hostedMail host' m (Or.inl (by rw [hi]; exact hm))
+      · rw [setActor_other w host host' _ hi] at hm
+        exact h.hostedMail host' m (Or.inl hm)
+    · by_cases hi : host' = host
+      · rw [hi, setActor_self] at hm
+        rcases List.mem_append.mp hm with hm | hm
+        · exact h.hostedMail host' m (Or.inr (by rw [hi]; exact hm))
+        · have hm' : m = msg := by simpa [List.mem_singleton] using hm
+          rw [hm']
+          exact hmem
+      · rw [setActor_other w host host' _ hi] at hm
+        exact h.hostedMail host' m (Or.inr hm)
 
 theorem offerPrio_inv (I : Impl) (D : Description) (w : World) (host : InstId) (msg : Msg)
-    (h : Inv I w) : Inv I (offerPrio D w host msg) := by
+    (h : Inv I w) (hfrom : msg.tombstone = true ∨ (w.st msg.sender).life = .alive)
+    (hmem : msg.sender ∈ w.roster) : Inv I (offerPrio D w host msg) := by
   unfold offerPrio
   dsimp only
   split
   · exact crash_inv I w h
-  · exact inv_same I w _ h (same_actor w host _ rfl rfl rfl rfl rfl)
+  · exact inv_frame I w _ h (same_actor w host _ rfl rfl rfl rfl rfl)
+      (seal_grow_prio w h.seal h.forest host msg hfrom hmem)
+
+theorem crash_not_alive (w : World) (i : InstId) (hi : i ∈ w.roster) :
+    ((crashWorld w).st i).life ≠ .alive := by
+  rw [crash_at w i hi]
+  unfold crashActor
+  by_cases hb : ((w.st i).life == .alive) = true
+  · rw [ite_eq_left hb]
+    intro h
+    cases h
+  · rw [ite_eq_right hb]
+    intro hlive
+    exact hb (beq_iff_eq.mpr hlive)
+
+theorem tryWake_skip (D : Description) (w : World) (dstId writer : InstId) (label : String)
+    (hd : (w.st dstId).life ≠ .alive) : tryWake D w dstId label writer = w := by
+  unfold tryWake
+  dsimp only
+  have hbit : ((w.st dstId).life == .alive) = false := by
+    rw [Bool.eq_false_iff]
+    intro hb
+    exact hd (beq_iff_eq.mp hb)
+  have hcond : ((w.st dstId).life != .alive) = true := by
+    show (!((w.st dstId).life == .alive)) = true
+    rw [hbit]
+    rfl
+  rw [hcond]
+  rfl
+
+theorem tryWake_cases (D : Description) (w : World) (dstId writer : InstId) (label : String) :
+    tryWake D w dstId label writer = w ∨
+    tryWake D w dstId label writer = crashWorld w ∨
+    (∃ msg, msg.sender = writer ∧ msg.tombstone = false ∧
+      tryWake D w dstId label writer = setActor w dstId (withPrio (w.st dstId) msg)) := by
+  unfold tryWake
+  dsimp only
+  split
+  · exact Or.inl rfl
+  · unfold offerPrio
+    dsimp only
+    split
+    · exact Or.inr (Or.inl rfl)
+    · exact Or.inr (Or.inr ⟨_, rfl, rfl, rfl⟩)
+
+theorem fold_skip (D : Description) (ids : List InstId) (label : String) (writer : InstId) (w : World)
+    (hd : ∀ i ∈ ids, (w.st i).life ≠ .alive) :
+    ids.foldl (fun w id => tryWake D w id label writer) w = w := by
+  induction ids with
+  | nil => rfl
+  | cons i is ih =>
+    simp only [List.foldl_cons]
+    rw [tryWake_skip D w i writer label (hd i (List.mem_cons_self (a := i)))]
+    exact ih (fun j hj => hd j (List.mem_cons_of_mem i hj))
 
 theorem tryWake_inv (I : Impl) (D : Description) (w : World) (dstId : InstId) (label : String)
-    (writer : InstId) (h : Inv I w) : Inv I (tryWake D w dstId label writer) := by
+    (writer : InstId) (h : Inv I w) (hw : (w.st writer).life = .alive) :
+    Inv I (tryWake D w dstId label writer) := by
   unfold tryWake
   dsimp only
   split
   · exact h
-  · exact offerPrio_inv I D w dstId _ h
+  · exact offerPrio_inv I D w dstId _ h (Or.inr hw)
+      (h.2.2.1 writer (by rw [hw]; intro hna; cases hna))
 
 theorem wakes_inv (I : Impl) (D : Description) (w : World) (ids : List InstId) (label : String)
-    (writer : InstId) (h : Inv I w) :
+    (writer : InstId) (h : Inv I w) (hw : (w.st writer).life = .alive)
+    (hsub : ∀ i ∈ ids, i ∈ w.roster) :
     Inv I (ids.foldl (fun w id => tryWake D w id label writer) w) := by
   induction ids generalizing w with
   | nil => exact h
   | cons i is ih =>
     simp only [List.foldl_cons]
-    exact ih _ (tryWake_inv I D w i label writer h)
+    rcases tryWake_cases D w i writer label with hskip | hrest
+    · rw [hskip]
+      exact ih _ h hw (fun j hj => hsub j (List.mem_cons_of_mem i hj))
+    · rcases hrest with hcrash | ⟨msg, hsnd, htomb, heq⟩
+      · rw [hcrash, fold_skip D is label writer (crashWorld w)
+          (fun j hj => crash_not_alive w j (hsub j (List.mem_cons_of_mem i hj)))]
+        exact crash_inv I w h
+      · rw [heq]
+        have hmem : writer ∈ w.roster := h.2.2.1 writer (by rw [hw]; intro hna; cases hna)
+        have hfrom : msg.tombstone = true ∨ (w.st msg.sender).life = .alive := by
+          rw [htomb, hsnd]
+          exact Or.inr hw
+        have h1 := inv_frame I w (setActor w i (withPrio (w.st i) msg)) h
+          (same_actor w i (withPrio (w.st i) msg) rfl rfl rfl rfl rfl)
+          (seal_grow_prio w h.seal h.forest i msg hfrom (by rw [hsnd]; exact hmem))
+        refine ih _ h1 ?_ ?_
+        · by_cases he : writer = i
+          · rw [he, setActor_self]
+            simp [withPrio]
+            rw [he] at hw
+            exact hw
+          · rw [setActor_other w i writer _ he]
+            exact hw
+        · intro j hj
+          simp [setActor]
+          exact hsub j (List.mem_cons_of_mem i hj)
 
 theorem wakeReaders_inv (I : Impl) (D : Description) (w : World) (dst label : String) (writer : InstId)
-    (h : Inv I w) : Inv I (wakeReaders D w dst label writer) :=
-  wakes_inv I D w _ label writer h
+    (h : Inv I w) (hw : (w.st writer).life = .alive) :
+    Inv I (wakeReaders D w dst label writer) :=
+  wakes_inv I D w _ label writer h hw
+    (fun i hi => (List.mem_filter.mp hi).1)
 
 theorem enqueueTombstone_inv (I : Impl) (D : Description) (w : World) (child : InstId) (h : Inv I w) :
     Inv I (enqueueTombstone D w child) := by
   unfold enqueueTombstone
-  split
-  · exact h
-  · dsimp only
+  match hpar : (w.st child).parent with
+  | none => exact h
+  | some parent =>
+    simp only [hpar]
     split
     · exact h
     · split
       · exact crash_inv I w h
-      · exact offerPrio_inv I D w _ _ h
+      · exact offerPrio_inv I D w parent (tombstoneMsg D (w.st parent) child) h
+          (Or.inl rfl) (roster_of_parent h.forest hpar)
 
 theorem resume_false_ok (D : Description) (sid : InstId) (a : Actor) (dst : InstId)
     (hc : contTy a) (hg : programOk D sid a) (hw : waitEdge D sid a) :
@@ -2370,7 +3318,15 @@ theorem after_rest (k : Cont) (e : Eff) (es : List Eff) (hk : k.rest = e :: es) 
 theorem inv_note (I : Impl) (w : World) (s : InstId) (d : String) (id : InstId) (a : Actor)
     (h : Inv I (setActor w id a)) : Inv I (setActor (noteStale w s d) id a) :=
   inv_same I _ _ h ⟨rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl⟩
-    (fun _ => by simp [noteStale]) (fun _ => by simp [noteStale]) (by simp [noteStale])
+    (fun i => by
+      by_cases hi : i = id
+      · rw [hi, setActor_self, setActor_self]
+      · rw [setActor_other (noteStale w s d) id i a hi, setActor_other w id i a hi, noteStale_st])
+    (fun i => by
+      by_cases hi : i = id
+      · rw [hi, setActor_self, setActor_self]
+      · rw [setActor_other (noteStale w s d) id i a hi, setActor_other w id i a hi, noteStale_st])
+    (by simp [setActor, noteStale])
 
 theorem reply_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff) (h : Inv I w)
     (hph : (w.st id).phase = .run k) (hk : k.rest = .reply :: es) (ha : (w.st id).life = .alive)
@@ -2425,7 +3381,12 @@ theorem cell_step_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label
       hfree ha rfl rfl rfl rfl hty hprog (src_ty I id k (by simp [setCell]) hs) rfl
   split
   · exact h1
-  · exact wakeReaders_inv I I.desc _ dst label id h1
+  · have hw : (((setActor (setCell w dst label c) id
+        (proceed ((setCell w dst label c).st id) k)).st id).life) = .alive := by
+      rw [setActor_self, proceed_keeps_life]
+      simp [setCell]
+      exact ha
+    exact wakeReaders_inv I I.desc _ dst label id h1 hw
 
 /-- An id off the roster: never spawned, so its life is still `absent`. -/
 theorem off_absent (I : Impl) (w : World) (id : InstId) (h : Inv I w) (hoff : id ∉ w.roster) :
@@ -2699,7 +3660,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
           (enqueue_sem I w id dstId _ false (afterHead k) h.1 hty htail
             ⟨l, by rw [route_tname w I.desc id d n dstId hr, hty]; exact hs.1⟩ ha
             (fun hc => absurd hc Bool.false_ne_true) (fun hc => absurd hc Bool.false_ne_true))
-          hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true)
+          hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true) rfl
     | trySend d l n f g =>
       have hs := head_try I.desc (tname id) d l (contAt k) n f g es hpe
       have hgone : Inv I (setActor w id (proceed (w.st id) { afterHead k with
@@ -2721,7 +3682,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
           simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hc
           exact enqueue_inv I w id dstId _ false (afterHead k) h
             (try_room_sem I w id dstId _ (afterHead k) h.1 hty htail hc.1.1 hc.1.2 hc.2 ha)
-            hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true)
+            hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true) rfl
         · split
           · exact hfull
           · exact hgone
@@ -2742,7 +3703,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
           (enqueue_sem_src I w id dstId _ true { afterHead k with onNotAdmitted := na, onTimedOut := to }
             h.1 hwait htail ⟨l, by rw [resolve_tname I.desc w id d n dstId hr, hty]; exact hs.1⟩ ha
             (fun _ _ => hs.2.1))
-          hfree ha hwait (fun _ => ⟨hs.2.1, hs.2.2.1⟩)
+          hfree ha hwait (fun _ => ⟨hs.2.1, hs.2.2.1⟩) rfl
     | reply =>
       simp only [execRun, hgo, hk, ite_true]
       exact reply_inv I w id k es h hph hk ha hty (head_rest _ _ _ _ _ hpe) hsrc0
@@ -2750,9 +3711,29 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
       simp only [execRun, hgo, hk, ite_true]
       split
       · exact inv_proceed I w id (w.st id) (afterHead k) h ha hfree ha rfl rfl rfl rfl hty htail hsrc rfl
-      · split
-        · exact inv_proceed I w id _ (afterHead k) h ha hfree (by exact ha) (by rfl) (by rfl) hty htail
-            (src_ty I id (afterHead k) rfl hsrc) rfl
+      · next hnew =>
+        split
+        · let msg : Msg :=
+            { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }
+          have happ : upsertPrio (w.st id).prio msg = (w.st id).prio ++ [msg] := by
+            unfold upsertPrio
+            rw [ite_eq_right hnew]
+          let grown := setActor w id (withPrio (w.st id) msg)
+          have h1 : Inv I grown :=
+            inv_frame I w grown h (same_actor w id (withPrio (w.st id) msg) rfl rfl rfl rfl rfl)
+              (seal_grow_prio w h.seal h.forest id msg (Or.inr ha)
+                (h.2.2.1 id (by rw [ha]; intro hna; cases hna)))
+          rw [happ]
+          simpa [grown, setActor_self, withPrio] using
+            inv_proceed I grown id (grown.st id) (afterHead k) h1
+              (by simp [grown, setActor, withPrio, ha])
+              (by simpa [grown, setActor, withPrio] using hfree)
+              (by simp [grown, setActor, withPrio, ha])
+              (by simp [grown, setActor, withPrio])
+              (by simp [grown, setActor, withPrio])
+              rfl rfl (by simpa [grown, setActor, withPrio, afterHead] using hty) htail
+              (src_ty I id (afterHead k) (by simp [grown, setActor, withPrio]) hsrc)
+              (by simp [grown, setActor, withPrio])
         · exact crash_inv I w h
     | cell dst label value =>
       simp only [execRun, hgo, hk, ite_true]
@@ -3556,20 +4537,21 @@ theorem callTimeout_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
 
 theorem ingress_inv (I : Impl) (w w' : World) (dst : InstId) (label : String) (h : Inv I w)
     (hs : receiveIngress I w dst label = some w') : Inv I w' := by
-  unfold receiveIngress at hs
-  dsimp only at hs
-  split at hs
-  · cases hs
-  · split at hs
-    · cases hs
-    · split at hs
-      · cases hs
-      · split at hs
-        · cases hs
-        · split at hs
-          · cases hs
-          · cases hs
-            exact inv_same I w _ h (same_actor w dst _ rfl rfl rfl rfl rfl)
+  obtain ⟨hlive, _, _, _, heq⟩ := ingress_open I w w' dst label hs
+  rw [heq]
+  exact inv_frame I w _ h (same_actor w dst _ rfl rfl rfl rfl rfl)
+    (seal_grow_box w h.seal h.forest dst
+      { chargeSender (w.st dst) (tname dst) with
+        box := (w.st dst).box ++
+          [{ label := label, sender := dst, callFrom := none, reliable := true,
+             mid := (w.st dst).nextMid }],
+        nextMid := (w.st dst).nextMid + 1 }
+      { label := label, sender := dst, callFrom := none, reliable := true,
+        mid := (w.st dst).nextMid }
+      hlive (by simp [chargeSender, bumpToken]) (by simp [chargeSender, bumpToken])
+      (by simp [chargeSender, bumpToken]) (by simp [chargeSender, bumpToken])
+      (by simp [chargeSender, bumpToken]) (Or.inr hlive)
+      (h.2.2.1 dst (by rw [hlive]; intro hna; cases hna)))
 
 theorem step_inv (I : Impl) (hL : LocalOk I) (w w' : World) (hstep : Step I w w')
     (h : Inv I w) : Inv I w' := by

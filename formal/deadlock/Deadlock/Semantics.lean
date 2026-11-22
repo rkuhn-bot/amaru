@@ -1539,6 +1539,12 @@ structure SealInv (w : World) : Prop where
   quiet : DeadQuiet w
   childless : DeadChildless w
   chain : TombChain w
+  /-- The parked entry and the message it carries name the same sender. -/
+  parkedFrom : ∀ host p, p ∈ (w.st host).parked → p.sender = p.msg.sender
+  /-- Bulk and priority mail was sent by someone on the roster. An id that has
+  not been born has no queued mail, so a later birth does not adopt it. -/
+  hostedMail : ∀ host m,
+    (m ∈ (w.st host).box ∨ m ∈ (w.st host).prio) → m.sender ∈ w.roster
 
 theorem isChild_edge (w : World) (parent child : InstId)
     (h : isChild w parent child = true) : ParentEdge w child parent := by
