@@ -646,6 +646,27 @@ theorem frame_releaseWorld (D : Description) (w : World) (id : InstId) (a : Acto
   have hC5 := cont_after (releaseOutbound w3 id) id _ hC4 hdead
   exact frame_trans (frame_trans hF4 (frame_halt _ id _ (by simp))) (release_frame id a.parked _ hC5).1
 
+theorem releaseWorld_cont (D : Description) (w : World) (id : InstId) (a : Actor)
+    (hC : ∀ i, contTy (w.st i)) : ∀ i, contTy ((releaseWorld D w id a).st i) := by
+  have hs3 : Same w (refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked) :=
+    same_trans (same_trans (same_cells D w id) (same_refundMsgs _ _ _)) (same_refundParked _ _ _)
+  generalize hw3 : refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked = w3
+    at hs3
+  have hrel : releaseWorld D w id a =
+      releaseParked (setActor (releaseOutbound w3 id) id
+        { ((releaseOutbound w3 id).st id) with
+          life := .dead, phase := .idle, box := [], prio := [], parked := [] }) id a.parked := by
+    rw [← hw3]
+    rfl
+  rw [hrel]
+  have hf := releaseOutbound_fields w3 id
+  have hC4 : ∀ i, contTy ((releaseOutbound w3 id).st i) := fun i =>
+    contTy_congr ((hf i).2.2.2.1.trans (hs3.phase i)) ((hf i).2.2.1.trans (hs3.ty i)) (hC i)
+  have hdead : contTy { ((releaseOutbound w3 id).st id) with
+      life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [contTy]
+  exact (release_frame id a.parked _ (cont_after (releaseOutbound w3 id) id _ hC4 hdead)).2
+
 theorem frame_seal (D : Description) (w : World) (id : InstId) (a : Actor) (hC : ∀ i, contTy (w.st i)) :
     Frame w (sealActor D w id a) := by
   unfold sealActor
@@ -660,63 +681,64 @@ theorem frame_shutdown (D : Description) (w : World) (id : InstId)
   · rw [ite_eq_right hlive]
     exact frame_refl w
 
-/-- Sealing a branch is a frame. The invariant carries `contTy` to each nested seal. -/
-theorem frame_sealBranch (I : Impl) (fuel : Nat) (D : Description) (w : World) (id : InstId)
-    (h : Inv I w) : Frame w (sealBranch fuel D w id) := by
+/-- Sealing a branch is a frame. `contTy` is enough: a seal does not install a live phase. -/
+theorem seal_frame_cont (fuel : Nat) (D : Description) (w : World) (id : InstId)
+    (hC : ∀ i, contTy (w.st i)) :
+    Frame w (sealBranch fuel D w id) ∧ ∀ i, contTy ((sealBranch fuel D w id).st i) := by
   induction fuel generalizing w id with
-  | zero => exact frame_refl w
+  | zero => exact ⟨frame_refl w, hC⟩
   | succ n ih =>
-    have hfold : ∀ (ids : List InstId) (acc : World), Inv I acc → Frame w acc →
-        Inv I (ids.foldl (fun acc child =>
-          if isChild acc id child then sealBranch n D acc child else acc) acc) ∧
+    have hfold : ∀ (ids : List InstId) (acc : World),
+        (∀ i, contTy (acc.st i)) → Frame w acc →
         Frame w (ids.foldl (fun acc child =>
-          if isChild acc id child then sealBranch n D acc child else acc) acc) := by
+          if isChild acc id child then sealBranch n D acc child else acc) acc) ∧
+        ∀ i, contTy ((ids.foldl (fun acc child =>
+          if isChild acc id child then sealBranch n D acc child else acc) acc).st i) := by
       intro ids
       induction ids with
-      | nil => intro acc ha hf; exact ⟨ha, hf⟩
+      | nil => intro acc hCa hf; exact ⟨hf, hCa⟩
       | cons c cs ihc =>
-        intro acc ha hf
+        intro acc hCa hf
         simp only [List.foldl_cons]
-        apply ihc
-        · split
-          · exact sealBranch_inv I n D _ _ ha
-          · exact ha
-        · split
-          · exact frame_trans hf (ih _ _ ha)
-          · exact hf
-    obtain ⟨hs, hF⟩ := hfold w.roster w h (frame_refl w)
+        split
+        · obtain ⟨hF, hC'⟩ := ih acc c hCa
+          exact ihc _ hC' (frame_trans hf hF)
+        · exact ihc _ hCa hf
+    obtain ⟨hF, hC'⟩ := hfold w.roster w hC (frame_refl w)
     unfold sealBranch
     dsimp only
     split
-    · exact frame_trans hF (frame_releaseWorld D _ id _ hs.1.cont)
-    · exact hF
+    · refine ⟨frame_trans hF (frame_releaseWorld D _ id _ hC'), ?_⟩
+      intro i
+      exact releaseWorld_cont D _ id _ hC' i
+    · exact ⟨hF, hC'⟩
 
-theorem frame_drop (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w) :
+theorem frame_sealBranch (fuel : Nat) (D : Description) (w : World) (id : InstId)
+    (hC : ∀ i, contTy (w.st i)) : Frame w (sealBranch fuel D w id) :=
+  (seal_frame_cont fuel D w id hC).1
+
+theorem frame_drop (D : Description) (w : World) (id : InstId) (hC : ∀ i, contTy (w.st i)) :
     Frame w (dropDescendants D w id) := by
   unfold dropDescendants
-  have hfold : ∀ (ids : List InstId) (acc : World), Inv I acc → Frame w acc →
-      Inv I (ids.foldl (fun acc child =>
-        if isChild acc id child then sealBranch w.roster.length D acc child else acc) acc) ∧
+  have hfold : ∀ (ids : List InstId) (acc : World),
+      (∀ i, contTy (acc.st i)) → Frame w acc →
       Frame w (ids.foldl (fun acc child =>
         if isChild acc id child then sealBranch w.roster.length D acc child else acc) acc) := by
     intro ids
     induction ids with
-    | nil => intro acc ha hf; exact ⟨ha, hf⟩
+    | nil => intro _ hf; exact hf
     | cons c cs ihc =>
-      intro acc ha hf
+      intro acc hCa hf
       simp only [List.foldl_cons]
-      apply ihc
-      · split
-        · exact sealBranch_inv I _ D _ _ ha
-        · exact ha
-      · split
-        · exact frame_trans hf (frame_sealBranch I _ D _ _ ha)
-        · exact hf
-  exact (hfold w.roster w h (frame_refl w)).2
+      split
+      · exact ihc _ (seal_frame_cont w.roster.length D acc c hCa).2
+          (frame_trans hf (frame_sealBranch w.roster.length D acc c hCa))
+      · exact ihc _ hCa hf
+  exact hfold w.roster w hC (frame_refl w)
 
 theorem frame_terminate (I : Impl) (D : Description) (w : World) (id : InstId) (a : Actor)
     (h : Inv I w) : Frame w (terminateStage D w id a) :=
-  frame_trans (frame_drop I D w id h)
+  frame_trans (frame_drop D w id h.1.cont)
     (frame_shutdown D (dropDescendants D w id) id (dropDescendants_inv I D w id h).1.cont)
 
 theorem frame_abort (I : Impl) (D : Description) (w : World) (parent : InstId) (h : Inv I w) :
@@ -739,10 +761,15 @@ theorem frame_abort (I : Impl) (D : Description) (w : World) (parent : InstId) (
       simp only [List.foldl_cons]
       apply ihc
       · split
-        · exact shutdownActor_inv I D _ c (dropDescendants_inv I D _ c ha)
+        · have hstep : shutdownActor D (dropDescendants D acc c) c =
+              terminateStage D acc c (acc.st c) := by
+            unfold terminateStage
+            rfl
+          rw [hstep]
+          exact terminateStage_inv I D acc c _ ha
         · exact ha
       · split
-        · exact frame_trans hf (frame_trans (frame_drop I D acc c ha)
+        · exact frame_trans hf (frame_trans (frame_drop D acc c ha.1.cont)
             (frame_shutdown D (dropDescendants D acc c) c
               (dropDescendants_inv I D acc c ha).1.cont))
         · exact hf

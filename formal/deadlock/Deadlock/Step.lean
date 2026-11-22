@@ -3594,8 +3594,67 @@ theorem releaseOutbound_inv (I : Impl) (w : World) (dead : InstId) (h : Inv I w)
       hostedMail := hostedMail_same h.seal.hostedMail (hf dead).1 (fun i => (hq i).1)
         (fun i => (hq i).2.1) }
 
-/-- The seal of a live actor, after its outbound entries are gone. -/
-theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
+/-- `Inv` is the tombstone chain with an empty gap. -/
+theorem except_of_inv {I : Impl} {w : World} (h : Inv I w) : ExceptInv I w (fun _ => False) :=
+  ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.forest,
+    { liveParked := h.seal.liveParked, quiet := h.seal.quiet, childless := h.seal.childless,
+      chain := gap_of_chain h.seal.chain, parkedFrom := h.seal.parkedFrom,
+      hostedMail := h.seal.hostedMail }⟩
+
+/-- A larger gap exempts more ids, so the chain for the smaller gap still holds. -/
+theorem gap_widen {w : World} {gap gap' : InstId → Prop} (h : TombGap w gap)
+    (hsub : ∀ i, gap i → gap' i) : TombGap w gap' :=
+  fun i hc hd hf hng => h i hc hd hf (fun hg => hng (hsub i hg))
+
+/-- Replace the waived chain and keep the other seal facts. -/
+theorem except_chain {I : Impl} {w : World} {gap gap' : InstId → Prop}
+    (h : ExceptInv I w gap) (hc : TombGap w gap') : ExceptInv I w gap' :=
+  ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.forest,
+    { liveParked := h.seal.liveParked, quiet := h.seal.quiet, childless := h.seal.childless,
+      chain := hc, parkedFrom := h.seal.parkedFrom, hostedMail := h.seal.hostedMail }⟩
+
+/-- The extra disjunct is empty, so the only exempt id is the actor just sealed. -/
+theorem gap_only_id {w : World} {ex : InstId} {gap : InstId → Prop}
+    (h : TombGap w (fun i => i = ex ∨ gap i ∧ (w.st i).parent ≠ some ex))
+    (hno : ∀ i, ¬ gap i) : TombGap w (fun i => i = ex) := by
+  intro i hc hd hf hng
+  exact h i hc hd hf (by
+    intro hbad
+    rcases hbad with hbad | hbad
+    · exact hng hbad
+    · exact hno i hbad.1)
+
+/-- Sealing `ex` while its parent is already dead does not waive `ex`: the
+parent's mail stays in flight, which is the ancestor half of the chain. -/
+theorem gap_drop_dead {w : World} {ex : InstId} {gap : InstId → Prop}
+    (h : TombGap w (fun i => i = ex ∨ gap i ∧ (w.st i).parent ≠ some ex))
+    (hF : ParentForest w)
+    (hdead : match (w.st ex).parent with
+      | none => True
+      | some p => (w.st p).life ≠ .alive) : TombGap w gap := by
+  intro i hc hd hf hng
+  by_cases he : i = ex
+  · cases hpar : (w.st ex).parent with
+    | none =>
+      rw [he, hpar]
+      trivial
+    | some p =>
+      rw [he, hpar]
+      have hna : (w.st p).life ≠ .alive := by
+        rw [hpar] at hdead
+        exact hdead
+      exact Or.inr ⟨hna, flight_ancestor w hF ex p hpar (by rw [← he]; exact hf)⟩
+  · exact h i hc hd hf (by
+      intro hbad
+      rcases hbad with hbad | hbad
+      · exact he hbad
+      · exact hng hbad.1)
+
+/-- The seal of a live actor, after its outbound entries are gone. Ids already
+in `gap` stay waived, except a child of `id`: that child is repaired because
+`id` is now dead, and `id` itself is the new waiver. -/
+theorem release_inv (I : Impl) (w w4 : World) (id : InstId) {gap : InstId → Prop}
+    (h : ExceptInv I w gap)
     (hgo : (w.st id).life = .alive)
     (hr : w4.roster = w.roster) (hl : ∀ i, (w4.st i).life = (w.st i).life)
     (ht : ∀ i, (w4.st i).typestate = (w.st i).typestate) (hp : ∀ i, (w4.st i).phase = (w.st i).phase)
@@ -3607,7 +3666,8 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
     (hkids : ∀ c, c ≠ id → (w.st c).parent = some id → (w.st c).life ≠ .alive) :
     ExceptInv I (releaseParked (setActor w4 id
       { (w4.st id) with life := .dead, phase := .idle, box := [], prio := [], parked := [] })
-      id (w.st id).parked) (fun i => i = id) := by
+      id (w.st id).parked)
+      (fun i => i = id ∨ gap i ∧ (w.st i).parent ≠ some id) := by
   have hS := h.1
   have hM := h.2.1
   have hmem : id ∈ w.roster :=
@@ -3766,28 +3826,21 @@ theorem release_inv (I : Impl) (w w4 : World) (id : InstId) (h : Inv I w)
             simp
       childless := childless_kill h.seal.childless hcrF hlift (by rw [hlifeId]; intro ha; cases ha)
         hparLift hkids
-      chain := by
-        have hraw := chain_gap_kill (gap_of_chain h.seal.chain) h.seal.childless h.forest
-          hcrF hroF hlifeId hlift hparLift
-          (fun i m hm => by
-            by_cases hi : i = id
-            · rw [hi, hboxId] at hm
-              cases hm
-            · exact Or.inl ⟨m, by rw [← hboxLift i hi]; exact hm, rfl, rfl⟩)
-          (fun i m hm => by
-            by_cases hi : i = id
-            · rw [hi, hprioId] at hm
-              cases hm
-            · exact Or.inl ⟨m, by rw [← hprioLift i hi]; exact hm, rfl, rfl⟩)
-          (fun parent id0 hpx ht => by
-            obtain ⟨m, hm, htomb, hsnd⟩ := ht
-            exact Or.inl ⟨m, by rw [hprioLift parent hpx]; exact hm, htomb, hsnd⟩)
-        intro i hc hd hf hng
-        exact hraw i hc hd hf (by
-          intro hbad
-          rcases hbad with hbad | hbad
-          · exact hng hbad
-          · exact hbad.1)
+      chain := chain_gap_kill h.seal.chain h.seal.childless h.forest
+        hcrF hroF hlifeId hlift hparLift
+        (fun i m hm => by
+          by_cases hi : i = id
+          · rw [hi, hboxId] at hm
+            cases hm
+          · exact Or.inl ⟨m, by rw [← hboxLift i hi]; exact hm, rfl, rfl⟩)
+        (fun i m hm => by
+          by_cases hi : i = id
+          · rw [hi, hprioId] at hm
+            cases hm
+          · exact Or.inl ⟨m, by rw [← hprioLift i hi]; exact hm, rfl, rfl⟩)
+        (fun parent id0 hpx ht => by
+          obtain ⟨m, hm, htomb, hsnd⟩ := ht
+          exact Or.inl ⟨m, by rw [hprioLift parent hpx]; exact hm, htomb, hsnd⟩)
       parkedFrom := by
         intro host p hp
         by_cases hh : host = id
@@ -3819,10 +3872,12 @@ theorem readCells_crashed (D : Description) (w : World) (id : InstId) :
     simp only [List.foldl_cons]
     exact (ih _).trans (by simp [setCell, setObserved])
 
-theorem releaseWorld_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w)
+theorem releaseWorld_gap (I : Impl) (D : Description) (w : World) (id : InstId)
+    {gap : InstId → Prop} (h : ExceptInv I w gap)
     (hgo : (w.st id).life = .alive)
     (hkids : ∀ c, c ≠ id → (w.st c).parent = some id → (w.st c).life ≠ .alive) :
-    ExceptInv I (releaseWorld D w id (w.st id)) (fun i => i = id) := by
+    ExceptInv I (releaseWorld D w id (w.st id))
+      (fun i => i = id ∨ gap i ∧ (w.st i).parent ≠ some id) := by
   have hs3 : Same w (refundParked (refundMsgs (readCells D w id) (tname id) (w.st id).box)
       (tname id) (w.st id).parked) :=
     same_trans (same_trans (same_cells D w id) (same_refundMsgs _ _ _)) (same_refundParked _ _ _)
@@ -3867,6 +3922,20 @@ theorem releaseWorld_inv (I : Impl) (D : Description) (w : World) (id : InstId) 
         rw [h.1.offEmpty i hm]
         rfl)
     hboxW hprioW hcrW hkids
+
+/-- Releasing from a full chain waives only the actor that just died. -/
+theorem releaseWorld_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w)
+    (hgo : (w.st id).life = .alive)
+    (hkids : ∀ c, c ≠ id → (w.st c).parent = some id → (w.st c).life ≠ .alive) :
+    ExceptInv I (releaseWorld D w id (w.st id)) (fun i => i = id) := by
+  have hwide := releaseWorld_gap I D w id (except_of_inv h) hgo hkids
+  refine except_chain hwide ?_
+  intro i hc hd hf hng
+  exact hwide.seal.chain i hc hd hf (by
+    intro hbad
+    rcases hbad with hbad | hbad
+    · exact hng hbad
+    · exact hbad.1)
 
 theorem closed_inv {I : Impl} {w : World} {ex : InstId}
     (h : ExceptInv I w (fun i => i = ex))
@@ -3943,54 +4012,607 @@ theorem shutdownActor_inv (I : Impl) (D : Description) (w : World) (id : InstId)
   · rw [ite_eq_right hlive]
     exact h
 
-theorem sealBranch_inv (I : Impl) (fuel : Nat) (D : Description) (w : World) (id : InstId)
-    (h : Inv I w) : Inv I (sealBranch fuel D w id) := by
+theorem releaseWorld_life_ne (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (hi : i ≠ id) : ((releaseWorld D w id a).st i).life = (w.st i).life := by
+  have hs3 : Same w (refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked) :=
+    same_trans (same_trans (same_cells D w id) (same_refundMsgs _ _ _)) (same_refundParked _ _ _)
+  simp only [releaseWorld]
+  rw [release_fold_eq, release_life, setActor_other _ id i _ hi, (releaseOutbound_fields _ id i).2.1]
+  exact hs3.life i
+
+theorem releaseWorld_roster (D : Description) (w : World) (id : InstId) (a : Actor) :
+    (releaseWorld D w id a).roster = w.roster := by
+  have hs3 : Same w (refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked) :=
+    same_trans (same_trans (same_cells D w id) (same_refundMsgs _ _ _)) (same_refundParked _ _ _)
+  simp only [releaseWorld]
+  rw [release_fold_eq, release_roster, setActor, (releaseOutbound_fields _ id id).1, hs3.roster]
+
+/-- Every descending chain from `id` has at most `n` steps. `0` means no proper child. -/
+def DescShort (w : World) (id : InstId) : Nat → Prop
+  | 0 => ∀ c, (w.st c).parent = some id → c = id
+  | n + 1 => ∀ c, c ≠ id → (w.st c).parent = some id → DescShort w c n
+
+theorem desc_short_parent {w w' : World} (hpar : ∀ i, (w'.st i).parent = (w.st i).parent)
+    {id : InstId} {n : Nat} (h : DescShort w id n) : DescShort w' id n := by
+  induction n generalizing id with
+  | zero =>
+    intro c hp
+    exact h c (by rw [hpar c] at hp; exact hp)
+  | succ n ih =>
+    intro c hc hp
+    exact ih (h c hc (by rw [← hpar c]; exact hp))
+
+/-- `xs` is a chain of proper descendants of `id`, nearest child first. -/
+inductive DPath (w : World) : InstId → List InstId → Prop where
+  | nil {id : InstId} : DPath w id []
+  | cons {id c : InstId} {rest : List InstId} :
+      (w.st c).parent = some id → c ≠ id → DPath w c rest → DPath w id (c :: rest)
+
+theorem path_of_not_short {w : World} {id : InstId} {n : Nat} (h : ¬ DescShort w id n) :
+    ∃ xs, DPath w id xs ∧ xs.length = n + 1 := by
+  induction n generalizing id with
+  | zero =>
+    obtain ⟨c, hc⟩ := Classical.not_forall.mp h
+    have hc' := Classical.not_imp.mp hc
+    exact ⟨[c], DPath.cons hc'.1 hc'.2 DPath.nil, rfl⟩
+  | succ n ih =>
+    obtain ⟨c, hc⟩ := Classical.not_forall.mp h
+    have hc1 := Classical.not_imp.mp hc
+    have hc2 := Classical.not_imp.mp hc1.2
+    obtain ⟨xs, hpath, hlen⟩ := ih hc2.2
+    exact ⟨c :: xs, DPath.cons hc2.1 hc1.1 hpath, by simp [hlen]⟩
+
+theorem dpath_anc {w : World} {id : InstId} {xs : List InstId} (h : DPath w id xs) :
+    ∀ x, x ∈ xs → StrictAncestor w x id := by
+  induction h with
+  | nil =>
+    intro x hx
+    cases hx
+  | cons hp hne _ ih =>
+    intro x hx
+    simp only [List.mem_cons] at hx
+    rcases hx with hx | hx
+    · rw [hx]
+      exact StrictAncestor.edge ⟨hp, hne⟩
+    · exact StrictAncestor.trans (ih x hx) (StrictAncestor.edge ⟨hp, hne⟩)
+
+theorem dpath_mem {w : World} (hF : ParentForest w) {id : InstId} {xs : List InstId}
+    (h : DPath w id xs) : ∀ x, x ∈ xs → x ∈ w.roster := by
+  induction h with
+  | nil =>
+    intro x hx
+    cases hx
+  | cons hp _ _ ih =>
+    intro x hx
+    simp only [List.mem_cons] at hx
+    rcases hx with hx | hx
+    · rw [hx]
+      exact roster_of_parent hF hp
+    · exact ih x hx
+
+theorem dpath_nodup {w : World} (hF : ParentForest w) {id : InstId} {xs : List InstId}
+    (h : DPath w id xs) : (id :: xs).Nodup := by
+  induction h
+  case nil =>
+    refine List.nodup_cons.mpr ⟨?_, List.nodup_nil⟩
+    intro hx
+    cases hx
+  case cons pid child rest hp hne hrest ih =>
+    refine List.nodup_cons.mpr ⟨?_, ih⟩
+    intro hx
+    simp only [List.mem_cons] at hx
+    rcases hx with hx | hx
+    · exact hne hx.symm
+    · exact ParentAcyclic.no_self hF.wf pid
+        (StrictAncestor.trans (dpath_anc hrest pid hx) (StrictAncestor.edge ⟨hp, hne⟩))
+
+theorem dpath_host {w : World} (hF : ParentForest w) {id c : InstId} {rest : List InstId}
+    (h : DPath w id (c :: rest)) : id ∈ w.roster := by
+  cases h with
+  | cons hp _ _ =>
+    exact hF.hosted c id hp
+
+/-- A descending chain is a duplicate-free roster list, so it fits in the roster. -/
+theorem desc_short_roster (w : World) (hF : ParentForest w) (id : InstId) :
+    DescShort w id (w.roster.length - 1) := by
+  exact Classical.byContradiction fun h => by
+    obtain ⟨xs, hpath, hlen⟩ := path_of_not_short h
+    have hnd := dpath_nodup hF hpath
+    have hsub : ∀ x, x ∈ id :: xs → x ∈ w.roster := by
+      intro x hx
+      simp only [List.mem_cons] at hx
+      rcases hx with hx | hx
+      · rw [hx]
+        cases xs with
+        | nil =>
+          simp only [List.length_nil] at hlen
+          omega
+        | cons c rest =>
+          exact dpath_host hF hpath
+      · exact dpath_mem hF hpath x hx
+    have hle := nodup_length_le (id :: xs) w.roster hnd hsub
+    simp only [List.length_cons, hlen] at hle
+    omega
+
+theorem strict_of_parent {w w' : World} (hpar : ∀ i, (w'.st i).parent = (w.st i).parent)
+    {desc anc : InstId} (h : StrictAncestor w desc anc) : StrictAncestor w' desc anc := by
+  induction h
+  case edge d a he =>
+    exact StrictAncestor.edge ⟨by rw [hpar d]; exact he.1, he.2⟩
+  case tail d mid a he rest ih =>
+    exact StrictAncestor.tail ⟨by rw [hpar d]; exact he.1, he.2⟩ ih
+
+theorem seal_parent (fuel : Nat) (D : Description) (w : World) (id i : InstId) :
+    ((sealBranch fuel D w id).st i).parent = (w.st i).parent := by
+  induction fuel generalizing w id with
+  | zero => rfl
+  | succ n ih =>
+    unfold sealBranch
+    dsimp only
+    have hfold : ∀ (ids : List InstId) (acc : World),
+        ((ids.foldl (fun acc child =>
+          if isChild acc id child then sealBranch n D acc child else acc) acc).st i).parent =
+          (acc.st i).parent := by
+      intro ids
+      induction ids with
+      | nil => intro _; rfl
+      | cons c cs ihc =>
+        intro acc
+        simp only [List.foldl_cons]
+        split
+        · rw [ihc, ih]
+        · rw [ihc]
+    split
+    · rw [releaseWorld_parent, hfold]
+    · exact hfold _ _
+
+theorem seal_roster (fuel : Nat) (D : Description) (w : World) (id : InstId) :
+    (sealBranch fuel D w id).roster = w.roster := by
+  induction fuel generalizing w id with
+  | zero => rfl
+  | succ n ih =>
+    unfold sealBranch
+    dsimp only
+    have hfold : ∀ (ids : List InstId) (acc : World),
+        (ids.foldl (fun acc child =>
+          if isChild acc id child then sealBranch n D acc child else acc) acc).roster =
+          acc.roster := by
+      intro ids
+      induction ids with
+      | nil => intro _; rfl
+      | cons _ cs ihc =>
+        intro acc
+        simp only [List.foldl_cons]
+        split
+        · rw [ihc, ih]
+        · rw [ihc]
+    split
+    · rw [releaseWorld_roster, hfold]
+    · exact hfold _ _
+
+theorem seal_not_born (fuel : Nat) (D : Description) (w : World) (id i : InstId)
+    (h : (w.st i).life ≠ .alive) : ((sealBranch fuel D w id).st i).life ≠ .alive := by
   induction fuel generalizing w id with
   | zero => exact h
   | succ n ih =>
-    have hfold : ∀ (ids : List InstId) (acc : World), Inv I acc →
-        Inv I (ids.foldl (fun acc child =>
-          if isChild acc id child then sealBranch n D acc child else acc) acc) := by
-      intro ids
-      induction ids with
-      | nil => intro acc ha; exact ha
-      | cons c cs ihc =>
-        intro acc ha
-        simp only [List.foldl_cons]
-        apply ihc
-        split
-        · exact ih _ _ ha
-        · exact ha
-    have hs := hfold w.roster w h
     unfold sealBranch
     dsimp only
+    have hfold : ∀ (ids : List InstId) (acc : World), (acc.st i).life ≠ .alive →
+        ((ids.foldl (fun acc child =>
+          if isChild acc id child then sealBranch n D acc child else acc) acc).st i).life ≠
+          .alive := by
+      intro ids
+      induction ids with
+      | nil => intro _ ha; exact ha
+      | cons _ cs ihc =>
+        intro acc ha
+        simp only [List.foldl_cons]
+        split
+        · exact ihc _ (ih _ _ ha)
+        · exact ihc _ ha
+    have hs := hfold w.roster w h
     split
-    · next hgo =>
-      apply releaseWorld_inv I D _ id hs
-      simpa [beq_iff_eq] using hgo
+    · by_cases hi : i = id
+      · rw [hi, (releaseWorld_keeps_credit D _ id _).1]
+        intro hd
+        cases hd
+      · rw [releaseWorld_life_ne D _ id _ i hi]
+        exact hs
     · exact hs
 
+/-- Sealing `id` does not rewrite `spared` when `spared` is not under `id`. -/
+theorem seal_spares (fuel : Nat) (D : Description) (w : World) (id spared : InstId)
+    (hF : ParentForest w) (hne : spared ≠ id) (hnot : ¬ StrictAncestor w spared id) :
+    ((sealBranch fuel D w id).st spared).life = (w.st spared).life := by
+  induction fuel generalizing w id with
+  | zero => rfl
+  | succ n ih =>
+    unfold sealBranch
+    dsimp only
+    have hfold : ∀ (ids : List InstId) (acc : World),
+        (∀ i, (acc.st i).parent = (w.st i).parent) → acc.roster = w.roster →
+        ParentForest acc → ¬ StrictAncestor acc spared id →
+        ((ids.foldl (fun acc child =>
+          if isChild acc id child then sealBranch n D acc child else acc) acc).st spared).life =
+          (acc.st spared).life := by
+      intro ids
+      induction ids with
+      | nil => intro _ _ _ _ _; rfl
+      | cons c cs ihc =>
+        intro acc hpar hro hFa hnotA
+        simp only [List.foldl_cons]
+        split
+        · next hchild =>
+          have hp := isChild_parent acc id c hchild
+          have hcne : c ≠ id := by
+            simp only [isChild] at hchild
+            split at hchild
+            · next p hp =>
+              exact of_decide_eq_true ((Bool.and_eq_true _ _).mp hchild).2
+            · simp at hchild
+          have hnotC : ¬ StrictAncestor acc spared c := by
+            intro hanc
+            exact hnotA (StrictAncestor.trans hanc (StrictAncestor.edge ⟨hp, hcne⟩))
+          have hspC : spared ≠ c := by
+            intro heq
+            exact hnotA (heq ▸ StrictAncestor.edge ⟨hp, hcne⟩)
+          have hlife := ih acc c hFa hspC hnotC
+          have hparS : ∀ i, ((sealBranch n D acc c).st i).parent = (w.st i).parent := by
+            intro i
+            rw [seal_parent, hpar]
+          have hroS : (sealBranch n D acc c).roster = w.roster := by
+            rw [seal_roster, hro]
+          rw [ihc (sealBranch n D acc c) hparS hroS
+            (ParentForest.parents hF hparS hroS)
+            (by
+              intro hanc
+              exact hnotA (strict_of_parent (fun i => (seal_parent n D acc c i).symm) hanc))]
+          exact hlife
+        · exact ihc acc hpar hro hFa hnotA
+    split
+    · rw [releaseWorld_life_ne D _ id _ spared hne]
+      exact hfold w.roster w (fun _ => rfl) rfl hF hnot
+    · exact hfold w.roster w (fun _ => rfl) rfl hF hnot
+
+/-- Ids waived only as live children of a now-dead `id` are repaired: their mail
+keeps `id` in flight. -/
+theorem gap_drop_children {w : World} {id : InstId} {gap g : InstId → Prop}
+    (h : TombGap w g) (hF : ParentForest w)
+    (hsub : ∀ i, g i → gap i ∨ ((w.st i).parent = some id ∧ i ≠ id))
+    (hdead : (w.st id).life ≠ .alive) : TombGap w gap := by
+  intro i hc hd hf hng
+  by_cases hg : g i
+  · rcases hsub i hg with hsub | hsub
+    · exact absurd hsub hng
+    · cases hpar : (w.st i).parent with
+      | none =>
+        have hbad := hsub.1
+        rw [hpar] at hbad
+        cases hbad
+      | some p =>
+        have hp : p = id := by
+          have hsome := hsub.1
+          rw [hpar] at hsome
+          cases hsome
+          rfl
+        exact Or.inr ⟨by rw [hp]; exact hdead, flight_ancestor w hF i p hpar hf⟩
+  · exact h i hc hd hf hg
+
+theorem inv_of_nogap {I : Impl} {w : World} (h : ExceptInv I w (fun _ => False)) : Inv I w :=
+  ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.forest,
+    { liveParked := h.seal.liveParked, quiet := h.seal.quiet, childless := h.seal.childless,
+      chain := chain_of_gap h.seal.chain, parkedFrom := h.seal.parkedFrom,
+      hostedMail := h.seal.hostedMail }⟩
+
+theorem desc_short_succ {w : World} {id : InstId} {k : Nat} (h : DescShort w id k) :
+    DescShort w id (k + 1) := by
+  induction k generalizing id with
+  | zero =>
+    intro c hc hp
+    exact absurd (h c hp) hc
+  | succ _ ih =>
+    intro c hc hp
+    exact ih (h c hc hp)
+
+theorem isChild_ne (w : World) (parent child : InstId) (h : isChild w parent child = true) :
+    child ≠ parent := by
+  simp only [isChild] at h
+  split at h
+  · next _ _ =>
+    exact of_decide_eq_true ((Bool.and_eq_true _ _).mp h).2
+  · simp at h
+
+/-- The world after sealing every listed child of `id`, with the waiver those
+live children add and the facts the parent's own release needs. -/
+structure KidsSeal (I : Impl) (id : InstId) (gap gapOf : InstId → Prop)
+    (start result : World) : Prop where
+  inv : ExceptInv I result gapOf
+  sub : ∀ i, gapOf i → gap i ∨ ((start.st i).parent = some id ∧ i ≠ id)
+  parent : ∀ i, (result.st i).parent = (start.st i).parent
+  roster : result.roster = start.roster
+  lifeId : (result.st id).life = (start.st id).life
+  kids : ∀ c, c ≠ id → (start.st c).parent = some id → (result.st c).life ≠ .alive
+  stays : ∀ j, (start.st j).life ≠ .alive → (result.st j).life ≠ .alive
+
+theorem seal_kids_fold (I : Impl) (n : Nat) (D : Description) (id : InstId)
+    (ids : List InstId) (acc : World) {gap : InstId → Prop} (h : ExceptInv I acc gap)
+    (hD : DescShort acc id (n + 1))
+    (hcover : ∀ c, c ≠ id → (acc.st c).parent = some id → c ∈ ids ∨ (acc.st c).life ≠ .alive)
+    (hstep : ∀ (w1 : World) (child : InstId) {g : InstId → Prop},
+      ExceptInv I w1 g → DescShort w1 child n →
+      ((w1.st child).life = .alive →
+          ExceptInv I (sealBranch (n + 1) D w1 child)
+            (fun i => i = child ∨ g i ∧ (w1.st i).parent ≠ some child) ∧
+          ((sealBranch (n + 1) D w1 child).st child).life = .dead) ∧
+      ((w1.st child).life ≠ .alive → ExceptInv I (sealBranch (n + 1) D w1 child) g)) :
+    ∃ gapOf, KidsSeal I id gap gapOf acc (ids.foldl (fun acc child =>
+      if isChild acc id child then sealBranch (n + 1) D acc child else acc) acc) := by
+  induction ids generalizing acc gap with
+  | nil =>
+    exact ⟨gap, {
+      inv := h
+      sub := fun i hg => Or.inl hg
+      parent := fun _ => rfl
+      roster := rfl
+      lifeId := rfl
+      kids := by
+        intro c hne hp
+        rcases hcover c hne hp with hmem | hdead
+        · exact absurd hmem (List.not_mem_nil (a := c))
+        · exact hdead
+      stays := fun _ hj => hj
+    }⟩
+  | cons c cs ihc =>
+    simp only [List.foldl_cons]
+    split
+    · next hchild =>
+      have hp := isChild_parent acc id c hchild
+      have hcne := isChild_ne acc id c hchild
+      have hnot : ¬ StrictAncestor acc id c := by
+        intro hanc
+        exact ParentAcyclic.no_self h.forest.wf id
+          (StrictAncestor.trans hanc (StrictAncestor.edge ⟨hp, hcne⟩))
+      have hpar1 : ∀ i, ((sealBranch (n + 1) D acc c).st i).parent = (acc.st i).parent :=
+        fun i => seal_parent (n + 1) D acc c i
+      have hro1 : (sealBranch (n + 1) D acc c).roster = acc.roster := seal_roster (n + 1) D acc c
+      have hstay1 : ∀ j, (acc.st j).life ≠ .alive →
+          ((sealBranch (n + 1) D acc c).st j).life ≠ .alive :=
+        fun j hj => seal_not_born (n + 1) D acc c j hj
+      have hspare := seal_spares (n + 1) D acc c id h.forest (Ne.symm hcne) hnot
+      have hDc : DescShort acc c n := hD c hcne hp
+      have hpair := hstep acc c h hDc
+      let mid := sealBranch (n + 1) D acc c
+      by_cases hgo : (acc.st c).life = .alive
+      · have hlive := hpair.1 hgo
+        have hDmid := desc_short_parent hpar1 hD
+        have hcover' : ∀ c', c' ≠ id → (mid.st c').parent = some id →
+            c' ∈ cs ∨ (mid.st c').life ≠ .alive := by
+          intro c' hne hp'
+          have hp0 : (acc.st c').parent = some id := by rw [← hpar1 c']; exact hp'
+          rcases hcover c' hne hp0 with hmem | hdead
+          · simp only [List.mem_cons] at hmem
+            rcases hmem with hmem | hmem
+            · exact Or.inr (by rw [hmem, hlive.2]; intro h'; cases h')
+            · exact Or.inl hmem
+          · exact Or.inr (hstay1 c' hdead)
+        obtain ⟨gTail, htail⟩ := ihc mid hlive.1 hDmid hcover'
+        exact ⟨gTail, {
+          inv := htail.inv
+          sub := by
+            intro i hi
+            rcases htail.sub i hi with hsub | hsub
+            · rcases hsub with hsub | hsub
+              · refine Or.inr ?_
+                rw [hsub]
+                exact ⟨hp, hcne⟩
+              · exact Or.inl hsub.1
+            · exact Or.inr ⟨by rw [← hpar1 i]; exact hsub.1, hsub.2⟩
+          parent := fun i => by rw [htail.parent, hpar1]
+          roster := by rw [htail.roster, hro1]
+          lifeId := by rw [htail.lifeId, hspare]
+          kids := by
+            intro c' hne hp'
+            exact htail.kids c' hne (by rw [hpar1 c']; exact hp')
+          stays := fun j hj => htail.stays j (hstay1 j hj)
+        }⟩
+      · have hna : (acc.st c).life ≠ .alive := hgo
+        have hdead := hpair.2 hna
+        have hDmid := desc_short_parent hpar1 hD
+        have hcover' : ∀ c', c' ≠ id → (mid.st c').parent = some id →
+            c' ∈ cs ∨ (mid.st c').life ≠ .alive := by
+          intro c' hne hp'
+          have hp0 : (acc.st c').parent = some id := by rw [← hpar1 c']; exact hp'
+          rcases hcover c' hne hp0 with hmem | hdead0
+          · simp only [List.mem_cons] at hmem
+            rcases hmem with hmem | hmem
+            · exact Or.inr (by rw [hmem]; exact hstay1 c hna)
+            · exact Or.inl hmem
+          · exact Or.inr (hstay1 c' hdead0)
+        obtain ⟨gTail, htail⟩ := ihc mid hdead hDmid hcover'
+        exact ⟨gTail, {
+          inv := htail.inv
+          sub := by
+            intro i hi
+            rcases htail.sub i hi with hsub | hsub
+            · exact Or.inl hsub
+            · exact Or.inr ⟨by rw [← hpar1 i]; exact hsub.1, hsub.2⟩
+          parent := fun i => by rw [htail.parent, hpar1]
+          roster := by rw [htail.roster, hro1]
+          lifeId := by rw [htail.lifeId, hspare]
+          kids := by
+            intro c' hne hp'
+            exact htail.kids c' hne (by rw [hpar1 c']; exact hp')
+          stays := fun j hj => htail.stays j (hstay1 j hj)
+        }⟩
+    · next hnotChild =>
+      have hcover' : ∀ c', c' ≠ id → (acc.st c').parent = some id →
+          c' ∈ cs ∨ (acc.st c').life ≠ .alive := by
+        intro c' hne hp
+        rcases hcover c' hne hp with hmem | hdead
+        · simp only [List.mem_cons] at hmem
+          rcases hmem with hmem | hmem
+          · have hrec := isChild_recorded acc id c' hp hne
+            rw [hmem] at hrec
+            exact absurd hrec hnotChild
+          · exact Or.inl hmem
+        · exact Or.inr hdead
+      exact ihc acc h hD hcover'
+
+/-- Sealing `id` waives `id` when `id` is alive, and leaves the incoming gap when
+it is not. A live child is waived only until this release: its parent is `id`,
+so the kill repairs it. -/
+theorem seal_gap (I : Impl) (n : Nat) (D : Description) (w : World) (id : InstId)
+    {gap : InstId → Prop} (h : ExceptInv I w gap) (hD : DescShort w id n) :
+    ((w.st id).life = .alive →
+        ExceptInv I (sealBranch (n + 1) D w id)
+          (fun i => i = id ∨ gap i ∧ (w.st i).parent ≠ some id) ∧
+        ((sealBranch (n + 1) D w id).st id).life = .dead) ∧
+    ((w.st id).life ≠ .alive → ExceptInv I (sealBranch (n + 1) D w id) gap) := by
+  induction n generalizing w id gap with
+  | zero =>
+    have hfold : (w.roster.foldl (fun acc child =>
+        if isChild acc id child then sealBranch 0 D acc child else acc) w) = w := by
+      induction w.roster with
+      | nil => rfl
+      | cons _ _ ih =>
+        simp only [List.foldl_cons]
+        split
+        · rw [show sealBranch 0 D _ _ = _ by rfl]
+          exact ih
+        · exact ih
+    refine ⟨?_, ?_⟩
+    · intro hgo
+      unfold sealBranch
+      dsimp only
+      rw [hfold]
+      rw [ite_eq_left (by simpa [beq_iff_eq] using hgo)]
+      refine ⟨?_, (releaseWorld_keeps_credit D w id (w.st id)).1⟩
+      exact releaseWorld_gap I D w id h hgo (by
+        intro c hc hp
+        exact absurd (hD c hp) hc)
+    · intro hna
+      unfold sealBranch
+      dsimp only
+      rw [hfold]
+      rw [ite_eq_right (by
+        intro hb
+        exact hna (beq_iff_eq.mp hb))]
+      exact h
+  | succ n ih =>
+    obtain ⟨_, hk⟩ := seal_kids_fold I n D id w.roster w h hD
+      (fun _ _ hp => Or.inl (roster_of_parent h.forest hp))
+      (fun w1 child _ hE hDc => ih w1 child hE hDc)
+    unfold sealBranch
+    dsimp only
+    refine ⟨?_, ?_⟩
+    · intro hgo
+      have hbit : ((((w.roster.foldl (fun acc child =>
+          if isChild acc id child then sealBranch (n + 1) D acc child else acc) w).st id).life ==
+            .alive)) = true := by
+        rw [hk.lifeId]
+        simpa [beq_iff_eq] using hgo
+      rw [ite_eq_left hbit]
+      refine ⟨?_, (releaseWorld_keeps_credit D _ id _).1⟩
+      have halive : ((w.roster.foldl (fun acc child =>
+          if isChild acc id child then sealBranch (n + 1) D acc child else acc) w).st id).life =
+          .alive := by rw [hk.lifeId]; exact hgo
+      have hrel := releaseWorld_gap I D _ id hk.inv halive (by
+        intro c hne hp
+        exact hk.kids c hne (by rw [hk.parent c] at hp; exact hp))
+      refine except_chain hrel ?_
+      intro i hc hd hf hng
+      exact hrel.seal.chain i hc hd hf (by
+        intro hbad
+        rcases hbad with hbad | hbad
+        · exact hng (Or.inl hbad)
+        · rcases hk.sub i hbad.1 with hsub | hsub
+          · exact hng (Or.inr ⟨hsub, by rw [← hk.parent i]; exact hbad.2⟩)
+          · exact hbad.2 (by rw [hk.parent i]; exact hsub.1))
+    · intro hna
+      rw [ite_eq_right (by
+        intro hb
+        rw [hk.lifeId] at hb
+        exact hna (beq_iff_eq.mp hb))]
+      refine except_chain hk.inv ?_
+      exact gap_drop_children hk.inv.seal.chain hk.inv.forest (by
+        intro i hg
+        rcases hk.sub i hg with hsub | hsub
+        · exact Or.inl hsub
+        · exact Or.inr ⟨by rw [hk.parent i]; exact hsub.1, hsub.2⟩) (by
+        rw [hk.lifeId]
+        exact hna)
+
+/-- Proper descendants of `id`, sealed, with each live child waived while `id` lives. -/
+theorem drop_seal (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w) :
+    ∃ gapOf, KidsSeal I id (fun _ => False) gapOf w (dropDescendants D w id) := by
+  by_cases hlen : w.roster.length = 0
+  · have hempty : w.roster = [] := List.length_eq_zero_iff.mp hlen
+    unfold dropDescendants
+    rw [hempty]
+    exact ⟨fun _ => False, {
+      inv := except_of_inv h
+      sub := fun _ hg => absurd hg (fun hf => hf)
+      parent := fun _ => rfl
+      roster := rfl
+      lifeId := rfl
+      kids := by
+        intro c _ hp
+        have hmem := roster_of_parent h.forest hp
+        rw [hempty] at hmem
+        exact absurd hmem (List.not_mem_nil (a := c))
+      stays := fun _ hj => hj }⟩
+  · have hn : (w.roster.length - 1) + 1 = w.roster.length := by omega
+    unfold dropDescendants
+    rw [← hn]
+    exact seal_kids_fold I (w.roster.length - 1) D id w.roster w (except_of_inv h)
+      (desc_short_succ (desc_short_roster w h.forest id))
+      (fun _ _ hp => Or.inl (roster_of_parent h.forest hp))
+      (fun w1 child _ hE hDc => seal_gap I (w.roster.length - 1) D w1 child hE hDc)
+
 theorem dropDescendants_inv (I : Impl) (D : Description) (w : World) (id : InstId) (h : Inv I w) :
-    Inv I (dropDescendants D w id) := by
-  unfold dropDescendants
-  have hfold : ∀ (ids : List InstId) (acc : World), Inv I acc →
-      Inv I (ids.foldl (fun acc child =>
-        if isChild acc id child then sealBranch w.roster.length D acc child else acc) acc) := by
-    intro ids
-    induction ids with
-    | nil => intro acc ha; exact ha
-    | cons c cs ihc =>
-      intro acc ha
-      simp only [List.foldl_cons]
-      apply ihc
-      split
-      · exact sealBranch_inv I _ D _ _ ha
-      · exact ha
-  exact hfold w.roster w h
+    ExceptInv I (dropDescendants D w id)
+      (fun i => i ≠ id ∧ (w.st i).parent = some id) := by
+  obtain ⟨_, hk⟩ := drop_seal I D w id h
+  refine except_chain hk.inv ?_
+  apply gap_widen hk.inv.seal.chain
+  intro i hg
+  rcases hk.sub i hg with hsub | hsub
+  · exact absurd hsub (fun hf => hf)
+  · exact ⟨hsub.2, hsub.1⟩
 
 theorem terminateStage_inv (I : Impl) (D : Description) (w : World) (id : InstId) (a : Actor)
-    (h : Inv I w) : Inv I (terminateStage D w id a) :=
-  shutdownActor_inv I D _ id (dropDescendants_inv I D w id h)
+    (h : Inv I w) : Inv I (terminateStage D w id a) := by
+  obtain ⟨_, hk⟩ := drop_seal I D w id h
+  unfold terminateStage
+  dsimp only
+  unfold shutdownActor
+  by_cases hgo : (((dropDescendants D w id).st id).life == .alive) = true
+  · rw [ite_eq_left hgo]
+    unfold sealActor
+    have halive : ((dropDescendants D w id).st id).life = .alive := by
+      simpa [beq_iff_eq] using hgo
+    have hrel := releaseWorld_gap I D (dropDescendants D w id) id hk.inv halive (by
+      intro c hne hp
+      exact hk.kids c hne (by rw [hk.parent c] at hp; exact hp))
+    refine enqueue_closes I D _ id (except_chain hrel ?_)
+    intro i hc hd hf hng
+    exact hrel.seal.chain i hc hd hf (by
+      intro hbad
+      rcases hbad with hbad | hbad
+      · exact hng hbad
+      · rcases hk.sub i hbad.1 with hsub | hsub
+        · exact absurd hsub (fun hf => hf)
+        · exact hbad.2 (by rw [hk.parent i]; exact hsub.1))
+  · rw [ite_eq_right hgo]
+    have hna : ((dropDescendants D w id).st id).life ≠ .alive := by
+      intro ha
+      exact hgo (beq_iff_eq.mpr ha)
+    exact inv_of_nogap (except_chain hk.inv (gap_drop_children hk.inv.seal.chain hk.inv.forest
+      (by
+        intro i hg
+        rcases hk.sub i hg with hsub | hsub
+        · exact absurd hsub (fun hf => hf)
+        · exact Or.inr ⟨by rw [hk.parent i]; exact hsub.1, hsub.2⟩) hna))
 
 theorem abortChildren_inv (I : Impl) (D : Description) (w : World) (parent : InstId) (h : Inv I w) :
     Inv I (abortChildren D w parent) := by
@@ -4008,7 +4630,12 @@ theorem abortChildren_inv (I : Impl) (D : Description) (w : World) (parent : Ins
       simp only [List.foldl_cons]
       apply ihc
       split
-      · exact shutdownActor_inv I D _ c (dropDescendants_inv I D _ c ha)
+      · have hstep : shutdownActor D (dropDescendants D acc c) c =
+            terminateStage D acc c (acc.st c) := by
+          unfold terminateStage
+          rfl
+        rw [hstep]
+        exact terminateStage_inv I D acc c _ ha
       · exact ha
   exact hfold w.roster w h
 
