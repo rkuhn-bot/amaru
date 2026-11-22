@@ -13829,140 +13829,118 @@ theorem occ_kill (I : Impl) (hG : GraphOk I.desc) (w : World) (sub : String) (ke
     (by simp [killSubtree, killMembers_N])
     (fun n => by simp [killSubtree, killMembers_nextIx]) rfl
 
+/-- Shutting one live actor down is its release followed by the supervisor's tombstone. -/
+theorem occ_shutdown (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
+    (hC : ∀ i, contTy (w.st i)) (hmem : id ∈ w.roster) (hlive : (w.st id).life = .alive)
+    (hcr : w.crashed = false) : OccInv I (shutdownActor I.desc w id) := by
+  unfold shutdownActor
+  have hb : ((w.st id).life == .alive) = true := beq_iff_eq.mpr hlive
+  rw [hb]
+  simp only [ite_true, sealActor]
+  have hrel := occ_releaseWorld I w id hO hC hmem hlive hcr
+  exact occ_tombstone I (releaseWorld I.desc w id (w.st id)) id hrel.1
+
 theorem occ_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
     (k : Cont) (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w) (hM : MailInv w)
     (hSlots : OpenSlots w) (hph : (w.st id).phase = .run k) (hsender : (w.st id).life = .alive)
     (hbulk : bulkScopeOf I.desc (tname id) k.rest = true) (hcr : w.crashed = false) :
     OccInv I (execRun I w id (w.st id) k) := by
   have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
-  have hmem := hO.aliveIn id hsender
-  cases k with
-  | mk rest toState replyTo =>
-    cases hrest : rest with
-    | nil =>
-      simp [execRun, hrest] at hph hty ⊢
-      apply occ_keep I w id ({ (w.st id) with phase := .idle, typestate := toState }) hO rfl rfl rfl
-        (fun _ => rfl) (by simp [hty])
-      intro d
-      simp [pending, contRest, sendsTo]
-    | cons e es =>
-      simp [hrest] at hph hty hbulk
-      cases e with
-      | send dst label hint =>
-        have hnot : ¬ loneTerminableName I.desc (tname id) := by
-          intro ⟨t, ht, htv, hsub⟩
-          have hnb : noBulkSend (.send dst label hint :: es) = true := by
-            simpa [bulkScopeOf, ht, htv, hsub] using hbulk
-          simp [noBulkSend] at hnb
-        simp [execRun]
-        cases hr : route w I.desc id dst with
-        | none =>
-          simp [hr]
-          exact occ_note I w id dst (proceed (w.st id) (afterHead ⟨.send dst label hint :: es, toState, replyTo⟩))
-            (occ_advance I w id ⟨.send dst label hint :: es, toState, replyTo⟩ hO hty hph)
-        | some dstId =>
-          simp [hr]
-          have hname := route_tname w I.desc id dst dstId hr
-          exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := none } false
-            ⟨.send dst label hint :: es, toState, replyTo⟩ (.send dst label hint) es label hint hO hT
-            hph rfl (Or.inl (by simp [hname])) rfl hty hsender hnot (route_agrees w I.desc id dst dstId hr)
-            hbulk
-      | trySend dst label hint onFull onGone =>
-        have hnot : ¬ loneTerminableName I.desc (tname id) := by
-          intro ⟨t, ht, htv, hsub⟩
-          have hnb : noBulkSend (.trySend dst label hint onFull onGone :: es) = true := by
-            simpa [bulkScopeOf, ht, htv, hsub] using hbulk
-          simp [noBulkSend] at hnb
-        exact occ_try I hL w id ⟨.trySend dst label hint onFull onGone :: es, toState, replyTo⟩
-          dst label hint onFull onGone es hO hT
-          hph hty hsender hnot hbulk
-      | call dst label hint na to =>
-        have hnot : ¬ loneTerminableName I.desc (tname id) := by
-          intro ⟨t, ht, htv, hsub⟩
-          have hnb : noBulkSend (.call dst label hint na to :: es) = true := by
-            simpa [bulkScopeOf, ht, htv, hsub] using hbulk
-          simp [noBulkSend] at hnb
-        simp [execRun]
-        cases hr : resolveId I.desc id dst with
-        | none =>
-          simp [hr]
-          exact occ_note I w id dst (proceed (w.st id) (afterHead ⟨.call dst label hint na to :: es, toState, replyTo⟩))
-            (occ_advance I w id ⟨.call dst label hint na to :: es, toState, replyTo⟩ hO hty hph)
-        | some dstId =>
-          simp [hr]
-          by_cases hliveD : (w.st dstId).life = .alive
-          · have hroute := route_of_resolve w I.desc id dst dstId hr hliveD
-            have hname := route_tname w I.desc id dst dstId hroute
-            exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := some id } true
-              ⟨.call dst label hint na to :: es, toState, replyTo⟩ (.call dst label hint na to) es label hint hO hT
-              hph rfl (Or.inr ⟨na, to, by simp [hname]⟩) rfl hty hsender hnot
-              (route_agrees w I.desc id dst dstId hroute) hbulk
-          · exact occ_enqueue I hL w id dstId
-              { label := label, sender := id, callFrom := some id } true
-              ⟨.call dst label hint na to :: es, toState, replyTo⟩ (.call dst label hint na to) es label hint hO hT
-              hph rfl (Or.inr ⟨na, to, by simp [resolve_tname I.desc id dst dstId hr]⟩) rfl hty hsender hnot
-              (resolve_agrees I.desc id dst dstId hr) hbulk
-      | reply =>
-        exact occ_reply I w id ⟨.reply :: es, toState, replyTo⟩ hO hS hph
-      | selfSchedule label =>
-        exact occ_schedule I w id (w.st id) ⟨.selfSchedule label :: es, toState, replyTo⟩ label hO rfl hph hty
-      | cell dst label value =>
-        exact occ_cell I w id ⟨.cell dst label value :: es, toState, replyTo⟩ dst label value hO hph hty
-      | internal =>
-        simp [execRun]
-        apply occ_keep I w id ({ (w.st id) with phase := .awaitEffect ⟨es, toState, replyTo⟩ }) hO
-          rfl rfl rfl (fun _ => rfl) rfl
-        intro d
-        simp [pending, contRest, hph, afterHead, sendsTo]
-      | peer =>
-        simp [execRun]
-        apply occ_keep I w id ({ (w.st id) with phase := .awaitPeer ⟨es, toState, replyTo⟩ }) hO
-          rfl rfl rfl (fun _ => rfl) rfl
-        intro d
-        simp [pending, contRest, hph, afterHead, sendsTo]
-      | terminate =>
-        simp [execRun]
-        cases ht : templateOf I.desc (tname id) with
-        | none =>
-          simp [ht]
-          exact hO
-        | some t =>
-          simp only [ht]
-          split
-          · next hgo =>
-            split
-            · next hsub =>
-              have hparts : t.terminable = true ∧ hasParkedCall (w.st id).parked = false := by
-                rcases hgo with ⟨hterm, hor⟩
-                exact ⟨hterm, by simpa [hsub.1] using hor⟩
-              have hterm : loneTerminableName I.desc (tname id) := ⟨t, ht, hparts.1, hsub.1⟩
-              have hmsg : ∀ p ∈ (w.st id).parked, p.sender = p.msg.sender := fun p hp => hO.parkMsg id p hp
-              let wR := readCells I.desc w id
-              have hOR := occ_same I w wR hO (fun i => readCells_st I.desc w id i)
-                (read_roster I.desc w id).1 (read_roster I.desc w id).2 (fun n => read_ix I.desc w id n)
-                (readCells_crashed I.desc w id)
-              have hcontR : ∀ i, contTy (wR.st i) := by
-                intro i
-                have hs := readCells_st I.desc w id i
-                exact (contTy_match _ _ (congrArg Actor.phase hs) (congrArg Actor.typestate hs)).mpr (hS.cont i)
-              have hmemR : id ∈ wR.roster := by
-                have hr := (read_roster I.desc w id).1
-                simpa [wR, hr] using hmem
-              have hst := readCells_st I.desc w id id
-              have hcrR : wR.crashed = false := (readCells_crashed I.desc w id).trans hcr
-              have hgot := occ_term_kill I wR id hOR hcontR hmemR
-                (by simp [terminableB, ht, hparts.1])
-                (by intro p hp; exact hmsg p (by simpa [wR, ← hst] using hp))
-                hcrR
-              rw [← hst]
-              simp only [releaseWorld]
-              simpa [wR] using hgot.2.1
-            · have htermB : terminableB I.desc (tname id) = true := by
-                rcases hgo with ⟨hterm, _⟩
-                simp [terminableB, ht, hterm]
-              simpa [terminateStage] using
-                occ_terminate I w id hO hS.cont hmem htermB
-          · exact hO
+  have hb : ((w.st id).life == .alive) = true := beq_iff_eq.mpr hsender
+  cases hk : k.rest with
+  | nil =>
+    simp only [execRun, hb, hk]
+    apply occ_keep I w id ({ (w.st id) with phase := .idle, typestate := k.toState }) hO
+      rfl rfl rfl (fun _ => rfl)
+    intro d _
+    exact Int.ofNat_le.mpr (by simp [tokenHold, pathReserve, contAt, hph, hk])
+  | cons e es =>
+    cases e with
+    | send dst label hint =>
+      simp only [execRun, hb, hk]
+      cases hr : route w I.desc id dst hint with
+      | none =>
+        simp only [hr]
+        apply occ_note I w id dst (proceed (w.st id) (afterHead k))
+        exact occ_advance I w id k hO hty hph
+      | some dstId =>
+        simp only [hr]
+        have hname := route_tname w I.desc id dst hint dstId hr
+        have hk' : k.rest = .send (tname dstId) label hint :: es := by simpa [hname] using hk
+        have hbulk' :
+            bulkScopeOf I.desc (tname id) (.send (tname dstId) label hint :: es) = true := by
+          simpa [hk'] using hbulk
+        exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := none } false
+          k (.send (tname dstId) label hint) es label hint hO hT hph hk' (Or.inl rfl) rfl hty
+          hsender (route_agrees w I.desc id dst hint dstId hr) hbulk' (fun h => by cases h)
+    | trySend dst label hint onFull onGone =>
+      exact occ_try I hL w id k dst label hint onFull onGone es hO hT hph hk hty hsender hbulk
+    | call dst label hint na to =>
+      simp only [execRun, hb, hk]
+      cases hr : resolveId I.desc w id dst hint with
+      | none =>
+        simp only [hr]
+        apply occ_note I w id dst
+          (finishCall (issueCall (w.st id)) (callWait k (.call dst label hint na to)) .notAdmitted)
+        apply occ_keep I w id
+            (finishCall (issueCall (w.st id)) (callWait k (.call dst label hint na to)) .notAdmitted)
+            hO (by simp [finishCall_life, issueCall_life])
+            (by simp [finishCall, issueCall, proceed_box])
+            (by simp [finishCall, issueCall, proceed_parked])
+            (by intro d; simp [finishCall, issueCall, proceed_tokens])
+        intro d _
+        exact Int.ofNat_le.mpr
+          (tokenHold_miss I.desc (tname id) d dst (w.st id) k na to es label hint hph hk)
+      | some dstId =>
+        simp only [hr]
+        have hname := resolve_tname I.desc w id dst hint dstId hr
+        have hk' : k.rest = .call (tname dstId) label hint na to :: es := by simpa [hname] using hk
+        have hbulk' :
+            bulkScopeOf I.desc (tname id) (.call (tname dstId) label hint na to :: es) = true := by
+          simpa [hk'] using hbulk
+        exact occ_enqueue I hL w id dstId { label := label, sender := id, callFrom := some id } true
+          k (.call (tname dstId) label hint na to) es label hint hO hT hph hk' (Or.inr ⟨na, to, rfl⟩)
+          rfl hty hsender (resolve_agrees I.desc w id dst hint dstId hr) hbulk'
+          (fun _ => ⟨na, to, rfl⟩)
+    | reply =>
+      simp only [execRun, hb, hk]
+      exact occ_reply I w id k hO hS hph
+    | selfSchedule label =>
+      simp only [execRun, hb, hk]
+      exact occ_schedule I w id (w.st id) k label hO rfl hph hty
+    | cell dst label value =>
+      simp only [execRun, hb, hk]
+      exact occ_cell I w id k dst label value hO hph hty
+    | internal =>
+      simp only [execRun, hb, hk]
+      apply occ_keep I w id ({ (w.st id) with phase := .awaitEffect (afterHead k) }) hO
+        rfl rfl rfl (fun _ => rfl)
+      intro d _
+      exact Int.ofNat_le.mpr (tokenHold_internal I.desc (tname id) d (w.st id) k es hph hk)
+    | peer onTimeout =>
+      simp only [execRun, hb, hk]
+      apply occ_keep I w id
+          ({ (w.st id) with phase := .awaitPeer { afterHead k with onTimeout := onTimeout } }) hO
+          rfl rfl rfl (fun _ => rfl)
+      intro d _
+      exact Int.ofNat_le.mpr
+        (tokenHold_peer I.desc (tname id) d (w.st id) k onTimeout es hph hk)
+    | abort =>
+      simp only [execRun, hb, hk]
+      exact occ_abort_run I w id k hO hS.cont hph hty hsender hcr
+    | spawn child =>
+      simp only [execRun, hb, hk]
+      exact occ_spawn_run I hG w id k child hO hS.cont hph hty hsender hcr
+    | terminate =>
+      have hstep := exec_term_step I w id (w.st id) k hsender ⟨es, hk⟩
+      generalize hw : execRun I w id (w.st id) k = wR at hstep ⊢
+      cases hstep with
+      | fall => exact occ_crash I w hO
+      | crash _ _ _ => exact occ_crash I w hO
+      | lone _ _ _ _ _ _ _ =>
+        exact occ_shutdown I w id hO hS.cont (hO.aliveIn id hsender) hsender hcr
+      | tree _ _ _ _ => exact occ_terminate I w id hO hS.cont hcr
+      | cascade _ _ _ _ _ _ _ => exact occ_terminate I w id hO hS.cont hcr
 
 theorem occ_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : World) (id : InstId)
     (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w) (hM : MailInv w)
