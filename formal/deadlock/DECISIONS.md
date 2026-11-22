@@ -721,3 +721,11 @@ timeout, which the call's reserve does not cover. The occupancy step follows
 the continuation the step stores. A send still proceeds on `afterHead`, and
 the spent token plus that tail stays under the head effect's reserve. Neither
 fact changes the step.
+
+## 2026-11-22 — A non-call park keeps the tail
+
+A full mailbox parks the message. For a send the phase is the tail, and the
+spent token is the one the head effect already reserved. The parked message
+is the charge, so the phase does not count it again. A parked call's reserve
+also includes `onTimeout`, which the running phase did not hold, so that case
+is separate. The step is unchanged.
