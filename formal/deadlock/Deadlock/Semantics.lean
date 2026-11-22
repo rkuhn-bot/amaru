@@ -7890,7 +7890,7 @@ theorem readCells_parent (D : Description) (w : World) (id i : InstId) :
     ((readCells D w id).st i).parent = (w.st i).parent :=
   congrArg (fun a : Actor => a.parent) (cellsSt D w id i)
 
-theorem readCells_crashed (D : Description) (w : World) (id : InstId) :
+private theorem readCells_crashed (D : Description) (w : World) (id : InstId) :
     (readCells D w id).crashed = w.crashed := by
   unfold readCells
   induction cellLabels D (tname id) generalizing w with
