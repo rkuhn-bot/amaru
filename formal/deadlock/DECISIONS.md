@@ -908,3 +908,14 @@ A birth does not adopt queued mail. The fresh id is off the roster, so no
 queued message names it, and one extra roster slot does not reveal a new
 descent among the ids that were already present. A child is born under a
 live parent, or under none.
+
+## 2026-11-22 — A pool admits a second child at the population bound
+
+`aliveCount ≤ N` is not kept by a pool spawn. `Deadlock/SpawnCount.lean` is
+a graph that passes `checkBool` and `localOkB`. Core `C` runs `spawn W`
+twice, with no abort, at `N = 1`. `W` has two slots. Ingress, deliver, and
+the first exec admit `peer W 0 0`, and `aliveCount` of `W` is `1`. The next
+exec admits `peer W 1 0`. Both are alive and the world has not crashed, so
+the count is `2`. The spawn does not consult `N`. This blocks the
+respawn-occupancy proof: the second admit is reachable, and `aliveCount < N`
+does not hold.
