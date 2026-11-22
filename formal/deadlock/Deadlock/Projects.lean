@@ -726,7 +726,7 @@ theorem frame_drop (D : Description) (w : World) (id : InstId) (hC : ∀ i, cont
         if isChild acc id child then sealBranch w.roster.length D acc child else acc) acc) := by
     intro ids
     induction ids with
-    | nil => intro _ hf; exact hf
+    | nil => intro _ _ hf; exact hf
     | cons c cs ihc =>
       intro acc hCa hf
       simp only [List.foldl_cons]
