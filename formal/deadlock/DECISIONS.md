@@ -891,5 +891,20 @@ beside `ParentForest`. `occ_set` may still change `prio` and `parent`, so
 the fact stays out of `OccInv`. The parked-lane scan of `mailInFlight` is
 reverted: it was justified only by a state edit that puts a dead sender's
 entry back after the seal. `parkedHold` is outside `Inv`. The box case of
-`cleared` remains: deleting the tombstone while the message sits in a live
-box is still not a step, and the receive still refuses that box.
+`cleared` is the same kind of edit: deleting the tombstone while the
+message sits in a live box is not a step. It lies outside the tombstone
+chain, and the receive still refuses that box.
+
+## 2026-11-22 — A sealed child is waived while its parent lives
+
+Sealing a child does not enqueue that child's tombstone. While the parent
+is still alive, the child is a gap in the tombstone chain. Releasing the
+parent repairs those children, because their mail is then the parent's
+mail, and the gap that remains is only the parent. Queueing the parent's
+tombstone closes it. If the parent is already dead, the child's mail is an
+ancestor obligation and the gap closes at once.
+
+A birth does not adopt queued mail. The fresh id is off the roster, so no
+queued message names it, and one extra roster slot does not reveal a new
+descent among the ids that were already present. A child is born under a
+live parent, or under none.
