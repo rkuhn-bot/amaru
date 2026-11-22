@@ -818,3 +818,22 @@ parked, and a call parked on a target that is now dead needs no entry. The
 roster does not change, and the member's life becomes dead rather than
 absent. Semantic compatibility, mail, and the open-slot roster all hold of
 the result. The step is unchanged.
+
+## 2026-11-22 — Abort uses the parent forest
+
+The occupancy account of one effect takes the parent forest. Aborting the
+children can crash the roster, and otherwise the parent is still alive and
+still running the same continuation, so the effect advances. Acyclicity is
+what keeps a child from sealing that parent. The step is unchanged.
+
+## 2026-11-22 — A free-slot respawn can be short of its idle floor
+
+`withKeyTokens` gives the new generation `budget − queuedFromKey`. That is the
+live-slot equation, and it is not the idle reserve. `C` at key 0 generation 0
+is dead and still on the roster, its message to `H` is still queued
+(`queuedFromKey = 1`, `budget(C, H) = 1`), and the parent's tombstone has left
+the lane, so `slotRespawnBlocked` is false. `spawnChild` admits generation
+`maxGen = 1`. The newborn is idle in `Idle`, whose floor is 1, and its token
+for `H` is 0. The birth does not satisfy the occupancy reserve. The parents
+and the host, both alive and idle, have floor 0, so the shortage is the
+newborn's. The step is unchanged.

@@ -13840,10 +13840,227 @@ theorem occ_shutdown (I : Impl) (w : World) (id : InstId) (hO : OccInv I w)
   have hrel := occ_releaseWorld I w id hO hC hmem hlive hcr
   exact occ_tombstone I (releaseWorld I.desc w id (w.st id)) id hrel.1
 
+/-- A crash leaves every roster member not alive. -/
+theorem crash_member_not_alive (w : World) (i : InstId) (h : i ∈ w.roster) :
+    ((crashWorld w).st i).life ≠ .alive := by
+  intro hl
+  simp only [crashWorld] at hl
+  have hmem : decide (i ∈ w.roster) = true := by simpa [decide_eq_true_eq] using h
+  simp only [hmem, ite_true, crashActor] at hl
+  by_cases hgo : ((w.st i).life == .alive) = true
+  · simp [hgo] at hl
+  · exact hgo (beq_iff_eq.mpr (by simpa [hgo] using hl))
+
+/-- A tombstone that does not crash keeps every typestate. The offer writes the
+priority lane and the message counter. -/
+theorem tombstone_offer_ty (D : Description) (w : World) (child s : InstId)
+    (hc : (enqueueTombstone D w child).crashed = false) :
+    ((enqueueTombstone D w child).st s).typestate = (w.st s).typestate := by
+  unfold enqueueTombstone at hc ⊢
+  cases hpar : (w.st child).parent with
+  | none => simp
+  | some parent =>
+    simp only [hpar] at hc ⊢
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · rw [ite_eq_left hlive]
+    · rw [ite_eq_right hlive] at hc ⊢
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · rw [ite_eq_left hlab] at hc
+        simp [crashWorld] at hc
+      · rw [ite_eq_right hlab] at hc ⊢
+        unfold offerPrio at hc ⊢
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · rw [ite_eq_left hfull] at hc
+          simp [crashWorld] at hc
+        · rw [ite_eq_right hfull]
+          by_cases hi : s = parent
+          · rw [hi, setActor_self]
+          · rw [setActor_other _ _ _ _ hi]
+
+theorem tombstone_offer_roster (D : Description) (w : World) (child : InstId) :
+    (enqueueTombstone D w child).roster = w.roster := by
+  unfold enqueueTombstone
+  cases hpar : (w.st child).parent with
+  | none => rfl
+  | some parent =>
+    simp only [hpar]
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · rw [ite_eq_left hlive]
+    · rw [ite_eq_right hlive]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · rw [ite_eq_left hlab]
+        rfl
+      · rw [ite_eq_right hlab]
+        unfold offerPrio
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · rw [ite_eq_left hfull]
+          rfl
+        · rw [ite_eq_right hfull]
+          rfl
+
+/-- Crashing on the tombstone kills every member of the roster. A lane that
+merely accepts the message does not crash. -/
+theorem tombstone_offer_crash_dead (D : Description) (w : World) (child i : InstId)
+    (hmem : i ∈ w.roster) (hcr : w.crashed = false)
+    (hc : (enqueueTombstone D w child).crashed = true) :
+    ((enqueueTombstone D w child).st i).life ≠ .alive := by
+  unfold enqueueTombstone at hc ⊢
+  cases hpar : (w.st child).parent with
+  | none =>
+    simp only [hpar] at hc
+    simp [hcr] at hc
+  | some parent =>
+    simp only [hpar] at hc ⊢
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · rw [hlive] at hc
+      simp only [ite_true] at hc
+      simp [hcr] at hc
+    · rw [ite_eq_right hlive] at hc ⊢
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · rw [ite_eq_left hlab] at hc ⊢
+        exact crash_member_not_alive w i hmem
+      · rw [ite_eq_right hlab] at hc ⊢
+        unfold offerPrio at hc ⊢
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · rw [ite_eq_left hfull] at hc ⊢
+          exact crash_member_not_alive w i hmem
+        · rw [ite_eq_right hfull] at hc
+          simp [setActor, hcr] at hc
+
+/-- Sealing each live child keeps the account. A crash leaves the roster not
+alive, so the rest of the fold does not seal again. A run that does not crash
+keeps typestate obligations and the roster. -/
+theorem occ_abort_children (I : Impl) (w : World) (parent : InstId) (hO : OccInv I w)
+    (hC : ∀ i, contTy (w.st i)) (hcr : w.crashed = false) :
+    OccInv I (abortChildren I.desc w parent) ∧
+      ((abortChildren I.desc w parent).crashed = false →
+        ∀ i, contTy ((abortChildren I.desc w parent).st i)) := by
+  unfold abortChildren
+  suffices ∀ (ids : List InstId) (w0 : World),
+      OccInv I w0 →
+      (w0.crashed = false → (∀ i, contTy (w0.st i)) ∧ w0.roster = w.roster) →
+      (w0.crashed = true → ∀ i, i ∈ w.roster → (w0.st i).life ≠ .alive) →
+      (∀ c, c ∈ ids → c ∈ w.roster) →
+      let w1 := ids.foldl (fun acc child =>
+        if isChild acc parent child && (acc.st child).life == .alive then
+          shutdownActor I.desc (dropDescendants I.desc acc child) child
+        else acc) w0
+      OccInv I w1 ∧
+        (w1.crashed = false → (∀ i, contTy (w1.st i)) ∧ w1.roster = w.roster) ∧
+        (w1.crashed = true → ∀ i, i ∈ w.roster → (w1.st i).life ≠ .alive) by
+    have hfold := this w.roster w hO (fun _ => ⟨hC, rfl⟩)
+      (fun hc _ _ => by simp [hcr] at hc) (fun _ h => h)
+    exact ⟨hfold.1, fun hcf i => (hfold.2.1 hcf).1 i⟩
+  intro ids
+  induction ids with
+  | nil =>
+    intro w0 hO0 hclear hdead _hsub
+    simpa using ⟨hO0, hclear, hdead⟩
+  | cons child ids ih =>
+    intro w0 hO0 hclear hdead hsub
+    simp only [List.foldl_cons]
+    have hsub' : ∀ c, c ∈ ids → c ∈ w.roster := fun c hc => hsub c (List.Mem.tail child hc)
+    have hmemChild : child ∈ w.roster := hsub child (List.Mem.head (a := child) ids)
+    by_cases hgo : (isChild w0 parent child && (w0.st child).life == .alive) = true
+    · rw [ite_eq_left hgo]
+      have hparts := (Bool.and_eq_true _ _).mp hgo
+      have hliveP : (w0.st child).life = .alive := by simpa [beq_iff_eq] using hparts.2
+      have hcr0 : w0.crashed = false := by
+        cases hb : w0.crashed with
+        | false => rfl
+        | true => exact absurd hliveP (hdead hb child hmemChild)
+      have hpack := hclear hcr0
+      have hC0 : ∀ i, contTy (w0.st i) := hpack.1
+      have hr0 : w0.roster = w.roster := hpack.2
+      have hdesc := occ_dropDesc I w0 child hO0 hC0 hcr0
+      let dropped := dropDescendants I.desc w0 child
+      unfold shutdownActor
+      by_cases hliveD : ((dropped.st child).life == .alive) = true
+      · have hliveDP : (dropped.st child).life = .alive := by simpa [beq_iff_eq] using hliveD
+        have hmemD : child ∈ dropped.roster := hdesc.1.1.aliveIn _ hliveDP
+        rw [hliveD]
+        simp only [ite_true, sealActor]
+        have hrel := occ_releaseWorld I dropped child hdesc.1.1 hdesc.1.2 hmemD hliveDP hdesc.2.1
+        let released := releaseWorld I.desc dropped child (dropped.st child)
+        have hcrR : released.crashed = false :=
+          (releaseWorld_crashed I.desc dropped child (dropped.st child)).trans hdesc.2.1
+        have hrR : released.roster = w.roster :=
+          (releaseWorld_roster I.desc dropped child (dropped.st child)).trans (hdesc.2.2.trans hr0)
+        have hT : OccInv I (enqueueTombstone I.desc released child) :=
+          occ_tombstone I released child hrel.1
+        dsimp only [released, dropped] at hT hrR hcrR ⊢
+        by_cases htc : (enqueueTombstone I.desc (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+            ((dropDescendants I.desc w0 child).st child)) child).crashed = true
+        · have hdeadT : ∀ i, i ∈ w.roster →
+              ((enqueueTombstone I.desc (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+                ((dropDescendants I.desc w0 child).st child)) child).st i).life ≠ .alive := by
+            intro i hi
+            have hmemR : i ∈ (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+                ((dropDescendants I.desc w0 child).st child)).roster := by
+              simpa [released, dropped] using (by rw [hrR]; exact hi : i ∈ released.roster)
+            exact tombstone_offer_crash_dead I.desc _ child i hmemR
+              (by simpa [released, dropped] using hcrR) htc
+          exact ih _ hT (fun hf => by simp [hf] at htc) (fun _ => hdeadT) hsub'
+        · have hcf : (enqueueTombstone I.desc (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+              ((dropDescendants I.desc w0 child).st child)) child).crashed = false := by
+            cases hb : (enqueueTombstone I.desc (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+                ((dropDescendants I.desc w0 child).st child)) child).crashed with
+            | false => rfl
+            | true => exact absurd hb htc
+          have hCT : ∀ i, contTy ((enqueueTombstone I.desc (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+              ((dropDescendants I.desc w0 child).st child)) child).st i) := by
+            intro i
+            exact contTy_congr
+              (enqueueTombstone_phase I.desc _ child i (by simpa [released, dropped] using hcf))
+              (tombstone_offer_ty I.desc _ child i (by simpa [released, dropped] using hcf))
+              (hrel.2 i)
+          have hrT : (enqueueTombstone I.desc (releaseWorld I.desc (dropDescendants I.desc w0 child) child
+              ((dropDescendants I.desc w0 child).st child)) child).roster = w.roster := by
+            simpa [released, dropped] using
+              ((tombstone_offer_roster I.desc released child).trans hrR)
+          exact ih _ hT (fun _ => ⟨hCT, hrT⟩) (fun ht => by simp [hcf] at ht) hsub'
+      · rw [ite_eq_right hliveD]
+        exact ih _ hdesc.1.1 (fun _ => ⟨hdesc.1.2, hdesc.2.2.trans hr0⟩)
+          (fun ht => by simp [hdesc.2.1] at ht) hsub'
+    · rw [ite_eq_right hgo]
+      exact ih _ hO0 hclear hdead hsub'
+
+/-- Aborting the live children, then installing the continuation when that did
+not crash. The parent stays alive because the forest has no cycle, and it is
+still running `k`, so the continuation is the ordinary advance. -/
+theorem occ_abort_run (I : Impl) (w : World) (id : InstId) (k : Cont) (hO : OccInv I w)
+    (hC : ∀ i, contTy (w.st i)) (hph : (w.st id).phase = .run k)
+    (_hty : (w.st id).typestate = k.toState) (hlive : (w.st id).life = .alive)
+    (hcr : w.crashed = false) (hF : ParentForest w) :
+    OccInv I (let w' := abortChildren I.desc w id
+              commitCont w' id (proceed (w'.st id) (afterHead k))) := by
+  have hpack := occ_abort_children I w id hO hC hcr
+  have hO' : OccInv I (abortChildren I.desc w id) := hpack.1
+  dsimp only [commitCont]
+  by_cases htc : (abortChildren I.desc w id).crashed = true
+  · rw [ite_eq_left htc]
+    exact hO'
+  · rw [ite_eq_right htc]
+    have hcf : (abortChildren I.desc w id).crashed = false := by
+      cases hb : (abortChildren I.desc w id).crashed with
+      | false => rfl
+      | true => exact absurd hb htc
+    have hlive' : ((abortChildren I.desc w id).st id).life = .alive :=
+      abort_parent_alive I.desc w id hF.wf hlive hcf
+    have hph' : ((abortChildren I.desc w id).st id).phase = .run k :=
+      abortChildren_preserves_run I.desc w id id k hph hlive'
+    have hc : ((abortChildren I.desc w id).st id).typestate = k.toState := by
+      have hty' := hpack.2 hcf id
+      unfold contTy at hty'
+      rw [hph'] at hty'
+      exact hty'
+    exact occ_advance I (abortChildren I.desc w id) id k hO' hc hph'
+
 theorem occ_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (id : InstId)
     (k : Cont) (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w) (hM : MailInv w)
     (hSlots : OpenSlots w) (hph : (w.st id).phase = .run k) (hsender : (w.st id).life = .alive)
-    (hbulk : bulkScopeOf I.desc (tname id) k.rest = true) (hcr : w.crashed = false) :
+    (hbulk : bulkScopeOf I.desc (tname id) k.rest = true) (hcr : w.crashed = false)
+    (hF : ParentForest w) :
     OccInv I (execRun I w id (w.st id) k) := by
   have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
   have hb : ((w.st id).life == .alive) = true := beq_iff_eq.mpr hsender
@@ -13927,7 +14144,7 @@ theorem occ_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World) (
         (tokenHold_peer I.desc (tname id) d (w.st id) k onTimeout es hph hk)
     | abort =>
       simp only [execRun, hb, hk]
-      exact occ_abort_run I w id k hO hS.cont hph hty hsender hcr
+      exact occ_abort_run I w id k hO hS.cont hph hty hsender hcr hF
     | spawn child =>
       simp only [execRun, hb, hk]
       exact occ_spawn_run I hG w id k child hO hS.cont hph hty hsender hcr
@@ -13946,7 +14163,7 @@ theorem occ_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : World
     (hO : OccInv I w) (hT : TyOk I.desc w) (hS : SemInv I w) (hM : MailInv w)
     (hSlots : OpenSlots w) (h : execHead I w id = some w')
     (hbulk : ∀ k, (w.st id).phase = .run k → bulkScopeOf I.desc (tname id) k.rest = true)
-    (hcr : w.crashed = false) :
+    (hcr : w.crashed = false) (hF : ParentForest w) :
     OccInv I w' := by
   by_cases hlive : (w.st id).life = .alive
   · simp [execHead, hlive] at h
@@ -13954,7 +14171,7 @@ theorem occ_head (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w w' : World
     | run k =>
       simp [hphase] at h
       cases h
-      exact occ_exec I hL hG w id k hO hT hS hM hSlots hphase hlive (hbulk k hphase) hcr
+      exact occ_exec I hL hG w id k hO hT hS hM hSlots hphase hlive (hbulk k hphase) hcr hF
     | idle => simp [hphase] at h
     | parked _ _ _ => simp [hphase] at h
     | awaitReply _ _ => simp [hphase] at h

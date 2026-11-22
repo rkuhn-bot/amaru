@@ -218,4 +218,61 @@ theorem sibling_spawn_fits :
     (landFloor fuseD "C" "Idle" "H" : Int) ≤ (siblingSpawned.st cNext).tokens "H" := by
   decide
 
+/-- The same sealed world with the tombstone taken off the live parent's lane.
+Nothing in the occupancy account puts that tombstone back, and the sibling
+still holds the message. The slot is free, so a spawn admits the next
+generation. -/
+def cleared : World :=
+  { sealedC with
+    nextIx := fun _ => 1
+    st := fun i =>
+      if i = pId then { sealedC.st pId with prio := [] } else sealedC.st i }
+
+theorem cleared_parent_alive : (cleared.st pId).life = .alive := rfl
+
+theorem cleared_not_crashed : cleared.crashed = false := rfl
+
+theorem cleared_budget : budget fuseD "C" "H" = 1 := rfl
+
+theorem cleared_parent_floor : landFloor fuseD "P" "Idle" "H" = 0 := rfl
+
+theorem cleared_host_floor : landFloor fuseD "H" "Idle" "H" = 0 := rfl
+
+theorem cleared_child_empty : (cleared.st cId).box = [] ∧ (cleared.st cId).parked = [] := ⟨rfl, rfl⟩
+
+theorem cleared_dead_gen : (cleared.st cId).life = .dead ∧ cId ∈ cleared.roster := by
+  decide
+
+theorem cleared_queued : queuedFromKey cleared "C" 0 "H" = 1 := rfl
+
+theorem cleared_gen : maxGen cleared "C" 0 = 1 := rfl
+
+theorem cleared_free : slotRespawnBlocked fuseD cleared pId "C" 0 = false := rfl
+
+theorem cleared_spawn :
+    spawnChild fuseI cleared pId "C" =
+      some (admitBorn fuseI cleared cNext
+        { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }) := rfl
+
+theorem cleared_born_tokens : (bornActor fuseD cleared "C" 0 "Idle").tokens "H" = 0 := rfl
+
+theorem cleared_floor : landFloor fuseD "C" "Idle" "H" = 1 := rfl
+
+/-- The admitted generation is idle in `Idle`, whose floor is the whole budget,
+while `withKeyTokens` left it the budget minus the queued message. -/
+theorem cleared_short :
+    ¬ ((tokenHold fuseD "C" "H"
+        { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId } : Int) ≤
+        (bornActor fuseD cleared "C" 0 "Idle").tokens "H") := by
+  decide
+
+theorem cleared_installed_tokens :
+    ((admitBorn fuseI cleared cNext
+        { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }).st cNext).tokens "H" = 0 ∧
+      ((admitBorn fuseI cleared cNext
+        { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }).st cNext).phase = .idle ∧
+      ((admitBorn fuseI cleared cNext
+        { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }).st cNext).life = .alive :=
+  ⟨rfl, rfl, rfl⟩
+
 end Deadlock
