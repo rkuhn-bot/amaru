@@ -1531,6 +1531,25 @@ def TombChain (w : World) : Prop :=
         ((w.st p).life = .alive ∧ HoldsTomb w p id) ∨
         ((w.st p).life ≠ .alive ∧ mailInFlight w p = true)
 
+/-- Tombstone chain for every dead id outside `gap`. `releaseWorld` puts the
+actor it seals into `gap`: that actor is dead and its tombstone is not queued
+yet. An id leaves `gap` when its parent dies, because its mail then keeps the
+parent's tombstone waiting, or when its own tombstone is queued. -/
+def TombGap (w : World) (gap : InstId → Prop) : Prop :=
+  ∀ id, w.crashed = false → (w.st id).life = .dead → mailInFlight w id = true →
+    ¬ gap id →
+    match (w.st id).parent with
+    | none => True
+    | some p =>
+        ((w.st p).life = .alive ∧ HoldsTomb w p id) ∨
+        ((w.st p).life ≠ .alive ∧ mailInFlight w p = true)
+
+theorem gap_of_chain {w : World} (h : TombChain w) : TombGap w (fun _ => False) :=
+  fun id hc hd hf _ => h id hc hd hf
+
+theorem chain_of_gap {w : World} (h : TombGap w (fun _ => False)) : TombChain w :=
+  fun id hc hd hf => h id hc hd hf (fun hf => hf)
+
 /-- Seal facts carried by `Inv` beside the parent forest. `OccInv` does not
 hold them: a state edit may change `prio` and `parent` while life, the box,
 and the parked lane stay put. -/
