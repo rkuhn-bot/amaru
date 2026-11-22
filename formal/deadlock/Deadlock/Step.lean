@@ -5123,6 +5123,11 @@ theorem detach_free (a : Actor) (caller : InstId) (cid : Nat) (h : notParked a.p
     cases a.phase <;> exact fun h => h
   · exact h
 
+theorem detach_keeps (caller : InstId) (m : Msg) :
+    (detachMsg caller m).sender = m.sender ∧ (detachMsg caller m).tombstone = m.tombstone := by
+  unfold detachMsg
+  split <;> simp
+
 theorem detach_inv (I : Impl) (w : World) (dst caller : InstId) (cid : Nat) (h : Inv I w) :
     Inv I (setActor w dst (detachReply (detachBox (w.st dst) caller) caller cid)) := by
   have hrest := detachHost_rest (w.st dst) caller cid
@@ -5146,7 +5151,86 @@ theorem detach_inv (I : Impl) (w : World) (dst caller : InstId) (cid : Nat) (h :
   · exact open_shape w _ h.2.2.1 (fun i hi => hi) hlife
   · exact outcome_set I w dst _ h.2.2.2.1 hpre.2.2.2
   · exact ParentForest.setActor h.forest (detachHost_parent _ _ _)
-  · exact ⟨parkedLive_set w dst _ h.seal.liveParked hrest.2.1 hrest.2.2⟩
+  · let a := detachReply (detachBox (w.st dst) caller) caller cid
+    let w' := setActor w dst a
+    have hprioA : a.prio = (w.st dst).prio := by
+      simp only [a]
+      unfold detachReply detachBox
+      split <;> simp
+    have hboxA : a.box = ((w.st dst).box.map (detachMsg caller)) := by
+      simp only [a]
+      unfold detachReply detachBox
+      split <;> simp
+    have hpar : ∀ i, (w'.st i).parent = (w.st i).parent := by
+      intro i
+      by_cases hi : i = dst
+      · rw [hi, setActor_self]
+        exact detachHost_parent _ _ _
+      · rw [setActor_other w dst i _ hi]
+    have hboxL : ∀ i, i ≠ dst → (w'.st i).box = (w.st i).box := by
+      intro i hi
+      rw [setActor_other w dst i _ hi]
+    have hprioL : ∀ i, (w'.st i).prio = (w.st i).prio := by
+      intro i
+      by_cases hi : i = dst
+      · rw [hi, setActor_self, hprioA]
+      · rw [setActor_other w dst i _ hi]
+    have hpkL : ∀ i, (w'.st i).parked = (w.st i).parked := by
+      intro i
+      by_cases hi : i = dst
+      · rw [hi, setActor_self]
+        exact hrest.2.2
+      · rw [setActor_other w dst i _ hi]
+    exact {
+      liveParked := parkedLive_set w dst a h.seal.liveParked hrest.2.1 hrest.2.2
+      quiet := by
+        rcases h.seal.quiet with hcr | hq
+        · exact Or.inl (by simpa [w', setActor] using hcr)
+        · refine Or.inr fun i hna => ?_
+          by_cases hi : i = dst
+          · have hna0 : (w.st i).life ≠ .alive := by
+              intro ha
+              exact hna (by rw [hlife i]; exact ha)
+            rcases hq i hna0 with ⟨hb, hp⟩
+            rw [hi] at hb hp
+            rw [hi, setActor_self, hboxA, hb]
+            simp [hp, hrest.2.2]
+          · have hna0 : (w.st i).life ≠ .alive := by
+              intro ha
+              exact hna (by rw [hlife i]; exact ha)
+            rcases hq i hna0 with ⟨hb, hp⟩
+            exact ⟨(hboxL i hi).trans hb, (hpkL i).trans hp⟩
+      childless := childless_stable h.seal.childless (by simp [w', setActor]) hlife hpar
+      chain := chain_edit h.seal.chain h.seal.childless h.forest (by simp [w', setActor]) rfl
+        hlife hpar
+        (fun i m hm => by
+          by_cases hi : i = dst
+          · rw [hi] at hm ⊢
+            rw [setActor_self, hboxA] at hm
+            obtain ⟨m', hm', heq⟩ := List.mem_map.mp hm
+            have hk := detach_keeps caller m'
+            exact Or.inl ⟨m', hm', by rw [← heq]; exact hk.1.symm, by rw [← heq]; exact hk.2.symm⟩
+          · exact Or.inl ⟨m, by rw [hboxL i hi] at hm; exact hm, rfl, rfl⟩)
+        (fun i m hm => Or.inl ⟨m, by rw [hprioL i] at hm; exact hm, rfl, rfl⟩)
+        (fun parent id ht => Or.inl (by
+          obtain ⟨m, hm, htomb, hsnd⟩ := ht
+          exact ⟨m, by rw [hprioL parent]; exact hm, htomb, hsnd⟩))
+      parkedFrom := parkedFrom_same h.seal.parkedFrom hpkL
+      hostedMail := by
+        intro host m hm
+        by_cases hh : host = dst
+        · rw [hh] at hm
+          rcases hm with hm | hm
+          · rw [setActor_self, hboxA] at hm
+            obtain ⟨m', hm', heq⟩ := List.mem_map.mp hm
+            have hk := detach_keeps caller m'
+            rw [← heq, hk.1]
+            exact h.seal.hostedMail dst m' (Or.inl hm')
+          · rw [setActor_self, hprioA] at hm
+            exact h.seal.hostedMail dst m (Or.inr hm)
+        · rw [setActor_other w dst host _ hh] at hm
+          exact h.seal.hostedMail host m hm
+    }
 
 theorem refund_call_roster (w : World) (caller dst : InstId) :
     (refundParkedCall w caller dst).roster = w.roster := by
