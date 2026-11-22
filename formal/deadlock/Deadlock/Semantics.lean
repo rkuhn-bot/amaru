@@ -1821,8 +1821,18 @@ def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Optio
       some w
     else none
 
+/-- Install the effect's continuation, unless the effect crashed the roster.
+A tombstone enqueue with an empty label or a full lane is `crashWorld`
+inside the effect. `proceed` must not overwrite that crashed phase. The
+same guard covers every such enqueue: the continuation is one step after
+the effect world, not a special case of abort or of the lane. -/
+def commitCont (w : World) (id : InstId) (next : Actor) : World :=
+  if w.crashed then w else setActor w id next
+
 /-- Run one effect. An actor that is not alive does not run. A `terminate`
-inside this transition seals the actor in the same step. -/
+inside this transition seals the actor in the same step. A continuation is
+`commitCont`: a crash inside the effect is the result, and the parent does
+not advance. -/
 def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World :=
   if a.life == .alive then
     match k.rest with
@@ -1887,13 +1897,13 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
         setActor w id { a with phase := .awaitPeer { k' with onTimeout := onTimeout } }
       | .abort =>
         -- The children are sealed, and their tombstones are queued, in this step.
-        -- The parent then takes the continuation: `offerPrio` has already written
-        -- the lane onto `w'.st id`, so `proceed` must start from that actor.
+        -- The parent takes the continuation only when that enqueue did not crash.
+        -- `offerPrio` writes the lane onto `w'.st id`, so `proceed` starts there.
         let w' := abortChildren I.desc w id
-        setActor w' id (proceed (w'.st id) k')
+        commitCont w' id (proceed (w'.st id) k')
       | .spawn child =>
         match spawnChild I w id child with
-        | some w' => setActor w' id (proceed (w'.st id) k')
+        | some w' => commitCont w' id (proceed (w'.st id) k')
         | none => crashWorld w
       | .terminate =>
         -- Every core crashes the node. pure-stage stops the simulation when a
@@ -7756,23 +7766,31 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
       simp [execRun, hliveB, hk] at hl
       exact (set_core_life w id { a with phase := .awaitPeer _ } name (by simp [ha])).symm.trans hl
     | abort =>
-      simp [execRun, hliveB, hk] at hl
-      have hset := set_core_life (abortChildren I.desc w id) id
-        (proceed ((abortChildren I.desc w id).st id) (afterHead k)) name
-        (by simp [proceed_keeps_life])
-      exact abortChildren_prev I.desc w id (InstId.core name) (hset.symm.trans hl)
+      simp only [execRun, hliveB, hk, ite_true, commitCont] at hl
+      by_cases hcr : (abortChildren I.desc w id).crashed = true
+      · rw [ite_eq_left hcr] at hl
+        exact abortChildren_prev I.desc w id (InstId.core name) hl
+      · rw [ite_eq_right hcr] at hl
+        have hset := set_core_life (abortChildren I.desc w id) id
+          (proceed ((abortChildren I.desc w id).st id) (afterHead k)) name
+          (by simp [proceed_keeps_life])
+        exact abortChildren_prev I.desc w id (InstId.core name) (hset.symm.trans hl)
     | spawn child =>
-      simp [execRun, hliveB, hk] at hl
+      simp only [execRun, hliveB, hk, ite_true, commitCont] at hl
       cases hs : spawnChild I w id child with
       | none =>
         simp [hs] at hl
         exact crashWorld_prev w (InstId.core name) hl
       | some w' =>
-        simp [hs] at hl
-        have hborn := spawnChild_core_life I w w' id child name hs
-        have hset := set_core_life w' id (proceed (w'.st id) (afterHead k)) name
-          (by simp [proceed_keeps_life])
-        exact hborn.symm.trans (hset.symm.trans hl)
+        simp only [hs] at hl
+        by_cases hcr : w'.crashed = true
+        · rw [ite_eq_left hcr] at hl
+          exact (spawnChild_core_life I w w' id child name hs).symm.trans hl
+        · rw [ite_eq_right hcr] at hl
+          have hborn := spawnChild_core_life I w w' id child name hs
+          have hset := set_core_life w' id (proceed (w'.st id) (afterHead k)) name
+            (by simp [proceed_keeps_life])
+          exact hborn.symm.trans (hset.symm.trans hl)
     | terminate =>
       have hprop : a.life = .alive := by simpa [beq_iff_eq] using hliveB
       have hstep := exec_term_step I w id a k hprop ⟨es, hk⟩

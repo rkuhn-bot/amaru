@@ -564,10 +564,34 @@ inside `abortChildren`, before `proceed`. `crashWorld` has already set the
 parent `dead` and `.crashed`. `proceed` keeps the dead life and, when the
 tail is nonempty, writes `.run`.
 
-`Deadlock/AbortCrash.lean` is that step. The child template's tombstone is
-`""`. The pre-state is a `SemInv` and a `MailInv`, every non-absent actor is
-on the roster, and the parent stands on the landing of its only transition.
-The post-state is crashed, the parent is dead, and its phase is `.run` of
-`.internal`. `idleOff` allows a dead actor only `.idle` or `.crashed`, so
-the post-state is not a `SemInv`. `exec_run_inv` is false for this world.
-No further change to the step relation was made.
+`Deadlock/AbortCrash.lean` was that step before the guard below. The child
+template's tombstone is `""`. The pre-state is a `SemInv` and a `MailInv`,
+every non-absent actor is on the roster, and the parent stands on the
+landing of its only transition. `proceed` then left the parent dead and in
+`.run`. This entry records the bug. The 2026-11-22 06:37 guard is the rule.
+
+## 2026-11-22 — A crashed effect does not continue
+
+Roland, 2026-11-22 06:37 CET. `commitCont` is the continuation of an
+effect. When the effect world has `crashed = true`, that world is the
+result and the parent does not advance. `abort` still seals the live
+children and queues their tombstones, and it still continues when the
+enqueue fits. An empty label and a full lane are the same crash: both are
+`crashWorld` inside the enqueue, and both stop before `proceed`. `spawn`
+uses the same guard. `Deadlock/AbortCrash.lean` is the empty-label abort:
+the parent is dead, `.crashed`, and not in `.run`.
+
+## 2026-11-22 — A parent cycle still continues
+
+The guard above stops only when the effect world is crashed. A parent
+pointer cycle is not a crash. `R` parents `C` and `C` parents `R`, both
+alive, and `R` runs `.abort`. `abortChildren` seals `C`, and sealing `C`
+seals `R` as its descendant, through `releaseWorld`, so `R` is dead and
+`.idle` and the world is not crashed. `commitCont` then installs the
+continuation. `Deadlock/ParentCycle.lean` is that step: the pre-state is a
+`SemInv` and a `MailInv`, every non-absent actor is on the roster, and the
+parent stands on the landing of its only transition. The post-state is not
+crashed, the parent is dead, and its phase is `.run` of `.internal`.
+`idleOff` rejects that phase, so the post-state is not a `SemInv`.
+`exec_run_inv` is false for this world. No further change to the step
+relation was made.

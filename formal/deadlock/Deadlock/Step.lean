@@ -2127,8 +2127,10 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
         exact inv_proceed I (abortChildren I.desc w id) id
           ((abortChildren I.desc w id).st id) (afterHead k) hw' hlive
           (by rw [hph']; trivial) hlive rfl rfl (by simpa [afterHead] using hc) htail hsrc'
-      · -- Dead parent: `AbortCrash` reduces this goal to a dead `.run`.
-        -- `idleOff` rejects it. The statement is not weakened.
+      · -- Dead parent, and the world is not the crash the guard returns unchanged.
+        -- `ParentCycle` is a parent-pointer cycle: `abortChildren` seals the
+        -- parent, `commitCont` still installs `.run`, and `idleOff` rejects it.
+        -- The statement is not weakened.
         done
     | terminate =>
       have hstep := exec_term_step I w id (w.st id) k ha ⟨es, hk⟩

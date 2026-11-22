@@ -1,6 +1,7 @@
 /-
-Aborting a child whose tombstone label is empty crashes the roster, and the
-parent still takes the continuation. The parent is then dead and `.run`.
+Aborting a child whose tombstone label is empty crashes the roster. The
+effect stops there: the parent stays `dead` and `.crashed`, and does not
+enter the `.internal` continuation.
 -/
 import Deadlock.Mail
 import Deadlock.RunInv
@@ -82,8 +83,13 @@ def wAbort : World := execRun crashImpl w0 rId (w0.st rId) kAbort
 theorem parent_dead : (wAbort.st rId).life = .dead := by
   rfl
 
-theorem parent_still_running : (wAbort.st rId).phase = .run (afterHead kAbort) := by
+theorem parent_stays_crashed : (wAbort.st rId).phase = .crashed := by
   rfl
+
+theorem parent_not_running : (wAbort.st rId).phase ≠ .run (afterHead kAbort) := by
+  rw [parent_stays_crashed]
+  intro h
+  cases h
 
 theorem roster_crashed : wAbort.crashed = true := by
   rfl
@@ -107,13 +113,9 @@ theorem roster_open (id : InstId) (h : (w0.st id).life ≠ .absent) : id ∈ w0.
     · simp [hc, w0]
     · simp [w0, hr, hc, absentActor] at h
 
-theorem post_not_idle :
-    ¬ ((wAbort.st rId).phase = .idle ∨ (wAbort.st rId).phase = .crashed) := by
-  rw [parent_still_running]
-  intro h
-  cases h with
-  | inl h => cases h
-  | inr h => cases h
+theorem parent_phase_ok :
+    (wAbort.st rId).phase = .idle ∨ (wAbort.st rId).phase = .crashed := by
+  exact Or.inr parent_stays_crashed
 
 private theorem child_ne : cId ≠ rId := by
   decide

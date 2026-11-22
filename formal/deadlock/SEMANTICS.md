@@ -166,6 +166,15 @@ mailbox. A lone terminable per-peer with no child and no parked call is
 onto a full lane, are `crashWorld`. There is no per-core shutdown.
 `terminable` is rejected on a multiplicity-one template.
 
+`commitCont` installs the continuation of an effect only when that effect
+did not crash the roster. `abort` seals the children and queues their
+tombstones, then continues the parent from the actor that holds those
+tombstones. An empty tombstone label, or a tombstone that does not fit on
+the lane, is `crashWorld` inside that enqueue. The parent stays in the
+crashed phase and does not take the continuation. The same guard is the
+continuation of `spawn`. A crash that is itself the effect, with no later
+continuation, is unchanged.
+
 `releaseWorld` is `readCells`, `refundMsgs` (`creditLive`), `refundParked`,
 `releaseOutbound`, the dead empty actor, and `releaseParked` for non-call
 parked senders. `markShutdown` is not a step. A crashed world has
