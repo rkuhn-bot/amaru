@@ -729,3 +729,16 @@ spent token is the one the head effect already reserved. The parked message
 is the charge, so the phase does not count it again. A parked call's reserve
 also includes `onTimeout`, which the running phase did not hold, so that case
 is separate. The step is unchanged.
+
+## 2026-11-22 — A missed call runs its own refusal
+
+A call aimed at a name that is not alive finishes as `NotAdmitted` on that
+call's own `onNotAdmitted`. That list is the not-admitted branch of the call's
+reserve, so the finish does not raise `tokenHold`. A send to a dead name still
+proceeds on the tail. The step is unchanged.
+
+## 2026-11-22 — A full self-schedule crashes the world
+
+A self-schedule that does not fit the priority lane crashes the world. The
+occupancy proof follows `crashWorld`. Killing only the sender was a stale
+account of the same step. The step is unchanged.

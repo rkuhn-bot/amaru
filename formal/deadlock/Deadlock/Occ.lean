@@ -6483,6 +6483,48 @@ theorem tokenHold_park_false (D : Description) (template dst name : String) (a :
   exact effReserve_ge_send D template dst name (contAt k) e
     (pathReserve D template dst (contAt k) es) label hint he
 
+/-- The continuation a missed call actually runs. `selectCall` lands in the
+typestate the reserve already checked for `NotAdmitted`. -/
+theorem contAt_not_admitted (k : Cont) (na to : List Eff) :
+    contAt (selectCall { afterHead k with onNotAdmitted := na, onTimedOut := to } .notAdmitted) =
+      focus (contAt k) k.toNotAdmitted := by
+  simp [contAt, selectCall, focus, pickState, afterHead]
+
+/-- A call that is not admitted spends no token and runs only `onNotAdmitted`.
+That path is one branch of the call's reserve. -/
+theorem tokenHold_miss (D : Description) (template dst name : String) (a : Actor) (k : Cont)
+    (na to : List Eff) (es : List Eff) (label : String) (hint : Nat)
+    (hph : a.phase = .run k)
+    (hk : k.rest = .call name label hint na to :: es) :
+    tokenHold D template dst
+        (finishCall (issueCall a) (callWait k (.call name label hint na to)) .notAdmitted) ≤
+      tokenHold D template dst a := by
+  have hct :
+      contAt (selectCall (callWait k (.call name label hint na to)) .notAdmitted) =
+        focus (contAt k) k.toNotAdmitted := by
+    simp [callWait, hk, contAt_not_admitted]
+  have hrest :
+      (selectCall (callWait k (.call name label hint na to)) .notAdmitted).rest = na := by
+    simp [selectCall, callWait, hk]
+  have hnew :
+      tokenHold D template dst
+          (finishCall (issueCall a) (callWait k (.call name label hint na to)) .notAdmitted) =
+        pathReserve D template dst (focus (contAt k) k.toNotAdmitted) na := by
+    cases na with
+    | nil =>
+      simp [finishCall, issueCall, proceed, tokenHold, pathReserve, hrest, hct, selectCall, callWait,
+        hk, afterHead, contAt, focus, pickState]
+    | cons _ _ =>
+      simp [finishCall, issueCall, proceed, tokenHold, hrest, hct]
+  have hold :
+      tokenHold D template dst a =
+        effReserve D template dst (contAt k) (.call name label hint na to)
+          (pathReserve D template dst (contAt k) es) := by
+    simp [tokenHold, hph, hk, pathReserve]
+  rw [hnew, hold]
+  simp [effReserve, contAt]
+  exact Nat.le_trans (Nat.le_max_left _ _) (Nat.le_max_right _ _)
+
 theorem occ_self_send (I : Impl) (w : World) (sender : InstId) (msg : Msg) (k : Cont)
     (e : Eff) (es : List Eff) (label : String) (hint : Nat) (hO : OccInv I w)
     (hph : (w.st sender).phase = .run k) (hk : k.rest = e :: es)
@@ -7040,31 +7082,33 @@ theorem occ_self_park (I : Impl) (_hL : LocalOk I) (w : World) (sender : InstId)
 theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)
     (e : Eff) (es : List Eff) (label : String) (hint : Nat) (hO : OccInv I w)
     (hph : (w.st sender).phase = .run k) (hk : k.rest = e :: es)
-    (he : e = .send (tname dst) label hint ∨ (∃ na to, e = .call (tname dst) label hint na to))
+    (he : ∃ na to, e = .call (tname dst) label hint na to)
     (hmsg : msg.sender = sender) (hsender : (w.st sender).life = .alive)
     (hnot : ¬ loneTerminableName I.desc (tname sender)) (hne : sender ≠ dst)
     (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk I.desc w.N dst)
-    (hagree : keyAgrees sender dst)
+    (hagree : keyAgrees I.desc sender dst)
     (hcore : peerKey dst = none → coreSender I.desc sender) :
-    OccInv I (enqueueOrPark w I.desc sender dst msg true (afterHead k)) := by
+    OccInv I (enqueueOrPark w I.desc sender dst msg true (callWait k e)) := by
+  obtain ⟨na, to, hc⟩ := he
   have hmem := hO.aliveIn sender hsender
   have hdst := hO.aliveIn dst hlive
-  have hpend1 : 1 ≤ pending (w.st sender) (tname dst) := by
-    simp [pending, contRest, hph, hk]
-    rcases he with rfl | ⟨_, _, rfl⟩ <;> simp [sendsTo]
   have htok1 : 1 ≤ (w.st sender).tokens (tname dst) := by
-    have hS := hO.slack sender (tname dst) hmem hsender
-    omega
+    have hS := hO.slack sender (tname dst) hsender
+    have hge := hold_ge_effect I.desc (tname sender) (tname dst) (w.st sender) k e es label hint
+      hph hk (Or.inr (Or.inl ⟨na, to, hc⟩))
+    exact Int.le_trans (Int.ofNat_le.mpr hge) hS
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname dst)
-  rw [enqueue_room_other_call w I.desc sender dst msg (afterHead k) hlive hne hpark hcap]
+  rw [enqueue_room_other_call w I.desc sender dst msg (callWait k e) hlive hne hpark hcap]
+  let issued : Msg :=
+    { msg with mid := (w.st dst).nextMid, callId := some (issueCall (chargeSender (w.st sender) (tname dst))).waitId }
   let aD : Actor :=
-    { (w.st dst) with
-      box := (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }],
-      nextMid := (w.st dst).nextMid + 1 }
+    { (w.st dst) with box := (w.st dst).box ++ [issued], nextMid := (w.st dst).nextMid + 1 }
   let aS : Actor :=
-    { issueCall (chargeSender (w.st sender) (tname dst)) with phase := .awaitReply dst (afterHead k) }
-  suffices OccInv I (setActor (setActor w dst aD) sender aS) by simpa [aS, aD] using this
+    { issueCall (chargeSender (w.st sender) (tname dst)) with
+      phase := .awaitReply dst (callWait k e) }
+  suffices OccInv I (setActor (setActor w dst aD) sender aS) by
+    simpa [aS, aD, issued] using this
   apply occ_two I w sender dst aS aD (tname dst) hO hne
   · simp [aS, hcl]
   · simp [aD]
@@ -7077,9 +7121,9 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     exact charge_tok (w.st sender) (tname dst) d htok1
   · intro d; simp [aD]
   · intro s
-    exact owed_other_box w.st (tname dst) sender dst aS aD
-      { msg with mid := (w.st dst).nextMid } w.roster hO.nodup hdst hmem hne rfl (by simpa using hmsg)
-      (by simp [aS, hcb]) (by simp [aS, hcp]) (by simp [aD]) (by simp [aD]) s
+    exact owed_other_box w.st (tname dst) sender dst aS aD issued
+      w.roster hO.nodup hdst hmem hne rfl (by simp [issued, hmsg])
+      (by simp [aS, hcb]) (by simp [aS, hcp]) (by simp [aD, issued]) (by simp [aD]) s
   · intro d hd s
     exact owed_other_skip w.st sender dst aS aD d w.roster hO.nodup hdst hmem hne
       (fun h => hd h.symm) (by simp [aS, hcb]) (by simp [aS, hcp]) s
@@ -7087,11 +7131,11 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     have hm' : m ∈ (w.st sender).box := by simpa [aS, hcb] using hm
     exact hO.sentFrom sender m hm'
   · intro m hm
-    have hm' : m ∈ (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }] := by simpa [aD] using hm
+    have hm' : m ∈ (w.st dst).box ++ [issued] := by simpa [aD, issued] using hm
     simp [List.mem_append] at hm'
     cases hm' with
     | inl h => exact hO.sentFrom dst m h
-    | inr h => simpa [h, hmsg] using hmem
+    | inr h => simpa [h, issued, hmsg] using hmem
   · intro p hp
     have hp' : p ∈ (w.st sender).parked := by simpa [aS, hcp] using hp
     exact hO.parkFrom sender p hp'
@@ -7104,18 +7148,6 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
   · intro p hp
     have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
     exact hO.parkMsg dst p hp'
-  · intro i hl1
-    by_cases hs : i = sender
-    · rw [hs] at hl1 ⊢
-      simp [aS, hcp]
-      exact hO.clear sender hl1
-    · by_cases hd : i = dst
-      · rw [hd] at hl1 ⊢
-        have hne' : dst ≠ sender := fun h => hne h.symm
-        simp [hne', aD]
-        exact hO.clear dst hl1
-      · simp [hs, hd]
-        exact hO.clear i hl1
   · exact hmem
   · exact hdst
   · exact hsender
@@ -7127,12 +7159,11 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     have hp' : p ∈ (w.st sender).parked := by simpa [aS, hcp] using hp
     exact (hO.sameKey sender).2 p hp'
   · intro m hm
-    have hm' : m ∈ (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }] := by
-      simpa [aD] using hm
+    have hm' : m ∈ (w.st dst).box ++ [issued] := by simpa [aD, issued] using hm
     simp [List.mem_append] at hm'
     rcases hm' with hm' | hm'
     · exact (hO.sameKey dst).1 m hm'
-    · rw [hm', hmsg]
+    · simp [hm', issued, hmsg]
       exact queueOk_alive w sender dst hagree hsender
   · intro p hp
     have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
@@ -7152,15 +7183,53 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
   · intro hk
     refine ⟨?_, ?_⟩
     · intro m hm
-      have hm' : m ∈ (w.st dst).box ++ [{ msg with mid := (w.st dst).nextMid }] := by
-        simpa [aD] using hm
+      have hm' : m ∈ (w.st dst).box ++ [issued] := by simpa [aD, issued] using hm
       simp [List.mem_append] at hm'
       rcases hm' with hm' | hm'
       · exact (hO.coreFrom dst hk).1 m hm'
-      · simpa [hm', hmsg] using hcore hk
+      · simpa [hm', issued, hmsg] using hcore hk
     · intro p hp
       have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
       exact (hO.coreFrom dst hk).2 p hp'
+  · intro nm key d
+    let w1 := setActor w dst aD
+    have hboxD : aD.box = (w.st dst).box ++ [issued] := by simp [aD, issued]
+    have hparkD : aD.parked = (w.st dst).parked := by simp [aD]
+    have happ := queuedFromKey_append w dst aD issued nm key d hO.nodup hdst hboxD hparkD
+    have hboxS : aS.box = (w1.st sender).box := by simp [aS, w1, setActor, hne, issueCall, hcb]
+    have hparkS : aS.parked = (w1.st sender).parked := by simp [aS, w1, setActor, hne, issueCall, hcp]
+    have hset := queuedFromKey_set w1 sender aS hboxS hparkS nm key d
+    rw [hset, happ, Int.natCast_add]
+    have hcast :
+        ((if (tname dst != d) = true then 0
+          else if keyPred nm key issued = true then 1 else 0 : Nat) : Int) =
+          queueDrop sender nm key d (tname dst) := by
+      have hswap :
+          ((if (tname dst != d) = true then 0
+            else if keyPred nm key issued = true then 1 else 0 : Nat) : Int) =
+            if d = tname dst then if keyPred nm key issued = true then (1 : Int) else 0 else 0 := by
+        by_cases ht : tname dst = d
+        · by_cases hk' : keyPred nm key issued = true <;> simp [ht, hk', bne]
+        · have hneD : ¬ d = tname dst := fun h => ht h.symm
+          by_cases hk' : keyPred nm key issued = true <;> simp [ht, hneD, hk', bne]
+      rw [hswap]
+      exact queueDrop_msg sender issued nm key d (tname dst) (by simp [issued, hmsg])
+    rw [hcast]
+  · intro d
+    have hk' : k.rest = .call (tname dst) label hint na to :: es := by rw [hc] at hk; exact hk
+    have hwait := tokenHold_call_wait I.desc (tname sender) d (tname dst) (w.st sender) k dst na to es
+      label hint hph hk'
+    have hphase : aS.phase = .awaitReply dst (callWait k e) := by simp [aS]
+    have hsameP : tokenHold I.desc (tname sender) d aS =
+        tokenHold I.desc (tname sender) d { (w.st sender) with phase := aS.phase } := by
+      simp [tokenHold, aS, hphase]
+    rw [hsameP, hphase, hc, callWait]
+    have hbit : ((if d = tname dst then 1 else 0 : Nat) : Int) =
+        if d = tname dst then (1 : Int) else 0 := by
+      by_cases hd : d = tname dst <;> simp [hd]
+    have hle := Int.ofNat_le.mpr hwait
+    rw [Int.natCast_add, hbit] at hle
+    exact hle
 
 theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) (k : Cont)
     (e : Eff) (es : List Eff) (label : String) (hint : Nat) (hO : OccInv I w)
@@ -7171,17 +7240,16 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     (hsender : (w.st sender).life = .alive) (hnot : ¬ loneTerminableName I.desc (tname sender))
     (hne : sender ≠ dst) (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk I.desc w.N dst)
-    (hagree : keyAgrees sender dst)
+    (hagree : keyAgrees I.desc sender dst)
     (hcore : peerKey dst = none → coreSender I.desc sender) :
     OccInv I (enqueueOrPark w I.desc sender dst msg false (afterHead k)) := by
   have hmem := hO.aliveIn sender hsender
   have hdst := hO.aliveIn dst hlive
-  have hpend1 : 1 ≤ pending (w.st sender) (tname dst) := by
-    simp [pending, contRest, hph, hk]
-    rcases he with rfl | ⟨_, _, rfl⟩ | ⟨_, _, rfl⟩ <;> simp [sendsTo]
   have htok1 : 1 ≤ (w.st sender).tokens (tname dst) := by
-    have hS := hO.slack sender (tname dst) hmem hsender
-    omega
+    have hS := hO.slack sender (tname dst) hsender
+    have hge := hold_ge_effect I.desc (tname sender) (tname dst) (w.st sender) k e es label hint
+      hph hk he
+    exact Int.le_trans (Int.ofNat_le.mpr hge) hS
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname dst)
   rw [enqueue_room_other_send w I.desc sender dst msg (afterHead k) hlive hne hpark hcap]
   let charged : Actor := chargeSender (w.st sender) (tname dst)
@@ -7234,18 +7302,6 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
   · intro p hp
     have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
     exact hO.parkMsg dst p hp'
-  · intro i hl1
-    by_cases hs : i = sender
-    · rw [hs] at hl1 ⊢
-      simp [aS, charged, proceed_parked, hcp]
-      exact hO.clear sender hl1
-    · by_cases hd : i = dst
-      · rw [hd] at hl1 ⊢
-        have hne' : dst ≠ sender := fun h => hne h.symm
-        simp [hne', aD]
-        exact hO.clear dst hl1
-      · simp [hs, hd]
-        exact hO.clear i hl1
   · exact hmem
   · exact hdst
   · exact hsender
@@ -7291,34 +7347,80 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     · intro p hp
       have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
       exact (hO.coreFrom dst hk).2 p hp'
+  · intro nm key d
+    let w1 := setActor w dst aD
+    let issued : Msg := { msg with mid := (w.st dst).nextMid }
+    have hboxD : aD.box = (w.st dst).box ++ [issued] := by simp [aD, issued]
+    have hparkD : aD.parked = (w.st dst).parked := by simp [aD]
+    have happ := queuedFromKey_append w dst aD issued nm key d hO.nodup hdst hboxD hparkD
+    have hboxS : aS.box = (w1.st sender).box := by
+      simp [aS, w1, setActor, hne, charged, proceed_box, hcb]
+    have hparkS : aS.parked = (w1.st sender).parked := by
+      simp [aS, w1, setActor, hne, charged, proceed_parked, hcp]
+    have hset := queuedFromKey_set w1 sender aS hboxS hparkS nm key d
+    rw [hset, happ, Int.natCast_add]
+    have hcast :
+        ((if (tname dst != d) = true then 0
+          else if keyPred nm key issued = true then 1 else 0 : Nat) : Int) =
+          queueDrop sender nm key d (tname dst) := by
+      have hswap :
+          ((if (tname dst != d) = true then 0
+            else if keyPred nm key issued = true then 1 else 0 : Nat) : Int) =
+            if d = tname dst then if keyPred nm key issued = true then (1 : Int) else 0 else 0 := by
+        by_cases ht : tname dst = d
+        · by_cases hk' : keyPred nm key issued = true <;> simp [ht, hk', bne]
+        · have hneD : ¬ d = tname dst := fun h => ht h.symm
+          by_cases hk' : keyPred nm key issued = true <;> simp [ht, hneD, hk', bne]
+      rw [hswap]
+      exact queueDrop_msg sender issued nm key d (tname dst) (by simp [issued, hmsg])
+    rw [hcast]
+  · intro d
+    have hsame : tokenHold I.desc (tname sender) d aS =
+        tokenHold I.desc (tname sender) d (proceed (w.st sender) (afterHead k)) := by
+      cases hrest : (afterHead k).rest with
+      | nil => simp [tokenHold, aS, charged, proceed, hrest]
+      | cons _ _ => simp [tokenHold, aS, charged, proceed, hrest]
+    rw [hsame]
+    have hNat := tokenHold_proceed_head I.desc (tname sender) d (tname dst) (w.st sender) k e es
+      label hint hph hk he
+    have hbit : ((if d = tname dst then 1 else 0 : Nat) : Int) =
+        if d = tname dst then (1 : Int) else 0 := by
+      by_cases hd : d = tname dst <;> simp [hd]
+    have hle := Int.ofNat_le.mpr hNat
+    rw [Int.natCast_add, hbit] at hle
+    exact hle
 
-theorem occ_other_park (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId) (msg : Msg)
+theorem occ_other_park (I : Impl) (_hL : LocalOk I) (w : World) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) (e : Eff) (es : List Eff) (label : String) (hint : Nat)
-    (hO : OccInv I w) (hT : TyOk I.desc w) (hph : (w.st sender).phase = .run k) (hk : k.rest = e :: es)
+    (hO : OccInv I w) (_hT : TyOk I.desc w) (hph : (w.st sender).phase = .run k) (hk : k.rest = e :: es)
     (he : e = .send (tname dst) label hint ∨ (∃ na to, e = .call (tname dst) label hint na to))
     (hmsg : msg.sender = sender) (hsender : (w.st sender).life = .alive)
     (hnot : ¬ loneTerminableName I.desc (tname sender)) (hne : sender ≠ dst)
-    (hlive : (w.st dst).life = .alive)     (hagree : keyAgrees sender dst)
+    (hlive : (w.st dst).life = .alive)     (hagree : keyAgrees I.desc sender dst)
     (hroom : ¬ ((w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst))
-    (hcore : peerKey dst = none → coreSender I.desc sender) :
+    (hcore : peerKey dst = none → coreSender I.desc sender)
+    (his : isCall = false) :
     OccInv I (enqueueOrPark w I.desc sender dst msg isCall (afterHead k)) := by
   have hmem := hO.aliveIn sender hsender
   have hdst := hO.aliveIn dst hlive
-  have hpend1 : 1 ≤ pending (w.st sender) (tname dst) := by
-    simp [pending, contRest, hph, hk]
-    rcases he with rfl | ⟨_, _, rfl⟩ <;> simp [sendsTo]
   have htok1 : 1 ≤ (w.st sender).tokens (tname dst) := by
-    have hS := hO.slack sender (tname dst) hmem hsender
-    omega
+    have hS := hO.slack sender (tname dst) hsender
+    have hge := hold_ge_effect I.desc (tname sender) (tname dst) (w.st sender) k e es label hint
+      hph hk (by
+        rcases he with h | h
+        · exact Or.inl h
+        · exact Or.inr (Or.inl h))
+    exact Int.le_trans (Int.ofNat_le.mpr hge) hS
   have ⟨hcl, hcty, _, hcb, hcp⟩ := charge_keeps (w.st sender) (tname dst)
   rw [enqueue_park_other w I.desc sender dst msg isCall (afterHead k) hlive hne hroom]
-  let entry : Parked :=
-    { sender := sender, msg := { msg with mid := (w.st dst).nextMid }, isCall := isCall }
-  let aD : Actor := { (w.st dst) with parked := (w.st dst).parked ++ [entry], nextMid := (w.st dst).nextMid + 1 }
   let charged := chargeSender (w.st sender) (tname dst)
+  let issued : Msg := { msg with mid := (w.st dst).nextMid, callId := if isCall then some (issueCall charged).waitId else msg.callId }
+  let entry : Parked := { sender := sender, msg := issued, isCall := isCall }
+  let aD : Actor := { (w.st dst) with parked := (w.st dst).parked ++ [entry], nextMid := (w.st dst).nextMid + 1 }
   let aS : Actor :=
     { (if isCall then issueCall charged else charged) with phase := .parked dst isCall (afterHead k) }
-  suffices OccInv I (setActor (setActor w dst aD) sender aS) by simpa [aS, aD, entry, charged] using this
+  suffices OccInv I (setActor (setActor w dst aD) sender aS) by
+    simpa [aS, aD, entry, issued, charged, his] using this
   apply occ_two I w sender dst aS aD (tname dst) hO hne
   · simp [aS, charged, hcl]
   · simp [aD]
@@ -7359,18 +7461,7 @@ theorem occ_other_park (I : Impl) (hL : LocalOk I) (w : World) (sender dst : Ins
     simp [List.mem_append] at hp'
     cases hp' with
     | inl h => exact hO.parkMsg dst p h
-    | inr h => simp [h, entry, hmsg]
-  · intro i hl1
-    by_cases hs : i = sender
-    · rw [hs] at hl1 ⊢
-      simp [aS, charged, hcp]
-      exact hO.clear sender hl1
-    · by_cases hd : i = dst
-      · rw [hd] at hl1
-        exact absurd (l1_park_unreachable I hL w hO hT sender dst hlive hmem hsender hpend1 hl1
-          hagree) hroom
-      · simp [hs, hd]
-        exact hO.clear i hl1
+    | inr h => simp [h, entry, issued, hmsg]
   · exact hmem
   · exact hdst
   · exact hsender
@@ -7413,10 +7504,53 @@ theorem occ_other_park (I : Impl) (hL : LocalOk I) (w : World) (sender dst : Ins
       simp [List.mem_append] at hp'
       rcases hp' with hp' | hp'
       · exact (hO.coreFrom dst hk).2 p hp'
-      · simpa [hp', entry, hmsg] using hcore hk
+      · simpa [hp', entry, issued, hmsg] using hcore hk
+  · intro nm key d
+    let w1 := setActor w dst aD
+    have hboxD : aD.box = (w.st dst).box := by simp [aD]
+    have hparkD : aD.parked = (w.st dst).parked ++ [entry] := by simp [aD]
+    have happ := queuedFromKey_park w dst aD entry nm key d hO.nodup hdst hboxD hparkD
+    have hboxS : aS.box = (w1.st sender).box := by
+      simp [aS, w1, setActor, hne, charged, his, hcb]
+    have hparkS : aS.parked = (w1.st sender).parked := by
+      simp [aS, w1, setActor, hne, charged, his, hcp]
+    have hset := queuedFromKey_set w1 sender aS hboxS hparkS nm key d
+    rw [hset, happ, Int.natCast_add]
+    have hcast :
+        ((if (tname dst != d) = true then 0
+          else if keyPred nm key entry.msg = true then 1 else 0 : Nat) : Int) =
+          queueDrop sender nm key d (tname dst) := by
+      have hswap :
+          ((if (tname dst != d) = true then 0
+            else if keyPred nm key entry.msg = true then 1 else 0 : Nat) : Int) =
+            if d = tname dst then if keyPred nm key entry.msg = true then (1 : Int) else 0 else 0 := by
+        by_cases ht : tname dst = d
+        · by_cases hk' : keyPred nm key entry.msg = true <;> simp [ht, hk', bne]
+        · have hneD : ¬ d = tname dst := fun h => ht h.symm
+          by_cases hk' : keyPred nm key entry.msg = true <;> simp [ht, hneD, hk', bne]
+      rw [hswap]
+      exact queueDrop_msg sender entry.msg nm key d (tname dst) (by simp [entry, issued, hmsg])
+    rw [hcast]
+  · intro d
+    have hsame : tokenHold I.desc (tname sender) d aS =
+        tokenHold I.desc (tname sender) d
+          { (w.st sender) with phase := .parked dst false (afterHead k) } := by
+      simp [tokenHold, aS, his]
+    rw [hsame]
+    have hNat := tokenHold_park_false I.desc (tname sender) d (tname dst) (w.st sender) k dst e es
+      label hint hph hk (by
+        rcases he with h | h
+        · exact Or.inl h
+        · exact Or.inr (Or.inl h))
+    have hbit : ((if d = tname dst then 1 else 0 : Nat) : Int) =
+        if d = tname dst then (1 : Int) else 0 := by
+      by_cases hd : d = tname dst <;> simp [hd]
+    have hle := Int.ofNat_le.mpr hNat
+    rw [Int.natCast_add, hbit] at hle
+    exact hle
 
 /-- A blocking send or call. The target is charged for when it is alive.
-On a Lemma-1 mailbox the park branch contradicts the occupancy invariant. -/
+A non-call park keeps the tail. A parked call is not this theorem. -/
 theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) (e : Eff) (es : List Eff) (label : String) (hint : Nat)
     (hO : OccInv I w) (hT : TyOk I.desc w) (hph : (w.st sender).phase = .run k)
@@ -7424,7 +7558,7 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
     (he : e = .send (tname dst) label hint ∨ (∃ na to, e = .call (tname dst) label hint na to))
     (hmsg : msg.sender = sender) (hty : (w.st sender).typestate = k.toState)
     (hsender : (w.st sender).life = .alive) (hnot : ¬ loneTerminableName I.desc (tname sender))
-    (hagree : keyAgrees sender dst)
+    (hagree : keyAgrees I.desc sender dst)
     (hbulk : bulkScopeOf I.desc (tname sender) (e :: es) = true) :
     OccInv I (enqueueOrPark w I.desc sender dst msg isCall
       (if isCall then callWait k e else afterHead k)) := by
@@ -7442,7 +7576,7 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
             hmsg hty hsender hnot hroom.1 hroom.2
         | true =>
           rcases he with hsend | ⟨na, to, hc⟩
-          · simp [callWait, hsend]
+          · fail "a send flagged as a call is not a step"
           · exact occ_self_call I w sender msg k e es label hint hO hph hk ⟨na, to, hc⟩ hmsg hsender hnot
               hroom.1 hroom.2
       · cases isCall with
@@ -7460,50 +7594,63 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
                 · exact Or.inl h
                 · exact Or.inr (Or.inl h)⟩ hk)
         | true =>
-          exact occ_other_call I w sender dst msg k e es label hint hO hph hk he hmsg hsender hnot
-            hsame hlive hroom.1 hroom.2 hagree
+          rcases he with hsend | ⟨na, to, hc⟩
+          · fail "a send flagged as a call is not a step"
+          · exact occ_other_call I w sender dst msg k e es label hint hO hph hk ⟨na, to, hc⟩ hmsg hsender hnot
+              hsame hlive hroom.1 hroom.2 hagree
+              (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive)
+                (hO.aliveIn sender hsender) hbulk
+                ⟨label, hint, Or.inr (Or.inl ⟨na, to, hc⟩)⟩ hk)
+    · by_cases hsame : sender = dst
+      · subst hsame
+        cases isCall with
+        | false =>
+          rw [ite_eq_right (by decide : ¬ false = true)]
+          exact occ_self_park I hL w sender msg false k e es label hint hO hT hph hk he hmsg hsender hnot
+            rfl hroom
+        | true =>
+          fail "a parked call counts onTimeout, which the running reserve did not"
+      · cases isCall with
+        | false =>
+          rw [ite_eq_right (by decide : ¬ false = true)]
+          exact occ_other_park I hL w sender dst msg false k e es label hint hO hT hph hk he hmsg
+            hsender hnot hsame hlive hagree hroom
             (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive)
               (hO.aliveIn sender hsender) hbulk
               ⟨label, hint, by
                 rcases he with h | h
                 · exact Or.inl h
-                · exact Or.inr (Or.inl h)⟩ hk)
-    · by_cases hsame : sender = dst
-      · subst hsame
-        cases isCall with
-        | false =>
-          exact occ_self_park I hL w sender msg isCall k e es label hint hO hT hph hk he hmsg hsender hnot
-            rfl hroom
+                · exact Or.inr (Or.inl h)⟩ hk) rfl
         | true =>
           fail "a parked call counts onTimeout, which the running reserve did not"
-      · exact occ_other_park I hL w sender dst msg isCall k e es label hint hO hT hph hk he hmsg
-          hsender hnot hsame hlive hagree hroom
-          (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive)
-            (hO.aliveIn sender hsender) hbulk
-            ⟨label, hint, by
-              rcases he with h | h
-              · exact Or.inl h
-              · exact Or.inr (Or.inl h)⟩ hk)
   · cases isCall with
     | false =>
+      rw [ite_eq_right (by decide : ¬ false = true)]
       rw [enqueue_dead w I.desc sender dst msg (afterHead k) hlive]
       exact occ_advance I w sender k hO hty hph
     | true =>
-      rw [enqueue_miss w I.desc sender dst msg (afterHead k) hlive]
-      let aS : Actor := finishCall (issueCall (w.st sender)) (afterHead k) .notAdmitted
-        suffices OccInv I (setActor w sender aS) by simpa [aS] using this
-        apply occ_keep I w sender aS hO (finishCall_life _ _ _)
-          (by cases hr : (afterHead k).rest <;> simp [aS, finishCall, proceed, hr])
-          (by cases hr : (afterHead k).rest <;> simp [aS, finishCall, proceed, hr])
-          (by intro d; cases hr : (afterHead k).rest <;> simp [aS, finishCall, proceed, hr])
-          (by
-            cases ht : k.rest.tail <;> simp [aS, finishCall, proceed, afterHead, ht, hty])
+      rw [ite_eq_left (by decide : true = true)]
+      rcases he with hsend | ⟨na, to, hc⟩
+      · fail "a send flagged as a call is not a step"
+      · rw [enqueue_miss w I.desc sender dst msg (callWait k e) hlive]
+        apply occ_keep I w sender
+            (finishCall (issueCall (w.st sender)) (callWait k e) .notAdmitted) hO
+          (by simpa [issueCall] using
+            finishCall_life (issueCall (w.st sender)) (callWait k e) .notAdmitted)
+          (by simpa [finishCall, issueCall] using
+            proceed_box (issueCall (w.st sender)) (selectCall (callWait k e) .notAdmitted))
+          (by simpa [finishCall, issueCall] using
+            proceed_parked (issueCall (w.st sender)) (selectCall (callWait k e) .notAdmitted))
           (by
             intro d
-            have hp : pending aS d = pending (proceed (w.st sender) (afterHead k)) d := by
-              cases hr : (afterHead k).rest <;> simp [aS, finishCall, proceed, pending, contRest, hr]
-            exact Nat.le_trans (Nat.le_of_eq hp)
-              ((proceed_tail (w.st sender) k d hty (by simp [contRest, hph])).1))
+            simpa [finishCall, issueCall] using
+              proceed_tokens (issueCall (w.st sender)) (selectCall (callWait k e) .notAdmitted) d)
+          (by
+            intro d _
+            have hk' : k.rest = .call (tname dst) label hint na to :: es := by rw [hc] at hk; exact hk
+            have hle := tokenHold_miss I.desc (tname sender) d (tname dst) (w.st sender) k na to es
+              label hint hph hk'
+            simpa [hc] using Int.ofNat_le.mpr hle)
 
 theorem occ_schedule (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (label : String)
     (hO : OccInv I w) (ha : a = w.st id) (hph : a.phase = .run k) (hty : a.typestate = k.toState) :
@@ -7515,7 +7662,7 @@ theorem occ_schedule (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
       if a.prio.any (fun p => p.label == label) then setActor w id (proceed a k')
       else if prioLoad a.prio < cap then
         setActor w id (proceed { a with prio := upsertPrio a.prio msg, nextMid := a.nextMid + 1 } k')
-      else setActor w id { a with phase := .crashed }) := by
+      else crashWorld w) := by
   let msg : Msg :=
     { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
   cases hb : a.prio.any (fun p => p.label == label) with
@@ -7533,30 +7680,15 @@ theorem occ_schedule (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
       · simp [aS, base, proceed_box, ha]
       · simp [aS, base, proceed_parked, ha]
       · intro d; simp [aS, base, proceed_tokens, ha]
-      · have hbase : base.typestate = (afterHead k).toState := by
-          simp [base, afterHead]
-          exact hty
-        have htyS : aS.typestate = a.typestate := by
-          simpa [aS, base] using proceed_ty_keep base (afterHead k) hbase
-        simpa [ha] using htyS
-      · intro d
-        have htyb : base.typestate = k.toState := by simp [base]; exact hty
-        have hrest : contRest base.phase = k.rest := by simp [base, contRest, hph]
-        have htail := proceed_tail base k d htyb hrest
-        have hbpend : pending base d = pending (w.st id) d := by
-          simp [pending, base, contRest, hph, ha]
-        simpa [aS, hbpend] using htail.1
+      · intro d _
+        have hphB : base.phase = .run k := by simp [base, hph]
+        have hle := tokenHold_advance I.desc (tname id) d base k hphB
+        have hsame : tokenHold I.desc (tname id) d base =
+            tokenHold I.desc (tname id) d (w.st id) := by
+          simp [tokenHold, base, ha, hph]
+        simpa [aS, hsame] using Int.ofNat_le.mpr hle
     · simp [hb, hlen]
-      apply occ_keep I w id ({ a with phase := .crashed }) hO
-      · simp [ha]
-      · simp [ha]
-      · simp [ha]
-      · intro d; simp [ha]
-      · simp [ha]
-      · intro d
-        rw [ha] at hph
-        simp [pending, contRest, hph]
-        exact Nat.zero_le _
+      exact occ_crash I w hO
 
 theorem occ_cell (I : Impl) (w : World) (id : InstId) (k : Cont) (dst label : String) (value : Nat)
     (hO : OccInv I w) (hph : (w.st id).phase = .run k) (hty : (w.st id).typestate = k.toState) :
