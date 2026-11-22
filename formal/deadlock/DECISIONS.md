@@ -749,3 +749,11 @@ A root with an empty subtree is born at `nextIx`. Occupancy records that every
 such key already on the roster is below that counter, so the birth does not
 share a slot with a live generation. Keys of every other template are
 allocated elsewhere and are not part of this bound. The step is unchanged.
+
+## 2026-11-22 — A scheduler root is born on a fresh key
+
+`spawn` installs one peer at `nextIx` or at `freshKey`. The key has no
+generation on the roster yet, so the newborn is the only live holder and its
+tokens are the whole budget. A checked description does not put a supervisor
+on an empty subtree, which is why that birth uses the subtree counter. The
+step is unchanged.

@@ -50,7 +50,7 @@ theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action)
   | finish id =>
     simpa [apply] using occ_finish I w w' id hO hS h
   | spawn template =>
-    simpa [apply] using occ_spawn I w w' template hO h
+    simpa [apply] using occ_spawn I hG w w' template hO h
   | ingress dst label =>
     simpa [apply] using occ_ingress I w w' dst label hO h
   | callTimeout id =>
