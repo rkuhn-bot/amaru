@@ -2404,6 +2404,186 @@ theorem foldl_pointwise {α β : Type} (f g : β → α → β) (l : List α) (b
     exact ih (g b a) fun b' a' ha => h b' a' (List.Mem.tail _ ha)
 
 /-- Queued mail is unchanged when the rewritten actor keeps its box and parked list. -/
+theorem box_filter_snoc (p : Msg → Bool) (ms : List Msg) (m : Msg) :
+    ((ms ++ [m]).filter p).length = (ms.filter p).length + if p m = true then 1 else 0 := by
+  rw [List.filter_append]
+  cases hp : p m <;> simp [List.filter, hp]
+
+theorem foldl_add_const (c : InstId → Nat) (e b : Nat) :
+    ∀ ids : List InstId,
+      List.foldl (fun n h => n + c h) (b + e) ids = List.foldl (fun n h => n + c h) b ids + e := by
+  intro ids
+  induction ids generalizing b with
+  | nil => simp
+  | cons x t ih =>
+    simp only [List.foldl_cons]
+    have hsum : b + e + c x = b + c x + e := by omega
+    rw [hsum]
+    exact ih (b + c x)
+
+theorem foldl_add_agree (c d : InstId → Nat) (b : Nat) :
+    ∀ ids : List InstId, (∀ x, x ∈ ids → c x = d x) →
+      List.foldl (fun n h => n + c h) b ids = List.foldl (fun n h => n + d h) b ids := by
+  intro ids
+  induction ids generalizing b with
+  | nil =>
+    intro _
+    rfl
+  | cons x t ih =>
+    intro h
+    simp only [List.foldl_cons]
+    rw [h x (List.Mem.head _)]
+    exact ih (b + d x) fun y hy => h y (List.Mem.tail _ hy)
+
+theorem foldl_add_once (c d : InstId → Nat) (extra : Nat) (target : InstId)
+    (hd : c target = d target + extra) (hs : ∀ x, x ≠ target → c x = d x) :
+    ∀ (b : Nat) (ids : List InstId), ids.Nodup →
+      List.foldl (fun n h => n + c h) b ids =
+        List.foldl (fun n h => n + d h) b ids + if target ∈ ids then extra else 0 := by
+  intro b ids
+  induction ids generalizing b with
+  | nil =>
+    intro _
+    simp
+  | cons x t ih =>
+    intro nd
+    have hc := List.nodup_cons.mp nd
+    simp only [List.foldl_cons]
+    by_cases hx : x = target
+    · rw [hx]
+      rw [hd]
+      have hnin : target ∉ t := by simpa [hx] using hc.1
+      have hagree :=
+        foldl_add_agree c d (b + d target) t fun y hy =>
+          hs y (by
+            intro he
+            exact hnin (he ▸ hy))
+      have hconst := foldl_add_const c extra (b + d target) t
+      have hsum : b + (d target + extra) = b + d target + extra := by omega
+      rw [hsum, hconst, hagree]
+      simp [List.mem_cons]
+    · rw [hs x hx]
+      have hx' : target ≠ x := Ne.symm hx
+      simp [List.mem_cons, hx']
+      exact ih (b + d x) hc.2
+
+/-- Appending one message adds it to `queuedFromKey` only on the host that
+stores it, and only when that host's template is `dst` and the sender is the
+named key. Later steps add a count to the running total, so the extra one is
+carried through the rest of the roster. -/
+theorem queuedFromKey_append (w : World) (id : InstId) (a : Actor) (msg : Msg) (name : String)
+    (key : Nat) (dst : String) (nodup : w.roster.Nodup) (hmem : id ∈ w.roster)
+    (hbox : a.box = (w.st id).box ++ [msg]) (hpark : a.parked = (w.st id).parked) :
+    queuedFromKey (setActor w id a) name key dst =
+      queuedFromKey w name key dst +
+        if (tname id != dst) = true then 0 else if keyPred name key msg = true then 1 else 0 := by
+  let extra := if (tname id != dst) = true then 0 else if keyPred name key msg = true then 1 else 0
+  let pred := keyPred name key
+  let add (st : InstId → Actor) (host : InstId) : Nat :=
+    if (tname host != dst) = true then 0
+    else ((st host).box.filter pred).length + ((st host).parked.filter fun (p : Parked) => pred p.msg).length
+  let st' : InstId → Actor := fun host => if host = id then a else w.st host
+  have hd : add st' id = add w.st id + extra := by
+    have hst : st' id = a := by simp [st']
+    simp only [add, hst]
+    by_cases ht : (tname id != dst) = true
+    · simp [ht, extra]
+    · have hf : (tname id != dst) = false := by
+        cases hbb : tname id != dst with
+        | false => rfl
+        | true => exact absurd hbb ht
+      simp only [ht, hf, Bool.false_eq_true, ite_false]
+      rw [hbox, hpark, box_filter_snoc]
+      simp only [extra, pred, ht, Bool.false_eq_true, ite_false]
+      omega
+  have hs : ∀ x, x ≠ id → add st' x = add w.st x := by
+    intro x hx
+    have hst : st' x = w.st x := by simp [st', hx]
+    simp [add, hst]
+  unfold queuedFromKey
+  simp only [setActor]
+  let step (st : InstId → Actor) (n : Nat) (host : InstId) : Nat :=
+    if (tname host != dst) = true then n
+    else n + ((st host).box.filter pred).length + ((st host).parked.filter fun (p : Parked) => pred p.msg).length
+  have hstep (st : InstId → Actor) (n : Nat) (host : InstId) : step st n host = n + add st host := by
+    simp only [step, add]
+    by_cases ht : (tname host != dst) = true
+    · simp [ht]
+    · have hf : (tname host != dst) = false := by
+        cases hbb : tname host != dst with
+        | false => rfl
+        | true => exact absurd hbb ht
+      simp [ht, hf]
+      omega
+  have hL := foldl_pointwise (step st') (fun n h => n + add st' h) w.roster 0 fun n host _ => hstep st' n host
+  have hR := foldl_pointwise (step w.st) (fun n h => n + add w.st h) w.roster 0 fun n host _ => hstep w.st n host
+  have hfold := foldl_add_once (add st') (add w.st) extra id hd hs 0 w.roster nodup
+  have hglue (st : InstId → Actor) :
+      List.foldl (step st) 0 w.roster =
+        List.foldl (fun n host =>
+          if (tname host != dst) = true then n
+          else n + ((st host).box.filter (fun m =>
+            match m.sender with
+            | .peer s k _ => s == name && k == key
+            | .core _ => false)).length +
+            ((st host).parked.filter (fun p =>
+            match p.msg.sender with
+            | .peer s k _ => s == name && k == key
+            | .core _ => false)).length) 0 w.roster := by
+    refine foldl_pointwise _ _ w.roster 0 ?_
+    intro n host _
+    simp [step, pred, keyPred]
+    rfl
+  have hLft := hglue st'
+  have hRgt := hglue w.st
+  dsimp only [st'] at hLft
+  exact (hLft.symm.trans (hL.trans (hfold.trans (by
+    simp [hmem]
+    rw [← hR, hRgt]
+    simp only [extra]
+    have hbool (n boxN parkN : Nat) (host : InstId) :
+        (if (tname host != dst) = true then n else n + boxN + parkN) =
+          if tname host = dst then n + boxN + parkN else n := by
+      cases hb : tname host == dst
+      · have hne : ¬ tname host = dst := by simpa [beq_iff_eq] using hb
+        simp [bne, hb, hne]
+      · have heq : tname host = dst := by simpa [beq_iff_eq] using hb
+        simp [bne, hb, heq]
+    have hextra :
+        (if (tname id != dst) = true then 0 else if keyPred name key msg = true then 1 else 0) =
+          if tname id = dst then if keyPred name key msg = true then 1 else 0 else 0 := by
+      cases hb : tname id == dst
+      · have hne : (tname id != dst) = true := by simp [bne, hb]
+        have hneq : ¬ tname id = dst := by simpa [beq_iff_eq] using hb
+        simp [hne, hneq]
+      · have hn : (tname id != dst) = false := by simp [bne, hb]
+        have heq : tname id = dst := by simpa [beq_iff_eq] using hb
+        simp [hn, heq]
+    have hfolds := foldl_pointwise
+      (fun n host => if (tname host != dst) = true then n else
+        n + ((w.st host).box.filter (fun m => match m.sender with
+          | .peer s k _ => s == name && k == key
+          | .core _ => false)).length +
+          ((w.st host).parked.filter (fun p => match p.msg.sender with
+          | .peer s k _ => s == name && k == key
+          | .core _ => false)).length)
+      (fun n host => if tname host = dst then
+        n + ((w.st host).box.filter (fun m => match m.sender with
+          | .peer s k _ => s == name && k == key
+          | .core _ => false)).length +
+          ((w.st host).parked.filter (fun p => match p.msg.sender with
+          | .peer s k _ => s == name && k == key
+          | .core _ => false)).length else n)
+      w.roster 0 (fun n host _ => hbool n
+        ((w.st host).box.filter (fun m => match m.sender with
+          | .peer s k _ => s == name && k == key
+          | .core _ => false)).length
+        ((w.st host).parked.filter (fun p => match p.msg.sender with
+          | .peer s k _ => s == name && k == key
+          | .core _ => false)).length host)
+    rw [hextra, hfolds]
+    rfl))))
+
 theorem queuedFromKey_set (w : World) (id : InstId) (a : Actor)
     (hbox : a.box = (w.st id).box) (hpark : a.parked = (w.st id).parked)
     (name : String) (key : Nat) (dst : String) :
@@ -2835,6 +3015,24 @@ theorem proceed_tokens (a : Actor) (k : Cont) (d : String) : (proceed a k).token
   unfold proceed
   cases k.rest <;> rfl
 
+/-- Finishing a wait does not raise the ingress reserve. The resumed
+continuation is one branch of the wait, and an empty tail lands at `toState`,
+which is what the empty reserve already counted. -/
+theorem tokenHold_proceed (D : Description) (template dst : String) (a : Actor) (k : Cont)
+    (h : a.phase = .awaitEffect k ∨ a.phase = .awaitPeer k) :
+    tokenHold D template dst (proceed a k) ≤ tokenHold D template dst a := by
+  cases hk : k.rest with
+  | nil =>
+    rcases h with hp | hp
+    · simp [proceed, tokenHold, pathReserve, contAt, hk, hp]
+    · simp [proceed, tokenHold, pathReserve, contAt, hk, hp]
+      exact Nat.le_max_left _ _
+  | cons _ _ =>
+    rcases h with hp | hp
+    · simp [proceed, tokenHold, hk, hp]
+    · simp [proceed, tokenHold, hk, hp]
+      exact Nat.le_max_left _ _
+
 theorem proceed_pending (a : Actor) (k : Cont) (d : String)
     (h : a.phase = .awaitEffect k ∨ a.phase = .awaitPeer k) :
     pending (proceed a k) d ≤ pending a d := by
@@ -2876,333 +3074,435 @@ theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
   have hw' : w' = setActor w dst a' := by simpa [a', a, name, msg] using hw
   rw [hw']
   have hnot : ¬ loneTerminableName I.desc name := by
-    intro ⟨t, ht, htv, hsub⟩
-    have hb : loneTerminableB I.desc (tname dst) = true := by
-      have hsubB : (t.subtree == "") = true := by simpa [beq_iff_eq] using hsub
-      simp [loneTerminableB, name, ht, htv, hsubB]
+    intro ⟨t, ht, htv, hterm, hsub⟩
+    have hsubB : (t.subtree == "") = true := by simpa [beq_iff_eq] using hsub
+    have hmulB : (t.multiplicity == .perPeer) = true := by
+      rw [htv]
+      decide
+    have hb : loneTerminableB I.desc name = true := by
+      simp [loneTerminableB, name, ht, hmulB, hterm, hsubB]
     rw [hb] at htermB
     cases htermB
-  have hone : 1 ≤ a.tokens name := by
-    have h1 : 1 ≤ budget I.desc (tname dst) (tname dst) -
-        debt I.desc (tname dst) a.typestate (tname dst) + pending a (tname dst) + 1 := by
-      omega
-    exact Nat.le_trans h1 (by simpa [a, name] using hfloor)
+  have hone : (1 : Int) ≤ a.tokens name := by
+    have hfloor' : (tokenHold I.desc name name a : Int) + 1 ≤ a.tokens name := by
+      simpa [a, name] using hfloor
+    omega
   have hcharge := charge_tokens a name hone
-  have hpend' (d : String) : pending a' d = pending a d := by
-    simp [a', pending, chargeSender, bumpToken]
   have hmem : dst ∈ w.roster := hO.aliveIn dst hlive
-  have htok (d : String) : a'.tokens d + (if d = name then 1 else 0) = a.tokens d := by
+  have hlife : a'.life = a.life := by simp [a', chargeSender, bumpToken]
+  have hbox : a'.box = a.box ++ [msg] := by simp [a', chargeSender, bumpToken]
+  have hpark : a'.parked = a.parked := by simp [a', chargeSender, bumpToken]
+  have hphase : a'.phase = a.phase := by simp [a', chargeSender, bumpToken]
+  have hty : a'.typestate = a.typestate := by simp [a', chargeSender, bumpToken]
+  have htok (d : String) : a'.tokens d = a.tokens d - if d = name then 1 else 0 := by
     by_cases hd : d = name
-    · simp [a', hd, hcharge]
+    · have h := hcharge
+      simp [a', hd, name] at h ⊢
+      omega
     · simp [a', hd, chargeSender, bumpToken]
-  let st0 := fun i => if i = dst then { a with box := a.box ++ [msg] } else w.st i
-  have hqueues (i : InstId) : (if i = dst then a' else w.st i).box = (st0 i).box ∧
-      (if i = dst then a' else w.st i).parked = (st0 i).parked := by
-    by_cases hi : i = dst
-    · simp [hi, st0, a', chargeSender, bumpToken]
-    · simp [hi, st0]
-  have hmail (d : String) (sender : InstId) :
-      owed (fun i => if i = dst then a' else w.st i) d sender w.roster = owed st0 d sender w.roster := by
-    refine owed_mail_eq _ _ _ _ _ ?_
-    intro i _
-    simpa [st0] using hqueues i
   have hnameB : (tname dst == name) = true := by simp [name]
-  have hown (s : InstId) : owed (fun i => if i = dst then a' else w.st i) name s w.roster =
+  have hown (s : InstId) : owed (setActor w dst a').st name s (setActor w dst a').roster =
       owed w.st name s w.roster + if s = dst then 1 else 0 := by
-    rw [hmail name s]
+    have hrost : (setActor w dst a').roster = w.roster := by simp [setActor]
+    rw [hrost]
+    have hmail : owed (setActor w dst a').st name s w.roster =
+        owed (fun i => if i = dst then { a with box := a.box ++ [msg] } else w.st i) name s w.roster := by
+      refine owed_mail_eq _ _ _ _ _ ?_
+      intro i _
+      by_cases hi : i = dst
+      · simp [setActor, hi, hbox, hpark]
+      · simp [setActor, hi]
+    rw [hmail]
     by_cases hs : s = dst
-    · simp [hs]
-      have happ := owed_append_msg w.st name dst dst msg w.roster hO.nodup hmem hnameB rfl
-      simpa [st0, hs] using happ
-    · simp [hs]
-      have hne : msg.sender ≠ s := by
+    · have happ := owed_append_msg w.st name dst dst msg w.roster hO.nodup hmem hnameB rfl
+      simpa [hs] using happ
+    · have hne : msg.sender ≠ s := by
         intro heq
         exact hs heq.symm
       have hother := owed_append_other w.st name s dst msg w.roster hO.nodup hmem (by simp [name]) hne
-      simpa [st0] using hother
+      simpa [hs] using hother
   have hother (d : String) (hd : d ≠ name) (s : InstId) :
-      owed (fun i => if i = dst then a' else w.st i) d s w.roster = owed w.st d s w.roster := by
-    rw [hmail d s]
-    dsimp [st0]
+      owed (setActor w dst a').st d s (setActor w dst a').roster = owed w.st d s w.roster := by
+    have hrost : (setActor w dst a').roster = w.roster := by simp [setActor]
+    rw [hrost]
     have hb : (tname dst == d) = false := by simpa [beq_iff_eq, name] using hd.symm
+    have hmail : owed (setActor w dst a').st d s w.roster =
+        owed (fun i => if i = dst then { a with box := a.box ++ [msg] } else w.st i) d s w.roster := by
+      refine owed_mail_eq _ _ _ _ _ ?_
+      intro i _
+      by_cases hi : i = dst
+      · simp [setActor, hi, hbox, hpark]
+      · simp [setActor, hi]
+    rw [hmail]
     have hslot : slot (fun i => if i = dst then { a with box := a.box ++ [msg] } else w.st i) d s dst =
         slot w.st d s dst := by simp [slot, hb]
     have hrep := owed_replace w.st d s dst { a with box := a.box ++ [msg] } w.roster hO.nodup hmem
     rw [hslot] at hrep
     exact Nat.add_right_cancel hrep
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · exact hO.nodup
   · intro i hl
+    have hrost : (setActor w dst a').roster = w.roster := by simp [setActor]
+    rw [hrost]
     by_cases hi : i = dst
     · rw [hi] at hl ⊢
-      rw [setActor_self] at hl
-      simp [a', chargeSender, bumpToken] at hl
+      rw [setActor_self, hlife] at hl
       exact hO.aliveIn dst hl
     · rw [setActor_other w dst i a' hi] at hl
       exact hO.aliveIn i hl
-  · intro template i hi
-    rw [actor_ix]
-    exact hO.indexed template i (by simpa [setActor] using hi)
+  · intro nm k g1 g2 ha hb hla hlb
+    have hlife1 : ((setActor w dst a').st (InstId.peer nm k g1)).life =
+        (w.st (InstId.peer nm k g1)).life := by
+      by_cases hg : InstId.peer nm k g1 = dst
+      · rw [hg, setActor_self, hlife]
+      · rw [setActor_other w dst _ a' hg]
+    have hlife2 : ((setActor w dst a').st (InstId.peer nm k g2)).life =
+        (w.st (InstId.peer nm k g2)).life := by
+      by_cases hg : InstId.peer nm k g2 = dst
+      · rw [hg, setActor_self, hlife]
+      · rw [setActor_other w dst _ a' hg]
+    apply hO.indexed nm k g1 g2 (by simpa [setActor] using ha) (by simpa [setActor] using hb)
+    · simpa [hlife1] using hla
+    · simpa [hlife2] using hlb
   · intro template ht
-    rw [aliveCount_set_life w dst a' (by simp [a', a, chargeSender, bumpToken]) template]
+    rw [aliveCount_set_life w dst a' hlife template]
     exact hO.liveOne template ht
   · intro template ht
-    rw [aliveCount_set_life w dst a' (by simp [a', a, chargeSender, bumpToken]) template]
+    rw [aliveCount_set_life w dst a' hlife template]
     exact hO.livePeer template ht
   · intro i hnin
+    have hrost : (setActor w dst a').roster = w.roster := by simp [setActor]
+    rw [hrost] at hnin
     by_cases hi : i = dst
-    · subst hi
-      exact absurd hmem hnin
+    · exact absurd (by simpa [hi] using hmem) hnin
     · rw [setActor_other w dst i a' hi]
-      exact hO.offEmpty i hnin
+      exact hO.offEmpty i (by simpa [setActor, hi] using hnin)
   · intro i m hm
     by_cases hi : i = dst
-    · rw [hi] at hm
-      rw [setActor_self] at hm
-      simp [a', List.mem_append, List.mem_singleton] at hm
+    · rw [hi, setActor_self, hbox] at hm
+      simp [List.mem_append, List.mem_singleton] at hm
       rcases hm with hm | rfl
       · exact hO.sentFrom dst m hm
-      · exact hmem
+      · have hrost : (setActor w dst a').roster = w.roster := by simp [setActor]
+        rw [hrost]
+        exact hmem
     · rw [setActor_other w dst i a' hi] at hm
       exact hO.sentFrom i m hm
   · intro i p hp
     by_cases hi : i = dst
-    · rw [hi] at hp
-      rw [setActor_self] at hp
-      simp [a', chargeSender, bumpToken] at hp
+    · rw [hi, setActor_self, hpark] at hp
       exact hO.parkFrom dst p hp
     · rw [setActor_other w dst i a' hi] at hp
       exact hO.parkFrom i p hp
   · intro i p hp
     by_cases hi : i = dst
-    · rw [hi] at hp
-      rw [setActor_self] at hp
-      simp [a', a, chargeSender, bumpToken] at hp
+    · rw [hi, setActor_self, hpark] at hp
       exact hO.parkMsg dst p hp
     · rw [setActor_other w dst i a' hi] at hp
       exact hO.parkMsg i p hp
-  · intro s d hs
-    simp [setActor]
-    by_cases hsnd : s = dst
-    · rw [hsnd] at hs ⊢
-      simp
-      by_cases hd : d = name
-      · rw [hd]
-        simp [name]
-        have hown' := hown dst
-        simp [name] at hown'
-        have htk : a'.tokens (tname dst) + 1 = (w.st dst).tokens (tname dst) := by
-          simpa [name, a] using htok (tname dst)
-        have hbal := hO.balance dst (tname dst) hs
-        rw [hown']
-        omega
-      · have htk : a'.tokens d = (w.st dst).tokens d := by
-          have ht := htok d
-          simp [name, a, hd, Nat.add_zero] at ht
-          exact ht
-        have hoth := hother d hd dst
-        have hbal := hO.balance dst d hs
-        rw [hoth, htk]
+  · refine ⟨⟨?_, ?_⟩, ?_⟩
+    · intro nm k live d hfind
+      have hfind0 := findLive_set_life w dst a' hlife nm k
+      rw [hfind0] at hfind
+      have hbal := hO.balance.1.1 nm k live d hfind
+      have happ := queuedFromKey_append w dst a' msg nm k d hO.nodup hmem hbox hpark
+      have hkey : peerKey live = some k ∧ tname live = nm := by
+        unfold findLive at hfind
+        have hp := List.find?_some hfind
+        cases live with
+        | core _ => simp at hp
+        | peer n kk g =>
+          simp only [Bool.and_eq_true, beq_iff_eq] at hp
+          exact ⟨by simp [peerKey, hp.1.2], by simp [tname, hp.1.1]⟩
+      by_cases hliveId : live = dst
+      · rw [hliveId, setActor_self]
+        have hpred : keyPred nm k msg = true := by
+          have hpk : peerKey dst = some k := by
+            have hk := hkey.1
+            rwa [hliveId] at hk
+          have htn0 : tname dst = nm := by
+            have hn := hkey.2
+            rwa [hliveId] at hn
+          cases dst with
+          | core _ => simp [peerKey] at hpk
+          | peer n kk g =>
+            simp [peerKey] at hpk
+            simp [tname] at htn0
+            simp [msg, keyPred, htn0, hpk]
+        have htn : tname dst = nm := by
+          rw [← hliveId]
+          exact hkey.2
+        rw [hliveId] at hbal
+        by_cases hd : d = nm
+        · rw [hd] at hbal ⊢ happ
+          have hfalse : (tname dst != nm) = false := by simp [bne, beq_iff_eq, htn]
+          have hbitq : queuedFromKey (setActor w dst a') nm k nm = queuedFromKey w nm k nm + 1 := by
+            rw [happ, hfalse]
+            simp [hpred]
+          have hn : name = nm := by simpa [name] using htn
+          have htk' : a'.tokens nm = a.tokens nm - 1 := by
+            rw [← hn]
+            simpa using htok name
+          rw [hbitq, htk']
+          have hcast : ((queuedFromKey w nm k nm + 1 : Nat) : Int) =
+              (queuedFromKey w nm k nm : Int) + 1 := by simp
+          rw [hcast]
+          have hsub : a.tokens nm - 1 + ((queuedFromKey w nm k nm : Int) + 1) =
+              a.tokens nm + (queuedFromKey w nm k nm : Int) := by omega
+          rw [hsub]
+          exact hbal
+        · have hneq : tname dst ≠ d := by
+            intro heq
+            exact hd (heq.symm.trans htn)
+          have ht : (tname dst != d) = true := by simpa [bne, beq_iff_eq] using hneq
+          have htk := htok d
+          have hname : d ≠ name := by
+            intro heq
+            have hn : name = nm := by simpa [name] using htn
+            exact hd (heq.trans hn)
+          simp [ht, hname] at happ htk
+          rw [happ, htk]
+          exact hbal
+      · rw [setActor_other w dst live a' hliveId]
+        have hbit : (if (tname dst != d) = true then 0 else if keyPred nm k msg = true then 1 else 0) = 0 := by
+          by_cases ht : (tname dst != d) = true
+          · simp [ht]
+          · have hf : (tname dst != d) = false := by
+              cases hbb : tname dst != d with
+              | false => rfl
+              | true => exact absurd hbb ht
+            simp only [ht, hf, Bool.false_eq_true, ite_false]
+            by_cases hp : keyPred nm k msg = true
+            · exfalso
+              unfold keyPred at hp
+              cases hsender : msg.sender with
+              | core _ => simp [hsender, keyPred] at hp
+              | peer n kk g =>
+                simp only [hsender, Bool.and_eq_true, beq_iff_eq] at hp
+                have hdst : dst = InstId.peer n kk g := by simpa [msg] using hsender
+                have hfound := findLive_of_alive w hO.indexed n kk g
+                  (by simpa [hdst] using hmem) (by simpa [hdst] using hlive)
+                have hsame : findLive w nm k = some dst := by
+                  simpa [hdst, hp.1, hp.2] using hfound
+                have heq : dst = live := by
+                  rw [hsame] at hfind
+                  injection hfind
+                exact hliveId heq.symm
+            · simp [hp]
+        rw [happ, hbit, Nat.add_zero]
         exact hbal
-    · simp [hsnd]
-      by_cases hd : d = name
-      · rw [hd]
-        simp [name]
-        have hown' := hown s
-        simp [name, hsnd] at hown'
-        have hbal := hO.balance s (tname dst) hs
-        rw [hown']
-        omega
-      · have hoth := hother d hd s
-        have hbal := hO.balance s d hs
-        rw [hoth]
+    · intro nm d hl hmemC
+      have hl0 : (w.st (.core nm)).life = .alive := by
+        by_cases hc : InstId.core nm = dst
+        · rw [hc] at hl ⊢
+          rw [setActor_self, hlife] at hl
+          exact hl
+        · rw [setActor_other w dst _ a' hc] at hl
+          exact hl
+      have hmem0 : InstId.core nm ∈ w.roster := by simpa [setActor] using hmemC
+      have hbal := hO.balance.1.2 nm d hl0 hmem0
+      by_cases hc : InstId.core nm = dst
+      · rw [hc, setActor_self]
+        rw [hc] at hbal
+        by_cases hd : d = name
+        · rw [hd] at hbal ⊢
+          have hown' : owed (setActor w dst a').st name dst (setActor w dst a').roster =
+              owed w.st name dst w.roster + 1 := by
+            simpa using hown dst
+          have htk : a'.tokens name = a.tokens name - 1 := by simpa using htok name
+          rw [hown', htk]
+          have hcast : ((owed w.st name dst w.roster + 1 : Nat) : Int) =
+              (owed w.st name dst w.roster : Int) + 1 := by simp
+          rw [hcast]
+          have hsub : a.tokens name - 1 + ((owed w.st name dst w.roster : Int) + 1) =
+              a.tokens name + (owed w.st name dst w.roster : Int) := by omega
+          rw [hsub]
+          exact hbal
+        · have hoth := hother d hd dst
+          have htk := htok d
+          simp [hd] at htk
+          rw [hoth, htk]
+          exact hbal
+      · rw [setActor_other w dst _ a' hc]
+        have howed : owed (setActor w dst a').st d (.core nm) (setActor w dst a').roster =
+            owed w.st d (.core nm) w.roster := by
+          by_cases hd : d = name
+          · rw [hd]
+            have hown' := hown (.core nm)
+            have hne : InstId.core nm ≠ dst := hc
+            simp [hne, Nat.add_zero] at hown'
+            exact hown'
+          · exact hother d hd (.core nm)
+        rw [howed]
         exact hbal
-  · intro s d hs hl
-    simp [setActor] at hl ⊢
-    by_cases hsnd : s = dst
-    · rw [hsnd] at hs hl ⊢
-      simp at hl ⊢
-      rw [hpend' d]
-      have hty : a'.typestate = (w.st dst).typestate := by simp [a', a, chargeSender, bumpToken]
-      rw [hty]
+    · intro nm k d hnone
+      have hnone0 : findLive w nm k = none := by
+        have hback := findLive_set_life w dst a' hlife nm k
+        exact hback.symm.trans hnone
+      have hbal := hO.balance.2 nm k d hnone0
+      have happ := queuedFromKey_append w dst a' msg nm k d hO.nodup hmem hbox hpark
+      have hbit : (if (tname dst != d) = true then 0 else if keyPred nm k msg = true then 1 else 0) = 0 := by
+        by_cases ht : (tname dst != d) = true
+        · simp [ht]
+        · have hf : (tname dst != d) = false := by
+            cases hbb : tname dst != d with
+            | false => rfl
+            | true => exact absurd hbb ht
+          simp only [ht, hf, Bool.false_eq_true, ite_false]
+          by_cases hp : keyPred nm k msg = true
+          · exfalso
+            cases hsender : msg.sender with
+            | core _ => simp [keyPred, hsender] at hp
+            | peer n kk g =>
+              simp only [keyPred, hsender, Bool.and_eq_true, beq_iff_eq] at hp
+              have hdst : dst = InstId.peer n kk g := by simpa [msg] using hsender
+              have hfound := findLive_of_alive w hO.indexed n kk g
+                (by simpa [hdst] using hmem) (by simpa [hdst] using hlive)
+              have hsame : findLive w nm k = some dst := by
+                simpa [hdst, hp.1, hp.2] using hfound
+              simp [hsame] at hnone0
+          · simp [hp]
+      rw [happ, hbit, Nat.add_zero]
+      exact hbal
+  · intro s d hl
+    by_cases hs : s = dst
+    · rw [hs, setActor_self] at hl ⊢
+      have hhold : tokenHold I.desc name d a' = tokenHold I.desc name d a := by
+        cases hp : a.phase <;> simp [a', tokenHold, chargeSender, bumpToken, hphase, hty, hp, a]
+      rw [hhold]
       by_cases hd : d = name
       · rw [hd]
-        simp [name]
-        have htk : a'.tokens (tname dst) + 1 = (w.st dst).tokens (tname dst) := by
-          simpa [name, a] using htok (tname dst)
-        have hf : floorState I.desc (tname dst) (w.st dst).typestate (tname dst) +
-            pending a (tname dst) + 1 ≤ (w.st dst).tokens (tname dst) := by
-          simpa [floorState, a, name] using hfloor
+        have htk := htok name
+        simp [hd] at htk
+        have hold := hO.slack dst name hlive
+        have hfloor' : (tokenHold I.desc name name a : Int) + 1 ≤ a.tokens name := by
+          simpa [a, name] using hfloor
         omega
-      · have htk : a'.tokens d = (w.st dst).tokens d := by
-          have ht := htok d
-          simp [name, a, hd, Nat.add_zero] at ht
-          exact ht
-        have hold := hO.slack dst d hs hlive
+      · have htk := htok d
+        simp [hd] at htk
+        have hold := hO.slack dst d hlive
         rw [htk]
         exact hold
-    · simp [hsnd] at hl ⊢
-      exact hO.slack s d hs hl
+    · rw [setActor_other w dst s a' hs] at hl ⊢
+      exact hO.slack s d hl
   · intro s d hs hterm
-    simp [setActor]
     by_cases hsnd : s = dst
-    · rw [hsnd] at hterm
-      exact absurd (by simpa [name] using hterm) hnot
+    · exact absurd (by simpa [hsnd, name] using hterm) hnot
     · have h0 := hO.still s d hs hterm
       by_cases hd : d = name
       · rw [hd] at h0 ⊢
-        simp [name] at h0 ⊢
         have hown' := hown s
-        simp [name, hsnd, Nat.add_zero] at hown'
+        simp [hsnd, Nat.add_zero] at hown'
         rw [hown']
         exact h0
-      · have hoth := hother d hd s
-        rw [hoth]
+      · rw [hother d hd s]
         exact h0
-  · intro s d hs hdead
-    simp [setActor] at hdead ⊢
+  · intro hcrash s d hs hdead
+    have hc : w.crashed = false := by simpa [setActor] using hcrash
     by_cases hsnd : s = dst
-    · rw [hsnd] at hdead
-      simp [a', a, chargeSender, bumpToken, hlive] at hdead
-    · simp [hsnd] at hdead ⊢
-      have h0 := hO.quiet s d hs hdead
+    · rw [hsnd, setActor_self, hlife] at hdead
+      exact absurd hlive hdead
+    · have hdead0 : (w.st s).life ≠ .alive := by
+        rw [setActor_other w dst s a' hsnd] at hdead
+        exact hdead
+      have hs0 : s ∈ w.roster := by simpa [setActor] using hs
+      have h0 := hO.quiet hc s d hs0 hdead0
       by_cases hd : d = name
       · rw [hd] at h0 ⊢
-        simp [name] at h0 ⊢
         have hown' := hown s
-        simp [name, hsnd, Nat.add_zero] at hown'
+        simp [hsnd, Nat.add_zero] at hown'
         rw [hown']
         exact h0
-      · have hoth := hother d hd s
-        rw [hoth]
+      · rw [hother d hd s]
         exact h0
-  · intro i hl1
-    simp [setActor]
+  · intro hcrash i hdead
+    have hc : w.crashed = false := by simpa [setActor] using hcrash
     by_cases hi : i = dst
-    · rw [hi] at hl1 ⊢
-      simp [a', a, chargeSender, bumpToken]
-      exact hO.clear dst hl1
-    · simp [hi]
-      exact hO.clear i hl1
-  · intro i hdead
-    by_cases hi : i = dst
-    · rw [hi, setActor_self] at hdead
-      simp [a', a, chargeSender, bumpToken, hlive] at hdead
+    · rw [hi, setActor_self, hlife] at hdead
+      rcases hdead with hdead | hdead
+      · rw [hdead] at hlive
+        cases hlive
+      · rw [hdead] at hlive
+        cases hlive
     · rw [setActor_other w dst i a' hi] at hdead ⊢
-      exact hO.deadEmpty i hdead
+      exact hO.deadEmpty hc i hdead
   · intro host
     refine ⟨?_, ?_⟩
     · intro m hm
       by_cases hh : host = dst
       · rw [hh] at hm ⊢
-        rw [setActor_self] at hm
-        simp [a', a, chargeSender, bumpToken, List.mem_append] at hm
-        rcases hm with hm | hm
-        · have hok := (hO.sameKey dst).1 m hm
-          have hl : ((setActor w dst a').st m.sender).life = (w.st m.sender).life := by
-            by_cases hs : m.sender = dst
-            · rw [hs, setActor_self]
-              simp [a', a, chargeSender, bumpToken]
-            · rw [setActor_other w dst m.sender a' hs]
-          exact (queueOk_life w (setActor w dst a') m.sender dst hl).1 hok
-        · have hsend : m.sender = dst := by
-            rw [hm]
-          refine ⟨?_, ?_⟩
-          · unfold keyAgrees
-            rw [hsend]
-            cases dst <;> simp [peerKey]
-          · intro hk
-            rw [hsend, setActor_self]
-            simp [a', a, chargeSender, bumpToken, hlive]
+        rw [setActor_self, hbox] at hm
+        simp [List.mem_append, List.mem_singleton] at hm
+        unfold queueOk
+        rcases hm with hm | rfl
+        · exact (hO.sameKey dst).1 m hm
+        · exact key_refl I.desc dst
       · rw [setActor_other w dst host a' hh] at hm
-        have hok := (hO.sameKey host).1 m hm
-        have hl : ((setActor w dst a').st m.sender).life = (w.st m.sender).life := by
-          by_cases hs : m.sender = dst
-          · rw [hs, setActor_self]
-            simp [a', a, chargeSender, bumpToken]
-          · rw [setActor_other w dst m.sender a' hs]
-        exact (queueOk_life w (setActor w dst a') m.sender host hl).1 hok
+        unfold queueOk
+        exact (hO.sameKey host).1 m hm
     · intro p hp
       by_cases hh : host = dst
       · rw [hh] at hp ⊢
-        rw [setActor_self] at hp
-        simp [a', a, chargeSender, bumpToken] at hp
-        have hok := (hO.sameKey dst).2 p hp
-        have hl : ((setActor w dst a').st p.sender).life = (w.st p.sender).life := by
-          by_cases hs : p.sender = dst
-          · rw [hs, setActor_self]
-            simp [a', a, chargeSender, bumpToken]
-          · rw [setActor_other w dst p.sender a' hs]
-        exact (queueOk_life w (setActor w dst a') p.sender dst hl).1 hok
+        rw [setActor_self, hpark] at hp
+        unfold queueOk
+        exact (hO.sameKey dst).2 p hp
       · rw [setActor_other w dst host a' hh] at hp
-        have hok := (hO.sameKey host).2 p hp
-        have hl : ((setActor w dst a').st p.sender).life = (w.st p.sender).life := by
-          by_cases hs : p.sender = dst
-          · rw [hs, setActor_self]
-            simp [a', a, chargeSender, bumpToken]
-          · rw [setActor_other w dst p.sender a' hs]
-        exact (queueOk_life w (setActor w dst a') p.sender host hl).1 hok
+        unfold queueOk
+        exact (hO.sameKey host).2 p hp
   · intro i hi
     exact hO.shaped i (by simpa [setActor] using hi)
   · intro host hk
     refine ⟨?_, ?_⟩
     · intro m hm
       by_cases hh : host = dst
-      · rw [hh, setActor_self] at hm
-        simp [a', a, chargeSender, bumpToken, List.mem_append] at hm
-        rcases hm with hm | hm
-        · exact (hO.coreFrom dst (hh ▸ hk)).1 m hm
-        · refine Or.inl ?_
-          have hsend : m.sender = dst := by rw [hm]
-          simpa [hsend] using (hh ▸ hk)
+      · rw [hh] at hm hk
+        rw [setActor_self, hbox] at hm
+        simp [List.mem_append, List.mem_singleton] at hm
+        rcases hm with hm | rfl
+        · exact (hO.coreFrom dst hk).1 m hm
+        · exact Or.inl (by simpa [msg] using hk)
       · rw [setActor_other w dst host a' hh] at hm
         exact (hO.coreFrom host hk).1 m hm
     · intro p hp
       by_cases hh : host = dst
-      · rw [hh, setActor_self] at hp
-        simp [a', a, chargeSender, bumpToken] at hp
-        exact (hO.coreFrom dst (hh ▸ hk)).2 p hp
+      · rw [hh] at hp hk
+        rw [setActor_self, hpark] at hp
+        exact (hO.coreFrom dst hk).2 p hp
       · rw [setActor_other w dst host a' hh] at hp
         exact (hO.coreFrom host hk).2 p hp
 
+
 /-- `finish` only advances a wait. The typestate is already the continuation's
 target, and the remaining sends do not grow. -/
-theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (hS : SemInv I w)
+theorem occ_finish (I : Impl) (w w' : World) (id : InstId) (hO : OccInv I w) (_hS : SemInv I w)
     (h : finishWait I w id = some w') : OccInv I w' := by
   cases hph : (w.st id).phase with
   | awaitEffect k =>
     simp [finishWait, hph] at h
-    cases h
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
+    rcases h with ⟨_, hw⟩
+    cases hw
     let a := proceed (w.st id) k
     exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
       (proceed_tokens _ _) (by
         intro d hl
-        have hmem := hO.aliveIn id (by rw [proceed_life] at hl; exact hl)
-        have hold := hO.slack id d hmem (by rw [proceed_life] at hl; exact hl)
-        have hty' := proceed_keeps_ty (w.st id) k hty
-        have hpend := proceed_pending (w.st id) k d (Or.inl hph)
-        rw [hty']
+        have hold := hO.slack id d (by rw [proceed_life] at hl; exact hl)
+        have hle := tokenHold_proceed I.desc (tname id) d (w.st id) k (Or.inl hph)
         have htok := proceed_tokens (w.st id) k d
         rw [htok]
-        exact Nat.le_trans (Nat.add_le_add_left hpend _) hold)
+        exact Int.le_trans (Int.ofNat_le.mpr (by simpa [a] using hle)) hold)
   | awaitPeer k =>
     simp [finishWait, hph] at h
     rcases h with ⟨_, hw⟩
     cases hw
-    have hty : (w.st id).typestate = k.toState := by simpa [contTy, hph] using hS.cont id
     let a := proceed (w.st id) k
     exact occ_set I w id a hO (proceed_life _ _) (proceed_box _ _) (proceed_parked _ _)
       (proceed_tokens _ _) (by
         intro d hl
-        have hmem := hO.aliveIn id (by rw [proceed_life] at hl; exact hl)
-        have hold := hO.slack id d hmem (by rw [proceed_life] at hl; exact hl)
-        have hty' := proceed_keeps_ty (w.st id) k hty
-        have hpend := proceed_pending (w.st id) k d (Or.inr hph)
-        rw [hty']
+        have hold := hO.slack id d (by rw [proceed_life] at hl; exact hl)
+        have hle := tokenHold_proceed I.desc (tname id) d (w.st id) k (Or.inr hph)
         have htok := proceed_tokens (w.st id) k d
         rw [htok]
-        exact Nat.le_trans (Nat.add_le_add_left hpend _) hold)
+        exact Int.le_trans (Int.ofNat_le.mpr (by simpa [a] using hle)) hold)
   | idle => simp [finishWait, hph] at h
   | run _ => simp [finishWait, hph] at h
   | parked _ _ _ => simp [finishWait, hph] at h
