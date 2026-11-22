@@ -5,7 +5,8 @@ dirty-bit cells, and fresh-name restart.
 `N` bounds how many root subtrees of a per-peer template occupy a population
 slot at once. A root holds its slot while it is alive. A core-supervised root
 also holds it while its tombstone is queued, and that tombstone is not
-receivable while the dead stage's mail is in a live queue. An unsupervised
+receivable while the dead stage's mail sits at a live host, in the bulk
+queue, the priority queue, or the parked queue. An unsupervised
 root holds it while a member of its subtree still has mail on a surviving
 receiver. Instance indices stay fresh: a restart allocates a new key, and the
 dead id is never reused. There is no shutting-down phase: a stage that
@@ -1043,20 +1044,25 @@ core: those hosts are not in this seal. -/
 def sealedTogether (w : World) (sender host : InstId) : Bool :=
   sender == host || descends w.roster.length w sender host
 
-/-- Program mail from `origin` or a recorded descendant, still sitting in a
-live receiver's bulk or priority queue. A tombstone is not program mail.
-A dead receiver's mailbox was cleared when it was sealed. Mail left by
-`crashWorld` is never consumed, because a crashed world takes no step. A
-parked send is not here: the kill drops it, so it is never enqueued. -/
+/-- Program mail from `origin`, or from a descendant sealed with it, still
+sitting at a live receiver. A tombstone is not program mail. The lanes are
+the bulk queue, the priority queue, and the parked queue: `enqueueOrPark`
+stores a message that does not fit on the target's parked list, and
+`queuedFromKey` counts that list. A dead receiver does not count. Its
+mailbox was cleared when it was sealed, and mail left by `crashWorld` is
+never consumed, because a crashed world takes no step. -/
 def mailInFlight (w : World) (origin : InstId) : Bool :=
   w.roster.any fun host =>
     (w.st host).life == .alive &&
       let hit (m : Msg) : Bool := !m.tombstone && sealedTogether w origin m.sender
-      (w.st host).box.any hit || (w.st host).prio.any hit
+      (w.st host).box.any hit || (w.st host).prio.any hit ||
+        (w.st host).parked.any fun p =>
+          hit p.msg || (!p.msg.tombstone && sealedTogether w origin p.sender)
 
 /-- A queued tombstone whose sender, or one of that sender's sealed
-descendants, still has program mail in a live queue. It stays in the lane,
-so it keeps its priority slot, and a receive skips it. -/
+descendants, still has program mail at a live host. The mail may sit in
+the bulk queue, the priority queue, or the parked queue. The tombstone
+stays in the lane, so it keeps its priority slot, and a receive skips it. -/
 def tombstoneWaits (w : World) (m : Msg) : Bool :=
   m.tombstone && mailInFlight w m.sender
 
@@ -1894,10 +1900,10 @@ def slotMailHeld (D : Description) (w : World) (name : String) (key : Nat) : Boo
 
 /-- No new incarnation of this slot. It is alive, or its tombstone is still on
 the supervisor's lane. The tombstone is queued in the seal and is not
-receivable while program mail from that stage is in a live queue, so the
-handler that would respawn runs only after that mail has left every live
-queue. Mail at a dead receiver counts as consumed. Mail is not a second
-guard here. -/
+receivable while program mail from that stage sits at a live host, in the
+bulk queue, the priority queue, or the parked queue, so the handler that
+would respawn runs only after that mail has left every live host. Mail at a
+dead receiver counts as consumed. Mail is not a second guard here. -/
 def slotRespawnBlocked (_D : Description) (w : World) (parent : InstId) (name : String) (key : Nat) : Bool :=
   slotOccupied w name key || slotTombstoneQueued w parent name key
 
@@ -1910,7 +1916,7 @@ theorem slotRespawnBlocked_clear (D : Description) (w : World) (parent : InstId)
 /-- Lowest slot in `0 ..< n` that is not `slotRespawnBlocked`. `fuel` counts
 the indices still to try, from `0` upward. A queued tombstone occupies the
 slot until the supervisor consumes it, and the supervisor cannot consume it
-while that stage's program mail is still in a live queue. -/
+while that stage's program mail is still at a live host. -/
 def freeGo (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) : Nat → Option Nat
   | 0 => none
   | fuel + 1 =>
@@ -1931,7 +1937,7 @@ child in a free slot below `slots`. The spawn is a no-op, the same as a full
 pool, while `slotRespawnBlocked` holds: the slot is alive, or its tombstone
 is still on the supervisor's lane. The tombstone is queued in the same step
 as the seal and is not receivable while program mail from that stage, or
-from a descendant sealed with it, sits in a live queue. The handler that
+from a descendant sealed with it, sits at a live host. The handler that
 consumes the tombstone therefore runs with that mail already gone, and the
 spawn in the handler is not refused for mail.
 A parent that is not alive admits nobody. A spawn the template does not

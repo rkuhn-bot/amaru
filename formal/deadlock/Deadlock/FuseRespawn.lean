@@ -218,10 +218,11 @@ theorem sibling_spawn_fits :
     (landFloor fuseD "C" "Idle" "H" : Int) ≤ (siblingSpawned.st cNext).tokens "H" := by
   decide
 
-/-- The same sealed world with the tombstone taken off the live parent's lane.
-Nothing in the occupancy account puts that tombstone back, and the sibling
-still holds the message. The slot is free, so a spawn admits the next
-generation. -/
+/-- The same sealed world with the tombstone taken off the live parent's lane
+by a state edit, not by `receivePrio`. Nothing in the occupancy account puts
+that tombstone back, and the sibling still holds the message, so a spawn of
+this edited state admits the next generation. That generation is short.
+`cleared_spawn` records that the receive does not produce this state. -/
 def cleared : World :=
   { sealedC with
     nextIx := fun _ => 1
@@ -249,11 +250,6 @@ theorem cleared_gen : maxGen cleared "C" 0 = 1 := rfl
 
 theorem cleared_free : slotRespawnBlocked fuseD cleared pId "C" 0 = false := rfl
 
-theorem cleared_spawn :
-    spawnChild fuseI cleared pId "C" =
-      some (admitBorn fuseI cleared cNext
-        { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }) := rfl
-
 theorem cleared_born_tokens : (bornActor fuseD cleared "C" 0 "Idle").tokens "H" = 0 := rfl
 
 theorem cleared_floor : landFloor fuseD "C" "Idle" "H" = 1 := rfl
@@ -274,5 +270,46 @@ theorem cleared_installed_tokens :
       ((admitBorn fuseI cleared cNext
         { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }).st cNext).life = .alive :=
   ⟨rfl, rfl, rfl⟩
+
+/-- The same sealed world, with `C`'s message only on `H`'s parked lane. -/
+def parkedHold : World :=
+  { sealedC with
+    st := fun i =>
+      if i = hId then
+        { sealedC.st hId with
+          box := []
+          parked := [{ sender := cId, msg := fuseMail, isCall := false }] }
+      else sealedC.st i }
+
+theorem parked_host_alive : (parkedHold.st hId).life = .alive := rfl
+
+theorem parked_queued : queuedFromKey parkedHold "C" 0 "H" = 1 := rfl
+
+theorem parked_box_empty : (parkedHold.st hId).box = [] := rfl
+
+theorem parked_waits :
+    tombstoneWaits parkedHold ((parkedHold.st pId).prio.head!) = true := rfl
+
+/-- While `H` holds `C`'s message, in the box or only on the parked lane, the
+parent cannot take the tombstone. The slot stays blocked, and `spawnChild`
+is the world it was given. The short birth of `cleared` is that receive
+with the tombstone deleted, and it is not a step. -/
+theorem cleared_spawn :
+    receivePrio fuseI sealedC pId = none ∧
+      spawnChild fuseI sealedC pId "C" = some sealedC ∧
+      receivePrio fuseI parkedHold pId = none ∧
+        spawnChild fuseI parkedHold pId "C" = some parkedHold :=
+  ⟨rfl, rfl, rfl, rfl⟩
+
+/-- A dead host's own priority message does not keep the tombstone. The lane
+checks sit under the liveness test. -/
+def deadPrio : World :=
+  { sealedC with
+    st := fun i =>
+      if i = hId then { sealedC.st hId with box := [] }
+      else if i = cId then { sealedC.st cId with prio := [fuseMail] }
+      else sealedC.st i }
+
+theorem dead_prio_flight : mailInFlight deadPrio cId = false := rfl
 
 end Deadlock

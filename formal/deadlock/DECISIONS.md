@@ -837,3 +837,42 @@ the lane, so `slotRespawnBlocked` is false. `spawnChild` admits generation
 for `H` is 0. The birth does not satisfy the occupancy reserve. The parents
 and the host, both alive and idle, have floor 0, so the shortage is the
 newborn's. The step is unchanged.
+
+## 2026-11-22 — The parked lane was the tombstone hole
+
+`tombstoneWaits` is `mailInFlight` of the tombstone's sender. The scan walks
+every roster host, keeps a host whose life is `alive`, and looks for a
+non-tombstone message `sealedTogether` with that sender. The sender itself
+is sealed together with itself, so a live sibling is counted, and the
+generation is that sender id. In the sealed fuse world the message is in
+`H`'s box, `H` is alive, `queuedFromKey` is 1, and `receivePrio` is already
+`none`. Key indexing, the liveness test, and a missing sibling are not what
+lets the parent take the tombstone.
+
+The lane the scan did not look at is `parked`. `queuedFromKey` counts
+`p.msg` there. `enqueueOrPark` appends the entry to the live target when the
+bulk lane is not free. The same sealed world with the message only on
+`H.parked` had `tombstoneWaits = false`, and `receivePrio` returned a world,
+while `queuedFromKey` stayed 1 and `H` stayed alive. A dead host's own
+priority message does not count: the lane checks sit under the liveness
+test. `releaseOutbound` drops `p.sender == dead` at the seal, so a tombstone
+queued by `shutdownActor` is not born next to that parked mail. The receive
+still accepted a world that still had it. `cleared` is not that receive. It
+deletes the tombstone by a state edit while the box still holds the message.
+
+## 2026-11-22 — A tombstone waits on every live lane
+
+2026-11-22 20:05, Roland approved option (a). A tombstone for a generation is
+not consumable while any mail sent by that generation, or by a descendant
+sealed with it, is queued at a live host. The lanes are the bulk queue, the
+priority queue, and the parked queue. `mailInFlight` counts all three. Mail
+at a dead host still counts as consumed. The spawn guard is unchanged: the
+slot stays blocked because the tombstone stays queued, not because spawn
+reads the mail.
+
+The wait ends when that mail is consumed or the host dies. `fair_box` and
+`fair_parked` empty a finishable peer's bulk queue and parked lane.
+`Fair.prio` takes a priority message once the actor is idle and the receive
+stays enabled. Sealing the host refunds its box and clears its parked list.
+A separate theorem that every held message meets one of those ends is not
+proved here. The two drain lemmas keep their statements.
