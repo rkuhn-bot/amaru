@@ -1066,7 +1066,7 @@ theorem mail_mask (w : World) (origin : InstId) :
     mailInFlight (maskWorld w) origin = mailInFlight w origin := by
   unfold mailInFlight sealedTogether
   simp only [maskWorld_roster, maskWorld_st, maskActor_life, maskActor_box, maskActor_prio,
-    maskActor_parked, descends_mask]
+    descends_mask]
 
 theorem waits_mask (w : World) (m : Msg) :
     tombstoneWaits (maskWorld w) m = tombstoneWaits w m := by

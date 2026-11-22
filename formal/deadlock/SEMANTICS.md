@@ -64,7 +64,7 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, and some `prio` message is not a waiting tombstone, and `deliver` accepts it | Consume the first such message. A waiting tombstone stays in the lane, in its place. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail sits at a live host. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive or its tombstone is still queued: that spawn is a no-op. The tombstone is queued in the seal and stays queued until the stage's in-flight mail has left every live host. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
+| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail is in a live queue. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive or its tombstone is still queued: that spawn is a no-op. The tombstone is queued in the seal and stays queued until the stage's in-flight mail has left every live queue. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
@@ -149,11 +149,11 @@ priority lane. There is no later seal. A stage that terminates inside its
 own transition is sealed before that `exec` returns.
 pure-stage `terminate_stage` removes the stage and its mailbox and pushes
 the tombstone in that step. The receive skips that message while program
-mail from the child, or from a descendant sealed with it, sits at a live
-host — in that host's bulk queue, its priority queue, or its parked queue.
-Mail at a dead receiver counts as consumed. A parked send of the killed
-stage is dropped at the kill, and a parked copy that is still at a live
-host keeps the tombstone as well. The supervisor may be a per-peer stage
+mail from the child, or from a descendant sealed with it, sits in a live
+queue. Mail at a dead receiver counts as consumed. A parked send of the
+killed stage is dropped at the kill, and the seal returns those slots in
+the same step, so a reachable world does not put that send back. The
+supervisor may be a per-peer stage
 of the same subtree. The parent answers the tombstone in its own later
 step, which runs only after that mail is gone. A re-spawn of that slot is a
 no-op while the slot is alive, or while its tombstone is queued. The mail

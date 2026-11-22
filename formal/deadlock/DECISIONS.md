@@ -860,19 +860,36 @@ queued by `shutdownActor` is not born next to that parked mail. The receive
 still accepted a world that still had it. `cleared` is not that receive. It
 deletes the tombstone by a state edit while the box still holds the message.
 
-## 2026-11-22 — A tombstone waits on every live lane
+## 2026-11-22 — A tombstone waits on the live queues
 
 2026-11-22 20:05, Roland approved option (a). A tombstone for a generation is
 not consumable while any mail sent by that generation, or by a descendant
-sealed with it, is queued at a live host. The lanes are the bulk queue, the
-priority queue, and the parked queue. `mailInFlight` counts all three. Mail
-at a dead host still counts as consumed. The spawn guard is unchanged: the
-slot stays blocked because the tombstone stays queued, not because spawn
-reads the mail.
+sealed with it, is queued at a live host. The lanes `mailInFlight` counts
+are the bulk queue and the priority queue. Mail at a dead host still counts
+as consumed. The spawn guard is unchanged: the slot stays blocked because
+the tombstone stays queued, not because spawn reads the mail.
 
-The wait ends when that mail is consumed or the host dies. `fair_box` and
-`fair_parked` empty a finishable peer's bulk queue and parked lane.
-`Fair.prio` takes a priority message once the actor is idle and the receive
-stays enabled. Sealing the host refunds its box and clears its parked list.
-A separate theorem that every held message meets one of those ends is not
-proved here. The two drain lemmas keep their statements.
+The wait ends when that mail is consumed or the host dies. `fair_box`
+empties a finishable peer's bulk queue. `Fair.prio` takes a priority
+message once the actor is idle and the receive stays enabled. Sealing the
+host refunds its box and clears its parked list. A separate theorem that
+every held message meets one of those ends is not proved here. The two
+drain lemmas keep their statements.
+
+## 2026-11-22 — A parked send is credited in the seal
+
+2026-11-22 21:01, Roland. A parked send is credited in the sender's
+termination step. Nothing is enqueued in the mailbox. `releaseOutbound`
+drops `p.sender == dead` and `addTokens` returns that count to the sender
+while the sender is still alive. `releaseWorld` then installs the dead
+actor and keeps those tokens. Inbound parked mail on the dying actor is
+`refundParked`, which is `creditLive`. `livePark` counts that inbound side.
+
+A live host therefore does not hold a parked entry whose sender is already
+dead. That is `ParkedFromLive`, a field of `SealInv`, and `Inv` carries it
+beside `ParentForest`. `occ_set` may still change `prio` and `parent`, so
+the fact stays out of `OccInv`. The parked-lane scan of `mailInFlight` is
+reverted: it was justified only by a state edit that puts a dead sender's
+entry back after the seal. `parkedHold` is outside `Inv`. The box case of
+`cleared` remains: deleting the tombstone while the message sits in a live
+box is still not a step, and the receive still refuses that box.

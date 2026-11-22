@@ -1175,7 +1175,7 @@ theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   | step w w' a hw happly ih =>
     rcases ih with ⟨hI, hO, hT, hB⟩
     exact ⟨step_inv I hL w w' ⟨a, happly⟩ hI,
-      occ_apply I hL hG a w w' hO hI.1 hI.2.1 hI.2.2.1 hT hB hI.2.2.2.2 happly,
+      occ_apply I hL hG a w w' hO hI.1 hI.2.1 hI.2.2.1 hT hB hI.forest happly,
       ty_step I hL hG N w w' a hw happly hT,     bulk_apply I hL a w w' hB happly⟩
 
 theorem residual_of_edge (D : Description) (e : Edge) (st : String) (he : e ∈ D.edges)

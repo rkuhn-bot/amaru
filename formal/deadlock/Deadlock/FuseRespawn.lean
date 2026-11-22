@@ -10,6 +10,7 @@ spawns `C'`, whose idle floor fits in its tokens.
 -/
 
 import Deadlock.Semantics
+import Deadlock.Step
 
 set_option autoImplicit false
 
@@ -287,19 +288,33 @@ theorem parked_queued : queuedFromKey parkedHold "C" 0 "H" = 1 := rfl
 
 theorem parked_box_empty : (parkedHold.st hId).box = [] := rfl
 
-theorem parked_waits :
-    tombstoneWaits parkedHold ((parkedHold.st pId).prio.head!) = true := rfl
-
-/-- While `H` holds `C`'s message, in the box or only on the parked lane, the
-parent cannot take the tombstone. The slot stays blocked, and `spawnChild`
-is the world it was given. The short birth of `cleared` is that receive
-with the tombstone deleted, and it is not a step. -/
+/-- The box still holds the message, so the parent cannot take the tombstone.
+The slot stays blocked and `spawnChild` is the world it was given. -/
 theorem cleared_spawn :
     receivePrio fuseI sealedC pId = none ∧
-      spawnChild fuseI sealedC pId "C" = some sealedC ∧
-      receivePrio fuseI parkedHold pId = none ∧
-        spawnChild fuseI parkedHold pId "C" = some parkedHold :=
-  ⟨rfl, rfl, rfl, rfl⟩
+      spawnChild fuseI sealedC pId "C" = some sealedC :=
+  ⟨rfl, rfl⟩
+
+/-- `H` is alive and the parked entry's sender is dead. `releaseOutbound`
+would have dropped that entry in the seal, so this world is not `ParkedFromLive`
+and therefore not `Inv`. The receive does not refuse it: the exclusion is the
+invariant, not a second scan of the parked lane. -/
+theorem parked_not_live : ¬ ParkedFromLive parkedHold := by
+  intro h
+  have hmem : ({ sender := cId, msg := fuseMail, isCall := false } : Parked) ∈
+      (parkedHold.st hId).parked := by
+    simp [parkedHold]
+  have hdead := h hId _ parked_host_alive hmem
+  simp [parkedHold] at hdead
+  have hne : ¬ cId = hId := by decide
+  rw [ite_eq_right hne] at hdead
+  exact hdead sealed_c_dead
+
+theorem parked_receive :
+    (receivePrio fuseI parkedHold pId).isSome = true := rfl
+
+theorem parked_not_inv : ¬ Inv fuseI parkedHold :=
+  not_inv_of_parked parked_not_live
 
 /-- A dead host's own priority message does not keep the tombstone. The lane
 checks sit under the liveness test. -/
