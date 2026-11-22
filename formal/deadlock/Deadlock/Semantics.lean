@@ -1502,11 +1502,43 @@ def ParkedFromLive (w : World) : Prop :=
   ∀ host p, (w.st host).life = .alive → p ∈ (w.st host).parked →
     (w.st p.sender).life ≠ .dead
 
+/-- An actor that is not alive has an empty mailbox, unless the roster has
+crashed and no further step will read it. -/
+def DeadQuiet (w : World) : Prop :=
+  w.crashed = true ∨ ∀ id, (w.st id).life ≠ .alive →
+    (w.st id).box = [] ∧ (w.st id).parked = []
+
+/-- An actor that is not alive has no live child. A step seals descendants
+before the parent, or it seals a childless actor. -/
+def DeadChildless (w : World) : Prop :=
+  w.crashed = true ∨ ∀ id c, (w.st id).life ≠ .alive →
+    (w.st c).parent = some id → (w.st c).life ≠ .alive
+
+/-- `parent`'s priority lane still holds `id`'s tombstone. -/
+def HoldsTomb (w : World) (parent id : InstId) : Prop :=
+  ∃ m, m ∈ (w.st parent).prio ∧ m.tombstone = true ∧ m.sender = id
+
+/-- While a dead actor's mail sits in a live queue, either its parent is alive
+and still holds its tombstone, or the parent is not alive and that parent's own
+mail is in flight. The second case is the ancestor: a descendant's message is
+sealed together with the parent, so the parent's tombstone is what stays queued.
+`occ_set` may change `prio` and `parent`, so this stays out of `OccInv`. -/
+def TombChain (w : World) : Prop :=
+  ∀ id, w.crashed = false → (w.st id).life = .dead → mailInFlight w id = true →
+    match (w.st id).parent with
+    | none => True
+    | some p =>
+        ((w.st p).life = .alive ∧ HoldsTomb w p id) ∨
+        ((w.st p).life ≠ .alive ∧ mailInFlight w p = true)
+
 /-- Seal facts carried by `Inv` beside the parent forest. `OccInv` does not
 hold them: a state edit may change `prio` and `parent` while life, the box,
 and the parked lane stay put. -/
 structure SealInv (w : World) : Prop where
   liveParked : ParkedFromLive w
+  quiet : DeadQuiet w
+  childless : DeadChildless w
+  chain : TombChain w
 
 theorem isChild_edge (w : World) (parent child : InstId)
     (h : isChild w parent child = true) : ParentEdge w child parent := by
