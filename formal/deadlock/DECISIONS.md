@@ -742,3 +742,10 @@ proceeds on the tail. The step is unchanged.
 A self-schedule that does not fit the priority lane crashes the world. The
 occupancy proof follows `crashWorld`. Killing only the sender was a stale
 account of the same step. The step is unchanged.
+
+## 2026-11-22 — An empty-subtree root takes a fresh key
+
+A root with an empty subtree is born at `nextIx`. Occupancy records that every
+such key already on the roster is below that counter, so the birth does not
+share a slot with a live generation. Keys of every other template are
+allocated elsewhere and are not part of this bound. The step is unchanged.

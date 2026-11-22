@@ -170,6 +170,21 @@ def coreSender (D : Description) (sender : InstId) : Prop :=
   peerKey sender = none ∨ terminableB D (tname sender) = false ∨
     loneTerminableB D (tname sender) = true
 
+/-- Empty-subtree roots are allocated from `nextIx`. Every such key already on
+the roster is strictly below the counter, so the next birth does not share
+a slot with a live generation. -/
+def IxFresh (D : Description) (w : World) : Prop :=
+  ∀ name k g, InstId.peer name k g ∈ w.roster →
+    ∀ t, templateOf D name = some t →
+      t.supervisor = none → t.subtree = "" → t.slots = 0 →
+        k < w.nextIx name
+
+theorem ixFresh_copy (D : Description) (w w' : World) (h : IxFresh D w)
+    (hr : w'.roster = w.roster) (hix : ∀ n, w'.nextIx n = w.nextIx n) : IxFresh D w' := by
+  intro name k g hmem t ht hsup hsub hslots
+  have hmem0 : InstId.peer name k g ∈ w.roster := by rw [hr] at hmem; exact hmem
+  simpa [hix] using h name k g hmem0 t ht hsup hsub hslots
+
 /-- Outstanding credit and queues. A Lemma-1 capacity does not keep the parked
 lane empty: a pool has `slots` keys, and a later key still sends while an
 earlier key's mail sits in the box. `deadEmpty` and `quiet` are not claimed
@@ -215,6 +230,8 @@ structure OccInv (I : Impl) (w : World) : Prop where
   coreFrom : ∀ host, peerKey host = none →
     (∀ m ∈ (w.st host).box, coreSender I.desc m.sender) ∧
     (∀ p ∈ (w.st host).parked, coreSender I.desc p.sender)
+  /-- The next empty-subtree root key is unused. -/
+  ixFresh : IxFresh I.desc w
 
 theorem owed_le_debt (budget owed tokens floor pending debt : Nat)
     (hB : owed + tokens = budget) (hS : floor + pending ≤ tokens) (hF : floor + debt = budget) :
@@ -2658,7 +2675,7 @@ theorem init_bit (I : Impl) (hG : GraphOk I.desc) (N : Nat) (template : String) 
 
 /-- Every initial core is alive, idle, and holding exactly its send budget. -/
 theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorld I N) := by
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · simpa [init_roster] using coreRoster_nodup I.desc hG
   · intro id hl
     rw [init_base_st] at hl
@@ -2801,6 +2818,10 @@ theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorl
       simp [(init_box I N host).1] at hm
     · intro p hp
       simp [(init_box I N host).2] at hp
+  · intro name k g hmem t ht _hsup _hsub _hslots
+    have hcore : InstId.peer name k g ∈ coreRoster I.desc := by simpa [init_roster] using hmem
+    obtain ⟨_t, _ht, _hone, hid⟩ := core_template I.desc (InstId.peer name k g) hG hcore
+    cases hid
 
 theorem owed_same_queues (st : InstId → Actor) (id : InstId) (a : Actor)
     (hbox : a.box = (st id).box) (hpark : a.parked = (st id).parked)
@@ -2838,7 +2859,7 @@ theorem occ_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I 
     OccInv I (setActor w id a) := by
   have hst : (setActor w id a).st = fun i => if i = id then a else w.st i := rfl
   have hr : (setActor w id a).roster = w.roster := rfl
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hr]
     exact hO.nodup
   · intro i hl
@@ -3011,6 +3032,7 @@ theorem occ_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I 
         exact (hO.coreFrom id (hh ▸ hk)).2 p hp
       · rw [setActor_other w id host a hh] at hp
         exact (hO.coreFrom host hk).2 p hp
+  · exact ixFresh_copy I.desc w (setActor w id a) hO.ixFresh rfl (fun _ => rfl)
 
 theorem proceed_box (a : Actor) (k : Cont) : (proceed a k).box = a.box := by
   unfold proceed
@@ -3144,7 +3166,7 @@ theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
     have hrep := owed_replace w.st d s dst { a with box := a.box ++ [msg] } w.roster hO.nodup hmem
     rw [hslot] at hrep
     exact Nat.add_right_cancel hrep
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · exact hO.nodup
   · intro i hl
     have hrost : (setActor w dst a').roster = w.roster := by simp [setActor]
@@ -3475,6 +3497,7 @@ theorem occ_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String) (h
         exact (hO.coreFrom dst hk).2 p hp
       · rw [setActor_other w dst host a' hh] at hp
         exact (hO.coreFrom host hk).2 p hp
+  · exact ixFresh_copy I.desc w (setActor w dst a') hO.ixFresh rfl (fun _ => rfl)
 
 
 /-- `finish` only advances a wait. The typestate is already the continuation's
@@ -3521,7 +3544,7 @@ theorem occ_same (I : Impl) (w w' : World) (hO : OccInv I w) (hst : ∀ i, w'.st
     intro i _
     rw [hst]
     exact ⟨rfl, rfl⟩
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hr]; exact hO.nodup
   · intro id hl
     rw [hst] at hl
@@ -3626,6 +3649,7 @@ theorem occ_same (I : Impl) (w w' : World) (hO : OccInv I w) (hst : ∀ i, w'.st
     · intro p hp
       rw [hst] at hp
       exact (hO.coreFrom host hk).2 p hp
+  · exact ixFresh_copy I.desc w w' hO.ixFresh hr _hix
 
 
 theorem deliver_base (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
@@ -4225,7 +4249,7 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
     have hcred := owed_bump wA.st holder (tname id) d s w.roster
     simp only [wF, wA, holder, creditLive, creditSender, setActor]
     exact hcred.trans hpre
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hrost]; exact hO.nodup
   · intro s hl
     rw [hlifeF] at hl
@@ -4520,6 +4544,7 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
         exact hfromP (hh ▸ hk) p hp
       · simp [hh] at hp
         exact (hO.coreFrom host hk).2 p hp
+  · exact ixFresh_copy I.desc w wF hO.ixFresh hrost hixf
 
 theorem owed_off (st : InstId → Actor) (id : InstId) (a : Actor) (dst : String) (sender : InstId)
     (roster : List InstId) (nodup : roster.Nodup) (hmem : id ∈ roster) (hname : tname id ≠ dst) :
@@ -5368,7 +5393,7 @@ theorem occ_crash (I : Impl) (w : World) (hO : OccInv I w) : OccInv I (crashWorl
   have hr : (crashWorld w).roster = w.roster := by simp [crashWorld]
   have hN : (crashWorld w).N = w.N := by simp [crashWorld]
   have hcr : (crashWorld w).crashed = true := by simp [crashWorld]
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hr]; exact hO.nodup
   · intro i hl
     by_cases hm : i ∈ w.roster
@@ -5454,6 +5479,8 @@ theorem occ_crash (I : Impl) (w : World) (hO : OccInv I w) : OccInv I (crashWorl
     · intro p hp
       rw [(crash_box w host).2.1] at hp
       exact (hO.coreFrom host hk).2 p hp
+  · exact ixFresh_copy I.desc w (crashWorld w) hO.ixFresh (by simp [crashWorld])
+      (fun _ => by simp [crashWorld])
 
 theorem occ_offer (I : Impl) (w : World) (host : InstId) (msg : Msg) (hO : OccInv I w) :
     OccInv I (offerPrio I.desc w host msg) := by
@@ -5618,7 +5645,7 @@ theorem occ_pay (I : Impl) (w w' : World) (sender : InstId) (name : String) (hO 
         (if d = name then (1 : Int) else 0) ≤
       (tokenHold I.desc (tname sender) d (w.st sender) : Int)) :
     OccInv I w' := by
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hrost]; exact hO.nodup
   · intro i hl
     rw [hlife] at hl
@@ -5800,6 +5827,7 @@ theorem occ_pay (I : Impl) (w w' : World) (sender : InstId) (name : String) (hO 
   · intro i hi
     exact hO.shaped i (by rw [hrost] at hi; exact hi)
   · exact hfrom
+  · exact ixFresh_copy I.desc w w' hO.ixFresh hrost hix
 
 theorem charge_keeps (a : Actor) (dst : String) :
     (chargeSender a dst).life = a.life ∧ (chargeSender a dst).typestate = a.typestate ∧
