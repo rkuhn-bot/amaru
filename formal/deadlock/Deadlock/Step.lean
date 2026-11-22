@@ -6466,6 +6466,43 @@ theorem refund_call_roster (w : World) (caller dst : InstId) :
         exact ih _ (by rw [creditSender, setActor]; exact h)
     exact hfold _ _ (by rw [setActor])
 
+/-- A parked-call refund edits the target's parked lane and then credits the caller.
+Bulk mail, priority mail, and the crash bit stay. -/
+theorem refund_queues (w : World) (caller dst i : InstId) :
+    ((refundParkedCall w caller dst).st i).box = (w.st i).box ∧
+      ((refundParkedCall w caller dst).st i).prio = (w.st i).prio ∧
+      (refundParkedCall w caller dst).crashed = w.crashed := by
+  unfold refundParkedCall
+  dsimp only
+  split
+  · exact ⟨rfl, rfl, rfl⟩
+  · have hfold : ∀ (ps : List Parked) (w0 : World),
+        (w0.st i).box = (w.st i).box → (w0.st i).prio = (w.st i).prio →
+        w0.crashed = w.crashed →
+        (((ps.foldl (fun w _ => creditSender w (tname dst) caller) w0).st i).box = (w.st i).box) ∧
+        (((ps.foldl (fun w _ => creditSender w (tname dst) caller) w0).st i).prio =
+          (w.st i).prio) ∧
+        (ps.foldl (fun w _ => creditSender w (tname dst) caller) w0).crashed = w.crashed := by
+      intro ps
+      induction ps with
+      | nil =>
+        intro w0 hb hp hc
+        exact ⟨hb, hp, hc⟩
+      | cons _ ps ih =>
+        intro w0 hb hp hc
+        simp only [List.foldl_cons]
+        have hcF := credit_fields w0 (tname dst) caller i
+        exact ih _ (hcF.2.2.1.trans hb) (hcF.2.2.2.2.trans hp) (by
+          rw [creditSender, setActor]
+          exact hc)
+    refine hfold _ _ ?_ ?_ (by rw [setActor])
+    · by_cases hi : i = dst
+      · rw [hi, setActor_self]
+      · rw [setActor_other w dst i _ hi]
+    · by_cases hi : i = dst
+      · rw [hi, setActor_self]
+      · rw [setActor_other w dst i _ hi]
+
 theorem setActor_at (w : World) (dst id : InstId) (a : Actor) (h : id = dst) : (setActor w dst a).st id = a := by
   rw [h, setActor_self]
 
@@ -6557,15 +6594,45 @@ theorem callTimeout_inv (I : Impl) (w w' : World) (id : InstId) (h : Inv I w)
       · exact ParentForest.setActor
           (ParentForest.parents h.forest (fun i => refundCall_parent w id dst i) hR)
           (finishCall_parent _ _ _)
-      · exact ⟨parkedLive_set _ id (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted)
-          (parkedLive_sub h.seal.liveParked (fun i => (hf i).2.1) (fun host p hp => by
-            by_cases hd : host = dst
-            · rw [hd] at hp ⊢
-              rw [(hf dst).2.2.2, ite_eq_left rfl] at hp
-              exact (List.mem_filter.mp hp).1
-            · rw [(hf host).2.2.2, ite_eq_right hd] at hp
-              exact hp))
-          hlifeF hpkF⟩
+      · have hq := fun i => refund_queues w id dst i
+        have hsub : ∀ host p, p ∈ ((refundParkedCall w id dst).st host).parked →
+            p ∈ (w.st host).parked := by
+          intro host p hp
+          by_cases hd : host = dst
+          · rw [hd] at hp ⊢
+            rw [(hf dst).2.2.2, ite_eq_left rfl] at hp
+            exact (List.mem_filter.mp hp).1
+          · rw [(hf host).2.2.2, ite_eq_right hd] at hp
+            exact hp
+        have hSeal : SealInv (refundParkedCall w id dst) := by
+          refine ⟨parkedLive_sub h.seal.liveParked (fun i => (hf i).2.1) hsub, ?_, ?_, ?_, ?_, ?_⟩
+          · rcases h.seal.quiet with hcr0 | hquiet
+            · exact Or.inl ((hq id).2.2.trans hcr0)
+            · refine Or.inr fun i hna => ?_
+              rcases hquiet i (fun ha => hna (((hf i).2.1).trans ha)) with ⟨hb, hpk0⟩
+              refine ⟨by rw [(hq i).1]; exact hb, ?_⟩
+              by_cases hid : i = dst
+              · rw [hid, (hf dst).2.2.2, ite_eq_left rfl]
+                rw [hid] at hpk0
+                rw [hpk0]
+                rfl
+              · rw [(hf i).2.2.2, ite_eq_right hid]
+                exact hpk0
+          · exact childless_stable h.seal.childless (hq id).2.2 (fun i => (hf i).2.1)
+              (fun i => refundCall_parent w id dst i)
+          · exact chain_stable h.seal.chain (hq id).2.2 hR (fun i => (hf i).2.1)
+              (fun i => (hq i).1) (fun i => (hq i).2.1) (fun i => refundCall_parent w id dst i)
+          · exact parkedFrom_sub h.seal.parkedFrom hsub
+          · exact hostedMail_same h.seal.hostedMail hR (fun i => (hq i).1) (fun i => (hq i).2.1)
+        have hfin : (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted).box =
+            ((refundParkedCall w id dst).st id).box ∧
+            (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted).prio =
+              ((refundParkedCall w id dst).st id).prio ∧
+            (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted).parent =
+              ((refundParkedCall w id dst).st id).parent := by
+          unfold finishCall proceed
+          split <;> simp
+        exact seal_set_keep hSeal hlifeF hfin.1 hfin.2.1 hpkF hfin.2.2
     · next k hph =>
       cases hs
       rw [hph] at hc ho
