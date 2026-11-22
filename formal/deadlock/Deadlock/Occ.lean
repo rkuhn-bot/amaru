@@ -4056,6 +4056,17 @@ theorem consume_pick {β : Type} (get : Actor → β)
     · rw [setActor_other w1 id s a1 hid, hst]
       simp [hid]
 
+theorem queuedFromKey_credit (w : World) (dst : String) (s : InstId) (name : String) (key : Nat)
+    (d : String) :
+    queuedFromKey (creditSender w dst s) name key d = queuedFromKey w name key d := by
+  unfold queuedFromKey
+  simp only [creditSender, setActor]
+  refine foldl_pointwise _ _ w.roster 0 ?_
+  intro n host _
+  by_cases hh : host = s
+  · simp [hh, bumpToken]
+  · simp [hh]
+
 theorem consume_tokens (w w1 : World) (id sender : InstId) (a1 : Actor) (s : InstId) (d : String)
     (hst : ∀ i, w1.st i = w.st i) (htok : ∀ d, a1.tokens d = (w.st id).tokens d) :
     ((creditSender (setActor w1 id a1) (tname id) sender).st s).tokens d =
@@ -4073,9 +4084,9 @@ theorem consume_tokens (w w1 : World) (id sender : InstId) (a1 : Actor) (s : Ins
       rw [hid, setActor_self, htok, ite_eq_right hne, Int.add_zero]
     · rw [setActor_other w1 id s a1 hid, hst, ite_eq_right hs, Int.add_zero]
 
-/-- Install `a1` for `id` and return one token to `sender`. `a1` keeps life and
-tokens. At `tname id` it owes `sender` one message less; every other account is
-unchanged. The new floor plus the new continuation fit in the old tokens. -/
+/-- Install `a1` for `id` and return one token to the live holder of `sender`'s
+key. `a1` keeps life. At `tname id` it owes `sender` one message less; every
+other account is unchanged. The new `tokenHold` fits in the old one. -/
 theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) (hO : OccInv I w)
     (hst : ∀ i, w1.st i = w.st i) (hr : w1.roster = w.roster) (hN : w1.N = w.N)
     (hix : ∀ n, w1.nextIx n = w.nextIx n) (hlife : a1.life = (w.st id).life)
@@ -4084,36 +4095,44 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
         (if s = sender then 1 else 0) = owed w.st (tname id) s w.roster)
     (hother : ∀ d, d ≠ tname id → ∀ s,
       owed (fun i => if i = id then a1 else w.st i) d s w.roster = owed w.st d s w.roster)
-    (hfloor : ∀ d, floorState I.desc (tname id) a1.typestate d + pending a1 d ≤
-      floorState I.desc (tname id) (w.st id).typestate d + pending (w.st id) d)
+    (hq : ∀ name key d,
+      (queuedFromKey (setActor w1 id a1) name key d : Int) =
+        (queuedFromKey w name key d : Int) -
+          if d = tname id then
+            match sender with
+            | .peer n k _ => if n = name ∧ k = key then 1 else 0
+            | .core _ => 0
+          else 0)
+    (hhold : ∀ d, tokenHold I.desc (tname id) d a1 ≤ tokenHold I.desc (tname id) d (w.st id))
     (hboxFrom : ∀ m ∈ a1.box, m.sender ∈ w.roster)
     (hparkFrom : ∀ p ∈ a1.parked, p.sender ∈ w.roster)
     (hparkMsg : ∀ p ∈ a1.parked, p.sender = p.msg.sender)
-    (hclear : l1 I.desc (tname id) = true → a1.parked = [])
-    (hkeyB : ∀ m ∈ a1.box, queueOk w m.sender id)
-    (hkeyP : ∀ p ∈ a1.parked, queueOk w p.sender id)
+    (hkeyB : ∀ m ∈ a1.box, queueOk I.desc w m.sender id)
+    (hkeyP : ∀ p ∈ a1.parked, queueOk I.desc w p.sender id)
     (hdeadQ : a1.life ≠ .alive → a1.box = [] ∧ a1.parked = [])
     (hfromB : peerKey id = none → ∀ m ∈ a1.box, coreSender I.desc m.sender)
     (hfromP : peerKey id = none → ∀ p ∈ a1.parked, coreSender I.desc p.sender) :
-    OccInv I (creditSender (setActor w1 id a1) (tname id) sender) := by
-  let wF := creditSender (setActor w1 id a1) (tname id) sender
+    OccInv I (creditLive (setActor w1 id a1) (tname id) sender) := by
+  let wA := setActor w1 id a1
+  let holder := budgetHolder wA sender
+  let wF := creditLive wA (tname id) sender
   suffices OccInv I wF by simpa [wF] using this
-  have hrost : wF.roster = w.roster := by simp [wF, creditSender, setActor, hr]
-  have hNf : wF.N = w.N := by simp [wF, creditSender, setActor, hN]
+  have hrost : wF.roster = w.roster := by simp [wF, wA, creditLive, creditSender, setActor, hr]
+  have hNf : wF.N = w.N := by simp [wF, wA, creditLive, creditSender, setActor, hN]
   have hixf : ∀ n, wF.nextIx n = w.nextIx n := by
-    intro n; simp [wF, creditSender, setActor, hix]
+    intro n; simp [wF, wA, creditLive, creditSender, setActor, hix]
   have hlifeF : ∀ s, (wF.st s).life = (w.st s).life := by
     intro s
-    rw [consume_pick (·.life) (by intro a tmpl; simp [bumpToken]) w w1 id sender a1 s hst]
+    rw [consume_pick (·.life) (by intro a tmpl; simp [bumpToken]) w w1 id holder a1 s hst]
     by_cases hid : s = id <;> simp [hid, hlife]
   have hboxF : ∀ s, (wF.st s).box = if s = id then a1.box else (w.st s).box :=
-    fun s => consume_pick (·.box) (by intro a tmpl; simp [bumpToken]) w w1 id sender a1 s hst
+    fun s => consume_pick (·.box) (by intro a tmpl; simp [bumpToken]) w w1 id holder a1 s hst
   have hparkF : ∀ s, (wF.st s).parked = if s = id then a1.parked else (w.st s).parked :=
-    fun s => consume_pick (·.parked) (by intro a tmpl; simp [bumpToken]) w w1 id sender a1 s hst
+    fun s => consume_pick (·.parked) (by intro a tmpl; simp [bumpToken]) w w1 id holder a1 s hst
   have htyF : ∀ s, (wF.st s).typestate = if s = id then a1.typestate else (w.st s).typestate :=
-    fun s => consume_pick (·.typestate) (by intro a tmpl; simp [bumpToken]) w w1 id sender a1 s hst
+    fun s => consume_pick (·.typestate) (by intro a tmpl; simp [bumpToken]) w w1 id holder a1 s hst
   have hphF : ∀ s, (wF.st s).phase = if s = id then a1.phase else (w.st s).phase :=
-    fun s => consume_pick (·.phase) (by intro a tmpl; simp [bumpToken]) w w1 id sender a1 s hst
+    fun s => consume_pick (·.phase) (by intro a tmpl; simp [bumpToken]) w w1 id holder a1 s hst
   have howed : ∀ d s, owed wF.st d s w.roster =
       owed (fun i => if i = id then a1 else w.st i) d s w.roster := by
     intro d s
@@ -4125,18 +4144,19 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
       · simp [hjid, setActor_self]
       · rw [setActor_other w1 id j a1 hjid, hst]
         simp [hjid]
-    have hcred := owed_bump (setActor w1 id a1).st sender (tname id) d s w.roster
-    simp only [wF, creditSender, setActor]
+    have hcred := owed_bump wA.st holder (tname id) d s w.roster
+    simp only [wF, wA, holder, creditLive, creditSender, setActor]
     exact hcred.trans hpre
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hrost]; exact hO.nodup
   · intro s hl
     rw [hlifeF] at hl
     rw [hrost]
     exact hO.aliveIn s hl
-  · intro template i hi
-    rw [hixf]
-    exact hO.indexed template i (by rw [hrost] at hi; exact hi)
+  · intro nm k g1 g2 ha hb hla hlb
+    apply hO.indexed nm k g1 g2 (by rw [hrost] at ha; exact ha) (by rw [hrost] at hb; exact hb)
+    · simpa [hlifeF] using hla
+    · simpa [hlifeF] using hlb
   · intro template ht
     have hc : aliveCount wF template = aliveCount w template := by
       rw [aliveCount_sum, aliveCount_sum, hrost]
@@ -4184,64 +4204,147 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
       exact hparkMsg p hp
     · simp [hs] at hp
       exact hO.parkMsg s p hp
-  · intro s d hs
-    rw [hrost] at hs ⊢
-    have htokF := consume_tokens w w1 id sender a1 s d hst htok
-    rw [howed, htokF]
-    by_cases hss : s = sender
-    · have hswap : sender = s := hss.symm
-      subst hswap
-      by_cases hd : d = tname id
-      · subst hd
-        simp
-        have hown' := hown sender
-        simp at hown'
-        have hbal := hO.balance sender (tname id) hs
-        omega
-      · simp [hd]
-        have hother' := hother d hd sender
-        have hbal := hO.balance sender d hs
-        omega
-    · by_cases hd : d = tname id
-      · subst hd
-        simp [hss]
-        have hown' := hown s
-        simp [hss] at hown'
-        have hbal := hO.balance s (tname id) hs
-        omega
-      · simp [hss, hd]
-        have hother' := hother d hd s
-        have hbal := hO.balance s d hs
-        omega
-  · intro s d hs hl
-    rw [hrost] at hs
-    rw [hlifeF] at hl
-    have hold := hO.slack s d hs hl
-    have htokF := consume_tokens w w1 id sender a1 s d hst htok
-    rw [htokF]
+  · refine ⟨⟨?_, ?_⟩, ?_⟩
+    · intro name key live d hfind
+      have hfind0 : findLive w name key = some live := by
+        simpa [findLive, hrost, hlifeF] using hfind
+      have hbal := hO.balance.1.1 name key live d hfind0
+      have htokF := consume_tokens w w1 id holder a1 live d hst htok
+      have hqF : queuedFromKey wF name key d = queuedFromKey wA name key d := by
+        simpa [wF, wA, creditLive, holder] using
+          queuedFromKey_credit wA (tname id) holder name key d
+      have hqA := hq name key d
+      rw [htokF, hqF]
+      cases hsendr : sender with
+      | core _ =>
+        simp [budgetHolder, holder, wA, hsendr, hqA]
+        exact hbal
+      | peer n k g =>
+        by_cases hkey : n = name ∧ k = key
+        · have hlive : holder = live := by
+            have hfindA : findLive wA n k = some live := by
+              simpa [findLive, wA, setActor, hlife, hst, hkey.1, hkey.2] using hfind0
+            simp [budgetHolder, holder, wA, hsendr, hfindA]
+          simp [hkey, hlive, hqA, hsendr]
+          omega
+        · have hnot : holder ≠ live := by
+            intro heq
+            have hfindA : findLive wA name key = some live := by
+              simpa [findLive, wA, setActor, hlife, hst] using hfind0
+            simp [budgetHolder, holder, wA, hsendr] at heq
+            split at heq
+            · next idf hfl =>
+              have hspec := findLive_spec wA n k idf hfl
+              have hspecL := findLive_spec wA name key live hfindA
+              exact hkey ⟨hspec.1.symm.trans (by rw [heq]; exact hspecL.1),
+                by
+                  have hk : k = key := by
+                    have hpk : peerKey idf = some k := by simp [peerKey]
+                    have hpl : peerKey live = some key := by simp [peerKey]
+                    rw [heq] at hpk
+                    injection hpk.symm.trans hpl
+                  exact hk⟩
+            · exact hkey ⟨by
+                have hspecL := findLive_spec wA name key live hfindA
+                rw [heq] at hspecL
+                exact hspecL.1.symm, by
+                have hpk : peerKey sender = some k := by simp [peerKey, hsendr]
+                have hpl : peerKey live = some key := by simp [peerKey]
+                rw [heq] at hpk
+                injection hpk.symm.trans hpl⟩
+          simp [hkey, hsendr, hqA, hnot]
+          exact hbal
+    · intro name d hl hmemc
+      have hl0 : (w.st (InstId.core name)).life = .alive := by simpa [hlifeF] using hl
+      have hmem0 : InstId.core name ∈ w.roster := by
+        rw [hrost] at hmemc
+        exact hmemc
+      have hbal := hO.balance.1.2 name d hl0 hmem0
+      have htokF := consume_tokens w w1 id holder a1 (InstId.core name) d hst htok
+      have how := howed d (InstId.core name)
+      rw [htokF, how]
+      cases hsendr : sender with
+      | peer _ _ _ =>
+        have hnot : holder ≠ InstId.core name := by
+          intro heq
+          simp [budgetHolder, holder, wA, hsendr] at heq
+        have howC : owed (fun i => if i = id then a1 else w.st i) d (InstId.core name) w.roster =
+            owed w.st d (InstId.core name) w.roster := by
+          by_cases hd : d = tname id
+          · have hown' := hown (InstId.core name)
+            simp [hsendr, hd] at hown'
+            exact hown'
+          · exact hother d hd (InstId.core name)
+        simp [hnot, howC]
+        exact hbal
+      | core c =>
+        by_cases hc : c = name
+        · simp [budgetHolder, holder, wA, hsendr, hc]
+          have hown' := hown (InstId.core name)
+          simp [hsendr, hc] at hown'
+          by_cases hd : d = tname id
+          · simp [hd, hown']
+            omega
+          · have hoth := hother d hd (InstId.core name)
+            simp [hd, hoth]
+            exact hbal
+        · have hnot : holder ≠ InstId.core name := by
+            intro heq
+            simp [budgetHolder, holder, wA, hsendr, hc] at heq
+          have hoth := by
+            by_cases hd : d = tname id
+            · have hown' := hown (InstId.core name)
+              simp [hsendr, hc, hd] at hown'
+              exact hown'
+            · exact hother d hd (InstId.core name)
+          simp [hnot, hoth]
+          exact hbal
+    · intro name key d hnone
+      have hnone0 : findLive w name key = none := by
+        simpa [findLive, hrost, hlifeF] using hnone
+      have hbal := hO.balance.2 name key d hnone0
+      have hqF : queuedFromKey wF name key d = queuedFromKey wA name key d := by
+        simpa [wF, wA, creditLive, holder] using
+          queuedFromKey_credit wA (tname id) holder name key d
+      rw [hqF, hq]
+      have hdrop : (queuedFromKey w name key d : Int) -
+          (if d = tname id then
+            match sender with
+            | .peer n k _ => if n = name ∧ k = key then 1 else 0
+            | .core _ => 0
+          else 0) ≤ (queuedFromKey w name key d : Int) := by
+        have hbit : (0 : Int) ≤
+            if d = tname id then
+              match sender with
+              | .peer n k _ => if n = name ∧ k = key then 1 else 0
+              | .core _ => 0
+            else 0 := by
+          by_cases hd : d = tname id <;> cases sender <;> simp [hd] <;> omega
+        exact Int.sub_le_self _ hbit 
+      exact Int.le_trans (by simpa using hdrop) hbal
+  · intro s d hl
+    have hl0 : (w.st s).life = .alive := by simpa [hlifeF] using hl
+    have hold := hO.slack s d hl0
+    have htokF := consume_tokens w w1 id holder a1 s d hst htok
+    have hge : (w.st s).tokens d ≤
+        (w.st s).tokens d + if s = holder then if d = tname id then 1 else 0 else 0 := by
+      have hbit : (0 : Int) ≤ if s = holder then if d = tname id then 1 else 0 else 0 := by
+        by_cases hs : s = holder <;> by_cases hd : d = tname id <;> simp [hs, hd]
+      exact Int.le_add_of_nonneg_right hbit 
     by_cases hid : s = id
-    · rw [hid] at hold ⊢
-      have hph : (wF.st id).phase = a1.phase := by rw [hphF]; simp
+    · have hph : (wF.st id).phase = a1.phase := by rw [hphF]; simp
       have hty : (wF.st id).typestate = a1.typestate := by rw [htyF]; simp
-      have hpendEq : pending (wF.st id) d = pending a1 d := by simp [pending, hph]
-      have hfloorEq : floorState I.desc (tname id) (wF.st id).typestate d =
-          floorState I.desc (tname id) a1.typestate d := by rw [hty]
-      rw [hpendEq, hfloorEq]
-      have hfl := hfloor d
-      omega
+      have hth : tokenHold I.desc (tname id) d (wF.st s) = tokenHold I.desc (tname id) d a1 := by
+        rw [hid, hph, hty]
+        rfl
+      rw [hth, htokF, hid]
+      exact Int.le_trans (Int.le_trans (Int.ofNat_le.mpr (hhold d)) hold) (by simpa [hid] using hge)
     · have hph : (wF.st s).phase = (w.st s).phase := by rw [hphF]; simp [hid]
       have hty : (wF.st s).typestate = (w.st s).typestate := by rw [htyF]; simp [hid]
-      have hpendEq : pending (wF.st s) d = pending (w.st s) d := by simp [pending, hph]
-      have hfloorEq : floorState I.desc (tname s) (wF.st s).typestate d =
-          floorState I.desc (tname s) (w.st s).typestate d := by rw [hty]
-      rw [hpendEq, hfloorEq]
-      by_cases hss : s = sender
-      · have hswap : sender = s := hss.symm
-        subst hswap
-        simp
-        omega
-      · simp [hss]
-        omega
+      have hth : tokenHold I.desc (tname s) d (wF.st s) = tokenHold I.desc (tname s) d (w.st s) := by
+        simp [tokenHold, hph, hty]
+      rw [hth, htokF]
+      exact Int.le_trans hold hge
   · intro s d hs hterm
     rw [hrost] at hs ⊢
     have h0 := hO.still s d hs hterm
@@ -4261,10 +4364,12 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
         simp [hss] at hown'
         rw [hown', h0]
       · rw [hother d hd s, h0]
-  · intro s d hs hdead
+  · intro hcrash s d hs hdead
+    have hc : w.crashed = false := by
+      simpa [wF, wA, creditLive, creditSender, setActor] using hcrash
     rw [hrost] at hs ⊢
     rw [hlifeF] at hdead
-    have h0 := hO.quiet s d hs hdead
+    have h0 := hO.quiet hc s d hs hdead
     rw [howed]
     by_cases hss : s = sender
     · have hswap : sender = s := hss.symm
@@ -4281,15 +4386,9 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
         simp [hss] at hown'
         rw [hown']; exact h0
       · rw [hother d hd s]; exact h0
-  · intro s hl1
-    by_cases hs : s = id
-    · rw [hs] at hl1 ⊢
-      rw [hparkF id]
-      simp
-      exact hclear hl1
-    · rw [hparkF, if_neg hs]
-      exact hO.clear s hl1
-  · intro i hdead
+  · intro hcrash i hdead
+    have hc : w.crashed = false := by
+      simpa [wF, wA, creditLive, creditSender, setActor] using hcrash
     have hdead0 : (w.st i).life ≠ .alive := by rw [← hlifeF i]; exact hdead
     by_cases hi : i = id
     · rw [hi] at hdead ⊢
@@ -4298,28 +4397,28 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
       exact hdeadQ (by
         rw [hlife, ← hlifeF id]
         exact hdead)
-    · rw [hboxF, hparkF, if_neg hi, if_neg hi]
-      exact hO.deadEmpty i hdead0
+    · rw [hboxF, hparkF, ite_eq_right hi, ite_eq_right hi]
+      exact hO.deadEmpty hc i hdead0
   · intro host
     refine ⟨?_, ?_⟩
     · intro m hm
       rw [hboxF] at hm
       by_cases hh : host = id
       · simp [hh] at hm ⊢
-        have hok := hkeyB m hm
-        exact (queueOk_life w wF m.sender id (hlifeF m.sender)).1 hok
+        unfold queueOk at hkeyB ⊢
+        exact hkeyB m hm
       · simp [hh] at hm
-        have hok := (hO.sameKey host).1 m hm
-        exact (queueOk_life w wF m.sender host (hlifeF m.sender)).1 hok
+        unfold queueOk
+        exact (hO.sameKey host).1 m hm
     · intro p hp
       rw [hparkF] at hp
       by_cases hh : host = id
       · simp [hh] at hp ⊢
-        have hok := hkeyP p hp
-        exact (queueOk_life w wF p.sender id (hlifeF p.sender)).1 hok
+        unfold queueOk at hkeyP ⊢
+        exact hkeyP p hp
       · simp [hh] at hp
-        have hok := (hO.sameKey host).2 p hp
-        exact (queueOk_life w wF p.sender host (hlifeF p.sender)).1 hok
+        unfold queueOk
+        exact (hO.sameKey host).2 p hp
   · intro i hi
     exact hO.shaped i (by rw [hrost] at hi; exact hi)
   · intro host hk

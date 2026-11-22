@@ -674,3 +674,14 @@ receiver idle at `toState`, or running that program. In both cases the new
 bound is the inequality the checker already proved. A name with no template
 has floor 0, and a checked program has no edge there, so its reserve is 0
 as well.
+
+## 2026-11-22 — A returned token goes to the live generation
+
+The step already does this. `creditLive` gives the slot to `budgetHolder`:
+the sender, when the sender is a core or no generation of that key is alive,
+and the live generation otherwise. Charging a new incarnation for mail left
+by an earlier one only stays an equality if the refund of that mail returns
+to the incarnation that holds the budget. Crediting the raw sender, after
+that sender is dead, would leave the token on an actor the account does not
+add, and the live equation would drop by one. The occupancy proof follows
+`creditLive`. It does not change the step.
