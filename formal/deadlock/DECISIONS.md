@@ -612,3 +612,53 @@ pre-state is a `SemInv` and a `MailInv`, and it is not `ParentAcyclic`, so
 it is not a reachable `Inv`. On a forest, the actor running `abort` is not
 a descendant of its own child, so it stays alive through `abortChildren`
 unless the enqueue crashes, where `commitCont` returns that crashed world.
+
+## 2026-11-22 — A lone terminable may address a core
+
+The occupancy invariant, not the step. `noBulkSend` mutes a plain `send` and a
+`selfSchedule`. It does not mute a `trySend` or a `call` whose outcome lists
+are themselves mute. A checked lone terminable per-peer can place that
+message in a core. The core's mailbox keeps it after the sender is sealed:
+`releaseWorld` refunds the sender's own lanes and its parked outbound, and
+the message already delivered stays where it was queued.
+
+`OccInv.coreFrom` used to say mail in a core comes from a core or from a role
+that does not terminate. That excludes this sender. `coreSender` is the
+placement the account uses: a core, a role that does not terminate, or a
+lone terminable per-peer. A subtree member is still excluded. Its program
+only addresses a per-peer of its own subtree, and sealing that subtree takes
+the mail with it.
+
+`OccInv.still` used to say a lone terminable owes nothing. The same message
+is queued mail. `still` is now the slot bound: that actor's `owed` is at
+most its template budget. The charge is the live generation's tokens plus
+`queuedFromKey`, the same equation as every other per-peer slot. The message
+is not a second account, and it is not forbidden.
+
+Two generations of one template share a key, so a sum of `budget` over roster
+ids of that key counts the template twice. That sum is not the edge fold.
+The account that replaces it is one budget per live slot, with every
+generation's mail in `queuedFromKey`.
+
+## 2026-11-22 — A pool mailbox may park under Lemma 1
+
+The capacity check is not a promise that the parked lane stays empty.
+`l1` compares edge occupancy with capacity for every population `N`. A
+per-peer edge stores its budget in the `a` coefficient, so at `N = 1` that
+edge pays for one key. A core-supervised pool's population is `slots`, not
+`N`. An earlier key can leave its message in the core, the core can seal
+that child and birth the next slot, and the new child can send while the
+old message is still queued.
+
+`Deadlock/PoolPark.lean` is that run. The core's capacity is `1*N+1`, Lemma
+1 holds, and `N = 1`. After two sealed children have each delivered one
+message, the third child's send finds the box full and parks. The world is
+not crashed. The box holds 2 and the parked lane holds 1, against
+`capBulk = 2`. Alive children of that template never exceed `N`.
+
+`OccInv` does not claim `parked = []` on a Lemma-1 host. The account that
+remains is per key: `queuedFromKey` is at most that template's budget, and
+the live generation's tokens are the rest of the same equation. The sum
+over a pool's keys is not bounded by `capBulk`. `enqueueOrPark` parks when
+the box is full; that branch is reachable, and the occupancy proof has to
+follow it.

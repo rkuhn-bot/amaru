@@ -66,8 +66,7 @@ import Deadlock.Json
 #print axioms Deadlock.projects
 #print axioms Deadlock.ty_reachable
 #print axioms Deadlock.live_le_occ
-#print axioms Deadlock.l1_fit
-#print axioms Deadlock.l1_park_unreachable
+#print axioms Deadlock.key_queued_le
 #print axioms Deadlock.occ_init
 #print axioms Deadlock.occ_set
 #print axioms Deadlock.occ_finish

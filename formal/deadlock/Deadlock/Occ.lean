@@ -162,9 +162,18 @@ def slotBalance (I : Impl) (w : World) : Prop :=
     (∀ name key d, findLive w name key = none →
       (queuedFromKey w name key d : Int) ≤ (budget I.desc name d : Int))
 
-/-- Outstanding credit, queues, and the Lemma-1 promise that nothing is parked.
-`clear`, `deadEmpty`, and `quiet` are not claimed of a crashed world: the crash
-kills the roster and leaves the mail queued. -/
+/-- Who may leave mail in a core. A core, a role that does not terminate, or a
+lone terminable per-peer. A subtree member addresses only a per-peer of its
+subtree, so its mail is not left in a core. A lone terminable has no subtree:
+its try-send or call is charged to its own key, and the message may sit here. -/
+def coreSender (D : Description) (sender : InstId) : Prop :=
+  peerKey sender = none ∨ terminableB D (tname sender) = false ∨
+    loneTerminableB D (tname sender) = true
+
+/-- Outstanding credit and queues. A Lemma-1 capacity does not keep the parked
+lane empty: a pool has `slots` keys, and a later key still sends while an
+earlier key's mail sits in the box. `deadEmpty` and `quiet` are not claimed
+of a crashed world: the crash kills the roster and leaves the mail queued. -/
 structure OccInv (I : Impl) (w : World) : Prop where
   nodup : w.roster.Nodup
   aliveIn : ∀ id, (w.st id).life = .alive → id ∈ w.roster
@@ -180,15 +189,15 @@ structure OccInv (I : Impl) (w : World) : Prop where
   balance : slotBalance I w
   slack : ∀ id d, (w.st id).life = .alive →
     (tokenHold I.desc (tname id) d (w.st id) : Int) ≤ (w.st id).tokens d
-  /-- A lone terminable never sends, so it owes nothing. A subtree member may owe
-  a sibling: that mail dies with the subtree. -/
-  still : ∀ s d, s ∈ w.roster → loneTerminableName I.desc (tname s) → owed w.st d s w.roster = 0
+  /-- A lone terminable's queued mail is charged to its own budget. A try-send
+  or a call may be in flight; it is not a second account. -/
+  still : ∀ s d, s ∈ w.roster → loneTerminableName I.desc (tname s) →
+    owed w.st d s w.roster ≤ budget I.desc (tname s) d
   /-- A non-alive id, while the world has not crashed, owes at most its budget.
   Tokens left on that id are not part of the bound. -/
   quiet : w.crashed = false →
     ∀ s d, s ∈ w.roster → (w.st s).life ≠ .alive →
       (owed w.st d s w.roster : Int) ≤ (budget I.desc (tname s) d : Int)
-  clear : w.crashed = false → ∀ id, l1 I.desc (tname id) = true → (w.st id).parked = []
   /-- An absent or dead actor keeps no queue, unless the world has crashed.
   The seal clears the mailbox in the step that kills the actor. -/
   deadEmpty : w.crashed = false →
@@ -201,14 +210,11 @@ structure OccInv (I : Impl) (w : World) : Prop where
     (∀ p ∈ (w.st host).parked, queueOk I.desc w p.sender host)
   /-- Every roster id is the core or the peer its template declares. -/
   shaped : ∀ id, id ∈ w.roster → shapeOk I.desc id
-  /-- Mail in a core comes from a core, or from a role that does not terminate.
-  A terminating per-peer keeps its mail on its own key, so killing it does not
-  leave that mail in a core. -/
+  /-- Mail in a core comes from a `coreSender`: a core, a role that does not
+  terminate, or a lone terminable per-peer. A subtree member does not. -/
   coreFrom : ∀ host, peerKey host = none →
-    (∀ m ∈ (w.st host).box,
-      peerKey m.sender = none ∨ terminableB I.desc (tname m.sender) = false) ∧
-    (∀ p ∈ (w.st host).parked,
-      peerKey p.sender = none ∨ terminableB I.desc (tname p.sender) = false)
+    (∀ m ∈ (w.st host).box, coreSender I.desc m.sender) ∧
+    (∀ p ∈ (w.st host).parked, coreSender I.desc p.sender)
 
 theorem owed_le_debt (budget owed tokens floor pending debt : Nat)
     (hB : owed + tokens = budget) (hS : floor + pending ≤ tokens) (hF : floor + debt = budget) :
@@ -1183,52 +1189,92 @@ theorem queueOk_alive {D : Description} (w : World) (sender host : InstId)
     (hkey : keyAgrees D sender host) (_hlive : (w.st sender).life = .alive) :
     queueOk D w sender host := hkey
 
-/-- A bulk effect that is in scope does not target a core from a terminable role.
-A lone terminable does not send. A subtree member sends only to a per-peer role. -/
+/-- A bulk effect that is in scope and aimed at a core comes from a `coreSender`.
+A multiplicity-one role is that core. A role that does not terminate may send.
+A lone terminable per-peer may try-send or call, and the message is charged to
+its key. A subtree member's program addresses only a per-peer. -/
 theorem core_send_from (I : Impl) (w : World) (hO : OccInv I w) (sender dstId : InstId)
-    (e : Eff) (es : List Eff) (hmem : dstId ∈ w.roster)
+    (e : Eff) (es : List Eff) (hmem : dstId ∈ w.roster) (hsend : sender ∈ w.roster)
     (hbulk : bulkScopeOf I.desc (tname sender) (e :: es) = true)
     (he : ∃ label hint,
       e = .send (tname dstId) label hint ∨ (∃ na to, e = .call (tname dstId) label hint na to) ∨
         (∃ full gone, e = .trySend (tname dstId) label hint full gone))
     (hk : peerKey dstId = none) :
-    peerKey sender = none ∨ terminableB I.desc (tname sender) = false := by
+    coreSender I.desc sender := by
   cases ht : templateOf I.desc (tname sender) with
   | none =>
-    exact Or.inr (by simp [terminableB, ht])
+    exact Or.inr (Or.inl (by simp [terminableB, ht]))
   | some t =>
-    by_cases hterm : t.terminable = true
-    · by_cases hsub : t.subtree = ""
-      · obtain ⟨label, hint, he⟩ := he
-        have hnb : noBulkSend (e :: es) = true := by
-          simpa [bulkScopeOf, ht, hterm, hsub] using hbulk
-        rcases he with rfl | ⟨_, _, rfl⟩ | ⟨_, _, rfl⟩ <;> simp [noBulkSend] at hnb
-      · obtain ⟨label, hint, he⟩ := he
-        have hm : memberProgramOk I.desc (tname sender) (e :: es) = true := by
-          simpa [bulkScopeOf, ht, hterm, hsub] using hbulk
-        have hok := memberProgram_head I.desc (tname sender) e es hm
-        have hper : perPeerB I.desc (tname dstId) = true := by
-          rcases he with rfl | ⟨_, _, rfl⟩ | ⟨_, _, rfl⟩
-          · simp [memberEffectOk, Bool.and_eq_true] at hok
-            exact hok.2
-          · simp [memberEffectOk, Bool.and_eq_true] at hok
-            exact hok.2
-          · simp [memberEffectOk, Bool.and_eq_true] at hok
-            exact hok.2
-        rcases hO.shaped dstId hmem with ⟨tD, htD, hshape⟩
-        have hmul : tD.multiplicity = .perPeer := by
-          simp only [perPeerB, htD] at hper
-          cases hbb : tD.multiplicity with
-          | perPeer => rfl
+    obtain ⟨tS, htS, hshape⟩ := hO.shaped sender hsend
+    have hts : tS = t := by
+      rw [ht] at htS
+      cases htS
+      rfl
+    simp only [bulkScopeOf, ht] at hbulk
+    by_cases hone : (t.multiplicity == .one) = true
+    · have hm : t.multiplicity = .one := by
+        cases htmul : t.multiplicity with
+        | one => rfl
+        | perPeer =>
+          have hfalse : (Multiplicity.perPeer == Multiplicity.one) = false := by decide
+          rw [htmul] at hone
+          exact Bool.noConfusion (hone.symm.trans hfalse)
+      rw [← hts] at hm
+      simp only [hm] at hshape
+      cases hshape
+      exact Or.inl rfl
+    · have hnot1 : (t.multiplicity == .one) = false := by
+        cases hb : (t.multiplicity == .one) with
+        | false => rfl
+        | true => exact absurd hb hone
+      by_cases hterm : t.terminable = true
+      · simp only [hnot1, hterm, Bool.or_false, Bool.not_true] at hbulk
+        by_cases hsub : (t.subtree == "") = true
+        · cases hmul : t.multiplicity with
           | one =>
-            have hfalse : (Multiplicity.one == Multiplicity.perPeer) = false := by decide
-            simp [hbb, hfalse] at hper
-        have hex : ∃ k, dstId = InstId.peer tD.name k := by simpa [hmul] using hshape
-        obtain ⟨k, hid⟩ := hex
-        cases dstId with
-        | core _ => cases hid
-        | peer _ _ => simp [peerKey] at hk
-    · exact Or.inr (by simp [terminableB, ht, hterm])
+            rw [hmul] at hnot1
+            have htrue : (Multiplicity.one == Multiplicity.one) = true := by decide
+            exact Bool.noConfusion (hnot1.symm.trans htrue)
+          | perPeer =>
+            have hmulB : (t.multiplicity == .perPeer) = true := by
+              rw [hmul]
+              decide
+            exact Or.inr (Or.inr (by simp [loneTerminableB, ht, hmulB, hterm, hsub]))
+        · have hsub' : (t.subtree == "") = false := by
+            cases hb : (t.subtree == "") with
+            | false => rfl
+            | true => exact absurd hb hsub
+          simp only [hsub', Bool.false_eq_true, ite_false] at hbulk
+          have hok := memberProgram_head I.desc (tname sender) e es hbulk
+          obtain ⟨label, hint, he⟩ := he
+          have htalk : sameSubtree I.desc (tname sender) (tname dstId) = true ∧
+              perPeerB I.desc (tname dstId) = true := by
+            rcases he with rfl | ⟨_, _, rfl⟩ | ⟨_, _, rfl⟩
+            · simp [memberEffectOk, subtreeTalk, Bool.and_eq_true] at hok
+              exact hok
+            · simp [memberEffectOk, subtreeTalk, Bool.and_eq_true] at hok
+              exact hok.1.1
+            · simp [memberEffectOk, subtreeTalk, Bool.and_eq_true] at hok
+              exact hok.1.1
+          have hper : perPeerB I.desc (tname dstId) = true := htalk.2
+          rcases hO.shaped dstId hmem with ⟨tD, htD, hshapeD⟩
+          have hmulD : tD.multiplicity = .perPeer := by
+            simp only [perPeerB, htD] at hper
+            cases hbb : tD.multiplicity with
+            | perPeer => rfl
+            | one =>
+              have hfalse : (Multiplicity.one == Multiplicity.perPeer) = false := by decide
+              simp [hbb, hfalse] at hper
+          have hex : ∃ k g, dstId = InstId.peer tD.name k g := by simpa [hmulD] using hshapeD
+          obtain ⟨k, g, hid⟩ := hex
+          cases dstId with
+          | core _ => cases hid
+          | peer _ _ _ => simp [peerKey] at hk
+      · have hterm' : t.terminable = false := by
+          cases hb : t.terminable with
+          | false => rfl
+          | true => exact absurd hb hterm
+        exact Or.inr (Or.inl (by simp [terminableB, ht, hterm']))
 
 theorem open_of_nokey (D : Description) (host : InstId) (h : peerKey host = none) :
     openHost D host := by
@@ -1290,7 +1336,7 @@ theorem route_agrees (w : World) (D : Description) (sender : InstId) (dst : Stri
             | peer _ key _ =>
               simp [memberKey] at hk
               simp [peerKey, hk]
-          exact Or.inr (hsend.symm.trans hkey)
+          exact Or.inr (hsend.trans hkey.symm)
 
 theorem resolve_agrees (D : Description) (w : World) (sender : InstId) (dst : String) (slot : Nat)
     (id : InstId) (h : resolveId D w sender dst slot = some id) : keyAgrees D sender id := by
@@ -1305,32 +1351,27 @@ theorem resolve_agrees (D : Description) (w : World) (sender : InstId) (dst : St
       exact Or.inl (open_of_nokey D (InstId.core dst) rfl)
     | perPeer =>
       simp only [hm] at h
-      by_cases hsl : (t.slots != 0) = true
-      · simp only [hsl, ite_true] at h
+      split at h
+      · next hsl =>
+        have hslots : t.slots ≠ 0 := by simpa [bne, beq_iff_eq] using hsl
         split at h
-        · cases h
-        · next k hklt =>
-          split at h
-          · have hname := (findLive_spec w dst slot id h).1
-            have hopen : openHost D id := by
+        · split at h
+          · next hfind =>
+            cases h
+            have hname := (findLive_spec w dst slot id hfind).1
+            exact Or.inl (by
               unfold openHost
               rw [hname, ht]
-              exact Or.inr (by simpa [bne, beq_iff_eq] using hsl)
-            exact Or.inl hopen
+              exact Or.inr hslots)
           · cases h
             exact Or.inl (by
               unfold openHost
               simp [tname, ht]
-              exact Or.inr (by simpa [bne, beq_iff_eq] using hsl))
-      · have hzero : (t.slots != 0) = false := by
-          cases hbb : t.slots != 0 with
-          | false => rfl
-          | true => exact absurd hbb hsl
-        simp only [hzero, ite_false] at h
-        cases hk : memberKey sender with
-        | none => simp [hk] at h
-        | some k =>
-          simp only [hk] at h
+              exact Or.inr hslots)
+        · cases h
+      · split at h
+        · cases h
+        · next k hk =>
           have hsend : peerKey sender = some k := by
             cases sender with
             | core _ => simp [memberKey] at hk
@@ -1338,8 +1379,10 @@ theorem resolve_agrees (D : Description) (w : World) (sender : InstId) (dst : St
               simp [memberKey] at hk
               simp [peerKey, hk]
           split at h
-          · have hkey : peerKey id = some k := by
-              have hp := List.find?_some h
+          · next hfind =>
+            cases h
+            have hkey : peerKey id = some k := by
+              have hp := List.find?_some hfind
               cases id with
               | core _ => simp [findLive] at hp
               | peer _ key _ =>
@@ -1347,26 +1390,9 @@ theorem resolve_agrees (D : Description) (w : World) (sender : InstId) (dst : St
                 obtain ⟨⟨_, hk'⟩, _⟩ := hp
                 subst hk'
                 rfl
-            cases h
-            exact Or.inr (hsend.symm.trans hkey)
+            exact Or.inr (hsend.trans hkey.symm)
           · cases h
             exact Or.inr (by simpa [peerKey] using hsend)
-
-theorem peer_same (a b : InstId) (k : Nat) (ha : peerKey a = some k) (hb : peerKey b = some k)
-    (hn : tname a = tname b) : a = b := by
-  cases a with
-  | core _ => cases ha
-  | peer na ka =>
-    cases b with
-    | core _ => cases hb
-    | peer nb kb =>
-      simp only [peerKey, tname] at ha hb hn
-      injection ha with ha
-      injection hb with hb
-      subst ha
-      subst hb
-      subst hn
-      rfl
 
 theorem sum_ge_mem (f : InstId → Nat) (ids : List InstId) (s : InstId) (hs : s ∈ ids)
     (nodup : ids.Nodup) : f s ≤ sumFold f ids := by
@@ -1541,38 +1567,6 @@ theorem fold_split (D : Description) (dst name : String) (banned : List String)
     · have hdf : (e.dst == dst) = false := by
         cases hbb : e.dst == dst <;> simp_all
       simp [instFoldB, srcFold, hdf, ih]
-
-theorem keySum_le (D : Description) (dst : String) (k : Nat) (banned : List String)
-    (ids : List InstId) (nodup : ids.Nodup)
-    (hban : ∀ s, s ∈ ids → peerKey s = some k → (banned.elem (tname s)) = false) :
-    sumFold (fun s => if peerKey s = some k then budget D (tname s) dst else 0) ids ≤
-      instFoldB D dst banned D.edges := by
-  induction ids generalizing banned with
-  | nil => simp [sumFold]
-  | cons s ids ih =>
-    have hcons := (List.nodup_cons).mp nodup
-    simp only [sumFold]
-    by_cases hk : peerKey s = some k
-    · simp only [hk, ite_true]
-      have hfresh : allowed banned (tname s) = true := by
-        have hfalse := hban s (List.Mem.head _) hk
-        unfold allowed
-        rw [hfalse]
-        exact Bool.not_false
-      have htail := ih (tname s :: banned) hcons.2 ?_
-      · have hbudget := budget_le_srcFold D (tname s) dst
-        have hsplit := fold_split D dst (tname s) banned hfresh D.edges
-        rw [hsplit]
-        exact Nat.add_le_add hbudget htail
-      · intro s' hs' hk'
-        have hne : tname s' ≠ tname s := by
-          intro hn
-          exact hcons.1 ((peer_same s' s k hk' hk hn) ▸ hs')
-        have hold : (banned.elem (tname s')) = false := hban s' (List.Mem.tail _ hs') hk'
-        have hbb : (tname s' == tname s) = false := by simpa [beq_iff_eq] using hne
-        rw [List.elem_cons, hbb, hold]
-    · simp only [hk, ite_false, Nat.zero_add]
-      exact ih banned hcons.2 (fun s' hs' hk' => hban s' (List.Mem.tail _ hs') hk')
 
 theorem edgeInst_le_eval (I : Impl) (hL : LocalOk I) (e : Edge) (he : e ∈ I.desc.edges) (n : Nat)
     (hn : 1 ≤ n) : edgeInst I.desc e ≤ e.occupancy.eval n := by
@@ -1915,11 +1909,11 @@ theorem pay_sum_dead (I : Impl) (w : World) (hO : OccInv I w) (e : Edge) (dst : 
   cases hteq
   cases hm : t.multiplicity with
   | perPeer =>
-    have hex : ∃ k, s = InstId.peer t.name k := by simpa [hm] using hmul
-    obtain ⟨k, hidS⟩ := hex
+    have hex : ∃ k g, s = InstId.peer t.name k g := by simpa [hm] using hmul
+    obtain ⟨k, g, hidS⟩ := hex
     cases s with
     | core _ => cases hidS
-    | peer _ _ => simp [peerKey] at hpk
+    | peer _ _ _ => simp [peerKey] at hpk
   | one =>
     have hsId : s = InstId.core t.name := by simpa [hm] using hmul
     have hidId : id = InstId.core t.name := by simpa [hm] using hmul'
@@ -2006,11 +2000,11 @@ theorem dead_budget_go (I : Impl) (hL : LocalOk I) (w : World) (hO : OccInv I w)
         · rcases hO.shaped s (hsub s (List.Mem.head _)) with ⟨t, ht, hmul⟩
           cases hm : t.multiplicity with
           | perPeer =>
-            have hex : ∃ k, s = InstId.peer t.name k := by simpa [hm] using hmul
-            obtain ⟨k, hidS⟩ := hex
+            have hex : ∃ k g, s = InstId.peer t.name k g := by simpa [hm] using hmul
+            obtain ⟨k, g, hidS⟩ := hex
             cases s with
             | core _ => cases hidS
-            | peer _ _ => simp [peerKey] at hk
+            | peer _ _ _ => simp [peerKey] at hk
           | one =>
             have hsrc := src_le_eval_go I hL dst (tname s) t ht hm w.N I.desc.edges (fun _ he => he)
             have hbud := budget_le_srcFold I.desc (tname s) dst
@@ -2087,105 +2081,26 @@ theorem box_le_parts (st : InstId → Actor) (dstName : String) (id : InstId) (i
       else 0)] at hpoint
   exact hpoint
 
-/-- A Lemma-1 mailbox holds at most `capBulk` messages, counting the parked lane.
-A dead host is empty. A core holds live senders and at most one budget from each
-dead core. A per-peer host holds one key, and each template on that key owes at
-most its budget. -/
-theorem l1_fit (I : Impl) (hL : LocalOk I) (w : World) (hO : OccInv I w) (hT : TyOk I.desc w)
-    (id : InstId) (hl1 : l1 I.desc (tname id) = true) :
-    (w.st id).box.length + (w.st id).parked.length ≤ capBulk I.desc w.N id := by
-  have hpark := hO.clear id hl1
-  rw [hpark, List.length_nil, Nat.add_zero]
-  by_cases hlive : (w.st id).life = .alive
-  · have hmem := hO.aliveIn id hlive
-    cases hk : peerKey id with
-    | none =>
-      have hwho : ∀ m ∈ (w.st id).box,
-          (w.st m.sender).life = .alive ∨ peerKey m.sender = none := by
-        intro m hm
-        exact ((hO.sameKey id).1 m hm).2 hk
-      have hbox := box_le_parts w.st (tname id) id w.roster hO.nodup hmem rfl
-        (fun m hm => hO.sentFrom id m hm) hwho
-      have hliveD := live_owed_le I w hO hT (tname id)
-      have hdead : sumFold (fun s =>
-          if peerKey s = none then
-            if (w.st s).life = .alive then 0 else owed w.st (tname id) s w.roster
-          else 0) w.roster ≤
-          sumFold (fun s =>
-            if peerKey s = none then
-              if (w.st s).life = .alive then 0 else budget I.desc (tname s) (tname id)
-            else 0) w.roster := by
-        refine sum_le _ _ w.roster ?_
-        intro s hs
-        by_cases hpk : peerKey s = none
-        · by_cases hl : (w.st s).life = .alive
-          · simp [hpk, hl]
-          · simp [hpk, hl]
-            exact hO.quiet s (tname id) hs hl
-        · simp [hpk]
-      have hroom := core_room I hL w hO (tname id)
-      have hcap := cap_of_l1 I.desc id w.N hl1
-      exact Nat.le_trans hbox (Nat.le_trans (Nat.add_le_add hliveD hdead)
-        (Nat.le_trans hroom hcap))
-    | some k =>
-      have hshape := hO.shaped id hmem
-      rcases hshape with ⟨t, ht, hmul⟩
-      cases hm : t.multiplicity with
-      | one =>
-        have hid : id = InstId.core t.name := by simpa [hm] using hmul
-        cases id with
-        | core _ => simp [peerKey] at hk
-        | peer _ _ => cases hid
-      | perPeer =>
-        have hex : ∃ k, id = InstId.peer t.name k := by simpa [hm] using hmul
-        obtain ⟨k0, hid⟩ := hex
-        cases id with
-        | core _ => simp [peerKey] at hk
-        | peer name key =>
-          have hid' : InstId.peer name key = InstId.peer t.name k0 := hid
-          simp [InstId.peer.injEq] at hid'
-          rcases hid' with ⟨hname, hkey0⟩
-          have hk' : key = k := by
-            have hp : peerKey (InstId.peer name key) = some key := rfl
-            simp [hp] at hk
-            exact hk
-          have hN1 : 1 ≤ w.N := by
-            have hbit : aliveBit w.st (tname (InstId.peer name key)) (InstId.peer name key) = 1 := by
-              unfold aliveBit
-              simp [hlive, beq_iff_eq]
-            have hge := sum_ge_mem (aliveBit w.st (tname (InstId.peer name key))) w.roster
-              (InstId.peer name key) hmem hO.nodup
-            have hone : 1 ≤ aliveCount w (tname (InstId.peer name key)) := by
-              rw [aliveCount_sum]
-              simpa [hbit] using hge
-            exact Nat.le_trans hone (hO.livePeer (tname (InstId.peer name key)) ⟨t, by simpa [hname] using ht, hm⟩)
-          have hkey : ∀ m ∈ (w.st (InstId.peer name key)).box, peerKey m.sender = some key := by
-            intro m hm
-            have hdis := ((hO.sameKey (InstId.peer name key)).1 m hm).1
-            simp [keyAgrees, peerKey] at hdis
-            exact hdis
-          have hbox := box_le_key w.st (tname (InstId.peer name key)) (InstId.peer name key) w.roster
-            key hO.nodup hmem rfl (fun m hm => hO.sentFrom _ m hm) hkey
-          have hpoint : sumFold (fun s =>
-              if peerKey s = some key then owed w.st (tname (InstId.peer name key)) s w.roster else 0)
-              w.roster ≤
-              sumFold (fun s =>
-                if peerKey s = some key then budget I.desc (tname s) (tname (InstId.peer name key)) else 0)
-                w.roster := by
-            refine sum_le _ _ w.roster ?_
-            intro s hs
-            by_cases hp : peerKey s = some key
-            · simp [hp]
-              exact owed_le_budget I w hO hT _ s hs
-            · simp [hp]
-          have hkeys := keySum_le I.desc (tname (InstId.peer name key)) key [] w.roster hO.nodup
-            (fun _ _ _ => rfl)
-          rw [instFoldB_nil] at hkeys
-          have hfold := instFold_le_eval I hL (tname (InstId.peer name key)) w.N hN1
-          have hcap := cap_of_l1 I.desc (InstId.peer name key) w.N hl1
-          exact Nat.le_trans hbox (Nat.le_trans hpoint (Nat.le_trans hkeys (Nat.le_trans hfold hcap)))
-  · have hempty := (hO.deadEmpty id (by simpa [hlive])).1
-    simp [hempty]
+/-- Mail from every generation of one key, on every host of `dst`, is at most
+that template's budget. The live generation's tokens are the rest of the same
+account, and a live actor's tokens are at least zero. A pool may occupy
+`slots` keys at once, so this bound is per key: the sum over keys is not
+`capBulk`. -/
+theorem key_queued_le (I : Impl) (w : World) (h : OccInv I w) (name : String) (key : Nat)
+    (dst : String) : queuedFromKey w name key dst ≤ budget I.desc name dst := by
+  cases hlive : findLive w name key with
+  | none =>
+    exact Int.ofNat_le.mp (h.balance.2 name key dst hlive)
+  | some id =>
+    have hbal := h.balance.1.1 name key id dst hlive
+    have hl : (w.st id).life = .alive := (findLive_spec w name key id hlive).2
+    have hS := h.slack id dst hl
+    have h0 : (0 : Int) ≤ (w.st id).tokens dst :=
+      Int.le_trans (Int.natCast_nonneg _) hS
+    have hq : (queuedFromKey w name key dst : Int) ≤ (budget I.desc name dst : Int) := by
+      omega
+    exact Int.ofNat_le.mp hq
+
 
 theorem sum_one_slack (f g : InstId → Nat) (ids : List InstId) (s : InstId) (hs : s ∈ ids)
     (nodup : ids.Nodup) (hle : ∀ id ∈ ids, f id ≤ g id) (hextra : f s + 1 ≤ g s) :
@@ -2206,157 +2121,6 @@ theorem sum_one_slack (f g : InstId → Nat) (ids : List InstId) (s : InstId) (h
       have hhead := hle id (List.Mem.head _)
       omega
 
-/-- The park branch of `enqueueOrPark` is unreachable for a Lemma-1 mailbox the
-sender can actually deliver to. The sender still has the send in its
-continuation, so its outstanding is strictly below the typestate debt, and
-`clear` keeps the parked lane empty. A per-peer mailbox only counts the
-sender's own key: residual mail of another key is not in this box. -/
-theorem l1_park_unreachable (I : Impl) (hL : LocalOk I) (w : World) (hO : OccInv I w)
-    (hT : TyOk I.desc w) (sender dst : InstId) (hlive : (w.st dst).life = .alive)
-    (hsend : sender ∈ w.roster) (hsender : (w.st sender).life = .alive)
-    (hpend : 1 ≤ pending (w.st sender) (tname dst)) (hl1 : l1 I.desc (tname dst) = true)
-    (hagree : keyAgrees sender dst) :
-    (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst := by
-  have hpark := hO.clear dst hl1
-  have hmem : dst ∈ w.roster := hO.aliveIn dst hlive
-  have hdebt : owed w.st (tname dst) sender w.roster + 1 ≤
-      debt I.desc (tname sender) (w.st sender).typestate (tname dst) := by
-    have hS := hO.slack sender (tname dst) hsend hsender
-    have hB := hO.balance sender (tname dst) hsend
-    cases ht : templateOf I.desc (tname sender) with
-    | none =>
-      have hele := hT sender hsender
-      simp [statesOf, ht, List.elem] at hele
-    | some t =>
-      have hele := hT sender hsender
-      have hst : (w.st sender).typestate ∈ t.states := by
-        simpa [statesOf, ht, List.elem_iff] using hele
-      have hF := floor_add_debt I.desc (tname sender) (w.st sender).typestate (tname dst) ⟨t, ht, hst⟩
-      have hle := owed_le_debt _ _ _ _ _ _ hB hS hF
-      omega
-  have hdbud : owed w.st (tname dst) sender w.roster + 1 ≤
-      budget I.desc (tname sender) (tname dst) := by
-    cases ht : templateOf I.desc (tname sender) with
-    | none =>
-      have hele := hT sender hsender
-      simp [statesOf, ht, List.elem] at hele
-    | some t =>
-      have hele := hT sender hsender
-      have hst : (w.st sender).typestate ∈ t.states := by
-        simpa [statesOf, ht, List.elem_iff] using hele
-      exact Nat.le_trans hdebt (debt_le_budget I.desc (tname sender) (w.st sender).typestate
-        (tname dst) ⟨t, ht, hst⟩)
-  cases hk : peerKey dst with
-  | none =>
-    have hwho : ∀ m ∈ (w.st dst).box,
-        (w.st m.sender).life = .alive ∨ peerKey m.sender = none := by
-      intro m hm
-      exact ((hO.sameKey dst).1 m hm).2 hk
-    have hbox := box_le_parts w.st (tname dst) dst w.roster hO.nodup hmem rfl
-      (fun m hm => hO.sentFrom dst m hm) hwho
-    have hsum : sumFold (fun s =>
-        if (w.st s).life = .alive then owed w.st (tname dst) s w.roster else 0) w.roster + 1 ≤
-        liveDebt I.desc w.st (tname dst) w.roster := by
-      rw [liveDebt_sum]
-      refine sum_one_slack _ _ w.roster sender hsend hO.nodup ?_ ?_
-      · intro s hs
-        by_cases hl : (w.st s).life = .alive
-        · simp [hl]
-          have h1 := owed_one_le I w hO hT (tname dst) s hs
-          simpa [hl] using h1
-        · simp [hl]
-      · simp [hsender]
-        exact hdebt
-    have hdead : sumFold (fun s =>
-        if peerKey s = none then
-          if (w.st s).life = .alive then 0 else owed w.st (tname dst) s w.roster
-        else 0) w.roster ≤
-        sumFold (fun s =>
-          if peerKey s = none then
-            if (w.st s).life = .alive then 0 else budget I.desc (tname s) (tname dst)
-          else 0) w.roster := by
-      refine sum_le _ _ w.roster ?_
-      intro s hs
-      by_cases hpk : peerKey s = none
-      · by_cases hl : (w.st s).life = .alive
-        · simp [hpk, hl]
-        · simp [hpk, hl]
-          exact hO.quiet s (tname dst) hs hl
-      · simp [hpk]
-    have hroom := core_room I hL w hO (tname dst)
-    have hcap := cap_of_l1 I.desc dst w.N hl1
-    have hlt : (w.st dst).box.length + 1 ≤ capBulk I.desc w.N dst := by
-      have hjoin := Nat.add_le_add hsum hdead
-      omega
-    exact ⟨hpark, Nat.lt_of_succ_le hlt⟩
-  | some k =>
-    have hkS : peerKey sender = some k := by
-      unfold keyAgrees at hagree
-      rcases hagree with hnone | hsame
-      · simp [hk] at hnone
-      · simpa [hk] using hsame
-    have hshape := hO.shaped dst hmem
-    rcases hshape with ⟨t, ht, hmul⟩
-    cases hm : t.multiplicity with
-    | one =>
-      have hid : dst = InstId.core t.name := by simpa [hm] using hmul
-      cases dst with
-      | core _ => simp [peerKey] at hk
-      | peer _ _ => cases hid
-    | perPeer =>
-      have hex : ∃ k, dst = InstId.peer t.name k := by simpa [hm] using hmul
-      obtain ⟨k0, hid⟩ := hex
-      cases dst with
-      | core _ => simp [peerKey] at hk
-      | peer name key =>
-        have hkeyM : ∀ m ∈ (w.st (InstId.peer name key)).box, peerKey m.sender = some key := by
-          intro m hm
-          have hdis := ((hO.sameKey (InstId.peer name key)).1 m hm).1
-          simp [keyAgrees, peerKey] at hdis
-          exact hdis
-        have hkKey : key = k := by
-          have hp : peerKey (InstId.peer name key) = some key := rfl
-          simp [hp] at hk
-          exact hk
-        have hbox := box_le_key w.st (tname (InstId.peer name key)) (InstId.peer name key) w.roster
-          key hO.nodup hmem rfl (fun m hm => hO.sentFrom _ m hm) hkeyM
-        have hsum : sumFold (fun s =>
-            if peerKey s = some key then owed w.st (tname (InstId.peer name key)) s w.roster else 0)
-            w.roster + 1 ≤
-            sumFold (fun s =>
-              if peerKey s = some key then
-                budget I.desc (tname s) (tname (InstId.peer name key)) else 0) w.roster := by
-          refine sum_one_slack _ _ w.roster sender hsend hO.nodup ?_ ?_
-          · intro s hs
-            by_cases hp : peerKey s = some key
-            · simp [hp]
-              exact owed_le_budget I w hO hT _ s hs
-            · simp [hp]
-          · simp [hkS, hkKey]
-            exact hdbud
-        have hN1 : 1 ≤ w.N := by
-          have hbit : aliveBit w.st (tname (InstId.peer name key)) (InstId.peer name key) = 1 := by
-            unfold aliveBit
-            simp [hlive, beq_iff_eq]
-          have hge := sum_ge_mem (aliveBit w.st (tname (InstId.peer name key))) w.roster
-            (InstId.peer name key) hmem hO.nodup
-          have hone : 1 ≤ aliveCount w (tname (InstId.peer name key)) := by
-            rw [aliveCount_sum]
-            simpa [hbit] using hge
-          have hid' : InstId.peer name key = InstId.peer t.name k0 := hid
-          simp [InstId.peer.injEq] at hid'
-          exact Nat.le_trans hone (hO.livePeer (tname (InstId.peer name key))
-            ⟨t, by simpa [hid'.1] using ht, hm⟩)
-        have hkeys := keySum_le I.desc (tname (InstId.peer name key)) key [] w.roster hO.nodup
-          (fun _ _ _ => rfl)
-        rw [instFoldB_nil] at hkeys
-        have hfold := instFold_le_eval I hL (tname (InstId.peer name key)) w.N hN1
-        have hcap := cap_of_l1 I.desc (InstId.peer name key) w.N hl1
-        have hlt : (w.st (InstId.peer name key)).box.length + 1 ≤ capBulk I.desc w.N
-            (InstId.peer name key) :=
-          Nat.le_trans (Nat.add_le_add_right hbox 1)
-            (Nat.le_trans hsum (Nat.le_trans hkeys (Nat.le_trans hfold hcap)))
-        exact ⟨hpark, Nat.lt_of_succ_le hlt⟩
 
 theorem name_lines (D : Description) (hG : GraphOk D) : nameFails D = [] := by
   have h := hG.struct
@@ -2490,9 +2254,13 @@ theorem reachable_core_one (I : Impl) (hG : GraphOk I.desc) (N : Nat) (w : World
 /-- A multiplicity-one template is not a subtree member. `subtreeFails` records it. -/
 theorem one_not_subtree (D : Description) (hG : GraphOk D) (name : String) (t : Template)
     (ht : templateOf D name = some t) (hne : t.subtree ≠ "") (hone : t.multiplicity = .one) : False := by
-  have hmap := hG.subtrees
-  simp [subtreeFails] at hmap
-  exact subtreeEntry_not_one D t hne hone (hmap t (templateOf_mem D name t ht).1)
+  have hmap : subtreeFails D = [] := hG.subtrees
+  unfold subtreeFails at hmap
+  have hleft : (D.templates.filterMap (subtreeEntry D)) = [] :=
+    (List.append_eq_nil_iff.mp hmap).1
+  have hent : subtreeEntry D t = none :=
+    filterMap_mem_none (subtreeEntry D) D.templates t hleft (templateOf_mem D name t ht).1
+  exact subtreeEntry_not_one D t hne hone hent
 
 theorem fold_cell_roster (reader : InstId) (labels : List String) (w : World) :
     ((labels.foldl (fun w label =>
@@ -2705,7 +2473,7 @@ theorem init_bit (I : Impl) (hG : GraphOk I.desc) (N : Nat) (template : String) 
 
 /-- Every initial core is alive, idle, and holding exactly its send budget. -/
 theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorld I N) := by
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · simpa [init_roster] using coreRoster_nodup I.desc hG
   · intro id hl
     rw [init_base_st] at hl
@@ -2779,20 +2547,20 @@ theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorl
         (fun id _ => init_box I N id)
       rw [hzero, Int.natCast_zero, Int.add_zero]
       exact init_tokens I hG N (.core name) hmem d
-    · intro _name _key d _hnone
-      have hzero : queuedFromKey (initWorld I N) _name _key d = 0 := by
+    · intro name key d _hnone
+      have hzero : queuedFromKey (initWorld I N) name key d = 0 := by
         unfold queuedFromKey
-        suffices ∀ ids n,
-            ids.foldl (fun n host =>
+        suffices ∀ (ids : List InstId) (n : Nat),
+            List.foldl (fun n host =>
               if tname host != d then n
               else n + (((initWorld I N).st host).box.filter fun m =>
                 match m.sender with
-                | .peer s k _ => s == _name && k == _key
+                | .peer s k _ => s == name && k == key
                 | .core _ => false).length +
                 (((initWorld I N).st host).parked.filter fun p =>
                   match p.msg.sender with
-                  | .peer s k _ => s == _name && k == _key
-                  | .core _ => false).length) n = n by
+                  | .peer s k _ => s == name && k == key
+                  | .core _ => false).length) n ids = n by
           exact this (initWorld I N).roster 0
         intro ids
         induction ids with
@@ -2821,13 +2589,14 @@ theorem occ_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : OccInv I (initWorl
     rw [hhold, init_tokens I hG N id hs]
     exact Int.ofNat_le.mpr (floor_le_budget I.desc (tname id) ((initWorld I N).st id).typestate d)
   · intro s d hs _hterm
-    exact owed_zero_of_empty (initWorld I N).st d s (initWorld I N).roster (fun id _ => init_box I N id)
+    have h0 := owed_zero_of_empty (initWorld I N).st d s (initWorld I N).roster
+      (fun id _ => init_box I N id)
+    rw [h0]
+    exact Nat.zero_le _
   · intro _hcrash s d hs _hdead
     rw [owed_zero_of_empty (initWorld I N).st d s (initWorld I N).roster (fun id _ => init_box I N id),
       Int.natCast_zero]
     exact Int.natCast_nonneg _
-  · intro _hcrash id _hl1
-    exact (init_box I N id).2
   · intro _hcrash id _hdead
     exact init_box I N id
   · intro host
@@ -2884,7 +2653,7 @@ theorem occ_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I 
     OccInv I (setActor w id a) := by
   have hst : (setActor w id a).st = fun i => if i = id then a else w.st i := rfl
   have hr : (setActor w id a).roster = w.roster := rfl
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hr]
     exact hO.nodup
   · intro i hl
@@ -3015,14 +2784,6 @@ theorem occ_set (I : Impl) (w : World) (id : InstId) (a : Actor) (hO : OccInv I 
       simpa [setActor] using howed
     rw [heq]
     exact hO.quiet hc s d hs0 hdead0
-  · intro hcrash i hl1
-    have hc : w.crashed = false := by simpa [setActor] using hcrash
-    by_cases hi : i = id
-    · rw [hi] at hl1 ⊢
-      rw [setActor_self, hpark]
-      exact hO.clear hc id hl1
-    · rw [setActor_other w id i a hi]
-      exact hO.clear hc i hl1
   · intro hcrash i hdead
     have hc : w.crashed = false := by simpa [setActor] using hcrash
     by_cases hi : i = id
@@ -3082,7 +2843,10 @@ theorem proceed_pending (a : Actor) (k : Cont) (d : String)
   | nil =>
     rcases h with hp | hp <;> simp [contRest, hk, hp, sendsTo]
   | cons _ _ =>
-    rcases h with hp | hp <;> simp [contRest, hk, hp]
+    rcases h with hp | hp
+    · simp [contRest, hk, hp]
+    · simp [contRest, hk, hp]
+      exact Nat.le_max_left _ _
 
 theorem owed_append_other (st : InstId → Actor) (dstName : String) (s dst : InstId) (msg : Msg)
     (roster : List InstId) (nodup : roster.Nodup) (hmem : dst ∈ roster) (hname : tname dst = dstName)
@@ -3980,10 +3744,8 @@ theorem occ_consume (I : Impl) (w w1 : World) (id sender : InstId) (a1 : Actor) 
     (hkeyB : ∀ m ∈ a1.box, queueOk w m.sender id)
     (hkeyP : ∀ p ∈ a1.parked, queueOk w p.sender id)
     (hdeadQ : a1.life ≠ .alive → a1.box = [] ∧ a1.parked = [])
-    (hfromB : peerKey id = none → ∀ m ∈ a1.box,
-      peerKey m.sender = none ∨ terminableB I.desc (tname m.sender) = false)
-    (hfromP : peerKey id = none → ∀ p ∈ a1.parked,
-      peerKey p.sender = none ∨ terminableB I.desc (tname p.sender) = false) :
+    (hfromB : peerKey id = none → ∀ m ∈ a1.box, coreSender I.desc m.sender)
+    (hfromP : peerKey id = none → ∀ p ∈ a1.parked, coreSender I.desc p.sender) :
     OccInv I (creditSender (setActor w1 id a1) (tname id) sender) := by
   let wF := creditSender (setActor w1 id a1) (tname id) sender
   suffices OccInv I wF by simpa [wF] using this
@@ -4815,10 +4577,8 @@ theorem occ_pay (I : Impl) (w w' : World) (sender : InstId) (name : String) (hO 
       (∀ m ∈ (w'.st host).box, queueOk w m.sender host) ∧
       (∀ p ∈ (w'.st host).parked, queueOk w p.sender host))
     (hfrom : ∀ host, peerKey host = none →
-      (∀ m ∈ (w'.st host).box,
-        peerKey m.sender = none ∨ terminableB I.desc (tname m.sender) = false) ∧
-      (∀ p ∈ (w'.st host).parked,
-        peerKey p.sender = none ∨ terminableB I.desc (tname p.sender) = false)) :
+      (∀ m ∈ (w'.st host).box, coreSender I.desc m.sender) ∧
+      (∀ p ∈ (w'.st host).parked, coreSender I.desc p.sender)) :
     OccInv I w' := by
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [hrost]; exact hO.nodup
@@ -5268,10 +5028,8 @@ theorem occ_one (I : Impl) (w : World) (sender : InstId) (aS : Actor) (name : St
     (hkeyB : ∀ m ∈ aS.box, queueOk w m.sender sender)
     (hkeyP : ∀ p ∈ aS.parked, queueOk w p.sender sender)
     (hdeadA : aS.life ≠ .alive → aS.box = [] ∧ aS.parked = [])
-    (hfromB : peerKey sender = none → ∀ m ∈ aS.box,
-      peerKey m.sender = none ∨ terminableB I.desc (tname m.sender) = false)
-    (hfromP : peerKey sender = none → ∀ p ∈ aS.parked,
-      peerKey p.sender = none ∨ terminableB I.desc (tname p.sender) = false) :
+    (hfromB : peerKey sender = none → ∀ m ∈ aS.box, coreSender I.desc m.sender)
+    (hfromP : peerKey sender = none → ∀ p ∈ aS.parked, coreSender I.desc p.sender) :
     OccInv I (setActor w sender aS) := by
   let w' := setActor w sender aS
   suffices OccInv I w' by simpa [w'] using this
@@ -5716,11 +5474,11 @@ theorem occ_two (I : Impl) (w : World) (sender dst : InstId) (aS aD : Actor) (na
     (hdeadS : aS.life ≠ .alive → aS.box = [] ∧ aS.parked = [])
     (hdeadD : aD.life ≠ .alive → aD.box = [] ∧ aD.parked = [])
     (hfromS : peerKey sender = none →
-      (∀ m ∈ aS.box, peerKey m.sender = none ∨ terminableB I.desc (tname m.sender) = false) ∧
-      (∀ p ∈ aS.parked, peerKey p.sender = none ∨ terminableB I.desc (tname p.sender) = false))
+      (∀ m ∈ aS.box, coreSender I.desc m.sender) ∧
+      (∀ p ∈ aS.parked, coreSender I.desc p.sender))
     (hfromD : peerKey dst = none →
-      (∀ m ∈ aD.box, peerKey m.sender = none ∨ terminableB I.desc (tname m.sender) = false) ∧
-      (∀ p ∈ aD.parked, peerKey p.sender = none ∨ terminableB I.desc (tname p.sender) = false)) :
+      (∀ m ∈ aD.box, coreSender I.desc m.sender) ∧
+      (∀ p ∈ aD.parked, coreSender I.desc p.sender)) :
     OccInv I (setActor (setActor w dst aD) sender aS) := by
   let w' := setActor (setActor w dst aD) sender aS
   suffices OccInv I w' by simpa [w'] using this
@@ -5999,8 +5757,7 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk I.desc w.N dst)
     (hagree : keyAgrees sender dst)
-    (hcore : peerKey dst = none →
-      peerKey sender = none ∨ terminableB I.desc (tname sender) = false) :
+    (hcore : peerKey dst = none → coreSender I.desc sender) :
     OccInv I (enqueueOrPark w I.desc sender dst msg true (afterHead k)) := by
   have hmem := hO.aliveIn sender hsender
   have hdst := hO.aliveIn dst hlive
@@ -6121,9 +5878,7 @@ theorem occ_other_call (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
       simp [List.mem_append] at hm'
       rcases hm' with hm' | hm'
       · exact (hO.coreFrom dst hk).1 m hm'
-      · rcases hcore hk with hpk | hterm
-        · exact Or.inl (by simpa [hm', hmsg] using hpk)
-        · exact Or.inr (by simpa [hm', hmsg] using hterm)
+      · simpa [hm', hmsg] using hcore hk
     · intro p hp
       have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
       exact (hO.coreFrom dst hk).2 p hp'
@@ -6138,8 +5893,7 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
     (hne : sender ≠ dst) (hlive : (w.st dst).life = .alive) (hpark : (w.st dst).parked = [])
     (hcap : (w.st dst).box.length < capBulk I.desc w.N dst)
     (hagree : keyAgrees sender dst)
-    (hcore : peerKey dst = none →
-      peerKey sender = none ∨ terminableB I.desc (tname sender) = false) :
+    (hcore : peerKey dst = none → coreSender I.desc sender) :
     OccInv I (enqueueOrPark w I.desc sender dst msg false (afterHead k)) := by
   have hmem := hO.aliveIn sender hsender
   have hdst := hO.aliveIn dst hlive
@@ -6265,9 +6019,7 @@ theorem occ_other_send (I : Impl) (w : World) (sender dst : InstId) (msg : Msg) 
       simp [List.mem_append] at hm'
       rcases hm' with hm' | hm'
       · exact (hO.coreFrom dst hk).1 m hm'
-      · rcases hcore hk with hpk | hterm
-        · exact Or.inl (by simpa [hm', hmsg] using hpk)
-        · exact Or.inr (by simpa [hm', hmsg] using hterm)
+      · simpa [hm', hmsg] using hcore hk
     · intro p hp
       have hp' : p ∈ (w.st dst).parked := by simpa [aD] using hp
       exact (hO.coreFrom dst hk).2 p hp'
@@ -6280,8 +6032,7 @@ theorem occ_other_park (I : Impl) (hL : LocalOk I) (w : World) (sender dst : Ins
     (hnot : ¬ loneTerminableName I.desc (tname sender)) (hne : sender ≠ dst)
     (hlive : (w.st dst).life = .alive)     (hagree : keyAgrees sender dst)
     (hroom : ¬ ((w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk I.desc w.N dst))
-    (hcore : peerKey dst = none →
-      peerKey sender = none ∨ terminableB I.desc (tname sender) = false) :
+    (hcore : peerKey dst = none → coreSender I.desc sender) :
     OccInv I (enqueueOrPark w I.desc sender dst msg isCall (afterHead k)) := by
   have hmem := hO.aliveIn sender hsender
   have hdst := hO.aliveIn dst hlive
@@ -6404,9 +6155,7 @@ theorem occ_other_park (I : Impl) (hL : LocalOk I) (w : World) (sender dst : Ins
       simp [List.mem_append] at hp'
       rcases hp' with hp' | hp'
       · exact (hO.coreFrom dst hk).2 p hp'
-      · rcases hcore hk with hpk | hterm
-        · exact Or.inl (by simp [hp', entry, hmsg, hpk])
-        · exact Or.inr (by simp [hp', entry, hmsg, hterm])
+      · simpa [hp', entry, hmsg] using hcore hk
 
 /-- A blocking send or call. The target is charged for when it is alive.
 On a Lemma-1 mailbox the park branch contradicts the occupancy invariant. -/
@@ -6443,7 +6192,8 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
               · exact Or.inl h
               · exact Or.inr (Or.inl h))
             hmsg hty hsender hnot hsame hlive hroom.1 hroom.2 hagree
-            (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive) hbulk
+            (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive)
+              (hO.aliveIn sender hsender) hbulk
               ⟨label, hint, by
                 rcases he with h | h
                 · exact Or.inl h
@@ -6451,7 +6201,8 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
         | true =>
           exact occ_other_call I w sender dst msg k e es label hint hO hph hk he hmsg hsender hnot
             hsame hlive hroom.1 hroom.2 hagree
-            (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive) hbulk
+            (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive)
+              (hO.aliveIn sender hsender) hbulk
               ⟨label, hint, by
                 rcases he with h | h
                 · exact Or.inl h
@@ -6462,7 +6213,8 @@ theorem occ_enqueue (I : Impl) (hL : LocalOk I) (w : World) (sender dst : InstId
           hroom
       · exact occ_other_park I hL w sender dst msg isCall k e es label hint hO hT hph hk he hmsg
           hsender hnot hsame hlive hagree hroom
-          (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive) hbulk
+          (fun hk => core_send_from I w hO sender dst e es (hO.aliveIn dst hlive)
+            (hO.aliveIn sender hsender) hbulk
             ⟨label, hint, by
               rcases he with h | h
               · exact Or.inl h
@@ -7151,7 +6903,7 @@ theorem occ_try (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : Cont)
           hph' rfl (Or.inr (Or.inr ⟨onFull, onGone, he⟩)) rfl hty' hsender hnot hsame hlive hpark hcap
           (route_agrees w I.desc id dstName dst hr)
           (fun hk => core_send_from I w hO id dst (.trySend (tname dst) label hint onFull onGone) es
-            (hO.aliveIn dst hlive) (by simpa [he] using hbulk)
+            (hO.aliveIn dst hlive) (hO.aliveIn id hsender) (by simpa [he] using hbulk)
             ⟨label, hint, Or.inr (Or.inr ⟨onFull, onGone, rfl⟩)⟩ hk)
     · exact occ_advance I w id cont hO hty' hph'
 
