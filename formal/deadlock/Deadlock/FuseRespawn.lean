@@ -263,6 +263,30 @@ theorem cleared_short :
         (bornActor fuseD cleared "C" 0 "Idle").tokens "H") := by
   decide
 
+theorem cleared_flight : mailInFlight cleared cId = true := rfl
+
+theorem cleared_parent : (cleared.st cId).parent = some pId := rfl
+
+theorem cleared_no_tomb : ¬ HoldsTomb cleared pId cId := by
+  intro h
+  rcases h with ⟨_, hm, _, _⟩
+  simp [cleared] at hm
+
+/-- The parent's lane no longer holds the dead child's tombstone, while the
+child's mail is still at the live sibling. A real receive cannot take that
+tombstone (`cleared_spawn`); this edit is outside the tombstone chain. -/
+theorem cleared_not_chain : ¬ TombChain cleared := by
+  intro h
+  have hstep := h cId cleared_not_crashed cleared_dead_gen.1 cleared_flight
+  rw [cleared_parent] at hstep
+  simp at hstep
+  rcases hstep with ⟨_, htomb⟩ | hdead
+  · exact cleared_no_tomb htomb
+  · exact hdead.1 cleared_parent_alive
+
+theorem cleared_not_inv : ¬ Inv fuseI cleared :=
+  fun h => cleared_not_chain h.seal.chain
+
 theorem cleared_installed_tokens :
     ((admitBorn fuseI cleared cNext
         { bornActor fuseD cleared "C" 0 "Idle" with parent := some pId }).st cNext).tokens "H" = 0 ∧
