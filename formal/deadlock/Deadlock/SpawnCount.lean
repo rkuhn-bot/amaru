@@ -19,12 +19,13 @@ set_option autoImplicit false
 
 namespace Deadlock
 
-/-! A pool admit at `aliveCount = N`.
+/-! A pool admit past `N`, and the live-debt sum that bound was protecting.
 
-`W` has two slots under core `C`. `N = 1`. The `Go` program spawns `W`
-twice and does not abort. The first exec admits generation 0. `aliveCount`
-is then `N`, and the second exec admits generation 1 anyway. Both stay
-alive, and the world has not crashed. -/
+`N` is the root population. `W` is a core-supervised pool of two slots, so
+its population is `slots`, not `N`. At `N = 1` the `Go` program spawns `W`
+twice. Both children stay alive. Each idle child owes one self-ingress, so
+the live sum into `W` is 2 while `(totalOcc "W").eval 1` is 1 and Lemma 1
+holds. Each child's own token reserve still fits. -/
 
 private def base (name : String) : Template where
   name := name
@@ -165,6 +166,29 @@ theorem count_at_bound : countAt countFirst 1 false = true := by
 
 /-- The next exec admits another generation. The count is no longer below `N`. -/
 theorem count_past_bound : countAt countActs 2 true = true := by
+  decide
+
+/-- Live per-instance debt summed over both children, against the affine total.
+Each child's own tokens still cover `tokenHold`. Lemma 1 holds for `W`. -/
+private def countSum : Bool :=
+  match countRun countActs with
+  | none => false
+  | some w =>
+    let owed := debt countDesc "W" (w.st countW0).typestate "W" +
+      debt countDesc "W" (w.st countW1).typestate "W"
+    let bound := (totalOcc countDesc "W").eval w.N
+    decide (owed = 2) && decide (bound = 1) && decide (bound < owed) &&
+      decide (l1 countDesc "W" = true) &&
+      decide (capBulk countDesc w.N countW0 = 1) &&
+      decide (budget countDesc "W" "W" = 1) &&
+      decide ((w.st countW0).tokens "W" = 1) &&
+      decide ((w.st countW1).tokens "W" = 1) &&
+      decide (queuedFromKey w "W" 0 "W" = 0) &&
+      decide (queuedFromKey w "W" 1 "W" = 0) &&
+      decide (tokenHold countDesc "W" "W" (w.st countW0) = 0) &&
+      decide (tokenHold countDesc "W" "W" (w.st countW1) = 0)
+
+theorem count_live_sum : countSum = true := by
   decide
 
 end Deadlock

@@ -909,13 +909,23 @@ queued message names it, and one extra roster slot does not reveal a new
 descent among the ids that were already present. A child is born under a
 live parent, or under none.
 
-## 2026-11-22 — A pool admits a second child at the population bound
+## 2026-11-22 — A pool's live count is not `N`
 
-`aliveCount ≤ N` is not kept by a pool spawn. `Deadlock/SpawnCount.lean` is
-a graph that passes `checkBool` and `localOkB`. Core `C` runs `spawn W`
-twice, with no abort, at `N = 1`. `W` has two slots. Ingress, deliver, and
-the first exec admit `peer W 0 0`, and `aliveCount` of `W` is `1`. The next
-exec admits `peer W 1 0`. Both are alive and the world has not crashed, so
-the count is `2`. The spawn does not consult `N`. This blocks the
-respawn-occupancy proof: the second admit is reachable, and `aliveCount < N`
-does not hold.
+`N` is the root population. A per-peer root with `slots = 0` has `N`
+instances. A core-supervised pool has `slots` instances. `OccInv.livePeer`
+asks every per-peer template for `aliveCount ≤ N`, and the live-debt sum
+uses that to stay under `occupancy.eval N`.
+
+`Deadlock/SpawnCount.lean` passes `checkBool` and `localOkB`. At `N = 1`,
+`W` has two slots and the core spawns it twice with no abort. Both children
+are alive. Each idle child has debt 1 toward `W`, so the live sum is 2.
+`(totalOcc "W").eval 1` is 1, and Lemma 1 holds. Each child's tokens are 1
+and its `tokenHold` is 0, so the per-key reserve fits. The template-wide
+live sum does not. The checker still multiplies a per-peer edge by `N`.
+
+The population rule already says a pool counts as `slots`. The step relation
+is left as it is. Closing the sum is a checker change: a pool edge pays for
+its slot count, and the live bound follows `population`. Refusing the birth
+past `N` would be a step change, and a pool could not reach `slots` when
+`slots > N`. A static ban that holds for every `N` is that same accounting,
+or it forbids pools.
