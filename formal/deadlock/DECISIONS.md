@@ -685,3 +685,23 @@ to the incarnation that holds the budget. Crediting the raw sender, after
 that sender is dead, would leave the token on an actor the account does not
 add, and the live equation would drop by one. The occupancy proof follows
 `creditLive`. It does not change the step.
+
+## 2026-11-22 — A crash keeps the queued mail inside the budget
+
+`crashWorld` kills every alive roster actor and leaves every mailbox as it
+was. The world is then crashed, so `quiet` and `deadEmpty` are not claimed.
+A key that had a live generation loses that equation. The mail stays in
+`queuedFromKey`, and it is still at most the budget: the live holder had
+nonnegative tokens, because its `tokenHold` was a natural number bounded by
+those tokens. A key that already had no live generation keeps the inequality
+it had.
+
+## 2026-11-22 — A call resume does not raise the reserve
+
+`resumeSender` on a call park moves to `awaitReply`. On a plain park it
+`proceed`s. `tokenHold` of `awaitReply` includes the timed-out program, so
+resuming a non-call park as a call can raise the reserve. While the sender
+is alive, `MailInv.fwd` says the parked flag is the phase's flag, so that
+resume does not occur. A resume that is not a call never raises `tokenHold`.
+The occupancy step takes that side condition. It does not change
+`resumeSender`.
