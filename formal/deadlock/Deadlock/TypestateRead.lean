@@ -1334,12 +1334,12 @@ theorem performReply_mask (w : World) (sender : InstId) (k : Cont) :
       · exact mask_set_proceed w sender (w.st sender) (afterHead k)
     · exact mask_set_proceed w sender (w.st sender) (afterHead k)
 
-theorem route_mask (w : World) (D : Description) (sender : InstId) (dst : String) (slot : Nat) :
-    route (maskWorld w) D sender dst slot = route w D sender dst slot := by
+theorem route_mask (w : World) (D : Description) (sender : InstId) (dst : String) :
+    route (maskWorld w) D sender dst = route w D sender dst := by
   simp [route, maskWorld_st, maskActor_life, findLive_mask]
 
-theorem resolve_mask (D : Description) (w : World) (sender : InstId) (dst : String) (slot : Nat) :
-    resolveId D (maskWorld w) sender dst slot = resolveId D w sender dst slot := by
+theorem resolve_mask (D : Description) (w : World) (sender : InstId) (dst : String) :
+    resolveId D (maskWorld w) sender dst = resolveId D w sender dst := by
   simp [resolveId, findLive_mask]
 
 theorem queued_mask (w : World) (name : String) (key : Nat) (dst : String) :

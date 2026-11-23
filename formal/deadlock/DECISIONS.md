@@ -449,11 +449,12 @@ the tombstone therefore runs when the in-flight set is already empty, and
 the spawn in that handler is not refused for mail. The sender set is the
 dead stage and its recorded descendants, which is who was sealed in that
 termination. A sibling's tombstone, and mail from a live sibling, do not
-hold this slot. `child_sub_respawn_enabled` and `pool_sub_respawn_enabled`
-are that birth, for a per-peer child and for a pool child.
-`guards_child_respawn_enabled` and `guards_pool_respawn_enabled` are the
-same when the mail sits on a core and the spawn is the supervisor's later
-step, once the tombstone has been received. The one-script refusals
+hold this slot. `child_sub_respawn_enabled` is that birth for a per-peer
+child. `guards_child_respawn_enabled` is the same when the mail sits on a
+core and the spawn is the supervisor's later step, once the tombstone has
+been received. The pool witnesses `pool_sub_respawn_enabled` and
+`guards_pool_respawn_enabled` described a core pool and were removed with
+pools. The one-script refusals
 `child_sub_refused` and `pool_sub_refused` do not survive. They showed a
 permanent drop under the old no-op, and they must not be cited as closing
 that class (N49).
@@ -940,10 +941,19 @@ terminated, never restarted, and unsupervised. Nothing dynamic remains, so
 they are ten fixed stages. No description in `examples/*.json`,
 `Deadlock/Examples.lean`, or an exporter names `slots > 0`, and none names
 those workers, so the model does not invent ten core templates for them.
-An accept stage, one per listen address, is static at startup and would be
-a core. None is modelled. A connection stage is already one scheduler root
-per key. Every per-peer parent spawns at most one child per template, so
-that child covers the connection subtree.
+An accept stage is one per listen address, and it is not static. It
+terminates on `AcceptError::Other`, the manager supervises it with the
+tombstone `Listen(addr)`, and that handler spawns a new accept. The model
+does not express that restart. Written as a core, the terminate crashes the
+node, and a crashed world is not explored further. The restart is not added
+to the model. Production is to stop terminating on `AcceptError::Other` and
+to drop the `Listen(addr)` respawn. That change is pending in
+`RUST-CHANGES.md`. A connection stage is
+already one scheduler root per key. A per-peer parent births one child of
+each template at its own key. A done-trap is the exception: the connection
+spawns one on every expected stop, and those traps stay alive together under
+that connection. A done-trap sends nothing. Its only effect is terminate,
+which tears the connection down, so it does not matter for deadlock.
 
 `Template` no longer has `slots`. `spawnChild` on a core is `none`, and
 `spawnScope` rejects a core's `Eff.spawn`. A per-peer parent still births

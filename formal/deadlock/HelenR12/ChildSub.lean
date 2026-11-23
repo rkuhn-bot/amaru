@@ -58,7 +58,7 @@ def churn (g : Nat) : List Action :=
 def last : List Action := [.ingress (Xg 4) "Go", .recvBulk (Xg 4), .exec (Xg 4)]
 def fin : List Action := [.recvBulk B0, .exec B0, .recvBulk A0, .exec (Xg 4), .exec A0]
 def acts : List Action := boot ++ churn 0 ++ churn 1 ++ churn 2 ++ churn 3 ++ last ++ fin
-def lifeTag (l : Life) : Nat := match l with | .absent => 0 | .alive => 1 | .shuttingDown => 2 | .dead => 3
+def lifeTag (l : Life) : Nat := match l with | .absent => 0 | .alive => 1 | .dead => 2
 def phS (p : Phase) : String :=
   match p with
   | .idle => "idle" | .run _ => "run" | .parked d _ _ => s!"parked→{tname d}" | .awaitReply _ _ => "await"
@@ -78,7 +78,7 @@ def snap (w : World) :=
 
 def seal0 : List Action := boot ++
   [.ingress (Xg 0) "Go", .recvBulk (Xg 0), .exec (Xg 0), .exec (Xg 0),
-   .ingress (Xg 0) "Go", .recvBulk (Xg 0), .exec (Xg 0), .exec (Xg 0)]
+   .ingress (Xg 0) "Go", .recvBulk (Xg 0), .exec (Xg 0)]
 def drainX : List Action :=
   [.recvBulk A0, .exec A0, .recvBulk A0, .recvBulk B0, .exec B0, .recvBulk B0]
 

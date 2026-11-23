@@ -7,7 +7,7 @@ open Deadlock Deadlock.Outlive
 /-! Per-peer child C under root R. A descendant mails core H. The
 supervisor's tombstone stays queued until H takes that mail. The following
 spawn then births the next generation. -/
-def lifeTag (l : Life) : Nat := match l with | .absent => 0 | .alive => 1 | .shuttingDown => 2 | .dead => 3
+def lifeTag (l : Life) : Nat := match l with | .absent => 0 | .alive => 1 | .dead => 2
 def st (t f l to : String) : CompatStep := { template := t, fromState := f, toState := to, label := l }
 def ingA (t s l : String) : Edge := { go t s with label := l, occupancy := { a := 1, b := 0 } }
 def ingB (t s l : String) : Edge := { go t s with label := l, occupancy := { a := 0, b := 1 } }
@@ -61,7 +61,7 @@ def sealA : List Action :=
   [.spawn "R", .ingress (P "R" 0) "Go", .recvBulk (P "R" 0), .exec (P "R" 0),
    .ingress (P "C" 0) "Go", .recvBulk (P "C" 0), .exec (P "C" 0),
    .ingress (P "X" 0) "Go", .recvBulk (P "X" 0), .exec (P "X" 0),
-   .ingress (P "C" 0) "Go", .recvBulk (P "C" 0), .exec (P "C" 0), .exec (P "C" 0)]
+   .ingress (P "C" 0) "Go", .recvBulk (P "C" 0), .exec (P "C" 0)]
 def readyA : List Action := sealA ++ [.recvBulk Hc, .recvPrio (P "R" 0)]
 def bornA : List Action :=
   readyA ++ [.ingress (P "R" 0) "Go", .recvBulk (P "R" 0), .exec (P "R" 0)]

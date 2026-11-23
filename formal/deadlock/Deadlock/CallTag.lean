@@ -9274,7 +9274,7 @@ theorem call_member_iff (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : N
           · by_cases hname : subtreeMemberName I.desc (tname who)
             · have hbulk : bulkScopeOf I.desc (tname who) (.call dst label hint :: tail) = true := by
                 simpa [contRest, hph, hrest] using hInv.2.2.2 who
-              have hok := member_effect_of_scope I.desc (tname who)
+              have hok := member_effect_of_scope I.desc hG (tname who)
                 (.call dst label hint) tail hname hbulk
               have hscope : (sameSubtree I.desc (tname who) dst && perPeerB I.desc dst) = true := by
                 simpa [memberEffectOk] using hok

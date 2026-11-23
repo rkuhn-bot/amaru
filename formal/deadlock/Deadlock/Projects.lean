@@ -1003,7 +1003,7 @@ theorem exec_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w : World)
   | cons e es =>
     cases e with
     | send d l n =>
-      cases hr : route w I.desc id d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact good_frame hG (frame_trans (frame_note w id d) (hproc _ _ rfl hty'))
@@ -1024,7 +1024,7 @@ theorem exec_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w : World)
         · rw [proceed_writes]
           simp only [k', picked]
           exact hn
-      cases hr : route w I.desc id d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         let k' := picked (afterHead k) g (afterHead k).toGone
@@ -1045,7 +1045,7 @@ theorem exec_good (I : Impl) (hL : LocalOk I) (hGr : GraphOk I.desc) (w : World)
           · exact hset g (afterHead k).toGone hgoneN
     | call d l n na to =>
       have hsrcC := src_lists I id (w.st id) (afterHead k) na to (afterHead k).onTimeout hsrcA
-      cases hr : resolveId I.desc w id d n with
+      cases hr : resolveId I.desc w id d with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         let kC := ({ afterHead k with onNotAdmitted := na, onTimedOut := to } : Cont)

@@ -770,8 +770,7 @@ def newerGeneration (w : World) (m : Msg) : Bool :=
 
 /-- The instance a name denotes, whether or not it is alive. A per-peer role
 uses the sender's subtree key. A missing template does not resolve. -/
-def resolveId (D : Description) (w : World) (sender : InstId) (dst : String)
-    (_slot : Nat := 0) : Option InstId :=
+def resolveId (D : Description) (w : World) (sender : InstId) (dst : String) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
@@ -787,8 +786,7 @@ def resolveId (D : Description) (w : World) (sender : InstId) (dst : String)
 
 /-- A live target only. A per-peer role is the live occupant of the sender's
 subtree key. Dead and never-spawned targets do not resolve. -/
-def route (w : World) (D : Description) (sender : InstId) (dst : String)
-    (_slot : Nat := 0) : Option InstId :=
+def route (w : World) (D : Description) (sender : InstId) (dst : String) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
@@ -1462,6 +1460,27 @@ structure ParentForest (w : World) : Prop where
   off : ∀ id, id ∉ w.roster → (w.st id).parent = none
   hosted : ∀ id p, (w.st id).parent = some p → p ∈ w.roster
 
+/-- A roster actor was wired by the supervisor its template names.
+An unsupervised actor has no parent. A per-peer supervisor is the
+incarnation at that actor's own key. A core supervisor carries no key. -/
+def Parented (D : Description) (w : World) : Prop :=
+  ∀ id t, id ∈ w.roster → templateOf D (tname id) = some t →
+    match t.supervisor with
+    | none => (w.st id).parent = none
+    | some name => ∃ p, (w.st id).parent = some p ∧ tname p = name ∧
+        match p with
+        | .peer _ k _ => memberKey id = some k
+        | .core _ => True
+
+/-- A roster actor was born alive and is later dead. Nothing writes `.absent`
+onto the roster. -/
+def Present (w : World) : Prop :=
+  ∀ id, id ∈ w.roster → (w.st id).life ≠ .absent
+
+/-- Bulk mail is program mail. A tombstone is offered on the priority lane. -/
+def PlainBox (w : World) : Prop :=
+  ∀ host m, m ∈ (w.st host).box → m.tombstone = false
+
 /-- A live host does not hold a parked entry whose sender is already dead.
 `releaseOutbound` drops those entries and returns their slots to the sender
 before `releaseWorld` marks that sender dead, so a later step never sees them. -/
@@ -1988,16 +2007,16 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
     | eff :: _ =>
       let k' := afterHead k
       match eff with
-      | .send dst label hint =>
-        match route w I.desc id dst hint with
+      | .send dst label _hint =>
+        match route w I.desc id dst with
         | none => setActor (noteStale w id dst) id (proceed a k')
         | some dstId =>
           let msg : Msg := { label := label, sender := id, callFrom := none }
           enqueueOrPark w I.desc id dstId msg false k'
-      | .trySend dst label hint onFull onGone =>
+      | .trySend dst label _hint onFull onGone =>
         let kFull := { k' with rest := onFull, toState := pickState k'.toState k'.toFull }
         let kGone := { k' with rest := onGone, toState := pickState k'.toState k'.toGone }
-        match route w I.desc id dst hint with
+        match route w I.desc id dst with
         | none => setActor (noteStale w id dst) id (proceed a kGone)
         | some dstId =>
           let target := w.st dstId
@@ -2010,9 +2029,9 @@ def execRun (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) : World 
             setActor w id (proceed a kFull)
           else
             setActor w id (proceed a kGone)
-      | .call dst label hint onNotAdmitted onTimedOut =>
+      | .call dst label _hint onNotAdmitted onTimedOut =>
         let kWait := { k' with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
-        match resolveId I.desc w id dst hint with
+        match resolveId I.desc w id dst with
         | none =>
           -- No such role: the call is not admitted, on its own continuation.
           setActor (noteStale w id dst) id (finishCall (issueCall a) kWait .notAdmitted)
@@ -2879,6 +2898,43 @@ def rootOf (D : Description) (t : Template) : Bool :=
     | some sup => sup.multiplicity == .one
     | none => false
 
+/-- A scheduler root occupies one key for its whole life. A per-peer child
+is born again at its parent's key, so this does not constrain it. -/
+def SingleGen (D : Description) (w : World) : Prop :=
+  ∀ name k g1 g2 t, templateOf D name = some t → rootOf D t = true →
+    InstId.peer name k g1 ∈ w.roster → InstId.peer name k g2 ∈ w.roster →
+    g1 = g2
+
+/-- A recorded parent is a different actor. Birth wires a fresh id to the
+spawner, and no step points an actor at itself. -/
+def NoSelfParent (w : World) : Prop :=
+  ∀ id, (w.st id).parent ≠ some id
+
+/-- An alive generation shares its key with no queued tombstone. The next
+generation is born only after that tombstone is taken, and nothing queues
+it again. -/
+def NoTombWhileLive (w : World) : Prop :=
+  ∀ name k g host m,
+    (w.st (InstId.peer name k g)).life = .alive →
+    (w.st host).life = .alive →
+    m ∈ (w.st host).prio →
+    m.tombstone = true →
+    match m.sender with
+    | .peer n key _ => n = name → key = k → False
+    | .core _ => True
+
+/-- A live child of `parent` keeps that parent's lane free of its tombstone. -/
+def TombFresh (D : Description) (w : World) : Prop :=
+  ∀ parent n k g,
+    let c := InstId.peer n k g
+    c ∈ w.roster →
+    isChild w parent c = true →
+    (w.st c).life = .alive →
+    (match templateOf D n with
+      | some t => t.tombstone != ""
+      | none => false) = true →
+    slotTombstoneQueued w parent n k = false
+
 /-- A core supervisor that is not alive admits no new root. -/
 def supervisorLive (D : Description) (w : World) (t : Template) : Bool :=
   match t.supervisor with
@@ -2955,8 +3011,8 @@ def placePeer (I : Impl) (w : World) (template : String) (k : Nat) (initial : St
 or `nextIx`). The birth is not enabled while `N` roots of this template
 already occupy a population slot. A core-supervised root keeps the slot
 while its tombstone is queued. An unsupervised root keeps it while subtree
-mail remains on a surviving receiver. A later incarnation of a pool slot or
-of a per-peer parent's one child is `spawnChild`, which is a no-op while
+mail remains on a surviving receiver. A later incarnation of a per-peer
+parent's one child is `spawnChild`, which is a no-op while
 `slotRespawnBlocked` holds. -/
 def spawn (I : Impl) (w : World) (template : String) : Option World :=
   match templateOf I.desc template with
@@ -7943,6 +7999,10 @@ private theorem readCells_crashed (D : Description) (w : World) (id : InstId) :
     simp only [List.foldl_cons]
     exact ih _
 
+theorem admitBorn_crashed (I : Impl) (w : World) (id : InstId) (a : Actor) :
+    (admitBorn I w id a).crashed = w.crashed := by
+  simp [admitBorn, setActor_crashed, readCells_crashed]
+
 private theorem releaseOutbound_step_parent (w : World) (dead host i : InstId) :
     ((if host == dead then w
       else
@@ -8465,7 +8525,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
     cases e with
     | send dst label hint =>
       simp [execRun, hliveB, hk] at hl
-      cases hr : route w I.desc id dst hint with
+      cases hr : route w I.desc id dst with
       | none =>
         simp [hr, noteStale] at hl
         have hset := set_core_life w id (proceed a (afterHead k)) name (by simp [proceed_keeps_life, ha])
@@ -8475,7 +8535,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
         exact (enqueue_core_life w I.desc id dstId _ false (afterHead k) name).symm.trans hl
     | trySend dst label hint onFull onGone =>
       simp [execRun, hliveB, hk] at hl
-      cases hr : route w I.desc id dst hint with
+      cases hr : route w I.desc id dst with
       | none =>
         simp [hr, noteStale] at hl
         let goneK := { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone }
@@ -8494,7 +8554,7 @@ theorem exec_core_alive_prev (I : Impl) (w : World) (id : InstId) (a : Actor) (k
             exact hset.symm.trans hl
     | call dst label hint onNotAdmitted onTimedOut =>
       simp [execRun, hliveB, hk] at hl
-      cases hr : resolveId I.desc w id dst hint with
+      cases hr : resolveId I.desc w id dst with
       | none =>
         simp [hr, noteStale] at hl
         have hset := set_core_life (noteStale w id dst) id

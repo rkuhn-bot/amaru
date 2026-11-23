@@ -88,6 +88,20 @@ def effTerminates : Eff → Bool
 end
 
 mutual
+/-- A program contains `Eff.spawn`, including inside an outcome continuation. -/
+def hasSpawn : List Eff → Bool
+  | [] => false
+  | e :: es => effSpawns e || hasSpawn es
+
+def effSpawns : Eff → Bool
+  | .spawn _ => true
+  | .trySend _ _ _ onFull onGone => hasSpawn onFull || hasSpawn onGone
+  | .call _ _ _ onNotAdmitted onTimedOut => hasSpawn onNotAdmitted || hasSpawn onTimedOut
+  | .peer onTimeout => hasSpawn onTimeout
+  | _ => false
+end
+
+mutual
 /-- A terminable program must not leave a reliable message behind. `send`,
 `trySend`, and `call` are bulk; `selfSchedule` is a reliable priority message
 that `terminate` would clear. -/
@@ -149,6 +163,12 @@ def spawnScopeFuel (D : Description) (src : String) : Nat → List Eff → Bool
 /-- `Eff.spawn` names a per-peer child this template supervises. -/
 def spawnScope (D : Description) (src : String) (es : List Eff) : Bool :=
   spawnScopeFuel D src 64 es
+
+/-- A core's program spawns. A core has population one and cannot birth a child. -/
+def coreSpawns (D : Description) (src : String) (es : List Eff) : Bool :=
+  match templateOf D src with
+  | some t => t.multiplicity == .one && hasSpawn es
+  | none => false
 
 def spawnEffect (D : Description) (src : String) (e : Eff) : Bool :=
   spawnScopeFuel D src 64 [e]
@@ -303,8 +323,7 @@ def labelHandled (I : Impl) : Bool :=
 /-- A reliable send or call leaves the sender's subtree only toward a core.
 A core's `terminate` crashes the node, so the sender is not left running
 against a target that shut down. Inside the subtree the target may be a
-terminable member: the subtree kill credits or fails that message. A pool
-child of the calling core is the same refund. -/
+terminable member: the subtree kill credits or fails that message. -/
 def permanentTarget (I : Impl) : Bool :=
   I.desc.edges.all fun e =>
     if (e.effect == .send || e.effect == .call) && e.reliability == .reliable then
@@ -643,6 +662,8 @@ def transitionIssues (I : Impl) (tr : Transition) : List String :=
         stateNamed t tr.toTimeout && stateNamed t tr.toFull && stateNamed t tr.toGone then []
      else [s!"fail: transition {tr.template} [{tr.label}] names an outcome state the template does not declare"]) ++
     (if spawnScope I.desc tr.template tr.program then []
+     else if coreSpawns I.desc tr.template tr.program then
+       [s!"fail: transition {tr.template} [{tr.label}] spawns, and a core cannot spawn"]
      else [s!"fail: transition {tr.template} [{tr.label}] spawns a stage it does not supervise"]) ++
     (if hasTerminate tr.program && !(t.multiplicity == .one || t.terminable) then
       [s!"fail: transition {tr.template} [{tr.label}] terminates, and {tr.template} is not terminable"]

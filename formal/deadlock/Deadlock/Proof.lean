@@ -681,12 +681,12 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
       cases e with
       | send dst label hint =>
         simp only [execRun, hliveB, hk, ite_true]
-        cases hr : route w I.desc id dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [setActor, hs, hp]
         | some dstId => exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
       | trySend dst label hint onFull onGone =>
         simp only [execRun, hliveB, hk, ite_true]
-        cases hr : route w I.desc id dst hint with
+        cases hr : route w I.desc id dst with
         | none => simp [setActor, hs, hp]
         | some dstId =>
           dsimp only
@@ -695,7 +695,7 @@ theorem execRun_preserves_other_run (I : Impl) (w : World) (id : InstId) (a : Ac
           · split <;> simp [setActor, hs, hp]
       | call dst label hint onNotAdmitted onTimedOut =>
         simp only [execRun, hliveB, hk, ite_true]
-        cases hr : resolveId I.desc w id dst hint with
+        cases hr : resolveId I.desc w id dst with
         | none => simp [setActor, hs, hp]
         | some dstId => exact enqueue_keeps_other_run _ _ _ _ _ _ _ _ _ hp hs
       | reply =>

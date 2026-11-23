@@ -1358,7 +1358,7 @@ theorem mail_pack_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N
   induction hR with
   | init => exact ⟨mail_here_init I N, align_init I N⟩
   | step w w' a hw h ih =>
-    exact mail_pack_step I a w w' ih.1 ih.2 (inv2_reachable I hL hG N w hw).2.2.2 h
+    exact mail_pack_step I hG a w w' ih.1 ih.2 (inv2_reachable I hL hG N w hw).2.2.2 h
 
 theorem mail_here_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : MailHere I.desc w :=

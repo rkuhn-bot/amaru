@@ -47,8 +47,8 @@ theorem findLive_spec (w : World) (name : String) (key : Nat) (id : InstId)
     simp only [Bool.and_eq_true, beq_iff_eq] at hp
     exact ⟨by simp [tname, hp.1.1], hp.2⟩
 
-theorem route_tname (w : World) (D : Description) (sender : InstId) (dst : String) (slot : Nat)
-    (id : InstId) (h : route w D sender dst slot = some id) : tname id = dst := by
+theorem route_tname (w : World) (D : Description) (sender : InstId) (dst : String)
+    (id : InstId) (h : route w D sender dst = some id) : tname id = dst := by
   unfold route at h
   split at h
   · cases h
@@ -68,8 +68,8 @@ theorem route_tname (w : World) (D : Description) (sender : InstId) (dst : Strin
         simp only [hk] at h
         exact (findLive_spec w dst k id h).1
 
-theorem resolve_tname (D : Description) (w : World) (sender : InstId) (dst : String) (slot : Nat)
-    (id : InstId) (h : resolveId D w sender dst slot = some id) : tname id = dst := by
+theorem resolve_tname (D : Description) (w : World) (sender : InstId) (dst : String)
+    (id : InstId) (h : resolveId D w sender dst = some id) : tname id = dst := by
   unfold resolveId at h
   split at h
   · cases h
@@ -5255,7 +5255,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
     cases e with
     | send d l n =>
       have hs := head_send I.desc (tname id) d l (contAt k) n es hpe
-      cases hr : route w I.desc id d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact inv_note I w id d id _
@@ -5264,7 +5264,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
         simp only [execRun, hgo, hk, hr, ite_true]
         exact enqueue_inv I w id dstId _ false (afterHead k) h
           (enqueue_sem I w id dstId _ false (afterHead k) h.1 hty htail
-            ⟨l, by rw [route_tname w I.desc id d n dstId hr, hty]; exact hs.1⟩ ha
+            ⟨l, by rw [route_tname w I.desc id d dstId hr, hty]; exact hs.1⟩ ha
             (fun hc => absurd hc Bool.false_ne_true) (fun hc => absurd hc Bool.false_ne_true))
           hfree ha hsrc (fun hc => absurd hc Bool.false_ne_true) rfl
     | trySend d l n f g =>
@@ -5277,7 +5277,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
           rest := f, toState := pickState (afterHead k).toState (afterHead k).toFull })) :=
         inv_pick I w id (w.st id) (afterHead k) f (afterHead k).toFull h ha hfree ha rfl rfl rfl rfl hsrc
           (Or.inr (Or.inr (Or.inr (Or.inl rfl)))) (by rw [contAt_pick]; exact hs.1) rfl
-      cases hr : route w I.desc id d n with
+      cases hr : route w I.desc id d with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact inv_note I w id d id _ hgone
@@ -5295,7 +5295,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
     | call d l n na to =>
       have hs := head_call I.desc (tname id) d l (contAt k) n na to es hpe
       have hwait := src_lists I id (w.st id) (afterHead k) na to (afterHead k).onTimeout hsrc
-      cases hr : resolveId I.desc w id d n with
+      cases hr : resolveId I.desc w id d with
       | none =>
         simp only [execRun, hgo, hk, hr, ite_true]
         exact inv_note I w id d id _
@@ -5307,7 +5307,7 @@ theorem exec_run_inv (I : Impl) (w : World) (id : InstId) (k : Cont) (h : Inv I 
         simp only [execRun, hgo, hk, hr, ite_true]
         exact enqueue_inv I w id dstId _ true { afterHead k with onNotAdmitted := na, onTimedOut := to } h
           (enqueue_sem_src I w id dstId _ true { afterHead k with onNotAdmitted := na, onTimedOut := to }
-            h.1 hwait htail ⟨l, by rw [resolve_tname I.desc w id d n dstId hr, hty]; exact hs.1⟩ ha
+            h.1 hwait htail ⟨l, by rw [resolve_tname I.desc w id d dstId hr, hty]; exact hs.1⟩ ha
             (fun _ _ => hs.2.1))
           hfree ha hwait (fun _ => ⟨hs.2.1, hs.2.2.1⟩) rfl
     | reply =>

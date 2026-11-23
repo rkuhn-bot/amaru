@@ -7654,7 +7654,7 @@ theorem hold_send (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Acto
   have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
   let k' := afterHead k
   have htail := ContDeclared.after I (tname id) k _ _ hk hdec
-  cases hroute : route w I.desc id dst hint with
+  cases hroute : route w I.desc id dst with
   | none =>
     have hrun : execRun I w id a k = setActor (noteStale w id dst) id (proceed a k') := by
       simp [execRun, hgo, hk, hroute, k']
@@ -7722,7 +7722,7 @@ theorem hold_try (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Actor
   have hphG : id ∈ w.roster → phaseDeclared I (tname id) (proceed a kGone).phase := by
     intro _
     simpa [ha, proceed_resumed, kGone, k'] using resumed_declared I (tname id) _ hG
-  cases hroute : route w I.desc id dst hint with
+  cases hroute : route w I.desc id dst with
   | none =>
     have hrun : execRun I w id a k =
         setActor (noteStale w id dst) id (proceed a kGone) := by
@@ -7808,7 +7808,7 @@ theorem hold_call (I : Impl) (w : World) (hH : Hold I w) (id : InstId) (a : Acto
   let k' := afterHead k
   let kWait := { k' with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
   have hwait := ContDeclared.callWait I (tname id) k dst label hint onNotAdmitted onTimedOut es hk hdec
-  cases hres : resolveId I.desc w id dst hint with
+  cases hres : resolveId I.desc w id dst with
   | none =>
     have hrun : execRun I w id a k =
         setActor (noteStale w id dst) id (finishCall (issueCall a) kWait .notAdmitted) := by
@@ -9773,7 +9773,7 @@ theorem send_frame (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (
   have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
   unfold execRun
   simp only [hgo, hk]
-  cases hr : route w I.desc id dst hint with
+  cases hr : route w I.desc id dst with
   | none =>
     exact frame_trans (note_frame w id dst)
       (frame_keep (noteStale w id dst) id (proceed a (afterHead k))
@@ -9787,7 +9787,7 @@ theorem try_frame (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (d
   have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
   unfold execRun
   simp only [hgo, hk]
-  cases hr : route w I.desc id dst hint with
+  cases hr : route w I.desc id dst with
   | none =>
     exact frame_trans (note_frame w id dst)
       (frame_keep (noteStale w id dst) id (proceed a _) (by simp [ha, proceed_keeps_prio, noteStale]))
@@ -9823,7 +9823,7 @@ theorem call_frame (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) (
   have hgo : (a.life == .alive) = true := (beq_iff_eq).mpr hlive
   unfold execRun
   simp only [hgo, hk]
-  cases hr : resolveId I.desc w id dst hint with
+  cases hr : resolveId I.desc w id dst with
   | none =>
     exact frame_trans (note_frame w id dst)
       (frame_keep (noteStale w id dst) id (finishCall (issueCall a) _ .notAdmitted)
@@ -10586,7 +10586,7 @@ theorem exec_wired (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (a
       | send dst label hint =>
         unfold execRun
         simp only [hgo, hk]
-        cases hr : route w I.desc id dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact wired_stable I.desc w _ hW fun i =>
             (set_parent (noteStale w id dst) id (proceed a (afterHead k)) i
@@ -10599,7 +10599,7 @@ theorem exec_wired (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (a
       | trySend dst label hint onFull onGone =>
         unfold execRun
         simp only [hgo, hk]
-        cases hr : route w I.desc id dst hint with
+        cases hr : route w I.desc id dst with
         | none =>
           exact wired_stable I.desc w _ hW fun i =>
             (set_parent (noteStale w id dst) id (proceed a _) i
@@ -10632,7 +10632,7 @@ theorem exec_wired (I : Impl) (w : World) (hW : Wired I.desc w) (id : InstId) (a
       | call dst label hint onNotAdmitted onTimedOut =>
         unfold execRun
         simp only [hgo, hk]
-        cases hr : resolveId I.desc w id dst hint with
+        cases hr : resolveId I.desc w id dst with
         | none =>
           exact wired_stable I.desc w _ hW fun i =>
             (set_parent (noteStale w id dst) id (finishCall (issueCall a) _ .notAdmitted) i
