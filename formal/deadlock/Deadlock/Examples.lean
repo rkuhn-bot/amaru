@@ -314,4 +314,38 @@ def bareTombDesc : Description where
 theorem bare_tombstone_rejected : subtreeFails bareTombDesc =
     ["fail: reader has a supervisor and no tombstone"] := by decide
 
+/-- A subtree with no unsupervised root. Its only member is supervised by a
+core. `subtreeEntry` allows that: it rejects a second unsupervised root, and
+a multiplicity-one supervisor is in the subtree. -/
+def coreChildDesc : Description where
+  name := "core-child"
+  freshNames := true
+  templates :=
+    [tpl "host" 2 ["idle"] "idle" true,
+     { tpl "worker" 2 ["idle"] "idle" false with
+         multiplicity := .perPeer, terminable := true, subtree := "sub",
+         supervisor := some "host", tombstone := "dead/worker" }]
+  edges := []
+  compatibility := .all
+  steps := []
+
+theorem core_child_passes : render coreChildDesc = "pass" := by decide
+
+/-- A per-peer supervisor that lives outside the subtree. The checker rejects
+it, so a child birth at that parent's key is not a checked description. -/
+def outsideSupDesc : Description where
+  name := "outside-sup"
+  freshNames := true
+  templates :=
+    [{ tpl "loner" 2 ["idle"] "idle" false with multiplicity := .perPeer },
+     { tpl "worker" 2 ["idle"] "idle" false with
+         multiplicity := .perPeer, terminable := true, subtree := "sub",
+         supervisor := some "loner", tombstone := "dead/worker" }]
+  edges := []
+  compatibility := .all
+  steps := []
+
+theorem outside_sup_rejected : subtreeFails outsideSupDesc =
+    ["fail: subtree sub supervisor loner is not in the subtree"] := by decide
+
 end Deadlock
