@@ -5311,6 +5311,81 @@ theorem held_init (I : Impl) (N : Nat) (name : String) :
   exact held_fold_core I.desc (initWorld I N) name (coreRoster I.desc) []
     (fun id hid => coreRoster_core I.desc id hid)
 
+/-- `placePeer` appends one empty generation of `template`. That is the only
+key the birth can add to that template. -/
+theorem held_place_len (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (bump : World → World) (hF : ParentForest w)
+    (hstB : ∀ u i, (bump u).st i = u.st i) (hrB : ∀ u, (bump u).roster = u.roster) :
+    (heldKeys I.desc (placePeer I w template k initial parent bump) template).length ≤
+      (heldKeys I.desc w template).length + 1 := by
+  let id := InstId.peer template k (maxGen w template k)
+  have hst := place_st I w template k initial parent bump hstB
+  have hros := place_roster I w template k initial parent bump hrB
+  have hempty : ((placePeer I w template k initial parent bump).st id).box = [] ∧
+      ((placePeer I w template k initial parent bump).st id).prio = [] ∧
+      ((placePeer I w template k initial parent bump).st id).parked = [] := by
+    have hid : (placePeer I w template k initial parent bump).st id =
+        { bornActor I.desc w template k initial with parent := parent } := by
+      simp [id, hst]
+    simp [hid, bornActor, withKeyTokens]
+  refine held_birth_len I.desc w _ template id k (maxGen w template k) hF (gen_fresh w template k)
+    (by simpa [id] using hros) rfl ?_ hempty
+  intro i hi
+  have h := hst i
+  simp [id, hi] at h
+  exact h
+
+/-- A scheduler spawn of `template` adds at most one held key of that template. -/
+theorem held_spawn_len (I : Impl) (w w' : World) (template : String) (hF : ParentForest w)
+    (h : spawn I w template = some w') :
+    (heldKeys I.desc w' template).length ≤ (heldKeys I.desc w template).length + 1 := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · simp only [hmay, ite_true] at h
+      cases hsup : t.supervisor with
+      | some name =>
+        rw [hsup] at h
+        cases h
+        exact held_place_len I w template (freshKey I.desc w t.subtree) t.initial
+          (some (InstId.core name)) (fun u =>
+            { u with nextKey := fun s =>
+                if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+          hF (fun _ _ => rfl) (fun _ => rfl)
+      | none =>
+        rw [hsup] at h
+        by_cases hempty : (t.subtree == "") = true
+        · rw [hempty] at h
+          cases h
+          exact held_place_len I w template (w.nextIx template) t.initial none
+            (fun u => { u with nextIx := fun n =>
+                if n = template then w.nextIx template + 1 else u.nextIx n })
+            hF (fun _ _ => rfl) (fun _ => rfl)
+        · have hf : (t.subtree == "") = false := by
+            cases hb : t.subtree == "" with
+            | false => rfl
+            | true => exact absurd hb hempty
+          rw [hf] at h
+          cases h
+          exact held_place_len I w template (freshKey I.desc w t.subtree) t.initial none
+            (fun u => { u with nextKey := fun s =>
+                if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+            hF (fun _ _ => rfl) (fun _ => rfl)
+    · simp [hmay] at h
+
+/-- An unsupervised spawn is allowed only while the outstanding count is below
+`w.N`. Held keys are at most that count, and the birth adds one. -/
+theorem held_spawn_lone (I : Impl) (w w' : World) (template : String) (hF : ParentForest w)
+    (h : spawn I w template = some w')
+    (hlone : loneOutstanding I.desc w template < w.N) :
+    (heldKeys I.desc w' template).length ≤ w.N := by
+  have hpre := held_le_lone I.desc w template
+  have hplus := held_spawn_len I w w' template hF h
+  omega
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
