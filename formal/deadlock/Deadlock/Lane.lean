@@ -18,7 +18,7 @@ namespace Deadlock
 def popFactor (n : Nat) (t : Template) : Nat :=
   if t.multiplicity == .perPeer then n else 1
 
-theorem factor_le (t : Template) (occ : Affine) (n : Nat) (hn : 1 ≤ n)
+theorem factor_le (t : Template) (occ : Affine) (n : Nat)
     (ha : t.multiplicity = .one → occ.a = 0) (hb : t.multiplicity = .perPeer → occ.b = 0) :
     popFactor n t * perInstance t.multiplicity occ ≤ occ.eval n := by
   cases hm : t.multiplicity with
@@ -32,7 +32,7 @@ theorem factor_le (t : Template) (occ : Affine) (n : Nat) (hn : 1 ≤ n)
     simp [popFactor, hm, hbeq, perInstance, Affine.eval, h0, Nat.mul_comm]
 
 theorem src_factor_go (I : Impl) (hL : LocalOk I) (dst name : String) (t : Template)
-    (ht : templateOf I.desc name = some t) (n : Nat) (hn : 1 ≤ n) :
+    (ht : templateOf I.desc name = some t) (n : Nat) :
     ∀ es, (∀ e ∈ es, e ∈ I.desc.edges) →
       popFactor n t * srcFold I.desc dst name es ≤ evalSrc dst name n es := by
   intro es hes
@@ -51,7 +51,7 @@ theorem src_factor_go (I : Impl) (hL : LocalOk I) (dst name : String) (t : Templ
       rw [hteq] at ha hb
       have hinst : edgeInst I.desc e = perInstance t.multiplicity e.occupancy := by
         simp [edgeInst, htname]
-      have hedge := factor_le t e.occupancy n hn ha hb
+      have hedge := factor_le t e.occupancy n ha hb
       have hmul := Nat.mul_add (popFactor n t) (edgeInst I.desc e) (srcFold I.desc dst name es)
       have hboth : (e.dst == dst && e.src == name) = true := by simp [hdb, hsb]
       simp [srcFold, evalSrc, hboth]
@@ -130,7 +130,7 @@ def nameCover (D : Description) (dst : String) (n : Nat) : List String → Nat
       | some t => popFactor n t * budget D name dst) +
       nameCover D dst n names
 
-theorem cover_go (I : Impl) (hL : LocalOk I) (dst : String) (n : Nat) (hn : 1 ≤ n) :
+theorem cover_go (I : Impl) (hL : LocalOk I) (dst : String) (n : Nat) :
     ∀ (names : List String) (banned : List String),
       names.Nodup → (∀ name ∈ names, allowed banned name = true) →
         (∀ name ∈ names, ∃ t, templateOf I.desc name = some t) →
@@ -145,7 +145,7 @@ theorem cover_go (I : Impl) (hL : LocalOk I) (dst : String) (n : Nat) (hn : 1 �
     have hcons := (List.nodup_cons).mp hnd
     have ⟨t, ht⟩ := hex name (List.Mem.head _)
     have hbud := budget_le_srcFold I.desc name dst
-    have hsrc := src_factor_go I hL dst name t ht n hn I.desc.edges (fun _ h => h)
+    have hsrc := src_factor_go I hL dst name t ht n I.desc.edges (fun _ h => h)
     have hfac : popFactor n t * budget I.desc name dst ≤ evalSrc dst name n I.desc.edges :=
       Nat.le_trans (Nat.mul_le_mul_left _ hbud) hsrc
     have hsplit := eval_split dst name banned n (hallow name (List.Mem.head _)) I.desc.edges
@@ -162,8 +162,7 @@ theorem cover_go (I : Impl) (hL : LocalOk I) (dst : String) (n : Nat) (hn : 1 �
     rw [hsplit]
     exact Nat.add_le_add hfac htail
 
-theorem name_cover_le (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (dst : String) (n : Nat)
-    (hn : 1 ≤ n) :
+theorem name_cover_le (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (dst : String) (n : Nat) :
     nameCover I.desc dst n (I.desc.templates.map (·.name)) ≤ (totalOcc I.desc dst).eval n := by
   have hnd := birth_names I.desc hG
   have hself : ∀ name ∈ I.desc.templates.map (·.name), ∃ t, templateOf I.desc name = some t := by
@@ -171,7 +170,7 @@ theorem name_cover_le (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (dst : S
     obtain ⟨t, ht, hname⟩ := List.mem_map.mp hmem
     refine ⟨t, ?_⟩
     simpa [templateOf, hname] using birth_find_named I.desc.templates t ht hnd
-  have hle := cover_go I hL dst n hn (I.desc.templates.map (·.name)) [] hnd
+  have hle := cover_go I hL dst n (I.desc.templates.map (·.name)) [] hnd
     (fun name _ => allowed_nil name) hself
   simpa [evalAllow_dst, evalDst_total] using hle
 
@@ -518,7 +517,7 @@ theorem keyed_box_room (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : Wo
     obtain ⟨t, ht, hn⟩ := List.mem_map.mp hmem
     exact ⟨t, by simpa [templateOf, hn] using birth_find_named I.desc.templates t ht hnd⟩
   have hcover := sumBudget_le_cover I.desc (tname host) w.N hN _ hself
-  have hocc := name_cover_le I hL hG (tname host) w.N hN
+  have hocc := name_cover_le I hL hG (tname host) w.N
   have hcap := cap_of_l1 I.desc host w.N hl1
   omega
 
@@ -6998,5 +6997,1286 @@ theorem held_of_parent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   exact Nat.le_trans (nodup_sub_len _ _ (heldKeys_nodup I.desc w child)
     (fun k hk => held_in_parent I hG w hcr hB.parented hI.forest (hold_reach I N w hG hR)
       hI.seal.childless child supName t ts ht hts hsup hmul k hk)) hparent
+
+
+/-! Held keys of every per-peer template sit under one population root.
+`held_le_N` bounds an empty subtree and a `rootOf` template. A child climbs
+to that root along `supStep`: `held_in_parent` keeps each held key, so the
+child's list is no longer than the root's. -/
+
+/-- The next per-peer supervisor. An empty subtree and a `rootOf` template
+are population roots, and the step stops there. -/
+def supStep (D : Description) (name : String) : Option String :=
+  match templateOf D name with
+  | none => none
+  | some t =>
+    if decide (t.subtree = "") || rootOf D t then none else t.supervisor
+
+/-- `n` supervisor steps from `name`. `none` once a step has already stopped. -/
+def nthSup (D : Description) (name : String) : Nat → Option String
+  | 0 => some name
+  | n + 1 => (nthSup D name n).bind (supStep D)
+
+theorem nthSup_shift (D : Description) (name sup : String)
+    (h : supStep D name = some sup) : ∀ n, nthSup D name (n + 1) = nthSup D sup n := by
+  intro n
+  induction n with
+  | zero =>
+    change supStep D name = some sup
+    exact h
+  | succ n ih =>
+    change (nthSup D name (n + 1)).bind (supStep D) =
+      (nthSup D sup n).bind (supStep D)
+    rw [ih]
+
+/-- A real step names a per-peer supervisor of a nonempty, non-root template. -/
+theorem supStep_child (D : Description) (hG : GraphOk D) (name sup : String)
+    (h : supStep D name = some sup) :
+    ∃ t ts, templateOf D name = some t ∧ templateOf D sup = some ts ∧
+      t.supervisor = some sup ∧ ts.multiplicity = .perPeer ∧ t.subtree ≠ "" ∧
+      rootOf D t = false ∧ ts.subtree = t.subtree := by
+  unfold supStep at h
+  cases ht : templateOf D name with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    have hcond : (decide (t.subtree = "") || rootOf D t) = false := by
+      by_cases hbit : (decide (t.subtree = "") || rootOf D t) = true
+      · simp [hbit] at h
+      · cases hb : decide (t.subtree = "") || rootOf D t
+        · rfl
+        · exact absurd hb hbit
+    simp only [hcond, ite_false] at h
+    have hempty : t.subtree ≠ "" := by
+      intro he
+      have hd : decide (t.subtree = "") = true := decide_eq_true he
+      simp [hd] at hcond
+    have hrootF : rootOf D t = false := by
+      cases hb : rootOf D t with
+      | false => rfl
+      | true => simp [hb] at hcond
+    obtain ⟨supName, ts, hsup, hts, hper, hsame, _⟩ :=
+      member_sup D hG name t ht hempty hrootF
+    have hnames : supName = sup := by
+      injection hsup.symm.trans h
+    refine ⟨t, ts, rfl, ?_, ?_, hper, hempty, hrootF, hsame⟩
+    · simpa [hnames] using hts
+    · simpa [hnames] using hsup
+
+/-- Stopping is the population root `held_le_N` takes: an empty subtree, or
+`rootOf` on a nonempty one. -/
+theorem supStep_stop (D : Description) (hG : GraphOk D) (name : String) (t : Template)
+    (ht : templateOf D name = some t) (h : supStep D name = none) :
+    t.subtree = "" ∨ rootOf D t = true ∧ t.subtree ≠ "" := by
+  unfold supStep at h
+  simp only [ht] at h
+  by_cases hempty : t.subtree = ""
+  · exact Or.inl hempty
+  · by_cases hroot : rootOf D t = true
+    · exact Or.inr ⟨hroot, hempty⟩
+    · have hrootF : rootOf D t = false := by
+        cases hb : rootOf D t with
+        | false => rfl
+        | true => exact absurd hb hroot
+      have hd : decide (t.subtree = "") = false := decide_eq_false hempty
+      simp only [hd, hrootF, Bool.false_or, ite_false] at h
+      obtain ⟨_, _, hsup, _⟩ := member_sup D hG name t ht hempty hrootF
+      rw [hsup] at h
+      cases h
+
+/-- No roster peer carries a name the description does not declare, so that
+name holds no key. -/
+theorem held_absent (I : Impl) (w : World) (hH : Hold I w) (name : String)
+    (ht : templateOf I.desc name = none) : heldKeys I.desc w name = [] := by
+  cases hkeys : heldKeys I.desc w name with
+  | nil => rfl
+  | cons k _ =>
+    have hk : k ∈ heldKeys I.desc w name := by simp [hkeys]
+    obtain ⟨who, hid, hbit, _⟩ := (heldKeys_mem I.desc w name k).mp hk
+    cases hwho : who with
+    | core _ =>
+      rw [hwho] at hbit
+      simp [heldBit] at hbit
+    | peer n _ _ =>
+      rw [hwho] at hbit
+      simp only [heldBit, Bool.and_eq_true] at hbit
+      have hn : n = name := by simpa [beq_iff_eq] using hbit.1
+      obtain ⟨_, ht', _⟩ := hH.role who hid
+      rw [hwho] at ht'
+      simp [tname, hn, ht] at ht'
+
+/-- A held key stays held at every supervisor along `nthSup`. Each step is
+`held_in_parent`. -/
+theorem held_along (I : Impl) (hG : GraphOk I.desc) (w : World) (hcr : w.crashed = false)
+    (hP : Parented I.desc w) (hF : ParentForest w) (hH : Hold I w) (hKids : DeadChildless w)
+    (name : String) (n : Nat) (s : String) (hs : nthSup I.desc name n = some s) (k : Nat)
+    (hk : k ∈ heldKeys I.desc w name) : k ∈ heldKeys I.desc w s := by
+  induction n generalizing s with
+  | zero =>
+    simp [nthSup] at hs
+    simpa [hs] using hk
+  | succ n ih =>
+    simp only [nthSup] at hs
+    cases hmid : nthSup I.desc name n with
+    | none => simp [hmid, Option.bind] at hs
+    | some mid =>
+      simp [hmid, Option.bind] at hs
+      obtain ⟨t, ts, ht, hts, hsup, hmul, _, _, _⟩ :=
+        supStep_child I.desc hG mid s hs
+      exact held_in_parent I hG w hcr hP hF hH hKids mid s t ts ht hts hsup hmul k
+        (ih mid hmid)
+
+/-- The recorded parent chain of a roster actor reaches a population root.
+The step is well-founded, so a supervisor cycle is not a populated chain. -/
+theorem chain_hits (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w) (hH : Hold I w)
+    (id : InstId) (hid : id ∈ w.roster) :
+    ∃ n root t, nthSup I.desc (tname id) n = some root ∧
+      templateOf I.desc root = some t ∧ supStep I.desc root = none ∧
+      (t.subtree = "" ∨ rootOf I.desc t = true ∧ t.subtree ≠ "") := by
+  let C : InstId → Prop := fun id =>
+    id ∈ w.roster →
+      ∃ n root t, nthSup I.desc (tname id) n = some root ∧
+        templateOf I.desc root = some t ∧ supStep I.desc root = none ∧
+        (t.subtree = "" ∨ rootOf I.desc t = true ∧ t.subtree ≠ "")
+  have hstep : ∀ id, (∀ parent, ParentEdge w id parent → C parent) → C id := by
+    intro id ih hid
+    obtain ⟨tRole, htRole, hmulRole⟩ := hH.role id hid
+    have htRole' : templateOf I.desc (tname id) = some tRole := by simpa [tname] using htRole
+    by_cases hstop : supStep I.desc (tname id) = none
+    · exact ⟨0, tname id, tRole, by simp [nthSup], htRole', hstop,
+        supStep_stop I.desc hG (tname id) tRole htRole' hstop⟩
+    · have hsome : ∃ sup, supStep I.desc (tname id) = some sup := by
+        cases hsb : supStep I.desc (tname id) with
+        | none => exact absurd hsb hstop
+        | some sup => exact ⟨sup, rfl⟩
+      obtain ⟨sup, hstepS⟩ := hsome
+      obtain ⟨t0, ts, ht0, hts, hsup, hper, hsub, _, _⟩ :=
+        supStep_child I.desc hG (tname id) sup hstepS
+      have hsame : t0 = tRole := by
+        injection ht0.symm.trans htRole'
+      rw [hsame] at hsub hsup
+      have hchildPer : tRole.multiplicity = .perPeer :=
+        member_per I.desc hG (tname id) tRole htRole' hsub
+      cases id with
+      | core _ =>
+        simp [tmb_role] at hmulRole
+        cases hchildPer.symm.trans hmulRole
+      | peer n key g =>
+        have hmem : InstId.peer n key g ∈ w.roster := hid
+        have htPeer : templateOf I.desc n = some tRole := by simpa [tname] using htRole'
+        have hsupN : tRole.supervisor = some sup := hsup
+        obtain ⟨gP, _, hpar⟩ :=
+          peer_parent I w hF hP hH n key g tRole ts sup hmem htPeer hsupN hts hper
+        have hhosted := hF.hosted _ _ hpar
+        have hne : InstId.peer n key g ≠ InstId.peer sup key gP := by
+          intro heq
+          apply hSelf (InstId.peer n key g)
+          rw [hpar, heq]
+        have hparent := ih (InstId.peer sup key gP) ⟨hpar, hne⟩ hhosted
+        obtain ⟨nSteps, root, tr, hnth, htr, hstopR, hkind⟩ := hparent
+        refine ⟨nSteps + 1, root, tr, ?_, htr, hstopR, hkind⟩
+        have hstepN : supStep I.desc n = some sup := by simpa [tname] using hstepS
+        simp only [tname]
+        rw [nthSup_shift I.desc n sup hstepN nSteps]
+        simpa [tname] using hnth
+  exact (hF.wf).fix hstep id hid
+
+/-- Every template name holds at most `N` keys. A population root is
+`held_le_N`. Any other per-peer name climbs to that root, and the held keys
+are a sublist of the root's. -/
+theorem held_le_sender (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hcr : w.crashed = false) (name : String) :
+    (heldKeys I.desc w name).length ≤ N := by
+  have hI := inv_reachable I N w hL hR
+  have hB := lane_birth I hL hG N w hR
+  have hH := hold_reach I N w hG hR
+  cases ht : templateOf I.desc name with
+  | none =>
+    rw [held_absent I w hH name ht]
+    exact Nat.zero_le _
+  | some t =>
+    by_cases hstop : supStep I.desc name = none
+    · exact held_le_N I hL hG N w hR name (by
+        cases supStep_stop I.desc hG name t ht hstop with
+        | inl hempty => exact Or.inl (by simp [templateSubtree, ht, hempty])
+        | inr hr => exact Or.inr ⟨t, ht, hr.1, hr.2⟩)
+    · by_cases hzero : (heldKeys I.desc w name).length = 0
+      · rw [hzero]
+        exact Nat.zero_le _
+      · cases hkeys : heldKeys I.desc w name with
+        | nil => simp [hkeys] at hzero
+        | cons k _ =>
+          have hk : k ∈ heldKeys I.desc w name := by simp [hkeys]
+          obtain ⟨who, hid, hbit, _⟩ := (heldKeys_mem I.desc w name k).mp hk
+          cases hwho : who with
+          | core _ =>
+            rw [hwho] at hbit
+            simp [heldBit] at hbit
+          | peer n _ _ =>
+            rw [hwho] at hbit
+            simp only [heldBit, Bool.and_eq_true] at hbit
+            have hn : n = name := by simpa [beq_iff_eq] using hbit.1
+            obtain ⟨nSteps, root, tr, hnth, htr, _, hkind⟩ :=
+              chain_hits I hG w hI.forest hB.parented hB.noSelf hH who hid
+            have hnth' : nthSup I.desc name nSteps = some root := by
+              simpa [tname, hwho, hn] using hnth
+            have hsub : ∀ key, key ∈ heldKeys I.desc w name → key ∈ heldKeys I.desc w root :=
+              fun key hkey => held_along I hG w hcr hB.parented hI.forest hH hI.seal.childless
+                name nSteps root hnth' key hkey
+            have hlen := nodup_sub_len _ _ (heldKeys_nodup I.desc w name) hsub
+            have hrootKind : templateSubtree I.desc root = "" ∨
+                ∃ t, templateOf I.desc root = some t ∧ rootOf I.desc t = true ∧
+                  t.subtree ≠ "" := by
+              cases hkind with
+              | inl hempty => exact Or.inl (by simp [templateSubtree, htr, hempty])
+              | inr hr => exact Or.inr ⟨tr, htr, hr.1, hr.2⟩
+            have hle : (heldKeys I.desc w name).length ≤ N :=
+              Nat.le_trans hlen (held_le_N I hL hG N w hR root hrootKind)
+            simpa [hkeys] using hle
+
+/-- A live host is not sealed with a sender that is no longer alive. A dead
+parent has no live child, so the host cannot sit under that sender. -/
+theorem unsealed_of_dead (w : World) (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (sender host : InstId) (hlive : (w.st host).life = .alive)
+    (hdead : (w.st sender).life ≠ .alive) : sealedTogether w sender host = false := by
+  have hne : sender ≠ host := by
+    intro heq
+    exact hdead (heq ▸ hlive)
+  have hbb : (sender == host) = false := by simpa [beq_iff_eq] using hne
+  have hd : descends w.roster.length w sender host = false := by
+    cases hb : descends w.roster.length w sender host with
+    | false => rfl
+    | true =>
+      exact absurd (ancestor_alive w hKids hcr (strict_of_descends w _ sender host hb) hlive) hdead
+  simp [sealedTogether, hbb, hd]
+
+/-- Mail from a peer, sitting in a live host, holds that peer's key. The
+sender is alive, or the host survived it and `slotMailHeld` still sees the
+message. -/
+theorem box_key_held (I : Impl) (w : World) (hO : OccInv I w) (hKids : DeadChildless w)
+    (hcr : w.crashed = false) (host : InstId) (hlive : (w.st host).life = .alive)
+    (m : Msg) (hm : m ∈ (w.st host).box) (name : String) (k g : Nat)
+    (hs : m.sender = InstId.peer name k g) : k ∈ heldKeys I.desc w name := by
+  have hsend := hO.sentFrom host m hm
+  have hmemS : InstId.peer name k g ∈ w.roster := by simpa [hs] using hsend
+  have hhost := hO.aliveIn host hlive
+  by_cases hl : (w.st (InstId.peer name k g)).life = .alive
+  · have hheld : heldAt I.desc w name k = true := by
+      unfold heldAt
+      refine (_root_.List.any_eq_true).mpr ⟨InstId.peer name k g, hmemS, ?_⟩
+      simp [hl]
+    exact (heldKeys_mem I.desc w name k).mpr
+      ⟨InstId.peer name k g, hmemS, by simp [heldBit, hheld], by simp [bitKey]⟩
+  · have hunseal := unsealed_of_dead w hKids hcr (InstId.peer name k g) host hlive hl
+    have hsurv : survivesSender w (InstId.peer name k g) host = true := by
+      have hlB : ((w.st host).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+      simp [survivesSender, hlB, hunseal]
+    have hslot : slotMailHeld I.desc w name k = true := by
+      by_cases hempty : templateSubtree I.desc name = ""
+      · have hb : (templateSubtree I.desc name == "") = true := by
+          simpa [beq_iff_eq] using hempty
+        simp only [slotMailHeld, hb, ite_true, slotCoreMail]
+        refine (_root_.List.any_eq_true).mpr ⟨host, hhost, ?_⟩
+        simp only [actorHoldsSlotMail, Bool.or_eq_true]
+        refine Or.inl (Or.inl ?_)
+        refine (_root_.List.any_eq_true).mpr ⟨m, hm, ?_⟩
+        simp [hs, fromSlot, hsurv]
+      · have hb : (templateSubtree I.desc name == "") = false := by
+          simpa [beq_iff_eq] using hempty
+        cases ht : templateOf I.desc name with
+        | none => simp [templateSubtree, ht] at hempty
+        | some t =>
+          have htree : t.subtree ≠ "" := by
+            simp [templateSubtree, ht] at hempty
+            exact hempty
+          have hmember := member_of_key I.desc (InstId.peer name k g) t k
+            (by simpa [tname] using ht) htree (by simp [memberKey])
+          have hsubEq : templateSubtree I.desc name = t.subtree := by simp [templateSubtree, ht]
+          simp only [slotMailHeld, hb, ite_false, subtreeCoreMail]
+          refine (_root_.List.any_eq_true).mpr ⟨host, hhost, ?_⟩
+          simp only [actorHoldsSubtreeMail, Bool.or_eq_true]
+          refine Or.inl (Or.inl ?_)
+          refine (_root_.List.any_eq_true).mpr ⟨m, hm, ?_⟩
+          simp [fromSubtree, hs, hsurv, hsubEq, hmember]
+    have hheld : heldAt I.desc w name k = true := by
+      unfold heldAt
+      refine (_root_.List.any_eq_true).mpr ⟨InstId.peer name k g, hmemS, ?_⟩
+      simp [hslot]
+    exact (heldKeys_mem I.desc w name k).mpr
+      ⟨InstId.peer name k g, hmemS, by simp [heldBit, hheld], by simp [bitKey]⟩
+
+/-- The live generation of a key holds that key, before it has sent. -/
+theorem alive_held (D : Description) (w : World) (name : String) (k g : Nat)
+    (hmem : InstId.peer name k g ∈ w.roster)
+    (hl : (w.st (InstId.peer name k g)).life = .alive) : k ∈ heldKeys D w name := by
+  have hheld : heldAt D w name k = true := by
+    unfold heldAt
+    refine (_root_.List.any_eq_true).mpr ⟨InstId.peer name k g, hmem, ?_⟩
+    simp [hl]
+  exact (heldKeys_mem D w name k).mpr
+    ⟨InstId.peer name k g, hmem, by simp [heldBit, hheld], by simp [bitKey]⟩
+
+/-- Messages in one host's box from one key. -/
+def keyLen (name : String) (k : Nat) (ms : List Msg) : Nat :=
+  (ms.filter (keyPred name k)).length
+
+theorem keyLen_yes (name : String) (k : Nat) (m : Msg) (ms : List Msg)
+    (h : keyPred name k m = true) : keyLen name k (m :: ms) = keyLen name k ms + 1 := by
+  simp [keyLen, List.filter, h, Nat.add_comm]
+
+theorem keyLen_no (name : String) (k : Nat) (m : Msg) (ms : List Msg)
+    (h : keyPred name k m = false) : keyLen name k (m :: ms) = keyLen name k ms := by
+  simp [keyLen, List.filter, h]
+
+theorem keyLen_le_queued (w : World) (hnd : w.roster.Nodup) (name : String) (k : Nat)
+    (host : InstId) (hmem : host ∈ w.roster) :
+    keyLen name k (w.st host).box ≤ queuedFromKey w name k (tname host) := by
+  simpa [keyLen] using share_ge_box w name k (tname host) host hmem hnd rfl
+
+/-- One key, summed across the keys a template still holds. -/
+def sumKey (name : String) : List Nat → List Msg → Nat
+  | [], _ => 0
+  | k :: ks, ms => keyLen name k ms + sumKey name ks ms
+
+theorem sumKey_le_mul (name : String) (keys : List Nat) (ms : List Msg) (B : Nat)
+    (hle : ∀ k ∈ keys, keyLen name k ms ≤ B) : sumKey name keys ms ≤ keys.length * B := by
+  induction keys with
+  | nil => simp [sumKey]
+  | cons k ks ih =>
+    have hhead := hle k (List.Mem.head _)
+    have htail := ih (fun k' hk' => hle k' (List.Mem.tail _ hk'))
+    simp only [sumKey, List.length_cons]
+    have hmul : (ks.length + 1) * B = B + ks.length * B := by
+      rw [Nat.succ_mul, Nat.add_comm]
+    omega
+
+theorem keyPred_from (name : String) (k : Nat) (m : Msg) (h : keyPred name k m = true) :
+    fromName name m = true := by
+  cases hsend : m.sender with
+  | core _ => simp [keyPred, hsend] at h
+  | peer n _ _ =>
+    simp [keyPred, fromName, hsend] at h ⊢
+    exact h.1
+
+theorem keyPred_only (name : String) (k k' : Nat) (m : Msg)
+    (hk : keyPred name k m = true) (hk' : keyPred name k' m = true) : k = k' := by
+  cases hsend : m.sender with
+  | core _ => simp [keyPred, hsend] at hk
+  | peer _ key _ =>
+    simp [keyPred, hsend, Bool.and_eq_true, beq_iff_eq] at hk hk'
+    exact hk.2.symm.trans hk'.2
+
+theorem sumKey_preds_miss (name : String) (m : Msg) (ms : List Msg) :
+    ∀ keys, (∀ k ∈ keys, keyPred name k m = false) →
+      sumKey name keys (m :: ms) = sumKey name keys ms := by
+  intro keys
+  induction keys with
+  | nil =>
+    intro _
+    simp [sumKey]
+  | cons k ks ih =>
+    intro h
+    simp only [sumKey]
+    rw [keyLen_no name k m ms (h k (List.Mem.head _))]
+    rw [ih (fun k' hk' => h k' (List.Mem.tail _ hk'))]
+
+theorem sumKey_hit (name : String) (keys : List Nat) (k : Nat) (m : Msg) (ms : List Msg)
+    (hmem : k ∈ keys) (hnd : keys.Nodup) (hyes : keyPred name k m = true)
+    (hno : ∀ k' ∈ keys, k' ≠ k → keyPred name k' m = false) :
+    sumKey name keys (m :: ms) = sumKey name keys ms + 1 := by
+  induction keys with
+  | nil => cases hmem
+  | cons head tail ih =>
+    have hcons := (List.nodup_cons).mp hnd
+    simp only [sumKey]
+    rcases List.mem_cons.mp hmem with rfl | htail
+    · rw [keyLen_yes name k m ms hyes]
+      rw [sumKey_preds_miss name m ms tail (fun k' hk' =>
+        hno k' (List.Mem.tail _ hk') (fun hsame => hcons.1 (by simpa [hsame] using hk')))]
+      omega
+    · have hhead : keyPred name head m = false :=
+        hno head (List.Mem.head _) (fun hsame => hcons.1 (by simpa [hsame] using htail))
+      rw [keyLen_no name head m ms hhead]
+      rw [ih htail hcons.2 (fun k' hk' hne => hno k' (List.Mem.tail _ hk') hne)]
+      omega
+
+theorem sumKey_slack (name : String) (keys : List Nat) (ms : List Msg) (s : Nat) (B : Nat)
+    (hs : s ∈ keys) (hnd : keys.Nodup) (hle : ∀ k ∈ keys, keyLen name k ms ≤ B)
+    (hextra : keyLen name s ms + 1 ≤ B) : sumKey name keys ms + 1 ≤ keys.length * B := by
+  induction keys with
+  | nil => cases hs
+  | cons k ks ih =>
+    have hcons := (List.nodup_cons).mp hnd
+    simp only [sumKey, List.length_cons]
+    rcases List.mem_cons.mp hs with rfl | htail
+    · have htailLe := sumKey_le_mul name ks ms B
+        (fun k' hk' => hle k' (List.Mem.tail _ hk'))
+      have hmul : (ks.length + 1) * B = B + ks.length * B := by
+        rw [Nat.succ_mul, Nat.add_comm]
+      omega
+    · have ih' := ih htail hcons.2 (fun k' hk' => hle k' (List.Mem.tail _ hk'))
+      have hhead := hle k (List.Mem.head _)
+      have hmul : (ks.length + 1) * B = B + ks.length * B := by
+        rw [Nat.succ_mul, Nat.add_comm]
+      omega
+
+theorem nameLen_le_sumKey (name : String) (keys : List Nat) (ms : List Msg) (hnd : keys.Nodup)
+    (hpick : ∀ m ∈ ms, fromName name m = true → ∃ k, k ∈ keys ∧ keyPred name k m = true) :
+    nameLen name ms ≤ sumKey name keys ms := by
+  induction ms with
+  | nil => simp [nameLen]
+  | cons m ms ih =>
+    by_cases hyes : fromName name m = true
+    · obtain ⟨k, hk, hpred⟩ := hpick m (List.Mem.head _) hyes
+      have honly : ∀ k' ∈ keys, k' ≠ k → keyPred name k' m = false := by
+        intro k' hk' hne
+        cases hp : keyPred name k' m with
+        | false => rfl
+        | true => exact absurd (keyPred_only name k' k m hp hpred) hne
+      rw [nameLen_yes name m ms hyes, sumKey_hit name keys k m ms hk hnd hpred honly]
+      exact Nat.add_le_add_right (ih (fun m' hm' => hpick m' (List.Mem.tail _ hm'))) 1
+    · have hno : fromName name m = false := by
+        cases hb : fromName name m with
+        | false => rfl
+        | true => exact absurd hb hyes
+      have hmiss : sumKey name keys (m :: ms) = sumKey name keys ms := by
+        refine sumKey_preds_miss name m ms keys ?_
+        intro k hk
+        cases hp : keyPred name k m with
+        | false => rfl
+        | true =>
+          exact False.elim ((Bool.eq_false_iff.mp hno) (keyPred_from name k m hp))
+      rw [nameLen_no name m ms hno, hmiss]
+      exact ih (fun m' hm' => hpick m' (List.Mem.tail _ hm'))
+
+/-- Messages of one peer name in a live box are at most one budget per held key. -/
+theorem name_le_held (I : Impl) (w : World) (hO : OccInv I w) (hKids : DeadChildless w)
+    (hcr : w.crashed = false) (host : InstId) (hlive : (w.st host).life = .alive)
+    (name : String) :
+    nameLen name (w.st host).box ≤
+      (heldKeys I.desc w name).length * budget I.desc name (tname host) := by
+  have hmemH := hO.aliveIn host hlive
+  have hpick : ∀ m ∈ (w.st host).box, fromName name m = true →
+      ∃ k, k ∈ heldKeys I.desc w name ∧ keyPred name k m = true := by
+    intro m hm hyes
+    cases hsend : m.sender with
+    | core _ => simp [fromName, hsend] at hyes
+    | peer n k g =>
+      simp only [fromName, hsend, beq_iff_eq] at hyes
+      have hsend' : m.sender = InstId.peer name k g := by simpa [hyes] using hsend
+      have hpred : keyPred name k m = true := by simp [keyPred, hsend']
+      exact ⟨k, box_key_held I w hO hKids hcr host hlive m hm name k g hsend', hpred⟩
+  exact Nat.le_trans
+    (nameLen_le_sumKey name (heldKeys I.desc w name) (w.st host).box
+      (heldKeys_nodup I.desc w name) hpick)
+    (sumKey_le_mul name (heldKeys I.desc w name) (w.st host).box _
+      (fun k _ => Nat.le_trans (keyLen_le_queued w hO.nodup name k host hmemH)
+        (key_queued_le I w hO name k (tname host))))
+
+/-- Workaround `lane_succ_le`: `queued_succ_le` is stated in `Inv2`, which
+imports this file. One token still in hand leaves room for one more queued
+message inside the same budget. -/
+theorem lane_succ_le (budget queued : Nat) (tokens : Int)
+    (hsum : tokens + (queued : Int) = (budget : Int)) (htok : (1 : Int) ≤ tokens) :
+    queued + 1 ≤ budget := by
+  omega
+
+/-- Workaround `lane_gap`: `peer_send_gap` is stated in `Inv2`. The live
+generation's tokens plus mail already queued are the budget, and `tokenHold`
+is still at least one. -/
+theorem lane_gap (I : Impl) (w : World) (hO : OccInv I w) (name : String) (key : Nat)
+    (sender : InstId) (dst : String) (hlive : findLive w name key = some sender)
+    (hlife : (w.st sender).life = .alive)
+    (hhold : 1 ≤ tokenHold I.desc name dst (w.st sender)) :
+    queuedFromKey w name key dst + 1 ≤ budget I.desc name dst := by
+  have htn := (findLive_spec w name key sender hlive).1
+  have hS := hO.slack sender dst hlife
+  have hcast : ((1 : Nat) : Int) ≤ (tokenHold I.desc name dst (w.st sender) : Int) :=
+    Int.ofNat_le.mpr hhold
+  rw [htn] at hS
+  exact lane_succ_le _ _ _ (hO.balance.1.1 name key sender dst hlive) (Int.le_trans hcast hS)
+
+/-- One more message from the live generation of `name` at `k` still fits in
+the keys that generation's template holds. -/
+theorem peer_name_succ (I : Impl) (w : World) (hO : OccInv I w) (hKids : DeadChildless w)
+    (hcr : w.crashed = false) (host : InstId) (hlive : (w.st host).life = .alive)
+    (name : String) (k g : Nat) (sender : InstId) (hsender : sender = InstId.peer name k g)
+    (hmemS : sender ∈ w.roster) (hlife : (w.st sender).life = .alive)
+    (hhold : 1 ≤ tokenHold I.desc name (tname host) (w.st sender)) :
+    nameLen name (w.st host).box + 1 ≤
+      (heldKeys I.desc w name).length * budget I.desc name (tname host) := by
+  have hmemH := hO.aliveIn host hlive
+  have hmemP : InstId.peer name k g ∈ w.roster := by simpa [hsender] using hmemS
+  have hliveP : (w.st (InstId.peer name k g)).life = .alive := by simpa [hsender] using hlife
+  have hfind := findLive_of_alive w hO.indexed name k g hmemP hliveP
+  have hfindS : findLive w name k = some sender := by simpa [hsender] using hfind
+  have hgap := lane_gap I w hO name k sender (tname host) hfindS hlife hhold
+  have hextra : keyLen name k (w.st host).box + 1 ≤ budget I.desc name (tname host) :=
+    Nat.le_trans (Nat.add_le_add_right (keyLen_le_queued w hO.nodup name k host hmemH) 1) hgap
+  have hkey := alive_held I.desc w name k g hmemP hliveP
+  have hkeys : ∀ key ∈ heldKeys I.desc w name,
+      keyLen name key (w.st host).box ≤ budget I.desc name (tname host) := by
+    intro key _
+    exact Nat.le_trans (keyLen_le_queued w hO.nodup name key host hmemH)
+      (key_queued_le I w hO name key (tname host))
+  have hsum := sumKey_slack name (heldKeys I.desc w name) (w.st host).box k _
+    hkey (heldKeys_nodup I.desc w name) hkeys hextra
+  have hpick : ∀ m ∈ (w.st host).box, fromName name m = true →
+      ∃ key, key ∈ heldKeys I.desc w name ∧ keyPred name key m = true := by
+    intro m hm hyes
+    cases hsend : m.sender with
+    | core _ => simp [fromName, hsend] at hyes
+    | peer n key gen =>
+      simp only [fromName, hsend, beq_iff_eq] at hyes
+      have hsend' : m.sender = InstId.peer name key gen := by simpa [hyes] using hsend
+      exact ⟨key, box_key_held I w hO hKids hcr host hlive m hm name key gen hsend',
+        by simp [keyPred, hsend']⟩
+  have hname := nameLen_le_sumKey name (heldKeys I.desc w name) (w.st host).box
+    (heldKeys_nodup I.desc w name) hpick
+  exact Nat.le_trans (Nat.add_le_add_right hname 1) hsum
+
+/-- Messages from one core. -/
+def coreLen (name : String) (ms : List Msg) : Nat :=
+  (ms.filter (fun m => m.sender == InstId.core name)).length
+
+theorem coreLen_yes (name : String) (m : Msg) (ms : List Msg)
+    (h : m.sender = InstId.core name) : coreLen name (m :: ms) = coreLen name ms + 1 := by
+  have hb : (m.sender == InstId.core name) = true := by simpa [beq_iff_eq] using h
+  simp [coreLen, List.filter, hb, Nat.add_comm]
+
+theorem coreLen_no (name : String) (m : Msg) (ms : List Msg) (h : m.sender ≠ InstId.core name) :
+    coreLen name (m :: ms) = coreLen name ms := by
+  have hb : (m.sender == InstId.core name) = false := by simpa [beq_iff_eq] using h
+  simp [coreLen, List.filter, hb]
+
+theorem coreLen_count (name : String) : ∀ ms, coreLen name ms = countFrom (InstId.core name) ms := by
+  intro ms
+  induction ms with
+  | nil => simp [coreLen, countFrom]
+  | cons m ms ih =>
+    by_cases hs : m.sender = InstId.core name
+    · rw [coreLen_yes name m ms hs, ih]
+      simp [countFrom, hs, Nat.add_comm]
+    · rw [coreLen_no name m ms hs, ih]
+      simp [countFrom, hs]
+
+theorem coreLen_out (name : String) (ms : List Msg)
+    (h : ∀ m ∈ ms, m.sender ≠ InstId.core name) : coreLen name ms = 0 := by
+  induction ms with
+  | nil => simp [coreLen]
+  | cons m ms ih =>
+    rw [coreLen_no name m ms (h m (List.Mem.head _))]
+    exact ih (fun m' hm' => h m' (List.Mem.tail _ hm'))
+
+theorem coreLen_le_owed_host (w : World) (host : InstId) (name dst : String)
+    (hmem : host ∈ w.roster) (hnd : w.roster.Nodup) (hdst : tname host = dst) :
+    coreLen name (w.st host).box ≤ owed w.st dst (InstId.core name) w.roster := by
+  rw [coreLen_count]
+  exact Nat.le_trans (Nat.le_add_right _ _)
+    (owed_ge_here w.st dst (InstId.core name) host w.roster hnd hmem hdst)
+
+/-- A core's mail on one host is inside its budget. An absent core has sent
+nothing. A live core's tokens are the rest of the same account. -/
+theorem core_le_budget (I : Impl) (w : World) (hO : OccInv I w) (hcr : w.crashed = false)
+    (name dst : String) (host : InstId) (hmemH : host ∈ w.roster) (hdst : tname host = dst) :
+    coreLen name (w.st host).box ≤ budget I.desc name dst := by
+  by_cases hmem : InstId.core name ∈ w.roster
+  · have hhere := coreLen_le_owed_host w host name dst hmemH hO.nodup hdst
+    by_cases hl : (w.st (InstId.core name)).life = .alive
+    · have hbal := hO.balance.1.2 name dst hl hmem
+      have hS := hO.slack (InstId.core name) dst hl
+      have h0 : (0 : Int) ≤ (w.st (InstId.core name)).tokens dst :=
+        Int.le_trans (Int.natCast_nonneg _) hS
+      have howed : (owed w.st dst (InstId.core name) w.roster : Int) ≤
+          (budget I.desc name dst : Int) := by omega
+      exact Nat.le_trans hhere (Int.ofNat_le.mp howed)
+    · exact Nat.le_trans hhere
+        (Int.ofNat_le.mp (hO.quiet hcr (InstId.core name) dst hmem hl))
+  · have hnone : ∀ m ∈ (w.st host).box, m.sender ≠ InstId.core name := by
+      intro m hm heq
+      have hsend := hO.sentFrom host m hm
+      rw [heq] at hsend
+      exact hmem hsend
+    rw [coreLen_out name (w.st host).box hnone]
+    exact Nat.zero_le _
+
+/-- One more message from a live core still fits in that core's budget. -/
+theorem core_succ (I : Impl) (w : World) (hO : OccInv I w) (name dst : String)
+    (host : InstId) (hmemH : host ∈ w.roster) (hdst : tname host = dst)
+    (hl : (w.st (InstId.core name)).life = .alive) (hmem : InstId.core name ∈ w.roster)
+    (hhold : 1 ≤ tokenHold I.desc name dst (w.st (InstId.core name))) :
+    coreLen name (w.st host).box + 1 ≤ budget I.desc name dst := by
+  have hhere := coreLen_le_owed_host w host name dst hmemH hO.nodup hdst
+  have hbal := hO.balance.1.2 name dst hl hmem
+  have hS := hO.slack (InstId.core name) dst hl
+  have h1 : (1 : Int) ≤ (w.st (InstId.core name)).tokens dst :=
+    Int.le_trans (Int.ofNat_le.mpr hhold) hS
+  exact Nat.le_trans (Nat.add_le_add_right hhere 1)
+    (lane_succ_le _ _ _ hbal h1)
+
+/-- What `name` contributes to a box: peer messages when the template is
+per-peer, core messages when it is one actor. -/
+def srcLen (D : Description) (name : String) (ms : List Msg) : Nat :=
+  match templateOf D name with
+  | none => 0
+  | some t =>
+    if t.multiplicity == .perPeer then nameLen name ms else coreLen name ms
+
+/-- `name` is the template that sent `m`, with the multiplicity that template
+declares. -/
+def hits (D : Description) (name : String) (m : Msg) : Bool :=
+  match m.sender with
+  | .peer n _ _ =>
+    n == name &&
+      match templateOf D name with
+      | some t => t.multiplicity == .perPeer
+      | none => false
+  | .core n =>
+    n == name &&
+      match templateOf D name with
+      | some t => !(t.multiplicity == .perPeer)
+      | none => false
+
+theorem hits_of_from (D : Description) (name : String) (t : Template) (m : Msg)
+    (ht : templateOf D name = some t) (hmul : t.multiplicity = .perPeer)
+    (hf : fromName name m = true) : hits D name m = true := by
+  have hbeq : (t.multiplicity == .perPeer) = true := by
+    rw [hmul]
+    decide
+  cases hsend : m.sender with
+  | core _ => simp [fromName, hsend] at hf
+  | peer n _ _ =>
+    simp only [fromName, hsend, beq_iff_eq] at hf
+    simp [hits, hsend, hf, ht, hbeq, beq_iff_eq]
+
+theorem hits_of_core (D : Description) (name : String) (t : Template) (m : Msg)
+    (ht : templateOf D name = some t) (hmul : t.multiplicity = .one)
+    (hs : m.sender = InstId.core name) : hits D name m = true := by
+  have hbeq : (t.multiplicity == .perPeer) = false := by
+    rw [hmul]
+    decide
+  simp [hits, hs, ht, hbeq]
+
+theorem srcLen_yes (D : Description) (name : String) (m : Msg) (ms : List Msg)
+    (h : hits D name m = true) : srcLen D name (m :: ms) = srcLen D name ms + 1 := by
+  cases hsend : m.sender with
+  | peer n _ _ =>
+    simp only [hits, hsend, Bool.and_eq_true] at h
+    cases ht : templateOf D name with
+    | none => simp [ht] at h
+    | some t =>
+      simp only [ht] at h
+      have hfrom : fromName name m = true := by simp [fromName, hsend, h.1]
+      simp [srcLen, ht, h.2, nameLen_yes name m ms hfrom]
+  | core n =>
+    simp only [hits, hsend, Bool.and_eq_true] at h
+    cases ht : templateOf D name with
+    | none => simp [ht] at h
+    | some t =>
+      simp only [ht] at h
+      have hnot : (t.multiplicity == .perPeer) = false := by
+        cases hb : t.multiplicity == .perPeer with
+        | false => rfl
+        | true => simp [hb] at h
+      have hn : n = name := by simpa [beq_iff_eq] using h.1
+      have hs : m.sender = InstId.core name := by simp [hsend, hn]
+      simp [srcLen, ht, hnot, coreLen_yes name m ms hs]
+
+theorem srcLen_no (D : Description) (name : String) (m : Msg) (ms : List Msg)
+    (h : hits D name m = false) : srcLen D name (m :: ms) = srcLen D name ms := by
+  cases ht : templateOf D name with
+  | none => simp [srcLen, ht]
+  | some t =>
+    cases hm : t.multiplicity with
+    | perPeer =>
+      have hbeq : (t.multiplicity == .perPeer) = true := by
+        rw [hm]
+        decide
+      have hfrom : fromName name m = false := by
+        cases hf : fromName name m with
+        | false => rfl
+        | true =>
+          simp [hits_of_from D name t m ht hm hf] at h
+      simp [srcLen, ht, hbeq, nameLen_no name m ms hfrom]
+    | one =>
+      have hbeq : (t.multiplicity == .perPeer) = false := by
+        rw [hm]
+        decide
+      have hs : m.sender ≠ InstId.core name := by
+        intro heq
+        simp [hits_of_core D name t m ht hm heq] at h
+      simp [srcLen, ht, hbeq, coreLen_no name m ms hs]
+
+/-- Sum of `srcLen` over the description's template names. -/
+def sumSrc (D : Description) (ms : List Msg) : List String → Nat
+  | [] => 0
+  | name :: names => srcLen D name ms + sumSrc D ms names
+
+theorem sumSrc_cons (D : Description) (ms : List Msg) (name : String) (names : List String) :
+    sumSrc D ms (name :: names) = srcLen D name ms + sumSrc D ms names := rfl
+
+theorem sumSrc_skip (D : Description) (m : Msg) (ms : List Msg) :
+    ∀ names, (∀ name ∈ names, hits D name m = false) →
+      sumSrc D (m :: ms) names = sumSrc D ms names := by
+  intro names
+  induction names with
+  | nil =>
+    intro _
+    simp [sumSrc]
+  | cons name names ih =>
+    intro hno
+    rw [sumSrc_cons, sumSrc_cons, srcLen_no D name m ms (hno name (List.Mem.head _))]
+    rw [ih (fun name' hmem => hno name' (List.Mem.tail _ hmem))]
+
+theorem sumSrc_step (D : Description) (names : List String) (name : String) (m : Msg)
+    (ms : List Msg) (hmem : name ∈ names) (hnd : names.Nodup) (hyes : hits D name m = true)
+    (hno : ∀ name' ∈ names, name' ≠ name → hits D name' m = false) :
+    sumSrc D (m :: ms) names = sumSrc D ms names + 1 := by
+  induction names with
+  | nil => cases hmem
+  | cons head tail ih =>
+    have hcons := (List.nodup_cons).mp hnd
+    rcases List.mem_cons.mp hmem with rfl | htail
+    · rw [sumSrc_cons, sumSrc_cons, srcLen_yes D name m ms hyes]
+      rw [sumSrc_skip D m ms tail (fun name' hmem' =>
+        hno name' (List.Mem.tail _ hmem') (fun hsame => hcons.1 (by simpa [hsame] using hmem')))]
+      omega
+    · have hhead : hits D head m = false :=
+        hno head (List.Mem.head _) (fun hsame => hcons.1 (by simpa [hsame] using htail))
+      rw [sumSrc_cons, sumSrc_cons, srcLen_no D head m ms hhead]
+      rw [ih htail hcons.2 (fun name' hmem' hne => hno name' (List.Mem.tail _ hmem') hne)]
+      omega
+
+theorem length_le_src (D : Description) (names : List String) (ms : List Msg) (hnd : names.Nodup)
+    (hmem : ∀ m ∈ ms, ∃ name ∈ names, hits D name m = true)
+    (hno : ∀ m ∈ ms, ∀ name' ∈ names, ∀ name ∈ names, hits D name m = true →
+      name' ≠ name → hits D name' m = false) :
+    ms.length ≤ sumSrc D ms names := by
+  induction ms with
+  | nil =>
+    simp [sumSrc]
+  | cons m ms ih =>
+    obtain ⟨name, hname, hyes⟩ := hmem m (List.Mem.head _)
+    have hstep := sumSrc_step D names name m ms hname hnd hyes
+      (fun name' hmem' hne => hno m (List.Mem.head _) name' hmem' name hname hyes hne)
+    have htail := ih (fun m' hm' => hmem m' (List.Mem.tail _ hm'))
+      (fun m' hm' => hno m' (List.Mem.tail _ hm'))
+    simp only [List.length_cons]
+    rw [hstep]
+    omega
+
+theorem hits_only (D : Description) (m : Msg) (name name' : String)
+    (h : hits D name m = true) (hne : name' ≠ name) : hits D name' m = false := by
+  cases hsend : m.sender with
+  | peer n _ _ =>
+    simp only [hits, hsend, Bool.and_eq_true] at h
+    have hn : n = name := by simpa [beq_iff_eq] using h.1
+    have hne' : n ≠ name' := fun heq => hne (heq.symm.trans hn)
+    have hbb : (n == name') = false := by simpa [beq_iff_eq] using hne'
+    simp [hits, hsend, hbb]
+  | core n =>
+    simp only [hits, hsend, Bool.and_eq_true] at h
+    have hn : n = name := by simpa [beq_iff_eq] using h.1
+    have hne' : n ≠ name' := fun heq => hne (heq.symm.trans hn)
+    have hbb : (n == name') = false := by simpa [beq_iff_eq] using hne'
+    simp [hits, hsend, hbb]
+
+theorem hits_shaped (D : Description) (id : InstId) (m : Msg) (hs : m.sender = id)
+    (hshape : shapeOk D id) : hits D (tname id) m = true := by
+  obtain ⟨t, ht, hmul⟩ := hshape
+  cases hm : t.multiplicity with
+  | perPeer =>
+    have hbeq : (t.multiplicity == .perPeer) = true := by
+      rw [hm]
+      decide
+    have hex : ∃ k g, id = InstId.peer t.name k g := by simpa [hm] using hmul
+    obtain ⟨k, g, hid⟩ := hex
+    subst hid
+    simp only [tname] at ht ⊢
+    simp [hits, hs, ht, hbeq]
+  | one =>
+    have hbeq : (t.multiplicity == .perPeer) = false := by
+      rw [hm]
+      decide
+    have hid : id = InstId.core t.name := by simpa [hm] using hmul
+    subst hid
+    simp only [tname] at ht ⊢
+    simp [hits, hs, ht, hbeq]
+
+/-- The charge `nameCover` gives `name`: `N` budgets for a per-peer template
+and one budget for a core. -/
+def popBudget (D : Description) (dst name : String) (n : Nat) : Nat :=
+  match templateOf D name with
+  | none => 0
+  | some t => popFactor n t * budget D name dst
+
+theorem nameCover_cons (D : Description) (dst : String) (n : Nat) (name : String)
+    (names : List String) :
+    nameCover D dst n (name :: names) = popBudget D dst name n + nameCover D dst n names := by
+  simp [nameCover, popBudget]
+
+theorem sumSrc_le_cover (D : Description) (dst : String) (n : Nat) (ms : List Msg) :
+    ∀ names, (∀ name ∈ names, srcLen D name ms ≤ popBudget D dst name n) →
+      sumSrc D ms names ≤ nameCover D dst n names := by
+  intro names
+  induction names with
+  | nil =>
+    intro _
+    simp [sumSrc, nameCover]
+  | cons name names ih =>
+    intro hle
+    rw [sumSrc_cons, nameCover_cons]
+    exact Nat.add_le_add (hle name (List.Mem.head _))
+      (ih (fun name' hmem => hle name' (List.Mem.tail _ hmem)))
+
+theorem sumSrc_cover_slack (D : Description) (dst : String) (n : Nat) (ms : List Msg)
+    (names : List String) (s : String) (hs : s ∈ names) (hnd : names.Nodup)
+    (hle : ∀ name ∈ names, srcLen D name ms ≤ popBudget D dst name n)
+    (hextra : srcLen D s ms + 1 ≤ popBudget D dst s n) :
+    sumSrc D ms names + 1 ≤ nameCover D dst n names := by
+  induction names with
+  | nil => cases hs
+  | cons name names ih =>
+    have hcons := (List.nodup_cons).mp hnd
+    rw [sumSrc_cons, nameCover_cons]
+    rcases List.mem_cons.mp hs with rfl | htail
+    · have htailLe := sumSrc_le_cover D dst n ms names
+        (fun name' hmem => hle name' (List.Mem.tail _ hmem))
+      omega
+    · have ih' := ih htail hcons.2 (fun name' hmem => hle name' (List.Mem.tail _ hmem))
+      have hhead := hle name (List.Mem.head _)
+      omega
+
+theorem src_bound (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (hcr : w.crashed = false) (host : InstId)
+    (hlive : (w.st host).life = .alive) (name : String) :
+    srcLen I.desc name (w.st host).box ≤ popBudget I.desc (tname host) name w.N := by
+  have hI := inv_reachable I N w hL hR
+  cases ht : templateOf I.desc name with
+  | none => simp [srcLen, popBudget, ht]
+  | some t =>
+    cases hm : t.multiplicity with
+    | perPeer =>
+      have hbeq : (t.multiplicity == .perPeer) = true := by
+        rw [hm]
+        decide
+      simp only [srcLen, popBudget, ht, hbeq, ite_true]
+      have hname := name_le_held I w hO hI.seal.childless hcr host hlive name
+      have hfac : popFactor w.N t = w.N := by
+        unfold popFactor
+        rw [hbeq]
+        simp
+      rw [hfac, reach_N I N w hR]
+      exact Nat.le_trans hname
+        (Nat.mul_le_mul_right _ (held_le_sender I hL hG N w hR hcr name))
+    | one =>
+      have hbeq : (t.multiplicity == .perPeer) = false := by
+        rw [hm]
+        decide
+      simp only [srcLen, popBudget, ht, hbeq, ite_false]
+      have hfac : popFactor w.N t = 1 := by
+        unfold popFactor
+        rw [hbeq]
+        simp
+      rw [hfac, Nat.one_mul]
+      exact core_le_budget I w hO hcr name (tname host) host (hO.aliveIn host hlive) rfl
+
+/-- The sender that still holds a token is one under its own charge. -/
+theorem src_succ (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (hcr : w.crashed = false) (host sender : InstId)
+    (hlive : (w.st host).life = .alive) (hlife : (w.st sender).life = .alive)
+    (hhold : 1 ≤ tokenHold I.desc (tname sender) (tname host) (w.st sender)) :
+    srcLen I.desc (tname sender) (w.st host).box + 1 ≤
+      popBudget I.desc (tname host) (tname sender) w.N := by
+  have hI := inv_reachable I N w hL hR
+  have hmemS := hO.aliveIn sender hlife
+  obtain ⟨t, ht, hmul⟩ := hO.shaped sender hmemS
+  have htn : t.name = tname sender := (templateOf_mem I.desc (tname sender) t ht).2
+  have htname : templateOf I.desc (tname sender) = some t := by simpa [htn] using ht
+  cases hm : t.multiplicity with
+  | perPeer =>
+    have hbeq : (t.multiplicity == .perPeer) = true := by
+      rw [hm]
+      decide
+    simp only [srcLen, popBudget, htname, hbeq, ite_true]
+    have hex : ∃ k g, sender = InstId.peer t.name k g := by simpa [hm] using hmul
+    obtain ⟨k, g, hsender⟩ := hex
+    have hpeer : sender = InstId.peer (tname sender) k g := by simpa [htn] using hsender
+    have hlen := peer_name_succ I w hO hI.seal.childless hcr host hlive (tname sender) k g
+      sender hpeer hmemS hlife hhold
+    have hfac : popFactor w.N t = w.N := by
+      unfold popFactor
+      rw [hbeq]
+      simp
+    rw [hfac, reach_N I N w hR]
+    exact Nat.le_trans hlen
+      (Nat.mul_le_mul_right _ (held_le_sender I hL hG N w hR hcr (tname sender)))
+  | one =>
+    have hbeq : (t.multiplicity == .perPeer) = false := by
+      rw [hm]
+      decide
+    simp only [srcLen, popBudget, htname, hbeq, ite_false]
+    have hfac : popFactor w.N t = 1 := by
+      unfold popFactor
+      rw [hbeq]
+      simp
+    rw [hfac, Nat.one_mul]
+    have hid : sender = InstId.core t.name := by simpa [hm] using hmul
+    have hcore : sender = InstId.core (tname sender) := by simpa [htn] using hid
+    have hhold' : 1 ≤ tokenHold I.desc (tname sender) (tname host)
+        (w.st (InstId.core (tname sender))) := by
+      rw [← hcore]
+      exact hhold
+    have hl' : (w.st (InstId.core (tname sender))).life = .alive := by
+      rw [← hcore]
+      exact hlife
+    have hmemC : InstId.core (tname sender) ∈ w.roster := by
+      rw [← hcore]
+      exact hmemS
+    exact core_succ I w hO (tname sender) (tname host) host (hO.aliveIn host hlive) rfl
+      hl' hmemC hhold'
+
+/-- A live Lemma-1 mailbox has room for one more message from a sender that
+still holds a token. Each per-peer template is charged `N` budgets, one per
+held key, and each core is charged one. `nameCover` puts that sum under
+`totalOcc.eval`, and Lemma 1 puts the evaluation under `capBulk`. -/
+theorem l1_box_room (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (hcr : w.crashed = false) (host sender : InstId)
+    (hlive : (w.st host).life = .alive) (hl1 : l1 I.desc (tname host) = true)
+    (hlife : (w.st sender).life = .alive)
+    (hhold : 1 ≤ tokenHold I.desc (tname sender) (tname host) (w.st sender)) :
+    (w.st host).box.length + 1 ≤ capBulk I.desc w.N host := by
+  let names := I.desc.templates.map (·.name)
+  have hnd := birth_names I.desc hG
+  have hpick : ∀ m ∈ (w.st host).box, ∃ name ∈ names, hits I.desc name m = true := by
+    intro m hm
+    have hsend := hO.sentFrom host m hm
+    have hshape := hO.shaped m.sender hsend
+    refine ⟨tname m.sender, ?_, hits_shaped I.desc m.sender m rfl hshape⟩
+    obtain ⟨t, ht, _⟩ := hshape
+    exact List.mem_map.mpr ⟨t, (templateOf_mem I.desc (tname m.sender) t ht).1,
+      (templateOf_mem I.desc (tname m.sender) t ht).2⟩
+  have honly : ∀ m ∈ (w.st host).box, ∀ name' ∈ names, ∀ name ∈ names,
+      hits I.desc name m = true → name' ≠ name → hits I.desc name' m = false := by
+    intro m _ name' _ name _ hyes hne
+    exact hits_only I.desc m name name' hyes hne
+  have hlen := length_le_src I.desc names (w.st host).box hnd hpick honly
+  have hmemS := hO.aliveIn sender hlife
+  obtain ⟨tS, htS, _⟩ := hO.shaped sender hmemS
+  have hsName : tname sender ∈ names :=
+    List.mem_map.mpr ⟨tS, (templateOf_mem I.desc (tname sender) tS htS).1,
+      (templateOf_mem I.desc (tname sender) tS htS).2⟩
+  have hle : ∀ name ∈ names, srcLen I.desc name (w.st host).box ≤
+      popBudget I.desc (tname host) name w.N := by
+    intro name _
+    exact src_bound I hL hG N w hR hO hcr host hlive name
+  have hextra := src_succ I hL hG N w hR hO hcr host sender hlive hlife hhold
+  have hsum := sumSrc_cover_slack I.desc (tname host) w.N (w.st host).box names (tname sender)
+    hsName hnd hle hextra
+  have hocc := name_cover_le I hL hG (tname host) w.N
+  have hcap := cap_of_l1 I.desc host w.N hl1
+  exact Nat.le_trans (Nat.add_le_add_right hlen 1) (Nat.le_trans hsum (Nat.le_trans hocc hcap))
+
+/-- `offerPrio` writes the priority lane, or crashes and copies every queue. -/
+theorem offerPrio_parked (D : Description) (w : World) (host : InstId) (msg : Msg) (i : InstId) :
+    ((offerPrio D w host msg).st i).parked = (w.st i).parked := by
+  unfold offerPrio
+  by_cases hfull : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) = true
+  · simp only [hfull, ite_true]
+    exact (crash_queues w i).2.2.1
+  · have hfullF : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) = false := by
+      cases hb : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) with
+      | false => rfl
+      | true => exact absurd hb hfull
+    simp only [hfullF, ite_false]
+    by_cases hi : i = host
+    · simp [setActor, hi]
+    · simp [setActor, hi]
+
+/-- A tombstone is a priority message, a dropped delivery, or a crash.
+None of the three writes a parked list. -/
+theorem enqueueTombstone_parked (D : Description) (w : World) (child i : InstId) :
+    ((enqueueTombstone D w child).st i).parked = (w.st i).parked := by
+  unfold enqueueTombstone
+  cases hpar : (w.st child).parent with
+  | none => simp [hpar]
+  | some parent =>
+    simp only [hpar]
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · simp [hlive]
+    · have hliveF : ((w.st parent).life != .alive) = false := by
+        cases hb : (w.st parent).life != .alive with
+        | false => rfl
+        | true => exact absurd hb hlive
+      simp only [hliveF, ite_false]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true]
+        exact (crash_queues w i).2.2.1
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          cases hb : (tombstoneMsg D (w.st parent) child).label == "" with
+          | false => rfl
+          | true => exact absurd hb hlab
+        simp only [hlabF, ite_false]
+        exact offerPrio_parked D w parent (tombstoneMsg D (w.st parent) child) i
+
+theorem set_proceed_parked (w : World) (id i : InstId) (k : Cont) (a : Actor)
+    (hpa : a.parked = (w.st id).parked) :
+    ((setActor w id (proceed a k)).st i).parked = (w.st i).parked := by
+  by_cases hi : i = id
+  · simp [setActor, hi, proceed_fields, hpa]
+  · simp [setActor, hi]
+
+theorem set_finish_parked (w : World) (id i : InstId) (k : Cont) (r : CallResult) (a : Actor)
+    (hpa : a.parked = (w.st id).parked) :
+    ((setActor w id (finishCall a k r)).st i).parked = (w.st i).parked := by
+  by_cases hi : i = id
+  · simp [setActor, hi, finishCall_fields, hpa]
+  · simp [setActor, hi]
+
+/-- A reply writes a continuation. The parked lists stay. -/
+theorem performReply_parked (w : World) (sender i : InstId) (k : Cont) :
+    ((performReply w sender k).st i).parked = (w.st i).parked := by
+  cases hr : k.replyTo with
+  | none =>
+    simp only [performReply, hr]
+    exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+  | some caller =>
+    simp only [performReply, hr]
+    cases hph : (w.st caller).phase with
+    | awaitReply dst ck =>
+      simp only [hph]
+      by_cases hmatch : (decide (dst = sender) &&
+          decide ((w.st sender).oweId = some (w.st caller).waitId)) = true
+      · simp only [hmatch, ite_true]
+        let w1 := setActor w caller (finishCall (w.st caller) ck .reply)
+        have h1 : ∀ j, (w1.st j).parked = (w.st j).parked :=
+          fun j => set_finish_parked w caller j ck .reply (w.st caller) rfl
+        exact (set_proceed_parked w1 sender i (afterHead k) (w1.st sender) rfl).trans (h1 i)
+      · have hmatchF : (decide (dst = sender) &&
+            decide ((w.st sender).oweId = some (w.st caller).waitId)) = false := by
+          cases hb : decide (dst = sender) &&
+              decide ((w.st sender).oweId = some (w.st caller).waitId) with
+          | false => rfl
+          | true => exact absurd hb hmatch
+        simp only [hmatchF, ite_false]
+        exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+    | idle =>
+      simp only [hph]
+      exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+    | run _ =>
+      simp only [hph]
+      exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+    | parked _ _ _ =>
+      simp only [hph]
+      exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+    | awaitEffect _ =>
+      simp only [hph]
+      exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+    | awaitPeer _ =>
+      simp only [hph]
+      exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+    | crashed =>
+      simp only [hph]
+      exact set_proceed_parked w sender i (afterHead k) (w.st sender) rfl
+
+theorem tryWake_parked (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) : ((tryWake D w dstId label writer).st i).parked = (w.st i).parked := by
+  simp only [tryWake]
+  split
+  · rfl
+  · exact offerPrio_parked D w dstId _ i
+
+theorem wakeFold_parked (D : Description) (writer : InstId) (label : String) :
+    ∀ (ids : List InstId) (w : World) (i : InstId),
+      ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).parked = (w.st i).parked := by
+  intro ids
+  induction ids with
+  | nil => intro _ _; rfl
+  | cons hd tl ih =>
+    intro w i
+    simp only [List.foldl_cons]
+    rw [ih, tryWake_parked]
+
+theorem wakeReaders_parked (D : Description) (w : World) (dst label : String) (writer i : InstId) :
+    ((wakeReaders D w dst label writer).st i).parked = (w.st i).parked := by
+  simp only [wakeReaders, readersOf]
+  exact wakeFold_parked D writer label (w.roster.filter fun id =>
+    tname id == dst && (w.st id).life == .alive) w i
+
+/-- Installing one born peer replaces that id's actor with an empty mailbox
+and leaves every other parked list alone. `next` is a key or index bump. -/
+theorem placePeer_park (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World)
+    (hst : ∀ (u : World) (j : InstId), ((next u).st j) = u.st j) (i : InstId) :
+    ((placePeer I w template k initial parent next).st i).parked = (w.st i).parked ∨
+      ((placePeer I w template k initial parent next).st i).parked = [] := by
+  let bornId := InstId.peer template k (maxGen w template k)
+  let born := { bornActor I.desc w template k initial with parent := parent }
+  let w0 := { w with roster := w.roster ++ [bornId] }
+  let w1 := next w0
+  have hbase : placePeer I w template k initial parent next =
+      readCells I.desc (setActor w1 bornId born) bornId := by
+    simp [placePeer, bornId, born, w0, w1]
+  rw [hbase, cellsSt]
+  by_cases hi : i = bornId
+  · exact Or.inr (by simp [setActor, hi, born, bornActor, withKeyTokens])
+  · exact Or.inl (by rw [setActor_other w1 bornId i born hi, hst w0 i])
+
+/-- A child birth is a no-op, or it installs one empty actor. -/
+theorem spawnChild_park (I : Impl) (w w' : World) (parent : InstId) (child : String) (i : InstId)
+    (h : spawnChild I w parent child = some w') :
+    (w'.st i).parked = (w.st i).parked ∨ (w'.st i).parked = [] := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hcond : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+        (w.st parent).life == .alive) = true
+    · rw [hcond] at h
+      rw [ite_eq_left (by decide : true = true)] at h
+      cases parent with
+      | core _ => simp at h
+      | peer pname pk pg =>
+        dsimp only at h
+        by_cases hblock : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk = true
+        · rw [hblock] at h
+          rw [ite_eq_left (by decide : true = true)] at h
+          cases h
+          exact Or.inl rfl
+        · have hblockF : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk = false := by
+            cases hb : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk with
+            | false => rfl
+            | true => exact absurd hb hblock
+          rw [hblockF] at h
+          rw [ite_eq_right (by decide : ¬ false = true)] at h
+          injection h with hw
+          subst hw
+          let bornId := InstId.peer child pk (maxGen w child pk)
+          by_cases hnew : i = bornId
+          · exact Or.inr (by
+              unfold bornId at hnew
+              simp [hnew, admitBorn, cellsSt, setActor, bornActor, withKeyTokens])
+          · exact Or.inl (by
+              unfold bornId at hnew
+              simp [admitBorn, cellsSt, setActor, hnew])
+    · have hcondF : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = false := by
+        cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hcond
+      rw [hcondF] at h
+      rw [ite_eq_right (by decide : ¬ false = true)] at h
+      by_cases hsup : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · rw [hsup] at h
+        rw [ite_eq_left (by decide : true = true)] at h
+        cases h
+        exact Or.inl rfl
+      · have hsupF : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) with
+          | false => rfl
+          | true => exact absurd hb hsup
+        rw [hsupF] at h
+        rw [ite_eq_right (by decide : ¬ false = true)] at h
+        simp at h
+
+/-- A parked entry that was not already queued was stored on the live
+destination, and that destination had no room. -/
+theorem enqueue_fresh (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) (p : Parked)
+    (hp : p ∈ ((enqueueOrPark w D sender dst msg isCall k).st i).parked) :
+    p ∈ (w.st i).parked ∨
+      i = dst ∧ (w.st dst).life = .alive ∧
+        ¬((w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst) := by
+  cases isCall <;>
+    (unfold enqueueOrPark at hp
+     by_cases hlive : (w.st dst).life = .alive
+     · simp [hlive] at hp
+       by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+       · simp [hroom] at hp
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame] at hp
+           simp [setActor] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hp
+             try rw [(proceed_fields _ k).2.2.2.1] at hp
+             try simp at hp
+             rw [hi]
+             exact Or.inl hp
+           · simp [setActor, hi] at hp
+             exact Or.inl hp
+         · rw [if_neg hsame] at hp
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hp
+             try rw [(proceed_fields _ k).2.2.2.1] at hp
+             try simp at hp
+             rw [hi]
+             exact Or.inl hp
+           · by_cases hid : i = dst
+             · simp [hid, hlive] at hp
+               rw [if_neg hflip] at hp
+               simp at hp
+             · rw [if_neg hi, if_neg hid] at hp
+               exact Or.inl hp
+       · simp [hroom] at hp
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame] at hp
+           simp [setActor] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall, List.mem_append, List.mem_singleton] at hp
+             try rw [(proceed_fields _ k).2.2.2.1] at hp
+             try simp [List.mem_append, List.mem_singleton] at hp
+             rcases hp with hp | rfl
+             · rw [hi]; exact Or.inl hp
+             · exact Or.inr ⟨hi.trans hsame, hlive, hroom⟩
+           · simp [setActor, hi] at hp
+             exact Or.inl hp
+         · rw [if_neg hsame] at hp
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hp
+             rw [hi]
+             exact Or.inl hp
+           · by_cases hid : i = dst
+             · simp [hid, hlive, List.mem_append, List.mem_singleton] at hp
+               try rw [if_neg hflip] at hp
+               try simp [List.mem_append, List.mem_singleton] at hp
+               rcases hp with hp | rfl
+               · rw [hid]; exact Or.inl hp
+               · exact Or.inr ⟨hid, hlive, hroom⟩
+             · rw [if_neg hi, if_neg hid] at hp
+               exact Or.inl hp
+     · rw [if_pos hlive] at hp
+       by_cases hi : i = sender
+       · simp [hi, setActor, issueCall, finishCall] at hp
+         try rw [(proceed_fields _ k).2.2.2.1] at hp
+         try rw [(proceed_fields _ (selectCall k _)).2.2.2.1] at hp
+         try simp at hp
+         rw [hi]
+         exact Or.inl hp
+       · simp [setActor, hi] at hp
+         exact Or.inl hp)
+
+/-- Parked mail after `enqueueOrPark` on an id that started empty. An alive
+Lemma-1 destination has room, so the fresh entry is not stored there. -/
+theorem enqueue_l1_park (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) (hempty : (w.st i).parked = [])
+    (hl1 : l1 D (tname i) = true)
+    (hlen : l1 D (tname dst) = true → (w.st dst).life = .alive →
+      (w.st dst).box.length < capBulk D w.N dst) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).parked = [] := by
+  cases hpark : ((enqueueOrPark w D sender dst msg isCall k).st i).parked with
+  | nil => rfl
+  | cons p _ =>
+    have hp : p ∈ ((enqueueOrPark w D sender dst msg isCall k).st i).parked := by simp [hpark]
+    rcases enqueue_fresh w D sender dst msg isCall k i p hp with h | ⟨heq, hlive, hnot⟩
+    · simp [hempty] at h
+    · subst heq
+      exact absurd ⟨hempty, hlen hl1 hlive⟩ hnot
 
 end Deadlock

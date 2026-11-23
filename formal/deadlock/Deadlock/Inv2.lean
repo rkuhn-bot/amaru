@@ -2003,6 +2003,518 @@ theorem peer_send_gap (I : Impl) (w : World) (hO : OccInv I w) (name : String) (
   rw [htn] at hS
   exact queued_succ_le _ _ _ (hO.balance.1.1 name key sender dst hlive) (Int.le_trans hcast hS)
 
+theorem tokenHold_head_call (D : Description) (template dst : String) (a : Actor) (k : Cont)
+    (label : String) (hint : Nat) (onNotAdmitted onTimedOut es : List Eff)
+    (hph : a.phase = .run k)
+    (hk : k.rest = .call dst label hint onNotAdmitted onTimedOut :: es) :
+    1 ≤ tokenHold D template dst a := by
+  have hb : (dst == dst) = true := by simp
+  simp only [tokenHold, hph, hk, pathReserve, effReserve, hb]
+  exact Nat.le_trans (Nat.le_add_right 1 _) (Nat.le_max_left _ _)
+
+theorem tokenHold_head_try (D : Description) (template dst : String) (a : Actor) (k : Cont)
+    (label : String) (hint : Nat) (onFull onGone es : List Eff) (hph : a.phase = .run k)
+    (hk : k.rest = .trySend dst label hint onFull onGone :: es) :
+    1 ≤ tokenHold D template dst a := by
+  have hb : (dst == dst) = true := by simp
+  simp only [tokenHold, hph, hk, pathReserve, effReserve, hb]
+  exact Nat.le_trans (Nat.le_add_right 1 _) (Nat.le_max_left _ _)
+
+theorem l1Clear_eq (D : Description) (w w' : World) (h : l1Clear D w)
+    (hp : ∀ i, (w'.st i).parked = (w.st i).parked) : l1Clear D w' := by
+  intro i hl1
+  simpa [hp i] using h i hl1
+
+theorem l1Clear_or (D : Description) (w w' : World) (h : l1Clear D w)
+    (hp : ∀ i, (w'.st i).parked = (w.st i).parked ∨ (w'.st i).parked = []) : l1Clear D w' := by
+  intro i hl1
+  rcases hp i with heq | hempty
+  · simpa [heq] using h i hl1
+  · exact hempty
+
+theorem l1Clear_crash (D : Description) (w : World) (h : l1Clear D w) : l1Clear D (crashWorld w) :=
+  l1Clear_eq D w (crashWorld w) h fun i => (crash_queues w i).2.2.1
+
+theorem l1Clear_release (D : Description) (w : World) (id : InstId) (a : Actor)
+    (h : l1Clear D w) : l1Clear D (releaseWorld D w id a) :=
+  l1Clear_sub D w (releaseWorld D w id a) h fun i p hp =>
+    List.Sublist.mem hp (releaseWorld_sub D w id a i).2
+
+theorem l1Clear_seal (D : Description) (w : World) (id : InstId) (a : Actor)
+    (h : l1Clear D w) : l1Clear D (sealActor D w id a) := by
+  have hrel := l1Clear_release D w id a h
+  exact l1Clear_eq D (releaseWorld D w id a) (sealActor D w id a) hrel
+    fun i => enqueueTombstone_parked D (releaseWorld D w id a) id i
+
+theorem l1Clear_shutdown (D : Description) (w : World) (id : InstId) (h : l1Clear D w) :
+    l1Clear D (shutdownActor D w id) := by
+  unfold shutdownActor
+  by_cases hl : ((w.st id).life == .alive) = true
+  · simp only [hl, ite_true]
+    exact l1Clear_seal D w id (w.st id) h
+  · have hlf : ((w.st id).life == .alive) = false := by
+      cases hb : (w.st id).life == .alive with
+      | false => rfl
+      | true => exact absurd hb hl
+    simp only [hlf, ite_false]
+    exact h
+
+theorem l1Clear_foldSeal (D : Description) (fuel : Nat) (parent : InstId)
+    (ih : ∀ w id, l1Clear D w → l1Clear D (sealBranch fuel D w id)) :
+    ∀ (ids : List InstId) (w : World), l1Clear D w →
+      l1Clear D (ids.foldl (fun acc child =>
+        if isChild acc parent child then sealBranch fuel D acc child else acc) w) := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro w h
+    simpa using h
+  | cons c cs ihf =>
+    intro w h
+    simp only [List.foldl_cons]
+    by_cases hc : isChild w parent c = true
+    · simp only [hc, ite_true]
+      exact ihf _ (ih w c h)
+    · have hcf : isChild w parent c = false := by
+        cases hb : isChild w parent c with
+        | false => rfl
+        | true => exact absurd hb hc
+      simp only [hcf, ite_false]
+      exact ihf _ h
+
+theorem l1Clear_sealBranch (D : Description) (fuel : Nat) (w : World) (id : InstId)
+    (h : l1Clear D w) : l1Clear D (sealBranch fuel D w id) := by
+  induction fuel generalizing w id with
+  | zero => simpa [sealBranch] using h
+  | succ fuel ih =>
+    unfold sealBranch
+    dsimp only
+    have hfold := l1Clear_foldSeal D fuel id ih w.roster w h
+    generalize hse : w.roster.foldl (fun acc child =>
+      if isChild acc id child then sealBranch fuel D acc child else acc) w = sealed at hfold ⊢
+    by_cases hl : ((sealed.st id).life == .alive) = true
+    · simp only [hl, ite_true]
+      exact l1Clear_release D sealed id (sealed.st id) hfold
+    · have hlf : ((sealed.st id).life == .alive) = false := by
+        cases hbb : (sealed.st id).life == .alive
+        · rfl
+        · exact absurd hbb hl
+      simp only [hlf, ite_false]
+      exact hfold
+
+theorem l1Clear_drop (D : Description) (w : World) (id : InstId) (h : l1Clear D w) :
+    l1Clear D (dropDescendants D w id) := by
+  unfold dropDescendants
+  exact l1Clear_foldSeal D w.roster.length id (l1Clear_sealBranch D w.roster.length) w.roster w h
+
+theorem l1Clear_abort (D : Description) (w : World) (parent : InstId) (h : l1Clear D w) :
+    l1Clear D (abortChildren D w parent) := by
+  unfold abortChildren
+  suffices ∀ (ids : List InstId) (w : World), l1Clear D w →
+      l1Clear D (ids.foldl (fun w child =>
+        if isChild w parent child && (w.st child).life == .alive then
+          shutdownActor D (dropDescendants D w child) child else w) w) from
+    this w.roster w h
+  intro ids
+  induction ids with
+  | nil =>
+    intro w h
+    simpa using h
+  | cons c cs ih =>
+    intro w h
+    simp only [List.foldl_cons]
+    by_cases hc : (isChild w parent c && (w.st c).life == .alive) = true
+    · simp only [hc, ite_true]
+      exact ih _ (l1Clear_shutdown D (dropDescendants D w c) c (l1Clear_drop D w c h))
+    · have hcf : (isChild w parent c && (w.st c).life == .alive) = false := by
+        cases hb : isChild w parent c && (w.st c).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hc
+      simp only [hcf, ite_false]
+      exact ih _ h
+
+theorem l1Clear_stage (D : Description) (w : World) (id : InstId) (a : Actor) (h : l1Clear D w) :
+    l1Clear D (terminateStage D w id a) := by
+  simp only [terminateStage]
+  exact l1Clear_shutdown D (dropDescendants D w id) id (l1Clear_drop D w id h)
+
+theorem l1Clear_commit (D : Description) (w : World) (id : InstId) (next : Actor)
+    (h : l1Clear D w) (hpa : next.parked = (w.st id).parked) : l1Clear D (commitCont w id next) := by
+  unfold commitCont
+  by_cases hc : w.crashed = true
+  · simp only [hc, ite_true]
+    exact h
+  · have hcf : w.crashed = false := by
+      cases hb : w.crashed with
+      | false => rfl
+      | true => exact absurd hb hc
+    simp only [hcf, ite_false]
+    intro i hli
+    by_cases hi : i = id
+    · simpa [setActor, hi, hpa] using h i hli
+    · simpa [setActor, hi] using h i hli
+
+theorem l1Clear_child (I : Impl) (w w' : World) (parent : InstId) (child : String)
+    (h : spawnChild I w parent child = some w') (hC : l1Clear I.desc w) : l1Clear I.desc w' :=
+  l1Clear_or I.desc w w' hC fun i => spawnChild_park I w w' parent child i h
+
+/-- The `trySend` continuation taken when the route is gone. Same record `execRun` builds. -/
+def goneCont (k : Cont) (onGone : List Eff) : Cont :=
+  let k' := afterHead k
+  { k' with rest := onGone, toState := pickState k'.toState k'.toGone }
+
+/-- The `trySend` continuation taken when the live mailbox is full. -/
+def fullCont (k : Cont) (onFull : List Eff) : Cont :=
+  let k' := afterHead k
+  { k' with rest := onFull, toState := pickState k'.toState k'.toFull }
+
+/-- The call continuation that records both failure handlers. -/
+def waitCont (k : Cont) (onNotAdmitted onTimedOut : List Eff) : Cont :=
+  let k' := afterHead k
+  { k' with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
+
+/-- The priority message a `selfSchedule` arms, and the actor that carries it. -/
+def selfMsg (a : Actor) (id : InstId) (label : String) : Msg :=
+  { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid }
+
+def selfActor (a : Actor) (id : InstId) (label : String) : Actor :=
+  { a with prio := upsertPrio a.prio (selfMsg a id label), nextMid := a.nextMid + 1 }
+
+/-- One more message from a running sender still fits on an alive Lemma-1 host. -/
+theorem l1_send_room (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (hcr : w.crashed = false) (id dstId : InstId)
+    (hlife : (w.st id).life = .alive) (hhold : 1 ≤ tokenHold I.desc (tname id) (tname dstId) (w.st id)) :
+    l1 I.desc (tname dstId) = true → (w.st dstId).life = .alive →
+      (w.st dstId).box.length < capBulk I.desc w.N dstId := by
+  intro hl1 hlive
+  exact Nat.lt_of_succ_le (l1_box_room I hL hG N w hR hO hcr dstId id hlive hl1 hlife hhold)
+
+theorem execRun_l1 (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (hO : OccInv I w) (hcr : w.crashed = false) (hC : l1Clear I.desc w)
+    (id : InstId) (a : Actor) (k : Cont) (ha : a = w.st id) (hlive : (a.life == .alive) = true)
+    (hph : a.phase = .run k) : l1Clear I.desc (execRun I w id a k) := by
+  have hlife : (w.st id).life = .alive := by simpa [beq_iff_eq, ha] using hlive
+  have hphase : (w.st id).phase = .run k := by simpa [ha] using hph
+  cases hk : k.rest with
+  | nil =>
+    simp only [execRun, hlive, hk]
+    intro i hli
+    by_cases hi : i = id
+    · simpa [setActor, hi, ha] using hC i hli
+    · simpa [setActor, hi] using hC i hli
+  | cons e es =>
+    cases e with
+    | send dst label hint =>
+      cases hr : route w I.desc id dst with
+      | none =>
+        simp only [execRun, hlive, hk, hr]
+        intro i hli
+        have hp := set_proceed_parked (noteStale w id dst) id i (afterHead k) a
+          (by simpa [noteStale_st, ha])
+        simpa [noteStale_st] using hp.trans (congrArg (·.parked) (noteStale_st w id dst i) ▸ hC i hli)
+      | some dstId =>
+        simp only [execRun, hlive, hk, hr]
+        intro i hli
+        have hhold := tokenHold_head_send I.desc (tname id) dst (w.st id) k label hint es hphase hk
+        have htn := route_tname w I.desc id dst dstId hr
+        have hhold' : 1 ≤ tokenHold I.desc (tname id) (tname dstId) (w.st id) := by
+          rw [htn]; exact hhold
+        exact enqueue_l1_park w I.desc id dstId { label := label, sender := id, callFrom := none }
+          false (afterHead k) i (hC i hli) hli
+          (l1_send_room I hL hG N w hR hO hcr id dstId hlife hhold')
+    | trySend dst label hint onFull onGone =>
+      cases hr : route w I.desc id dst with
+      | none =>
+        have hrw : execRun I w id a k =
+            setActor (noteStale w id dst) id (proceed a (goneCont k onGone)) := by
+          simp [execRun, hlive, hk, hr, goneCont]
+        rw [hrw]
+        intro i hli
+        rw [set_proceed_parked (noteStale w id dst) id i (goneCont k onGone) a
+          (by simp [noteStale_st, ha])]
+        simpa [noteStale_st] using hC i hli
+      | some dstId =>
+        by_cases hguard : (((w.st dstId).life == .alive) && decide ((w.st dstId).parked = []) &&
+            decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = true
+        · simp only [execRun, hlive, hk, hr, hguard, ite_true]
+          intro i hli
+          have hhold := tokenHold_head_try I.desc (tname id) dst (w.st id) k label hint onFull onGone
+            es hphase hk
+          have htn := route_tname w I.desc id dst dstId hr
+          have hhold' : 1 ≤ tokenHold I.desc (tname id) (tname dstId) (w.st id) := by
+            rw [htn]; exact hhold
+          exact enqueue_l1_park w I.desc id dstId
+            { label := label, sender := id, callFrom := none, reliable := false } false (afterHead k) i
+            (hC i hli) hli (l1_send_room I hL hG N w hR hO hcr id dstId hlife hhold')
+        · have hguardF : (((w.st dstId).life == .alive) && decide ((w.st dstId).parked = []) &&
+              decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = false := by
+            cases hb : ((w.st dstId).life == .alive) && decide ((w.st dstId).parked = []) &&
+                decide ((w.st dstId).box.length < capBulk I.desc w.N dstId) with
+            | false => rfl
+            | true => exact absurd hb hguard
+          by_cases haliveT : ((w.st dstId).life == .alive) = true
+          · have hrest : (decide ((w.st dstId).parked = []) &&
+                decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = false := by
+              cases hb1 : decide ((w.st dstId).parked = []) <;>
+                cases hb2 : decide ((w.st dstId).box.length < capBulk I.desc w.N dstId) <;>
+                simp [haliveT, hb1, hb2] at hguardF <;> rfl
+            have hrw : execRun I w id a k =
+                setActor w id (proceed a (fullCont k onFull)) := by
+              simp [execRun, hlive, hk, hr, haliveT, hrest, fullCont]
+            rw [hrw]
+            intro i hli
+            rw [set_proceed_parked w id i (fullCont k onFull) a (by simp [ha])]
+            exact hC i hli
+          · have hdead : ((w.st dstId).life == .alive) = false := by
+              cases hb : (w.st dstId).life == .alive with
+              | false => rfl
+              | true => exact absurd hb haliveT
+            have hrw : execRun I w id a k =
+                setActor w id (proceed a (goneCont k onGone)) := by
+              simp [execRun, hlive, hk, hr, hdead, goneCont]
+            rw [hrw]
+            intro i hli
+            rw [set_proceed_parked w id i (goneCont k onGone) a (by simp [ha])]
+            exact hC i hli
+    | call dst label hint onNotAdmitted onTimedOut =>
+      cases hr : resolveId I.desc w id dst with
+      | none =>
+        have hrw : execRun I w id a k =
+            setActor (noteStale w id dst) id
+              (finishCall (issueCall a) (waitCont k onNotAdmitted onTimedOut) .notAdmitted) := by
+          simp [execRun, hlive, hk, hr, waitCont]
+        rw [hrw]
+        intro i hli
+        rw [set_finish_parked (noteStale w id dst) id i
+          (waitCont k onNotAdmitted onTimedOut) .notAdmitted (issueCall a)
+          (by simp [noteStale_st, issueCall, ha])]
+        simpa [noteStale_st] using hC i hli
+      | some dstId =>
+        simp only [execRun, hlive, hk, hr]
+        intro i hli
+        let kWait := waitCont k onNotAdmitted onTimedOut
+        have hhold := tokenHold_head_call I.desc (tname id) dst (w.st id) k label hint
+          onNotAdmitted onTimedOut es hphase hk
+        have htn := resolve_tname I.desc w id dst dstId hr
+        have hhold' : 1 ≤ tokenHold I.desc (tname id) (tname dstId) (w.st id) := by
+          rw [htn]; exact hhold
+        exact enqueue_l1_park w I.desc id dstId
+          { label := label, sender := id, callFrom := some id } true kWait i (hC i hli) hli
+          (l1_send_room I hL hG N w hR hO hcr id dstId hlife hhold')
+    | reply =>
+      simp only [execRun, hlive, hk]
+      exact l1Clear_eq I.desc w (performReply w id k) hC fun i => performReply_parked w id i k
+    | selfSchedule label =>
+      by_cases hany : (a.prio.any (fun p => p.label == label)) = true
+      · simp only [execRun, hlive, hk, hany, ite_true]
+        intro i hli
+        have hp := set_proceed_parked w id i (afterHead k) a (by simpa [ha])
+        simpa [hp] using hC i hli
+      · have hfany : (a.prio.any (fun p => p.label == label)) = false := by
+          cases hb : a.prio.any (fun p => p.label == label) with
+          | false => rfl
+          | true => exact absurd hb hany
+        by_cases hroom : prioLoad a.prio < capPrio I.desc w.N id
+        · have hrw : execRun I w id a k =
+              setActor w id (proceed (selfActor a id label) (afterHead k)) := by
+            simp [execRun, hlive, hk, hfany, hroom, selfActor, selfMsg]
+          rw [hrw]
+          intro i hli
+          rw [set_proceed_parked w id i (afterHead k) (selfActor a id label) (by simp [ha, selfActor])]
+          exact hC i hli
+        · have hrw : execRun I w id a k = crashWorld w := by
+            simp [execRun, hlive, hk, hfany, hroom]
+          rw [hrw]
+          exact l1Clear_crash I.desc w hC
+    | cell dst label value =>
+      by_cases hdirty : (w.cell dst label).dirty = true
+      · simp only [execRun, hlive, hk, hdirty, ite_true]
+        intro i hli
+        let w1 := setCell w dst label { value := max (w.cell dst label).value value, dirty := true }
+        have hp := set_proceed_parked w1 id i (afterHead k) (w1.st id) rfl
+        simp only [w1] at hp
+        rw [hp]
+        simp [setCell]
+        exact hC i hli
+      · have hf : (w.cell dst label).dirty = false := by
+          cases hb : (w.cell dst label).dirty with
+          | false => rfl
+          | true => exact absurd hb hdirty
+        have hrw : execRun I w id a k =
+            wakeReaders I.desc
+              (setActor (setCell w dst label
+                  { value := max (w.cell dst label).value value, dirty := true }) id
+                (proceed ((setCell w dst label
+                    { value := max (w.cell dst label).value value, dirty := true }).st id)
+                  (afterHead k))) dst label id := by
+          simp [execRun, hlive, hk, hf]
+        rw [hrw]
+        intro i hli
+        let w1 := setCell w dst label { value := max (w.cell dst label).value value, dirty := true }
+        let w2 := setActor w1 id (proceed (w1.st id) (afterHead k))
+        have h2 := set_proceed_parked w1 id i (afterHead k) (w1.st id) rfl
+        have hw := wakeReaders_parked I.desc w2 dst label id i
+        simp only [w1, w2] at h2 hw
+        rw [hw, h2]
+        simp [setCell]
+        exact hC i hli
+    | internal =>
+      simp only [execRun, hlive, hk]
+      intro i hli
+      by_cases hi : i = id
+      · simpa [setActor, hi, ha] using hC i hli
+      · simpa [setActor, hi] using hC i hli
+    | peer _ =>
+      simp only [execRun, hlive, hk]
+      intro i hli
+      by_cases hi : i = id
+      · simpa [setActor, hi, ha] using hC i hli
+      · simpa [setActor, hi] using hC i hli
+    | abort =>
+      simp only [execRun, hlive, hk]
+      exact l1Clear_commit I.desc (abortChildren I.desc w id) id
+        (proceed ((abortChildren I.desc w id).st id) (afterHead k))
+        (l1Clear_abort I.desc w id hC) (proceed_fields _ _).2.2.2.1
+    | spawn child =>
+      cases hs : spawnChild I w id child with
+      | none =>
+        simp only [execRun, hlive, hk, hs]
+        exact l1Clear_crash I.desc w hC
+      | some w1 =>
+        simp only [execRun, hlive, hk, hs]
+        exact l1Clear_commit I.desc w1 id (proceed (w1.st id) (afterHead k))
+          (l1Clear_child I w w1 id child hs hC) (proceed_fields _ _).2.2.2.1
+    | terminate =>
+      have hlive' : a.life = .alive := by simpa [beq_iff_eq] using hlive
+      rcases execRun_terminate I w id a k hlive' ⟨es, hk⟩ with hcrash | hlone | htree | hcascade
+      · rw [hcrash]
+        exact l1Clear_crash I.desc w hC
+      · obtain ⟨_, _, _, _, _, _, _, hr⟩ := hlone
+        rw [hr]
+        exact l1Clear_shutdown I.desc w id hC
+      · obtain ⟨_, _, _, _, hr⟩ := htree
+        rw [hr]
+        exact l1Clear_stage I.desc w id a hC
+      · obtain ⟨_, _, _, _, _, _, _, hr⟩ := hcascade
+        rw [hr]
+        exact l1Clear_stage I.desc w id a hC
+
+theorem l1Clear_finish (I : Impl) (w w' : World) (id : InstId) (hC : l1Clear I.desc w)
+    (h : finishWait I w id = some w') : l1Clear I.desc w' := by
+  unfold finishWait at h
+  by_cases hnot : (w.st id).life ≠ .alive
+  · simp [hnot] at h
+  · simp [hnot] at h
+    cases hph : (w.st id).phase with
+    | awaitEffect k =>
+      simp [hph] at h
+      cases h
+      intro i hli
+      simpa [set_proceed_parked w id i k (w.st id) rfl] using hC i hli
+    | awaitPeer k =>
+      simp [hph] at h
+      cases h
+      intro i hli
+      simpa [set_proceed_parked w id i k (w.st id) rfl] using hC i hli
+    | idle => simp [hph] at h
+    | run _ => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+theorem l1Clear_spawn (I : Impl) (w w' : World) (template : String) (hC : l1Clear I.desc w)
+    (h : spawn I w template = some w') : l1Clear I.desc w' := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · simp only [hmay, ite_true] at h
+      cases hsup : t.supervisor with
+      | some name =>
+        rw [hsup] at h
+        cases h
+        exact l1Clear_or I.desc w _ hC fun i =>
+          placePeer_park I w template (freshKey I.desc w t.subtree) t.initial
+            (some (InstId.core name))
+            (fun u => { u with nextKey := fun s =>
+                if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+            (fun _ _ => rfl) i
+      | none =>
+        rw [hsup] at h
+        by_cases hempty : (t.subtree == "") = true
+        · rw [hempty] at h
+          cases h
+          exact l1Clear_or I.desc w _ hC fun i =>
+            placePeer_park I w template (w.nextIx template) t.initial none
+              (fun u => { u with nextIx := fun n =>
+                  if n = template then w.nextIx template + 1 else u.nextIx n })
+              (fun _ _ => rfl) i
+        · have hf : (t.subtree == "") = false := by
+            cases hb : t.subtree == "" with
+            | false => rfl
+            | true => exact absurd hb hempty
+          rw [hf] at h
+          cases h
+          exact l1Clear_or I.desc w _ hC fun i =>
+            placePeer_park I w template (freshKey I.desc w t.subtree) t.initial none
+              (fun u => { u with nextKey := fun s =>
+                  if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+              (fun _ _ => rfl) i
+    · simp [hmay] at h
+
+theorem l1Clear_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w w' : World)
+    (a : Action) (hR : Reachable I N w) (hC : l1Clear I.desc w) (h : apply I a w = some w') :
+    l1Clear I.desc w' := by
+  have ⟨hcr, hstep⟩ := apply_step I a w w' h
+  have hO := (inv2_reachable I hL hG N w hR).2.1
+  cases a with
+  | stutter =>
+    simpa [stutter_unchanged I w w' h] using hC
+  | recvBulk s =>
+    simp only [stepWorld] at hstep
+    exact l1Clear_sub I.desc w w' hC fun i p hp => (bulk_view I w w' s i hstep).2.2.2.1 p hp
+  | recvPrio s =>
+    simp only [stepWorld] at hstep
+    exact l1Clear_sub I.desc w w' hC fun i p hp => (prio_view I w w' s i hstep).2.2.2.1 p hp
+  | callTimeout s =>
+    simp only [stepWorld] at hstep
+    exact l1Clear_sub I.desc w w' hC fun i p hp => (timeout_view w w' s i hstep).2.2.2.1 p hp
+  | ingress dst label =>
+    simp only [stepWorld] at hstep
+    exact l1Clear_eq I.desc w w' hC fun i => (ingress_view I w w' dst label i hstep).2.2.2.1
+  | finish s =>
+    simp only [stepWorld] at hstep
+    exact l1Clear_finish I w w' s hC hstep
+  | spawn template =>
+    simp only [stepWorld] at hstep
+    exact l1Clear_spawn I w w' template hC hstep
+  | exec s =>
+    simp only [stepWorld] at hstep
+    unfold execHead at hstep
+    by_cases hlive : (w.st s).life = .alive
+    · simp [hlive] at hstep
+      cases hph : (w.st s).phase with
+      | run k =>
+        simp [hph] at hstep
+        cases hstep
+        exact execRun_l1 I hL hG N w hR hO hcr hC s (w.st s) k rfl
+          (by simpa [beq_iff_eq] using hlive) hph
+      | idle => simp [hph] at hstep
+      | parked _ _ _ => simp [hph] at hstep
+      | awaitReply _ _ => simp [hph] at hstep
+      | awaitEffect _ => simp [hph] at hstep
+      | awaitPeer _ => simp [hph] at hstep
+      | crashed => simp [hph] at hstep
+    · simp [hlive] at hstep
+
+theorem l1Clear_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : l1Clear I.desc w := by
+  induction hR with
+  | init => exact l1Clear_init I N
+  | step w w' a prev ha ih => exact l1Clear_step I hL hG N w w' a prev ih ha
+
 theorem l1_parked_empty (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id : InstId) (hl1 : l1 I.desc (tname id) = true) :
     (w.st id).parked = [] :=
