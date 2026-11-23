@@ -4821,6 +4821,249 @@ theorem held_drop (D : Description) (w : World) (id : InstId) (name : String) :
   · simp [hch] at hk
     exact hk
 
+/-- Parents and the roster determine `Parented`. A seal changes neither. -/
+theorem parented_frame (D : Description) {w w' : World} (hP : Parented D w)
+    (hro : w'.roster = w.roster) (hpar : ∀ i, (w'.st i).parent = (w.st i).parent) :
+    Parented D w' := by
+  intro id t hmem ht
+  have hold := hP id t (by rw [← hro]; exact hmem) ht
+  cases hs : t.supervisor with
+  | none =>
+    rw [hs] at hold
+    rw [hpar id]
+    exact hold
+  | some name =>
+    rw [hs] at hold
+    obtain ⟨p, hp, hn, hkey⟩ := hold
+    refine ⟨p, ?_, hn, hkey⟩
+    rw [hpar id]
+    exact hp
+
+/-- A parent field copied from a world with no self-parent still has none. -/
+theorem noSelf_frame {w w' : World} (h : NoSelfParent w)
+    (hpar : ∀ i, (w'.st i).parent = (w.st i).parent) : NoSelfParent w' := by
+  intro id
+  rw [hpar id]
+  exact h id
+
+/-- `dropDescendants` keeps the parent forest. The seal rewrites lives, not links. -/
+theorem drop_forest (I : Impl) (w : World) (id : InstId) (hI : Inv I w) :
+    ParentForest (dropDescendants I.desc w id) :=
+  (dropDescendants_inv I I.desc w id hI).forest
+
+/-- Children are sealed before their parent, so a newly dead actor stays childless.
+`dropDescendants_inv` is that transport: `KidsSeal.kids` is the child already dead. -/
+theorem drop_childless (I : Impl) (w : World) (id : InstId) (hI : Inv I w) :
+    DeadChildless (dropDescendants I.desc w id) :=
+  (dropDescendants_inv I I.desc w id hI).seal.childless
+
+/-- The roster is unchanged, so one root per subtree key survives the drop. -/
+theorem drop_one (I : Impl) (w : World) (id : InstId) (hOne : OneCohort I.desc w.roster) :
+    OneCohort I.desc (dropDescendants I.desc w id).roster :=
+  oneCohort_same I.desc (drop_roster I.desc w id) hOne
+
+/-- The recorded parent is unchanged, so a parented world stays parented. -/
+theorem drop_parented (I : Impl) (w : World) (id : InstId) (hP : Parented I.desc w) :
+    Parented I.desc (dropDescendants I.desc w id) :=
+  parented_frame I.desc hP (drop_roster I.desc w id) (fun i => drop_parent I.desc w id i)
+
+/-- No actor points at itself after a drop that does not rewrite parents. -/
+theorem drop_noself (I : Impl) (w : World) (id : InstId) (hSelf : NoSelfParent w) :
+    NoSelfParent (dropDescendants I.desc w id) :=
+  noSelf_frame hSelf (fun i => drop_parent I.desc w id i)
+
+/-- Sealing descendants and then `id` adds only `id`'s tombstone. The post-drop
+world still has the forest, the childless lives, and one cohort, so
+`held_shutdown` applies there. -/
+theorem held_after_drop (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster) (hcr : w.crashed = false)
+    (id : InstId) (name : String) (hmem : id ∈ w.roster)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc
+        (shutdownActor I.desc (dropDescendants I.desc w id) id) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hk
+  have hD := hold_drop_desc I w hH id hcr
+  have hmemD : id ∈ (dropDescendants I.desc w id).roster := by
+    simpa [drop_roster I.desc w id] using hmem
+  exact held_drop I.desc w id name key
+    (held_shutdown I hG (dropDescendants I.desc w id) (drop_forest I w id hI)
+      (drop_parented I w id hP) (drop_noself I w id hSelf) hD.1 (drop_one I w id hOne)
+      (drop_childless I w id hI) hD.2 id name hmemD hkind key hk)
+
+/-- `terminateStage` is a drop followed by the actor's own shutdown. -/
+theorem held_stage (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster) (hcr : w.crashed = false)
+    (id : InstId) (a : Actor) (name : String) (hmem : id ∈ w.roster)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (terminateStage I.desc w id a) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hk
+  dsimp only [terminateStage] at hk
+  exact held_after_drop I hG w hI hP hSelf hH hOne hcr id name hmem hkind key hk
+
+/-- Aborting seals each live child. A crash kills the rest of the roster, so the
+fold stops; otherwise the next child still sees the same bundle. -/
+theorem held_abort_children (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster) (hcr : w.crashed = false)
+    (parent : InstId) (name : String)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (abortChildren I.desc w parent) name →
+      key ∈ heldKeys I.desc w name := by
+  unfold abortChildren
+  suffices ∀ (ids : List InstId) (acc : World), Inv I acc → Parented I.desc acc →
+      NoSelfParent acc → Hold I acc →
+      OneCohort I.desc acc.roster → acc.crashed = false →
+      (∀ c, c ∈ ids → c ∈ acc.roster) →
+      ∀ key, key ∈ heldKeys I.desc (ids.foldl (fun acc child =>
+        if isChild acc parent child && (acc.st child).life == .alive then
+          shutdownActor I.desc (dropDescendants I.desc acc child) child
+        else acc) acc) name → key ∈ heldKeys I.desc acc name by
+    exact this w.roster w hI hP hSelf hH hOne hcr (fun _ h => h)
+  intro ids
+  induction ids with
+  | nil =>
+    intro acc _ _ _ _ _ _ _ key hk
+    simpa using hk
+  | cons child cs ih =>
+    intro acc hI hP hSelf hH hOne hcr hids key hk
+    simp only [List.foldl_cons] at hk
+    by_cases hc : (isChild acc parent child && (acc.st child).life == .alive) = true
+    · simp only [hc, ite_true] at hk
+      have hmem : child ∈ acc.roster := hids child (List.mem_cons.mpr (Or.inl rfl))
+      have hone := held_after_drop I hG acc hI hP hSelf hH hOne hcr child name hmem hkind
+      let wS := shutdownActor I.desc (dropDescendants I.desc acc child) child
+      by_cases hbad : wS.crashed = true
+      · have hD := hold_drop_desc I acc hH child hcr
+        have hskip := abort_fold_skip I.desc parent cs wS (fun c hcmem => by
+          have hmem0 := hids c (List.mem_cons_of_mem child hcmem)
+          have hmemD : c ∈ (dropDescendants I.desc acc child).roster := by
+            simpa [drop_roster I.desc acc child] using hmem0
+          exact shutdown_dead I.desc (dropDescendants I.desc acc child) child hD.2 hbad c hmemD)
+        rw [hskip] at hk
+        exact hone key hk
+      · have hcf : wS.crashed = false := by
+          cases hb : wS.crashed with
+          | false => rfl
+          | true => exact absurd hb hbad
+        have hstage : terminateStage I.desc acc child (acc.st child) = wS := by
+          simp [terminateStage, wS]
+        have hIS : Inv I wS := by
+          simpa [hstage] using terminateStage_inv I I.desc acc child (acc.st child) hI
+        have hpar : ∀ i, (wS.st i).parent = (acc.st i).parent := by
+          intro i
+          simpa [wS] using (shutdown_parent I.desc (dropDescendants I.desc acc child) child i).trans
+            (drop_parent I.desc acc child i)
+        have hro : wS.roster = acc.roster := by
+          simpa [wS] using (shutdown_roster I.desc (dropDescendants I.desc acc child) child).trans
+            (drop_roster I.desc acc child)
+        have hPS := parented_frame I.desc hP hro hpar
+        have hSelfS := noSelf_frame hSelf hpar
+        have hHS := by
+          simpa [hstage] using hold_terminate_stage I acc hH child (acc.st child) hcr
+        have hOneS := oneCohort_same I.desc hro hOne
+        have hidsS : ∀ c, c ∈ cs → c ∈ wS.roster := by
+          intro c hcmem
+          have hmem0 := hids c (List.mem_cons_of_mem child hcmem)
+          simpa [hro] using hmem0
+        exact hone key (ih wS hIS hPS hSelfS hHS hOneS hcf hidsS key hk)
+    · have hf : (isChild acc parent child && (acc.st child).life == .alive) = false := by
+        cases hb : isChild acc parent child && (acc.st child).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hc
+      simp only [hf] at hk
+      exact ih acc hI hP hSelf hH hOne hcr
+        (fun c hcmem => hids c (List.mem_cons_of_mem child hcmem)) key hk
+
+/-- `commitCont` installs a continuation. A crashed abort leaves the world, and
+a live one only rewrites the parent's phase. -/
+theorem held_commit (D : Description) (w : World) (id : InstId) (a : Actor) (name : String)
+    (hb : a.box = (w.st id).box) (hpr : a.prio = (w.st id).prio)
+    (hpa : a.parked = (w.st id).parked) (hpar : a.parent = (w.st id).parent)
+    (hl : a.life = (w.st id).life) :
+    ∀ key, key ∈ heldKeys D (commitCont w id a) name → key ∈ heldKeys D w name := by
+  intro key hk
+  unfold commitCont at hk
+  by_cases hcr : w.crashed = true
+  · simp only [hcr] at hk
+    exact hk
+  · have hf : w.crashed = false := by
+      cases hbcr : w.crashed with
+      | false => rfl
+      | true => exact absurd hbcr hcr
+    simp only [hf] at hk
+    exact held_phase D w id a name hb hpr hpa hpar hl key hk
+
+/-- Abort is not an `effectEnqueues` arm. The new mail is each live child's
+tombstone, queued by `held_after_drop`, not a message from the parent. The
+parent's continuation adds none. -/
+theorem held_abort_run (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster) (hcr : w.crashed = false)
+    (id : InstId) (a : Actor) (k : Cont) (es : List Eff) (name : String)
+    (hk : k.rest = .abort :: es)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id a k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  by_cases hlive : (a.life == .alive) = true
+  · have hgo : (a.life == .alive) = true := hlive
+    let k' := afterHead k
+    let w' := abortChildren I.desc w id
+    have hbase : execRun I w id a k = commitCont w' id (proceed (w'.st id) k') := by
+      simp [execRun, hgo, hk, w', k']
+    rw [hbase] at hkK
+    have hf := proceed_fields (w'.st id) k'
+    exact held_abort_children I hG w hI hP hSelf hH hOne hcr id name hkind key
+      (held_commit I.desc w' id (proceed (w'.st id) k') name
+        hf.2.2.2.2 hf.2.2.1 hf.2.2.2.1 hf.2.1 hf.1 key hkK)
+  · have hf : (a.life == .alive) = false := by
+      cases hb : a.life == .alive with
+      | false => rfl
+      | true => exact absurd hb hlive
+    simpa [execRun, hf] using hkK
+
+/-- Terminate is not an `effectEnqueues` arm. A core crashes and queues nothing.
+A per-peer shutdown queues that actor's tombstone, after the drop when the
+stage has descendants. -/
+theorem held_terminate_run (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster) (hcr : w.crashed = false)
+    (id : InstId) (a : Actor) (k : Cont) (name : String) (hmem : id ∈ w.roster)
+    (hk : ∃ tail, k.rest = .terminate :: tail)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id a k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  by_cases hbit : (a.life == .alive) = true
+  · have hlive : a.life = .alive := by simpa [beq_iff_eq] using hbit
+    rcases execRun_terminate I w id a k hlive hk with hcrash | hlone | htree | hcascade
+    · rw [hcrash] at hkK
+      exact held_crash I.desc w name key hkK
+    · obtain ⟨_, _, _, _, _, _, _, hr⟩ := hlone
+      rw [hr] at hkK
+      exact held_shutdown I hG w hI.forest hP hSelf hH hOne hI.seal.childless hcr id name hmem
+        hkind key hkK
+    · obtain ⟨_, _, _, _, hr⟩ := htree
+      rw [hr] at hkK
+      exact held_stage I hG w hI hP hSelf hH hOne hcr id a name hmem hkind key hkK
+    · obtain ⟨_, _, _, _, _, _, _, hr⟩ := hcascade
+      rw [hr] at hkK
+      exact held_stage I hG w hI hP hSelf hH hOne hcr id a name hmem hkind key hkK
+  · have hf : (a.life == .alive) = false := by
+      cases hb : a.life == .alive with
+      | false => rfl
+      | true => exact absurd hb hbit
+    simpa [execRun, hf] using hkK
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
