@@ -1028,3 +1028,24 @@ is still queued. `OccInv` does not say that a `.parked _ true` phase has
 such an entry, so the slack step of `occ_timeout` is blocked on
 `1 ≤` the length of that filter. `refundParkedCall`, `tokenHold` and
 `callTimeout` are unchanged.
+
+## 2026-11-23 — Sealing the callee drops a parked call
+
+A caller whose phase is `.parked dst true` does not always have an entry
+in `(st dst).parked`. `Deadlock/ParkDrop.lean` is one `exec` step.
+
+`box` is a per-peer template with subtree `tree`. `callee` is the peer
+`box` at key 0, alive, running `terminate`, with one parked call from
+`caller` (a core). `caller` is alive and its phase is `.parked callee true`.
+`before_entry` is that filter, length 1. `apply` of `.exec callee` is
+`some`. `terminateStage` seals `callee` because the subtree is nonempty,
+and that branch does not consult `hasParkedCall`. `releaseWorld` credits
+the caller (`refundParked` / `creditLive`), clears `callee`'s parked list,
+and `releaseParked` resumes only a non-call. `seal_drops_parked_call`:
+the caller is still `.parked callee true`, `callee` is dead, and its
+parked list is empty.
+
+The same step is what a later `callTimeout` of the caller would see: the
+phase is still parked and the filter `refundParkedCall` uses is empty.
+The clause is not preserved, so it is not added to `OccInv`. The step
+semantics are unchanged.
