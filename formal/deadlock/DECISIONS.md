@@ -941,14 +941,18 @@ terminated, never restarted, and unsupervised. Nothing dynamic remains, so
 they are ten fixed stages. No description in `examples/*.json`,
 `Deadlock/Examples.lean`, or an exporter names `slots > 0`, and none names
 those workers, so the model does not invent ten core templates for them.
-An accept stage is one per listen address, and it is not static. It
-terminates on `AcceptError::Other`, the manager supervises it with the
-tombstone `Listen(addr)`, and that handler spawns a new accept. The model
-does not express that restart. Written as a core, the terminate crashes the
-node, and a crashed world is not explored further. The restart is not added
-to the model. Production is to stop terminating on `AcceptError::Other` and
-to drop the `Listen(addr)` respawn. That change is pending in
-`RUST-CHANGES.md`. A connection stage is
+Each listener's accept stage is a static core. It does not terminate. The
+accept call is a detached effect, and its result comes back to that core as
+an ingress message: `Accepted`, or `AcceptError` for `AcceptError::Other`.
+Both edges are non-blocking, so the completion adds no wait and the stage
+never waits on its own result. The core has one bulk slot. That is the
+outstanding bound: one completion may sit in the box, and a second is
+refused until the first is received. The slot is Lemma 1 for the mailbox
+and `prioSized` for one priority sender. There is no `Listen(addr)`
+tombstone and no respawn. `examples/accept.json` is that listener, and
+`Deadlock/Accept.lean` records the bound. Production still terminates on
+`AcceptError::Other` and still respawns through `Listen(addr)`. Those
+changes stay pending in `RUST-CHANGES.md` and are not made here. A connection stage is
 already one scheduler root per key. A per-peer parent births one child of
 each template at its own key. A done-trap is the exception: the connection
 spawns one on every expected stop, and those traps stay alive together under

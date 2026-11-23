@@ -509,6 +509,34 @@ plus that return to receiving. The small lemma is the runtime rule above:
 returning to receiving with mail handles the head next, and the stage cannot
 refuse it.
 
+## Accept
+
+One listener is a static core named `accept`. It is not terminable, so it
+does not leave the roster. The detached accept completion is an ingress
+message on a non-blocking self-edge, `Accepted` or `AcceptError`.
+`residualEdges` of that description is empty: the completion is not a wait,
+and the stage does not wait on its own result. The handlers are empty, so
+the core stays idle. There is no `Listen` tombstone and no respawn.
+
+`acceptOutstanding` counts those two labels in the core's box.
+`boundFields` says the core is alive and idle, its priority and parked
+lanes are empty, the box holds at most one message and every message is one
+of those two labels, and the core's own tokens plus that length equal 1.
+`outstanding_le` is `acceptOutstanding ≤ 1` from `boundFields`.
+`accept_fits_prio` is `prioSized acceptDesc "accept" 1`, and
+`accept_fits_occ` is Lemma 1 for that mailbox (`l1`). The bulk capacity is
+1 at every `N` (`accept_cap`). `ingress_when_full` is the refusal: once the
+box is at that capacity, `receiveIngress` is `none`.
+
+`examples/accept.json` is the description. `checkBool` and `localOkB` both
+hold (`accept_checked`). `init_bounded` is the initial world.
+`both_results_consumed` replays `Accepted` then `AcceptError`, each received
+before the next arrives, and the core is still idle and not crashed.
+`second_completion_refused` is the non-vacuous bound: after `Accepted` is
+queued, a second ingress of either label is `none` and exactly one
+completion is outstanding. The module is `Deadlock.Accept`. It is not
+imported by `Deadlock.lean`, and it is not one of the headline theorems.
+
 ## Restrictions that are still in force
 
 **BulkFree for a terminable per-peer.** `BulkFree` says a terminable per-peer's
@@ -566,7 +594,7 @@ this development.
 what an earlier successful build printed. It is not a `#print axioms` of
 this tree.
 
-The modules that do build are `Basic`, `Compat`, `Counterexample`,
+The modules that do build are `Accept`, `Basic`, `Compat`, `Counterexample`,
 `Examples`, `Failures`, `Graph`, `Local`, `Occupy`, `Safety`, `Semantics`,
 `Tomb`, `Orphan`, and `Outlive`. An axiom audit of those modules, and of
 the R6a, R6b, R6c, R7a, R7b, R7c, R7d, R8b, R8c, Orphan, and Outlive

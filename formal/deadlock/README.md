@@ -13,6 +13,7 @@ cd formal/deadlock
 lake build
 lake exe check examples/safe.json
 lake exe check examples/height-two.json examples/height-two-trace.json
+lake exe check examples/accept.json examples/accept-trace.json
 ```
 
 Exit status is 0 on `pass`, 1 when the checks fail, 2 on usage or parse errors.
@@ -490,6 +491,7 @@ An id is `{"core": "<role>"}` or `{"peer": "<role>", "index": <n>}`.
 | `examples/height-two.json` + `height-two-trace.json` | `pass` — the height-2 chain, replayed |
 | `examples/height-two.json` + `height-two-bad.json` | `step 0 disallowed: exec peer P#0` |
 | `examples/safe.json` + `safe-trace.json` | `pass` — one stutter on an idle roster |
+| `examples/accept.json` + `accept-trace.json` | `pass` |
 | `examples/unlocal.json` | local failure: `Go` sends 6 times toward `B` from a state that holds 3, sends undeclared `Undeclared`, and terminates a role that is not terminable |
 
 `safe.json` and `credit.json` handle each delivered label and stay in the

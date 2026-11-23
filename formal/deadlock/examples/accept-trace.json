@@ -1,0 +1,10 @@
+{
+  "schema": "amaru-deadlock-trace/v1",
+  "n": 0,
+  "steps": [
+    {"op": "ingress", "id": {"core": "accept"}, "label": "Accepted"},
+    {"op": "recvBulk", "id": {"core": "accept"}},
+    {"op": "ingress", "id": {"core": "accept"}, "label": "AcceptError"},
+    {"op": "recvBulk", "id": {"core": "accept"}}
+  ]
+}

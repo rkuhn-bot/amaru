@@ -19,8 +19,9 @@ Line numbers are from the Amaru tree this model was read against.
 - Location: `crates/amaru-protocols/src/accept.rs:34-36`
 - Change: make the accept call a detached effect whose result returns to the
   stage as a message. The stage never terminates on `AcceptError::Other`.
-- Decision: N67. The model does not express an accept restart. Written as a
-  core, that terminate crashes the node.
+- Decision: N67. The Lean model is a static core. The completion is an
+  ingress message (`Accepted` or `AcceptError`) on a non-blocking self-edge,
+  and the stage does not terminate. Production is unchanged.
 - Status: pending
 
 ## 3. No Listen tombstone and no accept respawn
@@ -30,5 +31,6 @@ Line numbers are from the Amaru tree this model was read against.
   that path unreachable. `:439` supervises the accept stage with
   `ManagerMessage::Listen(listen_addr)`. `:861` handles that message by
   calling `listen` again.
-- Decision: N67. Same decision as the accept terminate.
+- Decision: N67. The Lean model has no `Listen(addr)` tombstone and no
+  respawn. Production is unchanged.
 - Status: pending

@@ -1,0 +1,54 @@
+{
+  "schema": "amaru-deadlock-graph/v1",
+  "name": "accept",
+  "freshNames": true,
+  "compatibility": "all",
+  "templates": [
+    {
+      "name": "accept",
+      "multiplicity": "one",
+      "capacity": 1,
+      "priorityCapacity": 1,
+      "priorityBound": 1,
+      "states": ["idle"],
+      "initial": "idle",
+      "terminable": false,
+      "untimedPeer": false,
+      "mustFit": true
+    }
+  ],
+  "edges": [
+    {
+      "src": "accept",
+      "srcState": "idle",
+      "dst": "accept",
+      "kind": "nonBlocking",
+      "reliability": "reliable",
+      "effect": "trySend",
+      "label": "Accepted",
+      "scope": "intra",
+      "occupancy": 1,
+      "repliesInDequeue": false,
+      "ingress": true,
+      "ingressLegal": 1
+    },
+    {
+      "src": "accept",
+      "srcState": "idle",
+      "dst": "accept",
+      "kind": "nonBlocking",
+      "reliability": "reliable",
+      "effect": "trySend",
+      "label": "AcceptError",
+      "scope": "intra",
+      "occupancy": 0,
+      "repliesInDequeue": false,
+      "ingress": true,
+      "ingressLegal": 0
+    }
+  ],
+  "transitions": [
+    {"template": "accept", "from": "idle", "to": "idle", "label": "Accepted", "program": []},
+    {"template": "accept", "from": "idle", "to": "idle", "label": "AcceptError", "program": []}
+  ]
+}
