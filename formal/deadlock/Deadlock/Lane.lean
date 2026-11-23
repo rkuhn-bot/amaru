@@ -4764,6 +4764,63 @@ theorem held_shutdown (I : Impl) (hG : GraphOk I.desc) (w : World)
   · simp [hbit] at hk
     exact hk
 
+theorem held_steps (D : Description) (ids : List InstId) (w : World) (name : String)
+    (step : World → InstId → World)
+    (hstep : ∀ acc c, ∀ key, key ∈ heldKeys D (step acc c) name → key ∈ heldKeys D acc name) :
+    ∀ key, key ∈ heldKeys D (ids.foldl step w) name → key ∈ heldKeys D w name := by
+  induction ids generalizing w with
+  | nil =>
+    intro key hk
+    simpa using hk
+  | cons j js ih =>
+    intro key hk
+    rw [List.foldl_cons] at hk
+    exact hstep w j key (ih (step w j) key hk)
+
+/-- Sealing a branch only releases actors. It deletes mail and does not add a
+tombstone, so no template gains a held key. -/
+theorem held_branch (fuel : Nat) (D : Description) (w : World) (id : InstId) (name : String) :
+    ∀ key, key ∈ heldKeys D (sealBranch fuel D w id) name → key ∈ heldKeys D w name := by
+  induction fuel generalizing w id with
+  | zero =>
+    intro key hk
+    simpa [sealBranch] using hk
+  | succ fuel ih =>
+    intro key hk
+    simp only [sealBranch] at hk
+    let step : World → InstId → World := fun acc c =>
+      if isChild acc id c then sealBranch fuel D acc c else acc
+    have hfold := held_steps D w.roster w name step
+      (by
+        intro acc c key hkS
+        by_cases hch : isChild acc id c = true
+        · simp [hch, step] at hkS
+          exact ih acc c key hkS
+        · simp [hch, step] at hkS
+          exact hkS)
+    let sealed := w.roster.foldl step w
+    by_cases hlive : ((sealed.st id).life == .alive) = true
+    · have hkS : key ∈ heldKeys D (releaseWorld D sealed id (sealed.st id)) name := by
+        simpa [step, sealed, hlive] using hk
+      exact hfold key (held_release D sealed id (sealed.st id) name key hkS)
+    · have hkS : key ∈ heldKeys D sealed name := by
+        simpa [step, sealed, hlive] using hk
+      exact hfold key hkS
+
+/-- Dropping descendants only seals them. Their tombstones are not queued, and
+no template gains a held key. -/
+theorem held_drop (D : Description) (w : World) (id : InstId) (name : String) :
+    ∀ key, key ∈ heldKeys D (dropDescendants D w id) name → key ∈ heldKeys D w name := by
+  unfold dropDescendants
+  refine held_steps D w.roster w name
+    (fun acc c => if isChild acc id c then sealBranch w.roster.length D acc c else acc) ?_
+  intro acc c key hk
+  by_cases hch : isChild acc id c = true
+  · simp [hch] at hk
+    exact held_branch w.roster.length D acc c name key hk
+  · simp [hch] at hk
+    exact hk
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
