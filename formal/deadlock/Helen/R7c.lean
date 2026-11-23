@@ -405,61 +405,6 @@ theorem nested_counted :
     noSelfSchedule [.call "Y" "q" 0 [.peer [.selfSchedule "z"]] []] = false := by decide
 
 
-/-! ## A core's pool: `slots` children, indexed by slot and generation. -/
-
-def tM : Template := tpl "M" 4 ["idle"] "idle" false
-def tW : Template := { tpl "W" 4 ["idle"] "idle" false with
-  multiplicity := .perPeer, slots := 2, supervisor := some "M", subtree := "pw",
-  terminable := true, tombstone := "dead/W" }
-
-def ingM : Edge := { ing "M" "idle" with occupancy := { a := 0, b := 1 } }
-
-def poolDesc : Description where
-  name := "pool"
-  freshNames := true
-  templates := [tM, tW]
-  edges := [ingM, ing "W" "idle"]
-  compatibility := .all
-  steps := [step "M" "idle" "Go" "idle", step "W" "idle" "Go" "idle",
-            step "M" "idle" "dead/W" "idle"]
-
-def poolImpl : Impl where
-  desc := poolDesc
-  transitions := [tr "M" "idle" "Go" "idle" [.spawn "W"],
-                  tr "W" "idle" "Go" "idle" [.terminate],
-                  tr "M" "idle" "dead/W" "idle" []]
-
-def Mc : InstId := .core "M"
-
-def birth : List Action := [.ingress Mc "Go", .recvBulk Mc, .exec Mc]
-
-def killSlot (k g : Nat) : List Action :=
-  [.ingress (.peer "W" k g) "Go", .recvBulk (.peer "W" k g),
-   .exec (.peer "W" k g), .exec (.peer "W" k g)]
-
-def poolLives (w : World) : List Nat :=
-  [lifeTag (w.st (.peer "W" 0 0)).life, lifeTag (w.st (.peer "W" 1 0)).life,
-   lifeTag (w.st (.peer "W" 0 1)).life]
-
-theorem pool_sized :
-    subtreeFails poolDesc = [] ∧
-    population poolDesc "W" 1 poolDesc.templates.length = 2 ∧
-    simultaneousTombstones poolDesc "M" 1 = 2 ∧
-    localOkB poolImpl = false ∧
-    restartFails poolImpl ≠ [] ∧
-    prioSized poolDesc "M" (prioLabels poolImpl "M").length = true := by
-  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide⟩
-
-/-- Two spawns fill the two slots. A third is a no-op. Killing slot 0 and
-spawning again births generation 1 in that slot. -/
-theorem pool_slots :
-    ((runAt poolImpl 1 (birth ++ birth)).map poolLives) = some [1, 1, 0] ∧
-    ((runAt poolImpl 1 (birth ++ birth ++ birth)).map poolLives) = some [1, 1, 0] ∧
-    ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ birth)).map poolLives) =
-      some [3, 1, 0] ∧
-    ((runAt poolImpl 1 (birth ++ birth ++ killSlot 0 0 ++ [.recvPrio Mc] ++ birth)).map poolLives) =
-      some [3, 1, 1] := by decide
-
 /-! ## Mail queued by an old generation is charged to the key. -/
 
 def tBox : Template := tpl "H" 4 ["idle"] "idle" false
@@ -512,6 +457,4 @@ end Deadlock.Helen7c
 #print axioms Deadlock.Helen7c.child_restart_overflow
 #print axioms Deadlock.Helen7c.stale_tombstone
 #print axioms Deadlock.Helen7c.nested_counted
-#print axioms Deadlock.Helen7c.pool_sized
-#print axioms Deadlock.Helen7c.pool_slots
 #print axioms Deadlock.Helen7c.old_mail_charged

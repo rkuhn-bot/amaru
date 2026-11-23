@@ -1359,17 +1359,6 @@ theorem blocked_mask (D : Description) (w : World) (parent : InstId) (name : Str
     slotRespawnBlocked D (maskWorld w) parent name key = slotRespawnBlocked D w parent name key := by
   simp [slotRespawnBlocked, occupied_mask, tombQueued_mask]
 
-theorem freeGo_mask (D : Description) (w : World) (parent : InstId) (name : String) (n fuel : Nat) :
-    freeGo D (maskWorld w) parent name n fuel = freeGo D w parent name n fuel := by
-  induction fuel with
-  | zero => simp [freeGo]
-  | succ fuel ih =>
-    simp only [freeGo, blocked_mask, ih]
-
-theorem freeSlot_mask (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) :
-    freeSlot D (maskWorld w) parent name n = freeSlot D w parent name n := by
-  simp [freeSlot, freeGo_mask]
-
 theorem born_mask (D : Description) (w : World) (template : String) (key : Nat) (initial : String) :
     bornActor D (maskWorld w) template key initial = bornActor D w template key initial := by
   simp [bornActor, withKeyTokens, queued_mask]
@@ -1400,28 +1389,19 @@ theorem spawnChild_mask (I : Impl) (w : World) (parent : InstId) (child : String
     (spawnChild I w parent child).map maskWorld =
       (spawnChild I (maskWorld w) parent child).map maskWorld := by
   cases parent with
-  | core pname =>
+  | core _ =>
     unfold spawnChild
-    simp only [maskWorld_st, maskActor_life, freeSlot_mask, maxGen_mask, born_mask, blocked_mask]
+    simp only [maskWorld_st, maskActor_life]
     split
     · rfl
-    · next ht t =>
-      split
-      · split
-        · split
-          · next k _hk =>
-            simp only [Option.map]
-            have hkeep := born_kept I.desc w child k ht.initial (InstId.core pname)
-            rw [admit_mask I w _ _ hkeep]
-            rw [admit_mask I (maskWorld w) _ _ hkeep, maskWorld_idem]
-          · simp [maskWorld_idem]
-        · rfl
+    · split
+      · rfl
       · split
         · simp [maskWorld_idem]
         · rfl
   | peer pname pkey pgen =>
     unfold spawnChild
-    simp only [maskWorld_st, maskActor_life, freeSlot_mask, maxGen_mask, born_mask, blocked_mask]
+    simp only [maskWorld_st, maskActor_life, maxGen_mask, born_mask, blocked_mask]
     split
     · rfl
     · next ht t =>

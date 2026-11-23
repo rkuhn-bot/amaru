@@ -613,15 +613,6 @@ def subtreeKillable (D : Description) (name : String) : Bool :=
   let s := templateSubtree D name
   s != "" && D.templates.any fun t => t.subtree == s && t.timeoutKills
 
-/-- A pool child addressed by its core supervisor. The core may send to and
-call that child: the child's shutdown refunds the message. -/
-def coreSupervisedPool (D : Description) (src dst : String) : Bool :=
-  match templateOf D dst, templateOf D src with
-  | some child, some parent =>
-    child.slots != 0 && child.multiplicity == .perPeer &&
-      supNamed child.supervisor src && parent.multiplicity == .one
-  | _, _ => false
-
 def callTermFails (D : Description) : List String :=
   D.edges.filterMap fun e =>
     if e.effect != .call then none
@@ -629,11 +620,10 @@ def callTermFails (D : Description) : List String :=
       match templateOf D e.dst with
       | none => some s!"fail: call {e.label} targets unknown template {e.dst}"
       | some t =>
-        -- A call may enter a terminable per-peer inside that peer's subtree, or a
-        -- pool child of the calling core. A core is not a terminable target: the
-        -- flag is rejected, and the core's terminate crashes the node.
-        if t.terminable && t.multiplicity != .one && !sameSubtree D e.src e.dst &&
-            !coreSupervisedPool D e.src e.dst then
+        -- A call may enter a terminable per-peer inside that peer's subtree.
+        -- A core is not a terminable target: the flag is rejected, and the
+        -- core's terminate crashes the node.
+        if t.terminable && t.multiplicity != .one && !sameSubtree D e.src e.dst then
           some s!"fail: call {e.label} targets terminable template {e.dst}"
         else none
 
@@ -711,28 +701,13 @@ def missingTombstone (t : Template) : Option String :=
 template. That template is the scheduler root: it takes a fresh subtree key,
 and a second root would not share it, so a send between them would not
 resolve. A named supervisor is a multiplicity-one core or a per-peer stage of
-the same subtree. A pool (`slots` > 0) may name a core supervisor and no
-subtree: the core births it by slot. The step relation does not require every
-member to be terminable, and it does not require a `timeoutKills` role: any
-stage may `terminate`, and the tombstone goes to the immediate supervisor.
+the same subtree. The step relation does not require every member to be
+terminable, and it does not require a `timeoutKills` role: any stage may
+`terminate`, and the tombstone goes to the immediate supervisor.
 `timeoutKills` on a template with no subtree is still rejected: the flag names
 a subtree kill the template does not belong to. -/
 def subtreeEntry (D : Description) (t : Template) : Option String :=
-  if t.slots != 0 && (t.multiplicity != .perPeer || t.supervisor.isNone) then
-    some s!"fail: pool {t.name} is a per-peer template with a supervisor"
-  else if t.slots != 0 then
-    match t.supervisor with
-    | some name =>
-      match templateOf D name with
-      | some s =>
-        if s.multiplicity != .one then
-          some s!"fail: slots must be 0 under a per-peer parent"
-        else if t.subtree != "" && !(supervisorInSubtree D t) then
-          some s!"fail: subtree {t.subtree} supervisor {name} is not in the subtree"
-        else missingTombstone t
-      | none => some s!"fail: pool {t.name} names unknown supervisor {name}"
-    | none => some s!"fail: pool {t.name} names unknown supervisor none"
-  else if t.subtree == "" then
+  if t.subtree == "" then
     if t.supervisor.isSome then some s!"fail: {t.name} names a supervisor without a subtree"
     else if t.timeoutKills then some s!"fail: {t.name} sets timeoutKills without a subtree"
     else if templatePure D t.name then some (pureKillMsg t.name)
@@ -746,8 +721,7 @@ def subtreeEntry (D : Description) (t : Template) : Option String :=
     some s!"fail: subtree {t.subtree} has more than one unsupervised root"
   else missingTombstone t
 
-/-- A multiplicity-one template is not a subtree member. The entry is a pool
-failure when it has slots, and a "not per-peer" failure when it does not. -/
+/-- A multiplicity-one template is not a subtree member. -/
 theorem subtreeEntry_not_one (D : Description) (t : Template)
     (hne : t.subtree ≠ "") (hone : t.multiplicity = .one) :
     subtreeEntry D t ≠ none := by
@@ -755,9 +729,7 @@ theorem subtreeEntry_not_one (D : Description) (t : Template)
   have hsub : (t.subtree == "") = false := by simpa using hne
   have hmult : (t.multiplicity != .perPeer) = true := by
     rw [hone]; decide
-  by_cases hs : (t.slots != 0) = true
-  · simp [hs, hmult]
-  · simp [hs, hsub, hmult]
+  simp [hsub, hmult]
 
 /-- A supervised template that passes `subtreeEntry` names a tombstone.
 `missingTombstone` is the last check on every arm that allows a supervisor. -/
@@ -776,26 +748,39 @@ theorem subtreeEntry_tombstone (D : Description) (t : Template) (name : String)
     (h : subtreeEntry D t = none) (hsup : t.supervisor = some name) :
     t.tombstone ≠ "" := by
   unfold subtreeEntry at h
-  simp only [hsup] at h
-  split at h
-  · simp at h
-  · split at h
-    · split at h
-      · split at h
-        · simp at h
-        · split at h
-          · simp at h
-          · exact missingTombstone_ne t name h hsup
-      · simp at h
-    · split at h
-      · simp at h
-      · split at h
-        · simp at h
-        · split at h
-          · simp at h
-          · split at h
-            · simp at h
-            · exact missingTombstone_ne t name h hsup
+  have hsome : t.supervisor.isSome = true := by simp [hsup]
+  by_cases hsub : (t.subtree == "") = true
+  · simp [hsub, hsome] at h
+  · have hf : (t.subtree == "") = false := by
+      cases hbb : t.subtree == "" with
+      | false => rfl
+      | true => exact absurd hbb hsub
+    simp only [hf, Bool.false_eq_true, ite_false] at h
+    by_cases hmul : (t.multiplicity != .perPeer) = true
+    · simp [hmul] at h
+    · have hmulF : (t.multiplicity != .perPeer) = false := by
+        cases hbb : t.multiplicity != .perPeer with
+        | false => rfl
+        | true => exact absurd hbb hmul
+      simp only [hmulF, Bool.false_eq_true, ite_false] at h
+      by_cases hbad : (t.supervisor.isSome && !supervisorInSubtree D t) = true
+      · simp [hbad] at h
+      · have hbadF : (t.supervisor.isSome && !supervisorInSubtree D t) = false := by
+          cases hbb : t.supervisor.isSome && !supervisorInSubtree D t with
+          | false => rfl
+          | true => exact absurd hbb hbad
+        simp only [hbadF, Bool.false_eq_true, ite_false] at h
+        by_cases hroot : (t.supervisor.isNone && decide (rootCount D t.subtree > 1) &&
+            firstRoot D t.subtree == some t.name) = true
+        · simp [hroot] at h
+        · have hrootF : (t.supervisor.isNone && decide (rootCount D t.subtree > 1) &&
+              firstRoot D t.subtree == some t.name) = false := by
+            cases hbb : t.supervisor.isNone && decide (rootCount D t.subtree > 1) &&
+                firstRoot D t.subtree == some t.name with
+            | false => rfl
+            | true => exact absurd hbb hroot
+          simp only [hrootF, Bool.false_eq_true, ite_false] at h
+          exact missingTombstone_ne t name h hsup
 
 /-- `terminable` names a per-peer shutdown. A multiplicity-one template that
 sets it is rejected: every core may terminate, and that step crashes the node. -/

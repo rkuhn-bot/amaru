@@ -929,3 +929,28 @@ its slot count, and the live bound follows `population`. Refusing the birth
 past `N` would be a step change, and a pool could not reach `slots` when
 `slots > N`. A static ban that holds for every `N` is that same accounting,
 or it forbids pools.
+
+## 2026-11-23 — Pools removed
+
+2026-11-23, Roland, by voice. Pools are removed. They are not repriced.
+
+The connector's `connect-worker-{n}` stages are created lazily up to
+`DEFAULT_PARALLEL_CONNECTION = 10`, reused from the idle list, never
+terminated, never restarted, and unsupervised. Nothing dynamic remains, so
+they are ten fixed stages. No description in `examples/*.json`,
+`Deadlock/Examples.lean`, or an exporter names `slots > 0`, and none names
+those workers, so the model does not invent ten core templates for them.
+An accept stage, one per listen address, is static at startup and would be
+a core. None is modelled. A connection stage is already one scheduler root
+per key. Every per-peer parent spawns at most one child per template, so
+that child covers the connection subtree.
+
+`Template` no longer has `slots`. `spawnChild` on a core is `none`, and
+`spawnScope` rejects a core's `Eff.spawn`. A per-peer parent still births
+one child at its own key. Generations, `slotRespawnBlocked`, and tombstone
+delivery are unchanged. Population of every per-peer template is `N` at a
+root and the parent's population under a per-peer supervisor.
+
+This supersedes the pool adoption of 2026-11-21 20:20 and the pool entries
+of 2026-11-22, including the live-count note above. `SpawnCount.lean` and
+`PoolPark.lean` recorded pool behaviour and are deleted.

@@ -412,8 +412,7 @@ for a send the actor did not itself perform.
   targets it and no template in its cohort has a timed peer. A core is not an
   untimed peer end, and it may not set `terminable`.
 - **No call targets a terminable per-peer outside its subtree**
-  (`callTermFails`, part of `GraphOk.lifecycle`), except a pool child of the
-  calling core. A call to a core is allowed. An admitted call sits in the callee's box and the
+  (`callTermFails`, part of `GraphOk.lifecycle`). A call to a core is allowed. An admitted call sits in the callee's box and the
   caller is in `awaitReply`; it is not a parked entry. Killing `terminate`
   refunds that box with a credit only, and `releaseParked` skips `isCall`
   entries and does not read the box, so the caller would stay in `awaitReply`

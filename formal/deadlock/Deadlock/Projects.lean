@@ -946,7 +946,7 @@ theorem spawn_good (I : Impl) (hGr : GraphOk I.desc) (w w' : World) (template : 
     · next hmay =>
       have hm : t.multiplicity = .perPeer := by
         simp only [maySpawnRoot, Bool.and_eq_true] at hmay
-        exact perPeer_of_beq t hmay.1.1.1.1
+        exact perPeer_of_beq t hmay.1.1.1
       split at hs
       · cases hs
         exact good_place I hGr w template _ t _ _ (fun _ => rfl) ht hm hG
@@ -969,20 +969,12 @@ theorem spawnChild_good (I : Impl) (hGr : GraphOk I.desc) (w w' : World) (parent
         simp only [Bool.and_eq_true] at hc
         exact perPeer_of_beq t hc.1.1
       split at hs
+      · cases hs
       · split at hs
-        · split at hs
-          · cases hs
-            exact good_place I hGr w child _ t _ (fun v => v) (fun _ => rfl) ht hm hG
-          · cases hs
-            exact hG
         · cases hs
-      · split at hs
-        · split at hs
-          · cases hs
-            exact hG
-          · cases hs
-            exact good_place I hGr w child _ t _ (fun v => v) (fun _ => rfl) ht hm hG
+          exact hG
         · cases hs
+          exact good_place I hGr w child _ t _ (fun v => v) (fun _ => rfl) ht hm hG
     · split at hs
       · cases hs
         exact hG

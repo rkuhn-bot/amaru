@@ -96,8 +96,8 @@ inductive Eff where
   | abort
   | terminate
   /-- A per-peer stage spawns one child of `template` at its own key.
-  A core spawns a pool child into a free slot below that template's `slots`.
-  A slot whose tombstone is still queued is not free, and the spawn is a no-op. -/
+  A slot whose tombstone is still queued is not free, and the spawn is a no-op.
+  A core spawns nothing. -/
   | spawn (template : String)
 
 mutual
@@ -545,12 +545,10 @@ def aliveCount (w : World) (template : String) : Nat :=
     if tname id == template && (w.st id).life == .alive then n + 1 else n) 0
 
 /-- Population of `name` at root population `N`. A core is one instance. A
-per-peer root with `slots = 0` — no supervisor, or a core supervisor — has
-`N` instances. A pool (`slots = n`) under a core has `n` instances, and a
-pool under a per-peer supervisor has that supervisor's population times `n`.
-A per-peer child with `slots = 0` has its per-peer supervisor's population,
-one child per parent, not a fresh `N`. `fuel` is the template count, so a
-cycle stops. The chain is the product of those factors. -/
+per-peer root — no supervisor, or a core supervisor — has `N` instances. A
+per-peer child has its per-peer supervisor's population, one child per
+parent, not a fresh `N`. `fuel` is the template count, so a cycle stops.
+The chain is the product of those factors. -/
 def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
   match fuel with
   | 0 => 0
@@ -561,37 +559,20 @@ def population (D : Description) (name : String) (N fuel : Nat) : Nat :=
       match t.multiplicity with
       | .one => 1
       | .perPeer =>
-        if t.slots != 0 then
-          match t.supervisor with
+        match t.supervisor with
+        | none => N
+        | some name =>
+          match templateOf D name with
           | none => 0
-          | some name =>
-            match templateOf D name with
-            | none => 0
-            | some sup =>
-              match sup.multiplicity with
-              | .one => t.slots
-              | .perPeer => population D name N fuel * t.slots
-        else
-          match t.supervisor with
-          | none => N
-          | some name =>
-            match templateOf D name with
-            | none => 0
-            | some sup =>
-              match sup.multiplicity with
-              | .one => N
-              | .perPeer => population D name N fuel
-
-/-- How many of `t` one parent instance can have outstanding. `slots = 0` is one
-child at the parent's key; a pool is its `slots`. -/
-def slotCount (t : Template) : Nat := if t.slots == 0 then 1 else t.slots
+          | some sup =>
+            match sup.multiplicity with
+            | .one => N
+            | .perPeer => population D name N fuel
 
 /-- Tombstones one instance of `parent` can hold at once, as `a * N + b`.
-A per-peer parent's lane sees each direct child once, or `slots` of a pool.
-A core's lane sees `slots` of a pool and one slot per root population for a
-root child (`slots = 0`). That is `slots` times the child's multiplicity.
-A restart does not add a second term: the spawn rule keeps one tombstone
-per slot. -/
+A per-peer parent's lane sees each direct child once. A core's lane sees one
+slot per root population. A restart does not add a second term: the spawn
+rule keeps one tombstone per child template at a key. -/
 def tombstoneAffine (D : Description) (parent : String) : Affine :=
   match templateOf D parent with
   | none => .zero
@@ -599,15 +580,13 @@ def tombstoneAffine (D : Description) (parent : String) : Affine :=
     D.templates.foldl (fun acc t =>
       if supNamed t.supervisor parent && t.tombstone != "" then
         match sup.multiplicity with
-        | .perPeer => { a := acc.a, b := acc.b + slotCount t }
-        | .one =>
-          if t.slots == 0 then { a := acc.a + 1, b := acc.b }
-          else { a := acc.a, b := acc.b + t.slots }
+        | .perPeer => { a := acc.a, b := acc.b + 1 }
+        | .one => { a := acc.a + 1, b := acc.b }
       else acc) .zero
 
 /-- How many tombstones can sit on one instance of `parent` at population `N`.
 This is `tombstoneAffine` evaluated, so a core's root children scale with `N`
-and a pool contributes its `slots`. -/
+and a per-peer parent contributes one per child template. -/
 def simultaneousTombstones (D : Description) (parent : String) (N : Nat) : Nat :=
   (tombstoneAffine D parent).eval N
 
@@ -789,36 +768,27 @@ def newerGeneration (w : World) (m : Msg) : Bool :=
         | .core _ => false
   | .core _ => false
 
-/-- The instance a name denotes, whether or not it is alive. A pool
-(`slots` > 0) is addressed by `slot`. Any other per-peer role uses the
-sender's subtree key. A missing template does not resolve. -/
+/-- The instance a name denotes, whether or not it is alive. A per-peer role
+uses the sender's subtree key. A missing template does not resolve. -/
 def resolveId (D : Description) (w : World) (sender : InstId) (dst : String)
-    (slot : Nat := 0) : Option InstId :=
+    (_slot : Nat := 0) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
     match t.multiplicity with
     | .one => some (.core dst)
     | .perPeer =>
-      if t.slots != 0 then
-        if slot < t.slots then
-          match findLive w dst slot with
-          | some id => some id
-          | none => some (.peer dst slot 0)
-        else none
-      else
-        match memberKey sender with
-        | none => none
-        | some k =>
-          match findLive w dst k with
-          | some id => some id
-          | none => some (.peer dst k 0)
+      match memberKey sender with
+      | none => none
+      | some k =>
+        match findLive w dst k with
+        | some id => some id
+        | none => some (.peer dst k 0)
 
-/-- A live target only. A pool is the live occupant of `slot`. Any other
-per-peer role is the live occupant of the sender's subtree key. Dead and
-never-spawned targets do not resolve. -/
+/-- A live target only. A per-peer role is the live occupant of the sender's
+subtree key. Dead and never-spawned targets do not resolve. -/
 def route (w : World) (D : Description) (sender : InstId) (dst : String)
-    (slot : Nat := 0) : Option InstId :=
+    (_slot : Nat := 0) : Option InstId :=
   match templateOf D dst with
   | none => none
   | some t =>
@@ -827,12 +797,9 @@ def route (w : World) (D : Description) (sender : InstId) (dst : String)
       let id := InstId.core dst
       if (w.st id).life == .alive then some id else none
     | .perPeer =>
-      if t.slots != 0 then
-        if slot < t.slots then findLive w dst slot else none
-      else
-        match memberKey sender with
-        | none => none
-        | some k => findLive w dst k
+      match memberKey sender with
+      | none => none
+      | some k => findLive w dst k
 
 /-- Record a route that did not resolve. The sender then leaves the effect. -/
 def noteStale (w : World) (sender : InstId) (dst : String) : World :=
@@ -1906,10 +1873,9 @@ def slotOccupied (w : World) (name : String) (k : Nat) : Bool :=
       n == name && key == k && (w.st id).life == .alive
     | .core _ => false
 
-/-- `id` is an occupant of per-peer slot `(name, key)`. A pool slot is that
-key under its core, in `0 ..< slots`. A per-peer parent's one child uses the
-parent's key. Generation distinguishes occupants of the same key. A scheduler
-root takes a fresh key, so it is a new slot. -/
+/-- `id` is an occupant of per-peer slot `(name, key)`. A per-peer parent's
+one child uses the parent's key. Generation distinguishes occupants of the
+same key. A scheduler root takes a fresh key, so it is a new slot. -/
 def fromSlot (name : String) (key : Nat) (id : InstId) : Bool :=
   match id with
   | .peer n k _ => n == name && k == key
@@ -1977,58 +1943,28 @@ theorem slotRespawnBlocked_clear (D : Description) (w : World) (parent : InstId)
   unfold slotRespawnBlocked at h
   exact Bool.or_eq_false_iff.mp h
 
-/-- Lowest slot in `0 ..< n` that is not `slotRespawnBlocked`. `fuel` counts
-the indices still to try, from `0` upward. A queued tombstone occupies the
-slot until the supervisor consumes it, and the supervisor cannot consume it
-while that stage's program mail is still in a live queue. -/
-def freeGo (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) : Nat → Option Nat
-  | 0 => none
-  | fuel + 1 =>
-    let k := n - (fuel + 1)
-    if slotRespawnBlocked D w parent name k then freeGo D w parent name n fuel
-    else some k
-
-/-- Lowest free slot below `n`. -/
-def freeSlot (D : Description) (w : World) (parent : InstId) (name : String) (n : Nat) : Option Nat :=
-  freeGo D w parent name n n
-
-/-- Lowest root key in `0 ..< n` that `freeSlot` accepts. -/
-def freeRootSlot (D : Description) (w : World) (supervisor name : String) (n : Nat) : Option Nat :=
-  freeSlot D w (.core supervisor) name n
-
-/-- A per-peer parent births one child at its own key. A core births one pool
-child in a free slot below `slots`. The spawn is a no-op, the same as a full
-pool, while `slotRespawnBlocked` holds: the slot is alive, or its tombstone
-is still on the supervisor's lane. The tombstone is queued in the same step
+/-- A per-peer parent births one child at its own key. The spawn is a no-op
+while `slotRespawnBlocked` holds: the slot is alive, or its tombstone is
+still on the supervisor's lane. The tombstone is queued in the same step
 as the seal and is not receivable while program mail from that stage, or
 from a descendant sealed with it, sits in a live queue. The handler that
 consumes the tombstone therefore runs with that mail already gone, and the
 spawn in the handler is not refused for mail.
-A parent that is not alive admits nobody. A spawn the template does not
-allow is `none`, and the effect then crashes. -/
+A core births nobody. A parent that is not alive admits nobody. A spawn the
+template does not allow is `none`, and the effect then crashes. -/
 def spawnChild (I : Impl) (w : World) (parent : InstId) (child : String) : Option World :=
   match templateOf I.desc child with
   | none => none
   | some t =>
     if t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) && (w.st parent).life == .alive then
       match parent with
-      | .core _ =>
-        if t.slots != 0 then
-          match freeSlot I.desc w parent child t.slots with
-          | some k =>
-            let id := InstId.peer child k (maxGen w child k)
-            let born := { bornActor I.desc w child k t.initial with parent := some parent }
-            some (admitBorn I w id born)
-          | none => some w
-        else none
+      | .core _ => none
       | .peer _ k _ =>
-        if t.slots == 0 then
-          if slotRespawnBlocked I.desc w parent child k then some w
-          else
-            let id := InstId.peer child k (maxGen w child k)
-            let born := { bornActor I.desc w child k t.initial with parent := some parent }
-            some (admitBorn I w id born)
-        else none
+        if slotRespawnBlocked I.desc w parent child k then some w
+        else
+          let id := InstId.peer child k (maxGen w child k)
+          let born := { bornActor I.desc w child k t.initial with parent := some parent }
+          some (admitBorn I w id born)
     else if t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) then
       some w
     else none
@@ -3001,7 +2937,7 @@ plus roots whose subtree mail is still on a surviving receiver. A root under
 a core is bounded by `rootOutstanding`: alive, or tombstone still queued.
 The key itself is always fresh. -/
 def maySpawnRoot (D : Description) (w : World) (template : String) (t : Template) : Bool :=
-  t.multiplicity == .perPeer && t.slots == 0 && rootOf D t && supervisorLive D w t &&
+  t.multiplicity == .perPeer && rootOf D t && supervisorLive D w t &&
     match t.supervisor with
     | some name => decide (rootOutstanding D w name template < w.N)
     | none => decide (loneOutstanding D w template < w.N)
@@ -8500,26 +8436,15 @@ theorem spawnChild_core_life (I : Impl) (w w' : World) (parent : InstId) (child 
   · simp at h
   · split at h
     · split at h
-      · split at h
-        · split at h
-          · next k _ =>
-            cases h
-            have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
-              intro h; cases h
-            simp [admitBorn, setActor, cellsSt, hpeer]
-          · cases h
-            rfl
-        · simp at h
+      · simp at h
       · next _ k _ =>
         split at h
-        · split at h
-          · cases h
-            rfl
-          · cases h
-            have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
-              intro h; cases h
-            simp [admitBorn, setActor, cellsSt, hpeer]
-        · simp at h
+        · cases h
+          rfl
+        · cases h
+          have hpeer : InstId.core name ≠ InstId.peer child k (maxGen w child k) := by
+            intro h; cases h
+          simp [admitBorn, setActor, cellsSt, hpeer]
     · split at h
       · cases h
         rfl

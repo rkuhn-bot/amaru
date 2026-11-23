@@ -59,15 +59,15 @@ self-schedule and a reachable cell wake fit the lane, so neither overflows
 it.
 
 `prioSized` is part of `LocalOk`. Per parent it is one tombstone per child
-slot — a pool's `slots`, one key per root population for a root a core
-spawns, one child for a per-peer parent — plus that parent's self-schedule
-and cell-wake senders. The sender term is the larger of the maximum along
-one program path and the number of distinct labels: a branch's outcomes are
-not added, and the lane holds each label once across later transitions.
-`LocalOk` also rejects a re-spawn that can run while that slot's tombstone
-is still queued. The semantics makes the same spawn a no-op, for a core pool
-and for a per-peer parent, while the slot is occupied or that tombstone is
-still queued. The tombstone is queued at the seal and is not receivable
+template — one key per root population for a root a core supervises, one
+child for a per-peer parent — plus that parent's self-schedule and cell-wake
+senders. The sender term is the larger of the maximum along one program path
+and the number of distinct labels: a branch's outcomes are not added, and
+the lane holds each label once across later transitions. `LocalOk` also
+rejects a re-spawn that can run while that slot's tombstone is still queued.
+The semantics makes the same spawn a no-op for a per-peer parent while the
+slot is occupied or that tombstone is still queued. A core's `Eff.spawn`
+is not a birth. The tombstone is queued at the seal and is not receivable
 while program mail from the dead stage, or from a descendant sealed with it,
 sits in a live receiver's bulk or priority queue. `receivePrio` skips that
 tombstone and takes the first priority message that is not waiting, so a
@@ -77,9 +77,9 @@ therefore runs with that mail already gone, and the spawn is not refused
 for mail. `slotRespawnBlocked` does not consult `slotMailHeld`.
 `receivePrio_tombstone_drained` is that fact for the message `receivePrio`
 removes. The world after the receive is the delivery of that message, and a
-tombstone in that position was not waiting. `child_sub_respawn_enabled` and `pool_sub_respawn_enabled` are
-the birth after the receivers have taken the mail. `child_sub_refused` and
-`pool_sub_refused` do not survive, and they are not a closure of that class.
+tombstone in that position was not waiting. `child_sub_respawn_enabled` is
+the birth after the receivers have taken the mail. `child_sub_refused` does
+not survive, and it is not a closure of that class.
 A scheduler root takes a fresh key. A core-supervised root occupies one of
 the `N` population slots while it is alive, or its tombstone
 is still queued. `rootOutstanding` is that count. The tombstone cannot be
@@ -520,8 +520,7 @@ This is narrower than a rule that would forbid every send by a terminable
 per-peer.
 
 **callTermFails.** `GraphOk.lifecycle` is `callTermFails D = []`: no call edge
-targets a terminable per-peer outside that peer's subtree, except a pool child
-of the calling core. A core is not a terminable target. `coreFlagFails` rejects
+targets a terminable per-peer outside that peer's subtree. A core is not a terminable target. `coreFlagFails` rejects
 the flag, and a call to a core is allowed because the core's `terminate`
 crashes the node rather than leaving the caller waiting. A killing `terminate`
 is refused while a parked call is present. The two together are why a per-peer

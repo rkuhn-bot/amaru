@@ -10,9 +10,9 @@ commit as any change to that step relation.
 `World` holds `N`, `roster`, `nextIx`, `st`, `cell`, `observed`, `failures`,
 and `tombstone`.
 
-`InstId` is `core name` or `peer name key generation`. A pool child of a
-core is indexed by a slot below the template's `slots` and by generation.
-A dead id is not reused. `memberKey` is the key; a core has none.
+`InstId` is `core name` or `peer name key generation`. A per-peer child
+uses its parent's key and a generation. A dead id is not reused.
+`memberKey` is the key; a core has none.
 `isMember` is a peer whose key is the subtree key and whose template's
 subtree is `sub`.
 
@@ -64,7 +64,7 @@ idle. Everyone else is `absentActor`.
 | `recvPrio id` | alive, `idle`, and some `prio` message is not a waiting tombstone, and `deliver` accepts it | Consume the first such message. A waiting tombstone stays in the lane, in its place. No credit. |
 | `exec id` | alive and `run` | `execRun` performs the head `Eff` and leaves `afterHead`. An empty continuation becomes `idle`. |
 | `finish id` | `awaitEffect`, or `awaitPeer` with `peerFinishable` | `finishWait` runs `proceed`. |
-| `spawn template` | per-peer root with `slots = 0`, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail is in a live queue. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A pool (`slots > 0`) is born by `Eff.spawn` from its core, into a free slot. A slot is not free while it is alive or its tombstone is still queued: that spawn is a no-op. The tombstone is queued in the seal and stays queued until the stage's in-flight mail has left every live queue. The same rule applies to a per-peer parent's one child. A dead id is not reused. |
+| `spawn template` | per-peer root, a fresh key, and fewer than `N` roots occupying a population slot | Fresh generation at a fresh key, idle, on the roster. A root occupies a slot while it is alive. A core-supervised root also occupies it while its tombstone is queued, and that tombstone is not receivable while the dead stage's mail is in a live queue. An unsupervised root occupies it while a member of that subtree key still has mail on a surviving receiver. A per-peer parent births one child at its own key with `Eff.spawn`. That spawn is a no-op while the child is alive or its tombstone is still queued. The tombstone is queued in the seal and stays queued until the stage's in-flight mail has left every live queue. A core's `Eff.spawn` is not a birth. A dead id is not reused. |
 | `ingress dst label` | alive, `ingressOpen`, a declared ingress edge, room in `box`, not a lone terminable, and `tokens` cover the path reserve plus one | Append one reliable self-message and charge. |
 | `stutter` | not `runtimeBusy` | Same world. A crashed world does not stutter. |
 
@@ -100,10 +100,8 @@ One `exec` step, by the head effect:
   in that step. A lone terminable per-peer with no child and no parked call
   seals only itself.
 
-`route` resolves a multiplicity-one name to its live core. A pool
-(`slots` > 0) is the live occupant of the addressed slot, and `hint` is
-that slot, so a core can send to and call its own pool members. Any other
-per-peer name is the live occupant of the sender's subtree key.
+`route` resolves a multiplicity-one name to its live core. A per-peer
+name is the live occupant of the sender's subtree key.
 
 `deliver` refuses a dead actor, a call with no transition, and a call whose
 transition does not `acceptsCall`. The receive is then not enabled. A
@@ -157,7 +155,8 @@ supervisor may be a per-peer stage
 of the same subtree. The parent answers the tombstone in its own later
 step, which runs only after that mail is gone. A re-spawn of that slot is a
 no-op while the slot is alive, or while its tombstone is queued. The mail
-is not a second guard. A core pool and a per-peer parent use the same rule.
+is not a second guard. A per-peer parent uses that rule. A core does
+not birth a child with `Eff.spawn`.
 A scheduler root under a core keeps one of the `N` population slots while
 that tombstone is queued. An unsupervised root has no tombstone, and that
 key keeps its population slot while the subtree's mail remains on a

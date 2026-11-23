@@ -652,22 +652,13 @@ theorem spawnChild_other_st (I : Impl) (w w' : World) (parent : InstId) (child :
   · simp at h
   · split at h
     · split at h
+      · simp at h
       · split at h
-        · split at h
-          · cases h
-            simp only [admitBorn, cellsSt]
-            rw [setActor_other _ _ _ _ (hfresh _)]
-          · cases h
-            rfl
-        · simp at h
-      · split at h
-        · split at h
-          · cases h
-            rfl
-          · cases h
-            simp only [admitBorn, cellsSt]
-            rw [setActor_other _ _ _ _ (hfresh _)]
-        · simp at h
+        · cases h
+          rfl
+        · cases h
+          simp only [admitBorn, cellsSt]
+          rw [setActor_other _ _ _ _ (hfresh _)]
     · split at h
       · cases h
         rfl

@@ -62,13 +62,11 @@ theorem route_tname (w : World) (D : Description) (sender : InstId) (dst : Strin
       · cases h
     | perPeer =>
       simp only [hm] at h
-      split at h
-      · split at h
-        · exact (findLive_spec w dst slot id h).1
-        · cases h
-      · split at h
-        · cases h
-        · exact (findLive_spec w dst _ id h).1
+      cases hk : memberKey sender with
+      | none => simp [hk] at h
+      | some k =>
+        simp only [hk] at h
+        exact (findLive_spec w dst k id h).1
 
 theorem resolve_tname (D : Description) (w : World) (sender : InstId) (dst : String) (slot : Nat)
     (id : InstId) (h : resolveId D w sender dst slot = some id) : tname id = dst := by
@@ -83,21 +81,16 @@ theorem resolve_tname (D : Description) (w : World) (sender : InstId) (dst : Str
       rfl
     | perPeer =>
       simp only [hm] at h
-      split at h
-      · split at h
-        · split at h
-          · cases h
-            exact (findLive_spec w dst slot _ (by assumption)).1
-          · cases h
-            rfl
+      cases hk : memberKey sender with
+      | none => simp [hk] at h
+      | some k =>
+        simp only [hk] at h
+        split at h
+        · next hfind =>
+          cases h
+          exact (findLive_spec w dst k _ hfind).1
         · cases h
-      · split at h
-        · cases h
-        · split at h
-          · cases h
-            exact (findLive_spec w dst _ _ (by assumption)).1
-          · cases h
-            rfl
+          rfl
 
 /-- Outcome typestate fields of `k` are the ones `tr` declares. `toState` and
 `rest` are not part of the match: `pickState` and `selectCall` rewrite those
@@ -5226,22 +5219,13 @@ theorem spawnChild_inv (I : Impl) (w w' : World) (parent : InstId) (child : Stri
         cases hp
         exact h.1.rostered parent halive
       split at hs
+      · cases hs
       · split at hs
-        · split at hs
-          · cases hs
-            exact admit_inv I w child _ t.initial _ hhost
-              (fun p hp => by cases hp; exact halive) h
-          · cases hs
-            exact h
         · cases hs
-      · split at hs
-        · split at hs
-          · cases hs
-            exact h
-          · cases hs
-            exact admit_inv I w child _ t.initial _ hhost
-              (fun p hp => by cases hp; exact halive) h
+          exact h
         · cases hs
+          exact admit_inv I w child _ t.initial _ hhost
+            (fun p hp => by cases hp; exact halive) h
     · split at hs
       · cases hs
         exact h
