@@ -977,3 +977,152 @@ theorem birth_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : BirthInv I.desc 
   refine birth_cores I hG _ rfl (fun _ => rfl) (fun _ => rfl) ?_
   intro id
   rfl
+
+theorem birth_keep_line (D : Description) (w : World) (id : InstId) (a : Actor) (h : BirthInv D w)
+    (hl : a.life = (w.st id).life ∧ a.parent = (w.st id).parent ∧ a.box = (w.st id).box ∧
+      a.prio = (w.st id).prio ∧ a.parked = (w.st id).parked) :
+    BirthInv D (setActor w id a) := by
+  rcases hl with ⟨hl, hp, hb, hpr, hk⟩
+  exact birth_keep D w id a h hp hl hb hpr hk
+
+theorem detach_plain (a : Actor) (caller : InstId)
+    (h : ∀ m, m ∈ a.box → m.tombstone = false) :
+    ∀ m, m ∈ (detachBox a caller).box → m.tombstone = false := by
+  intro m hm
+  rw [detachBox] at hm
+  obtain ⟨m0, hm0, heq⟩ := List.mem_map.mp hm
+  rw [← heq, detachMsg_tomb]
+  exact h _ hm0
+
+theorem detach_host_line (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).life = a.life ∧
+      (detachReply (detachBox a caller) caller cid).parent = a.parent ∧
+      (detachReply (detachBox a caller) caller cid).prio = a.prio ∧
+      (detachReply (detachBox a caller) caller cid).parked = a.parked := by
+  unfold detachReply
+  split
+  · simp [detachBox, clearReplyPhase]
+  · simp [detachBox]
+
+theorem birth_detach (D : Description) (w : World) (dst caller : InstId) (cid : Nat)
+    (h : BirthInv D w) :
+    BirthInv D (setActor w dst (detachReply (detachBox (w.st dst) caller) caller cid)) := by
+  rcases detach_host_line (w.st dst) caller cid with ⟨hl, hp, hpr, hk⟩
+  have hbox : (detachReply (detachBox (w.st dst) caller) caller cid).box =
+      (detachBox (w.st dst) caller).box := by
+    unfold detachReply
+    split <;> rfl
+  refine birth_set D w dst _ h hp (Or.inl hl) ?box ?park ?prio
+  · intro m hm
+    rw [hbox] at hm
+    exact detach_plain (w.st dst) caller (h.plainBox dst) m hm
+  · intro p hp'
+    rw [hk] at hp'
+    exact h.plainParked dst p hp'
+  · intro m hm
+    rw [hpr] at hm
+    exact Or.inl hm
+
+theorem birth_refund_call (D : Description) (w : World) (caller dst : InstId) (h : BirthInv D w) :
+    BirthInv D (refundParkedCall w caller dst) := by
+  unfold refundParkedCall
+  dsimp only
+  by_cases hempty : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty = true
+  · simp [hempty]
+    exact h
+  · have hf : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty = false := by
+      cases hbit : ((w.st dst).parked.filter fun p => p.sender == caller && p.isCall).isEmpty <;> simp_all
+    simp only [hf, ite_false]
+    let keep := List.filter (fun p => !((p.sender == caller) && p.isCall)) (w.st dst).parked
+    refine birth_credits D _ (tname dst) caller _ ?_
+    refine birth_set D w dst { (w.st dst) with parked := keep } h rfl (Or.inl rfl)
+      ?box ?park ?prio
+    · intro m hm
+      exact h.plainBox dst m hm
+    · intro p hp
+      exact h.plainParked dst p (List.mem_filter.mp hp).1
+    · intro m hm
+      exact Or.inl hm
+
+theorem birth_finish (I : Impl) (w w' : World) (id : InstId) (h : BirthInv I.desc w)
+    (hf : finishWait I w id = some w') : BirthInv I.desc w' := by
+  unfold finishWait at hf
+  by_cases hl : (w.st id).life = .alive
+  · simp only [hl, ne_eq] at hf
+    cases hph : (w.st id).phase <;> simp [hph] at hf
+    case awaitEffect k =>
+      cases hf
+      exact birth_keep_line I.desc w id (proceed (w.st id) k) h (proceed_lineage (w.st id) k)
+    case awaitPeer k =>
+      cases hf
+      exact birth_keep_line I.desc w id (proceed (w.st id) k) h (proceed_lineage (w.st id) k)
+  · have hne : (w.st id).life ≠ .alive := by
+      intro heq
+      exact hl heq
+    simp [hne] at hf
+
+theorem birth_timeout (D : Description) (w w' : World) (id : InstId) (h : BirthInv D w)
+    (ht : callTimeout w id = some w') : BirthInv D w' := by
+  unfold callTimeout at ht
+  by_cases hl : ((w.st id).life != .alive) = true
+  · simp [hl] at ht
+  · have hf : ((w.st id).life != .alive) = false := by
+      cases hbit : (w.st id).life != .alive <;> simp_all
+    simp only [hf, ite_false] at ht
+    cases hph : (w.st id).phase <;> simp [hph] at ht
+    case awaitReply dst k =>
+      rw [← ht]
+      exact birth_keep_line D (setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)) id
+        (finishCall
+          ((setActor w dst (detachReply (detachBox (w.st dst) id) id (w.st id).waitId)).st id) k .timedOut)
+        (birth_detach D w dst id (w.st id).waitId h)
+        (finish_lineage _ k .timedOut)
+    case parked dst c k =>
+      cases hc : c
+      · simp [hph, hc] at ht
+      · simp [hph, hc] at ht
+        rw [← ht]
+        exact birth_keep_line D (refundParkedCall w id dst) id
+          (finishCall ((refundParkedCall w id dst).st id) k .notAdmitted)
+          (birth_refund_call D w id dst h)
+          (finish_lineage _ k .notAdmitted)
+    case awaitPeer k =>
+      rw [← ht]
+      exact birth_keep_line D w id (proceed (w.st id)
+        { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout }) h
+        (proceed_lineage _ _)
+
+theorem ingress_msg_tomb (dst : InstId) (label : String) (mid : Nat) :
+    ({ label := label, sender := dst, callFrom := none, reliable := true, mid := mid } : Msg).tombstone =
+      false := rfl
+
+theorem birth_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String)
+    (h : BirthInv I.desc w) (hi : receiveIngress I w dst label = some w') :
+    BirthInv I.desc w' := by
+  dsimp [receiveIngress] at hi
+  split at hi
+  · simp at hi
+  · split at hi
+    · simp at hi
+    · split at hi
+      · simp at hi
+      · split at hi
+        · simp at hi
+        · split at hi
+          · simp at hi
+          · cases hi
+            let a := w.st dst
+            let msg : Msg :=
+              { label := label, sender := dst, callFrom := none, reliable := true, mid := a.nextMid }
+            let charged := chargeSender a (tname dst)
+            rcases charge_lineage a (tname dst) with ⟨hl, hp, hb, hpr, hk⟩
+            refine birth_set I.desc w dst { charged with box := a.box ++ [msg], nextMid := a.nextMid + 1 }
+              h hp (Or.inl hl) ?box ?park ?prio
+            · intro m hm
+              exact plain_append (h.plainBox dst) (ingress_msg_tomb dst label a.nextMid) m hm
+            · intro p hp'
+              rw [hk] at hp'
+              exact h.plainParked dst p hp'
+            · intro m hm
+              rw [hpr] at hm
+              exact Or.inl hm
