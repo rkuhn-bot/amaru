@@ -6659,4 +6659,344 @@ theorem held_spawn_run (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Con
     simp [execRun, hf] at hmem
     exact hmem
 
+/-- An empty subtree names no supervisor, so the template is a root.
+`birth_supervised` is the checker fact: a supervisor without a subtree is rejected. -/
+theorem empty_is_root (D : Description) (hG : GraphOk D) (name : String) (t : Template)
+    (ht : templateOf D name = some t) (hempty : t.subtree = "") : rootOf D t = true := by
+  cases hsup : t.supervisor with
+  | none => simp [rootOf, hsup]
+  | some n => exact absurd hempty (birth_supervised D hG name t ht n hsup)
+
+/-- `spawnChild` does not birth a root. A root's supervisor is absent or a core,
+and a peer executor is not that core. The result is the world unchanged. -/
+theorem spawn_root_same (I : Impl) (w w' : World) (hH : Hold I w) (parent : InstId)
+    (child : String) (hmem : parent ∈ w.roster) (h : spawnChild I w parent child = some w')
+    (t : Template) (ht : templateOf I.desc child = some t) (hroot : rootOf I.desc t = true) :
+    w' = w := by
+  unfold spawnChild at h
+  simp only [ht] at h
+  by_cases hgo :
+      (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+        (w.st parent).life == .alive) = true
+  · simp only [hgo, ite_true] at h
+    cases parent with
+    | core _ => simp at h
+    | peer pn pk pg =>
+      simp only [Bool.and_eq_true] at hgo
+      have hnamed : t.supervisor = some pn := by
+        simpa [tname] using sup_is pn t.supervisor hgo.1.2
+      simp only [rootOf, hnamed] at hroot
+      cases hts : templateOf I.desc pn with
+      | none => simp [hts] at hroot
+      | some ts =>
+        simp only [hts] at hroot
+        have hone : ts.multiplicity = .one := by
+          cases hmul : ts.multiplicity with
+          | one => rfl
+          | perPeer =>
+            rw [hmul] at hroot
+            have hbeq : (Multiplicity.perPeer == Multiplicity.one) = false := rfl
+            rw [hbeq] at hroot
+            cases hroot
+        obtain ⟨tp, htp, hrole⟩ := hH.role (InstId.peer pn pk pg) hmem
+        have htp' : templateOf I.desc pn = some tp := by simpa [tname] using htp
+        have hsame : tp = ts := by injection htp'.symm.trans hts
+        have hper : tp.multiplicity = .perPeer := by simpa [tmb_role] using hrole
+        rw [hsame, hone] at hper
+        cases hper
+  · have hf :
+        (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = false := by
+      cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive with
+      | false => rfl
+      | true => exact absurd hb hgo
+    simp only [hf] at h
+    by_cases hstay : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+    · simp only [hstay, ite_true] at h
+      cases h
+      rfl
+    · have hstayF : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+        cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) with
+        | false => rfl
+        | true => exact absurd hb hstay
+      simp [hstayF] at h
+
+/-- Placing a generation of one template does not hold a new key of another. -/
+theorem held_place_other (I : Impl) (w : World) (template name : String) (k : Nat)
+    (initial : String) (parent : Option InstId) (bump : World → World) (hF : ParentForest w)
+    (hstB : ∀ u i, (bump u).st i = u.st i) (hrB : ∀ u, (bump u).roster = u.roster)
+    (hother : template ≠ name) :
+    ∀ key, key ∈ heldKeys I.desc (placePeer I w template k initial parent bump) name →
+      key ∈ heldKeys I.desc w name := by
+  let id := InstId.peer template k (maxGen w template k)
+  have hst := place_st I w template k initial parent bump hstB
+  have hros := place_roster I w template k initial parent bump hrB
+  have hempty : ((placePeer I w template k initial parent bump).st id).box = [] ∧
+      ((placePeer I w template k initial parent bump).st id).prio = [] ∧
+      ((placePeer I w template k initial parent bump).st id).parked = [] := by
+    have hid : (placePeer I w template k initial parent bump).st id =
+        { bornActor I.desc w template k initial with parent := parent } := by
+      simp [id, hst]
+    simp [hid, bornActor, withKeyTokens]
+  have hotherName : tname id ≠ name := by simp [id, tname, hother]
+  refine held_birth_other I.desc w _ name id hF (gen_fresh w template k)
+    (by simpa [id] using hros) ?_ hempty hotherName
+  intro i hi
+  have h := hst i
+  simp [id, hi] at h
+  exact h
+
+/-- A scheduler spawn of another template does not grow this template's held keys. -/
+theorem held_spawn_other (I : Impl) (w w' : World) (template name : String) (hF : ParentForest w)
+    (hother : template ≠ name) (h : spawn I w template = some w') :
+    ∀ key, key ∈ heldKeys I.desc w' name → key ∈ heldKeys I.desc w name := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · simp only [hmay, ite_true] at h
+      cases hsup : t.supervisor with
+      | some sname =>
+        rw [hsup] at h
+        cases h
+        exact held_place_other I w template name (freshKey I.desc w t.subtree) t.initial
+          (some (InstId.core sname)) (fun u =>
+            { u with nextKey := fun s =>
+                if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+          hF (fun _ _ => rfl) (fun _ => rfl) hother
+      | none =>
+        rw [hsup] at h
+        by_cases hempty : (t.subtree == "") = true
+        · rw [hempty] at h
+          cases h
+          exact held_place_other I w template name (w.nextIx template) t.initial none
+            (fun u => { u with nextIx := fun n =>
+                if n = template then w.nextIx template + 1 else u.nextIx n })
+            hF (fun _ _ => rfl) (fun _ => rfl) hother
+        · have hf : (t.subtree == "") = false := by
+            cases hb : t.subtree == "" with
+            | false => rfl
+            | true => exact absurd hb hempty
+          rw [hf] at h
+          cases h
+          exact held_place_other I w template name (freshKey I.desc w t.subtree) t.initial none
+            (fun u => { u with nextKey := fun s =>
+                if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+            hF (fun _ _ => rfl) (fun _ => rfl) hother
+    · simp [hmay] at h
+
+/-- A spawn that returns a world was allowed by `maySpawnRoot`. -/
+theorem spawn_may (I : Impl) (w w' : World) (template : String) (h : spawn I w template = some w') :
+    ∃ t, templateOf I.desc template = some t ∧ maySpawnRoot I.desc w template t = true := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · exact ⟨t, rfl, hmay⟩
+    · simp [hmay] at h
+
+/-- Spawning a root stays within `w.N`. An unsupervised root is bounded by
+`loneOutstanding`. A core-supervised root is bounded by `rootOutstanding`, and
+the live core is what `maySpawnRoot` checks. -/
+theorem held_spawn_bound (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w w' : World) (hR : Reachable I N w) (hcr : w.crashed = false) (template : String)
+    (h : spawn I w template = some w') :
+    (heldKeys I.desc w' template).length ≤ w.N := by
+  obtain ⟨t, ht, hmay⟩ := spawn_may I w w' template h
+  have hF : ParentForest w := (inv_reachable I N w hL hR).forest
+  unfold maySpawnRoot at hmay
+  simp only [Bool.and_eq_true] at hmay
+  cases hsup : t.supervisor with
+  | none =>
+    rw [hsup] at hmay
+    have hlt : loneOutstanding I.desc w template < w.N := of_decide_eq_true hmay.2
+    exact held_spawn_lone I w w' template hF h hlt
+  | some sup =>
+    rw [hsup] at hmay
+    have hlt : rootOutstanding I.desc w sup template < w.N := of_decide_eq_true hmay.2
+    have hlive : (w.st (InstId.core sup)).life = .alive := by
+      have hsupLive := hmay.1.2
+      unfold supervisorLive at hsupLive
+      simp only [hsup] at hsupLive
+      cases hts : templateOf I.desc sup with
+      | none => simp [hts] at hsupLive
+      | some ts =>
+        simp only [hts] at hsupLive
+        cases hmul : ts.multiplicity with
+        | perPeer => simp [hmul] at hsupLive
+        | one =>
+          simp only [hmul] at hsupLive
+          exact (beq_iff_eq).mp hsupLive
+    have hroot : rootOf I.desc t = true := hmay.1.1.2
+    have hsub : t.subtree ≠ "" := birth_supervised I.desc hG template t ht sup hsup
+    have hpre := held_le_root_reachable I hL hG N w hR hcr template t ht hroot hsub sup hsup hlive
+    have hplus := held_spawn_len I w w' template hF h
+    omega
+
+/-- An accepted `exec` does not grow the held keys of an empty subtree or of a
+root. Enqueueing effects, abort, terminate, phase effects and a refused root
+spawn are the arms; a child birth is a different template and adds none here. -/
+theorem held_exec_keep (I : Impl) (hG : GraphOk I.desc) (w w' : World)
+    (hI : Inv I w) (hB : BirthInv I.desc w) (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hcr : w.crashed = false) (id : InstId) (name : String) (hmem : id ∈ w.roster)
+    (h : execHead I w id = some w')
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc w' name → key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  have hF : ParentForest w := hI.forest
+  have hP : Parented I.desc w := hB.parented
+  have hSelf : NoSelfParent w := hB.noSelf
+  have hKids : DeadChildless w := hI.seal.childless
+  unfold execHead at h
+  by_cases hnot : (w.st id).life ≠ .alive
+  · simp [hnot] at h
+  · have hlive : (w.st id).life = .alive := Classical.byContradiction fun hne => hnot hne
+    have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+    simp [hnot] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h
+      cases h
+      cases hk : k.rest with
+      | nil =>
+        exact held_exec_phase I w id k name (by simp [hk]) key hkK
+      | cons e es =>
+        cases e with
+        | send dst label hint =>
+          exact held_exec_enqueue I hG w hF hP hSelf hH hOne hKids hcr id k (.send dst label hint)
+            es name hlive hmem hk (by simp [effectEnqueues]) hkind key hkK
+        | trySend dst label hint onFull onGone =>
+          exact held_exec_enqueue I hG w hF hP hSelf hH hOne hKids hcr id k
+            (.trySend dst label hint onFull onGone) es name hlive hmem hk
+            (by simp [effectEnqueues]) hkind key hkK
+        | call dst label hint onNotAdmitted onTimedOut =>
+          exact held_exec_enqueue I hG w hF hP hSelf hH hOne hKids hcr id k
+            (.call dst label hint onNotAdmitted onTimedOut) es name hlive hmem hk
+            (by simp [effectEnqueues]) hkind key hkK
+        | selfSchedule label =>
+          exact held_exec_enqueue I hG w hF hP hSelf hH hOne hKids hcr id k (.selfSchedule label)
+            es name hlive hmem hk (by simp [effectEnqueues]) hkind key hkK
+        | cell dst label value =>
+          exact held_exec_enqueue I hG w hF hP hSelf hH hOne hKids hcr id k (.cell dst label value)
+            es name hlive hmem hk (by simp [effectEnqueues]) hkind key hkK
+        | reply =>
+          exact held_exec_reply I w id k es name hk key hkK
+        | internal =>
+          exact held_exec_phase I w id k name (by simp [hk]) key hkK
+        | peer n =>
+          exact held_exec_phase I w id k name (by simp [hk]) key hkK
+        | abort =>
+          exact held_abort_run I hG w hI hP hSelf hH hOne hcr id (w.st id) k es name hk hkind key hkK
+        | terminate =>
+          exact held_terminate_run I hG w hI hP hSelf hH hOne hcr id (w.st id) k name hmem
+            ⟨es, hk⟩ hkind key hkK
+        | spawn child =>
+          by_cases hsame : child = name
+          · have hkN : k.rest = .spawn name :: es := by simpa [hsame] using hk
+            cases hs : spawnChild I w id name with
+            | none =>
+              simp [execRun, hbit, hkN, hs] at hkK
+              exact held_crash I.desc w name key hkK
+            | some w1 =>
+              cases htc : templateOf I.desc name with
+              | none => simp [spawnChild, htc] at hs
+              | some t =>
+                have hrootT : rootOf I.desc t = true := by
+                  cases hkind with
+                  | inl hempty =>
+                    have hemptyT : t.subtree = "" := by
+                      simp [templateSubtree, htc] at hempty
+                      exact hempty
+                    exact empty_is_root I.desc hG name t htc hemptyT
+                  | inr hr =>
+                    obtain ⟨t', ht', hroot', _⟩ := hr
+                    have hteq : t' = t := by injection ht'.symm.trans htc
+                    simpa [hteq] using hroot'
+                have hw := spawn_root_same I w w1 hH id name hmem hs t htc hrootT
+                simp [execRun, hbit, hkN, hs, hw] at hkK
+                have hp := proceed_fields (w.st id) (afterHead k)
+                exact held_commit I.desc w id (proceed (w.st id) (afterHead k)) name
+                  hp.2.2.2.2 hp.2.2.1 hp.2.2.2.1 hp.2.1 hp.1 key hkK
+          · exact held_spawn_run I w id (w.st id) k es child name hF hk hsame key hkK
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+/-- A reachable world holds at most `N` keys of an empty subtree or of a root.
+A non-birth step adds none. Spawning this root is allowed only while its
+outstanding count is below `N`, and spawning anything else does not touch it. -/
+theorem held_le_N (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) (name : String)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    (heldKeys I.desc w name).length ≤ N := by
+  induction hR with
+  | init =>
+    rw [held_init]
+    simp
+  | step w w' a hprev ha ih =>
+    have hcr : w.crashed = false := (apply_step I a w w' ha).1
+    have hstep := (apply_step I a w w' ha).2
+    have hI := inv_reachable I N w hL hprev
+    have hB := lane_birth I hL hG N w hprev
+    have hH := hold_reach I N w hG hprev
+    have hOne := oneCohort_reachable I hG N w hprev
+    cases a with
+    | recvBulk s =>
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name (held_receive I w w' s name hstep)) ih
+    | recvPrio s =>
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name (held_prio I w w' s name hstep)) ih
+    | finish s =>
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name (held_finish I w w' s name hstep)) ih
+    | callTimeout s =>
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name (held_timeout I w w' s name hstep)) ih
+    | stutter =>
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name (held_stutter I w w' name hstep)) ih
+    | ingress dst label =>
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name
+        (held_ingress_reachable I hL hG N w w' hprev dst label name ha hkind)) ih
+    | exec s =>
+      simp only [stepWorld] at hstep
+      exact Nat.le_trans (held_len_of_sub I.desc w w' name
+        (held_exec_keep I hG w w' hI hB hH hOne hcr s name
+          (hI.1.rostered s (by
+            unfold execHead at hstep
+            by_cases hnot : (w.st s).life ≠ .alive
+            · simp [hnot] at hstep
+            · exact Classical.byContradiction fun hne => hnot hne))
+          hstep hkind)) ih
+    | spawn template =>
+      simp only [stepWorld] at hstep
+      by_cases hsame : template = name
+      · rw [hsame] at hstep
+        have hbound := held_spawn_bound I hL hG N w w' hprev hcr name hstep
+        simpa [reach_N I N w hprev] using hbound
+      · exact Nat.le_trans (held_len_of_sub I.desc w w' name
+          (held_spawn_other I w w' template name hI.forest hsame hstep)) ih
+
+/-- A per-peer child's held keys are among its parent's, so a parent inside
+the population bound keeps the child inside it. Climb to the subtree root,
+which `held_le_N` bounds, one supervisor at a time. -/
+theorem held_of_parent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hcr : w.crashed = false)
+    (child supName : String) (t ts : Template) (ht : templateOf I.desc child = some t)
+    (hts : templateOf I.desc supName = some ts) (hsup : t.supervisor = some supName)
+    (hmul : ts.multiplicity = .perPeer)
+    (hparent : (heldKeys I.desc w supName).length ≤ N) :
+    (heldKeys I.desc w child).length ≤ N := by
+  have hI := inv_reachable I N w hL hR
+  have hB := lane_birth I hL hG N w hR
+  exact Nat.le_trans (nodup_sub_len _ _ (heldKeys_nodup I.desc w child)
+    (fun k hk => held_in_parent I hG w hcr hB.parented hI.forest (hold_reach I N w hG hR)
+      hI.seal.childless child supName t ts ht hts hsup hmul k hk)) hparent
+
 end Deadlock
