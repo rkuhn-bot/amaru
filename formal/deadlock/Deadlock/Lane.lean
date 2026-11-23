@@ -2688,7 +2688,7 @@ theorem slot_mail_prev (D : Description) (w w' : World) (name : String) (k : Nat
       cases hb : templateSubtree D name == "" with
       | false => rfl
       | true => exact absurd hb hempty
-    simp only [hne, ite_false] at hmail ⊢
+    simp only [hne] at hmail ⊢
     unfold subtreeCoreMail at hmail ⊢
     simp only [subtree_queues] at hmail ⊢
     rw [hros] at hmail
@@ -3201,5 +3201,501 @@ theorem held_timeout (I : Impl) (w w' : World) (id : InstId) (name : String)
     ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
   simp only [stepWorld] at h
   exact held_from_view I.desc w w' name (call_roster w w' id h) (fun i => timeout_view w w' id i h)
+
+/-! Ingress and an effect enqueue mail from the actor the guard already required
+to be alive. `held_sub` asks for an alive generation of the template whose slot
+the new message holds. That generation is the sender when the template has no
+subtree, and the subtree's root when the sender is a member of a root template.
+A child template that shares a nonempty subtree is not this fact: a sibling's
+message holds that child's slot while every generation of the child is dead,
+and the alive generation is the root of a different name. -/
+
+/-- The sender test `slotMailHeld` uses for `name` at `k`. -/
+def slotPred (D : Description) (name : String) (k : Nat) (id : InstId) : Bool :=
+  let sub := templateSubtree D name
+  if sub == "" then fromSlot name k id else fromSubtree D sub k id
+
+theorem slotPred_empty (D : Description) (name : String) (k : Nat) (id : InstId)
+    (hempty : templateSubtree D name = "") : slotPred D name k id = fromSlot name k id := by
+  unfold slotPred
+  have hb : (templateSubtree D name == "") = true := by simpa [beq_iff_eq] using hempty
+  simp [hb]
+
+theorem slotPred_root (D : Description) (name : String) (k : Nat) (id : InstId) (t : Template)
+    (ht : templateOf D name = some t) (hsub : t.subtree ≠ "") :
+    slotPred D name k id = isMember D id t.subtree k := by
+  have htree : templateSubtree D name = t.subtree := by simp [templateSubtree, ht]
+  unfold slotPred fromSubtree
+  rw [htree]
+  have hne : (t.subtree == "") = false := by
+    cases hb : t.subtree == "" with
+    | false => rfl
+    | true => exact absurd (beq_iff_eq.mp hb) hsub
+  simp [hne]
+
+/-- A host that still survives a sender survived it before, when parents are
+unchanged and a life that is alive afterwards was alive before. -/
+theorem survives_back (w w' : World) (sender host : InstId)
+    (hros : w'.roster = w.roster) (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hlife : (w'.st host).life = .alive → (w.st host).life = .alive)
+    (h : survivesSender w' sender host = true) : survivesSender w sender host = true := by
+  simp only [survivesSender, Bool.and_eq_true] at h ⊢
+  have hlive' : (w'.st host).life = .alive := by simpa [beq_iff_eq] using h.1
+  refine ⟨by simpa [beq_iff_eq] using hlife hlive', ?_⟩
+  have hseal := sealed_st w w' sender host hros hp
+  rw [← hseal]
+  cases hsb : sealedTogether w' sender host with
+  | false => simp
+  | true => simp [hsb] at h
+
+theorem box_split (pred : InstId → Bool) (senders : InstId → Prop)
+    (oldB : List Msg) (oldP : List Parked) (newB : List Msg)
+    (h : ∀ m, m ∈ newB →
+      (∃ m0, m0 ∈ oldB ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ oldP ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)) ∨
+        senders m.sender)
+    (hany : newB.any (fun m => pred m.sender) = true) :
+    oldB.any (fun m => pred m.sender) = true ∨
+      oldP.any (fun p => pred p.sender || pred p.msg.sender) = true ∨
+        ∃ s, senders s ∧ pred s = true := by
+  obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hany
+  rcases h m hm with ⟨m0, hm0, hs⟩ | ⟨p, hp, hs⟩ | hsend
+  · exact Or.inl (mem_any _ _ m0 hm0 (by simpa [hs] using hh))
+  · apply Or.inr ∘ Or.inl
+    cases hs with
+    | inl hps =>
+      exact mem_any _ _ p hp (by
+        have : pred p.sender = true := by simpa [hps] using hh
+        simp [this])
+    | inr hpm =>
+      exact mem_any _ _ p hp (by
+        have : pred p.msg.sender = true := by simpa [hpm] using hh
+        simp [this])
+  · exact Or.inr (Or.inr ⟨m.sender, hsend, hh⟩)
+
+theorem prio_split (pred : InstId → Bool) (senders : InstId → Prop)
+    (oldP newP : List Msg)
+    (h : ∀ m, m ∈ newP → (∃ m0, m0 ∈ oldP ∧ m0.sender = m.sender) ∨ senders m.sender)
+    (hany : newP.any (fun m => pred m.sender) = true) :
+    oldP.any (fun m => pred m.sender) = true ∨ ∃ s, senders s ∧ pred s = true := by
+  obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hany
+  rcases h m hm with ⟨m0, hm0, hs⟩ | hsend
+  · exact Or.inl (mem_any _ _ m0 hm0 (by simpa [hs] using hh))
+  · exact Or.inr ⟨m.sender, hsend, hh⟩
+
+theorem park_split (pred : InstId → Bool) (senders : InstId → Prop)
+    (oldP newP : List Parked)
+    (h : ∀ p, p ∈ newP →
+      ((∃ q, q ∈ oldP ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∨ senders p.sender) ∧
+        ((∃ q, q ∈ oldP ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)) ∨
+          senders p.msg.sender))
+    (hany : newP.any (fun p => pred p.sender || pred p.msg.sender) = true) :
+    oldP.any (fun q => pred q.sender || pred q.msg.sender) = true ∨
+      ∃ s, senders s ∧ pred s = true := by
+  obtain ⟨p, hp, hh⟩ := _root_.List.any_eq_true.mp hany
+  rcases h p hp with ⟨h1, h2⟩
+  simp only [Bool.or_eq_true] at hh
+  cases hh with
+  | inl hs =>
+    rcases h1 with ⟨q, hq, hwho⟩ | hsend
+    · cases hwho with
+      | inl heq =>
+        exact Or.inl (mem_any _ _ q hq (by
+          have : pred q.sender = true := by simpa [heq] using hs
+          simp [this]))
+      | inr heq =>
+        exact Or.inl (mem_any _ _ q hq (by
+          have : pred q.msg.sender = true := by simpa [heq] using hs
+          simp [this]))
+    · exact Or.inr ⟨p.sender, hsend, hs⟩
+  | inr hs =>
+    rcases h2 with ⟨q, hq, hwho⟩ | hsend
+    · cases hwho with
+      | inl heq =>
+        exact Or.inl (mem_any _ _ q hq (by
+          have : pred q.sender = true := by simpa [heq] using hs
+          simp [this]))
+      | inr heq =>
+        exact Or.inl (mem_any _ _ q hq (by
+          have : pred q.msg.sender = true := by simpa [heq] using hs
+          simp [this]))
+    · exact Or.inr ⟨p.msg.sender, hsend, hs⟩
+
+/-- A queue held afterwards was held before, or one of `senders` satisfies `pred`. -/
+theorem queues_split (pred surv surv' : InstId → Bool) (senders : InstId → Prop)
+    (a a' : Actor) (hsurv : ∀ s, surv' s = true → surv s = true)
+    (hbox : ∀ m, m ∈ a'.box →
+      (∃ m0, m0 ∈ a.box ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ a.parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)) ∨
+        senders m.sender)
+    (hprio : ∀ m, m ∈ a'.prio →
+      (∃ m0, m0 ∈ a.prio ∧ m0.sender = m.sender) ∨ senders m.sender)
+    (hpark : ∀ p, p ∈ a'.parked →
+      ((∃ q, q ∈ a.parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∨
+        senders p.sender) ∧
+        ((∃ q, q ∈ a.parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)) ∨
+          senders p.msg.sender))
+    (h : queuesHold pred surv' a' = true) :
+    queuesHold pred surv a = true ∨ ∃ s, senders s ∧ pred s = true := by
+  have hback : ∀ s, (pred s && surv' s) = true → (pred s && surv s) = true := by
+    intro s hs
+    simp only [Bool.and_eq_true] at hs
+    simp [hs.1, hsurv s hs.2]
+  unfold queuesHold at h ⊢
+  simp only [Bool.or_eq_true] at h ⊢
+  rcases h with (hboxA | hprioA) | hparkA
+  · have hboxH : a'.box.any (fun m => pred m.sender && surv m.sender) = true := by
+      obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hboxA
+      exact mem_any _ _ m hm (hback _ hh)
+    rcases box_split (fun s => pred s && surv s) senders a.box a.parked a'.box hbox hboxH with
+      hB | hP | hS
+    · exact Or.inl (Or.inl (Or.inl hB))
+    · exact Or.inl (Or.inr hP)
+    · obtain ⟨s, hs, hp⟩ := hS
+      simp only [Bool.and_eq_true] at hp
+      exact Or.inr ⟨s, hs, hp.1⟩
+  · have hprioH : a'.prio.any (fun m => pred m.sender && surv m.sender) = true := by
+      obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hprioA
+      exact mem_any _ _ m hm (hback _ hh)
+    rcases prio_split (fun s => pred s && surv s) senders a.prio a'.prio hprio hprioH with hP | hS
+    · exact Or.inl (Or.inl (Or.inr hP))
+    · obtain ⟨s, hs, hp⟩ := hS
+      simp only [Bool.and_eq_true] at hp
+      exact Or.inr ⟨s, hs, hp.1⟩
+  · have hparkH :
+        a'.parked.any (fun p =>
+          (pred p.sender && surv p.sender) || (pred p.msg.sender && surv p.msg.sender)) = true := by
+      obtain ⟨p, hp, hh⟩ := _root_.List.any_eq_true.mp hparkA
+      simp only [Bool.or_eq_true] at hh
+      cases hh with
+      | inl hs => exact mem_any _ _ p hp (by simp [hback _ hs])
+      | inr hs => exact mem_any _ _ p hp (by simp [hback _ hs])
+    rcases park_split (fun s => pred s && surv s) senders a.parked a'.parked hpark hparkH with
+      hP | hS
+    · exact Or.inl (Or.inr hP)
+    · obtain ⟨s, hs, hp⟩ := hS
+      simp only [Bool.and_eq_true] at hp
+      exact Or.inr ⟨s, hs, hp.1⟩
+
+theorem any_split (ids : List InstId) (p q : InstId → Bool) (r : InstId → Prop)
+    (h : ∀ i, i ∈ ids → p i = true → q i = true ∨ r i) (hp : ids.any p = true) :
+    ids.any q = true ∨ ∃ i, i ∈ ids ∧ r i := by
+  induction ids with
+  | nil => simp at hp
+  | cons i ids ih =>
+    simp only [List.any_cons, Bool.or_eq_true] at hp ⊢
+    cases hp with
+    | inl hi =>
+      cases h i (List.Mem.head _) hi with
+      | inl hq => exact Or.inl (Or.inl hq)
+      | inr hr => exact Or.inr ⟨i, List.Mem.head _, hr⟩
+    | inr ht =>
+      cases ih (fun j hj => h j (List.Mem.tail _ hj)) ht with
+      | inl hq => exact Or.inl (Or.inr hq)
+      | inr hr =>
+        obtain ⟨j, hj, hr⟩ := hr
+        exact Or.inr ⟨j, List.Mem.tail _ hj, hr⟩
+
+/-- Slot mail that appears after a step was already held, or a new sender
+satisfies the slot's predicate. Parents are unchanged, and a host that is
+alive afterwards was alive before. -/
+theorem slot_split (D : Description) (w w' : World) (name : String) (k : Nat)
+    (senders : InstId → Prop) (hros : w'.roster = w.roster)
+    (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hlife : ∀ i, (w'.st i).life = .alive → (w.st i).life = .alive)
+    (hbox : ∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).box →
+      (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)) ∨
+        senders m.sender)
+    (hprio : ∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).prio →
+      (∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∨ senders m.sender)
+    (hpark : ∀ i, i ∈ w.roster → ∀ p, p ∈ (w'.st i).parked →
+      ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∨
+        senders p.sender) ∧
+        ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)) ∨
+          senders p.msg.sender))
+    (hmail : slotMailHeld D w' name k = true) :
+    slotMailHeld D w name k = true ∨ ∃ s, senders s ∧ slotPred D name k s = true := by
+  unfold slotMailHeld at hmail ⊢
+  by_cases hempty : (templateSubtree D name == "") = true
+  · simp only [hempty, ite_true] at hmail ⊢
+    unfold slotCoreMail at hmail ⊢
+    simp only [core_queues] at hmail ⊢
+    rw [hros] at hmail
+    have hsplit := any_split w.roster _ _ (fun _ => ∃ s, senders s ∧ fromSlot name k s = true)
+      (fun host hhost hh => by
+        have hsurv : ∀ s, survivesSender w' s host = true → survivesSender w s host = true :=
+          fun s hs => survives_back w w' s host hros hp (hlife host) hs
+        rcases queues_split (fromSlot name k) (fun s => survivesSender w s host)
+            (fun s => survivesSender w' s host) senders (w.st host) (w'.st host) hsurv
+            (hbox host hhost) (hprio host hhost) (hpark host hhost) hh with
+          hold | ⟨s, hs, hp⟩
+        · exact Or.inl hold
+        · exact Or.inr ⟨s, hs, hp⟩) hmail
+    rcases hsplit with hold | ⟨_, _, ⟨s, hs, hp⟩⟩
+    · exact Or.inl hold
+    · exact Or.inr ⟨s, hs, by
+        unfold slotPred
+        simp [hempty, hp]⟩
+  · have hne : (templateSubtree D name == "") = false := by
+      cases hb : templateSubtree D name == "" with
+      | false => rfl
+      | true => exact absurd hb hempty
+    simp only [hne] at hmail ⊢
+    unfold subtreeCoreMail at hmail ⊢
+    simp only [subtree_queues] at hmail ⊢
+    rw [hros] at hmail
+    have hsplit := any_split w.roster _ _ (fun _ =>
+        ∃ s, senders s ∧ fromSubtree D (templateSubtree D name) k s = true)
+      (fun host hhost hh => by
+        have hsurv : ∀ s, survivesSender w' s host = true → survivesSender w s host = true :=
+          fun s hs => survives_back w w' s host hros hp (hlife host) hs
+        rcases queues_split (fromSubtree D (templateSubtree D name) k)
+            (fun s => survivesSender w s host) (fun s => survivesSender w' s host) senders
+            (w.st host) (w'.st host) hsurv (hbox host hhost) (hprio host hhost)
+            (hpark host hhost) hh with
+          hold | ⟨s, hs, hp⟩
+        · exact Or.inl hold
+        · exact Or.inr ⟨s, hs, hp⟩) hmail
+    rcases hsplit with hold | ⟨_, _, ⟨s, hs, hp⟩⟩
+    · exact Or.inl hold
+    · exact Or.inr ⟨s, hs, by
+        unfold slotPred
+        simp [hne, hp]⟩
+
+/-- The conclusion of `held_sub`, for a step whose new mail comes from
+`senders`. The alive generation is required only at a key that already has a
+generation of `name` on the roster: that is the key `heldKeys` can record. -/
+theorem held_kept (D : Description) (w w' : World) (name : String)
+    (senders : InstId → Prop) (hros : w'.roster = w.roster)
+    (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hlife : ∀ i, (w'.st i).life = .alive → (w.st i).life = .alive)
+    (hbox : ∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).box →
+      (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)) ∨
+        senders m.sender)
+    (hprio : ∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).prio →
+      (∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∨ senders m.sender)
+    (hpark : ∀ i, i ∈ w.roster → ∀ p, p ∈ (w'.st i).parked →
+      ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∨
+        senders p.sender) ∧
+        ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)) ∨
+          senders p.msg.sender))
+    (hwit : ∀ k g s, InstId.peer name k g ∈ w.roster → senders s →
+      slotPred D name k s = true →
+      ∃ id, id ∈ w.roster ∧ fromSlot name k id = true ∧ (w.st id).life = .alive) :
+    ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name := by
+  intro k hk
+  rw [held_mem_bit] at hk ⊢
+  rw [bitKeys_mem] at hk ⊢
+  obtain ⟨id, hid, hbit, hkey⟩ := hk
+  have hold : id ∈ w.roster := by simpa [hros] using hid
+  cases id with
+  | core _ => simp [loneBit] at hbit
+  | peer n key g =>
+    simp only [loneBit, Bool.and_eq_true] at hbit
+    simp only [bitKey] at hkey
+    have hnameb : (n == name) = true := hbit.1
+    have hflag : ((w'.st (.peer n key g)).life == .alive || slotMailHeld D w' name key) = true :=
+      hbit.2
+    by_cases hpre : (w.st (.peer n key g)).life = .alive
+    · refine ⟨.peer n key g, hold, ?_, hkey⟩
+      simp only [loneBit, hnameb, Bool.true_and]
+      rw [hkey] at hpre ⊢
+      have hb : ((w.st (.peer n k g)).life == .alive) = true := by
+        simpa [beq_iff_eq] using hpre
+      simp [hb]
+    · have hlive' : (w'.st (.peer n key g)).life ≠ .alive := by
+        intro h
+        exact hpre (hlife _ h)
+      have hmailK : slotMailHeld D w' name key = true := by
+        cases hbb : (w'.st (.peer n key g)).life == .alive with
+        | true =>
+          have : (w'.st (.peer n key g)).life = .alive := by simpa [beq_iff_eq] using hbb
+          exact absurd this hlive'
+        | false =>
+          rw [hbb, Bool.false_or] at hflag
+          exact hflag
+      rw [hkey] at hmailK
+      have hn : n = name := by simpa [beq_iff_eq] using hnameb
+      have hgen : InstId.peer name k g ∈ w.roster := by simpa [hn, hkey] using hold
+      rcases slot_split D w w' name k senders hros hp hlife hbox hprio hpark hmailK with
+        holdMail | ⟨s, hs, hpred⟩
+      · refine ⟨.peer n key g, hold, ?_, hkey⟩
+        simp only [loneBit, hnameb, Bool.true_and]
+        rw [hkey]
+        simp [holdMail]
+      · obtain ⟨id', hid', hfrom, halive⟩ := hwit k g s hgen hs hpred
+        cases id' with
+        | core _ => simp [fromSlot] at hfrom
+        | peer n' key' g' =>
+          simp only [fromSlot, Bool.and_eq_true] at hfrom
+          have hn' : n' = name := by simpa [beq_iff_eq] using hfrom.1
+          have hk' : key' = k := by simpa [beq_iff_eq] using hfrom.2
+          refine ⟨.peer n' key' g', hid', ?_, hk'⟩
+          simp only [loneBit]
+          rw [hn', hk'] at halive ⊢
+          have hb : ((w.st (.peer name k g')).life == .alive) = true := by
+            simpa [beq_iff_eq] using halive
+          simp [hb]
+
+/-- A live member of a root template's subtree has that root's generation alive.
+The executing actor is the member. `member_root_id` names the one root of the
+key, and `ancestor_alive` keeps it alive. -/
+theorem root_sender_slot (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (hrootMem : InstId.peer name k g ∈ w.roster)
+    (s : InstId) (hs : s ∈ w.roster) (hlive : (w.st s).life = .alive)
+    (hm : isMember I.desc s t.subtree k = true) :
+    ∃ id, id ∈ w.roster ∧ fromSlot name k id = true ∧ (w.st id).life = .alive := by
+  have hwho :=
+    member_root_id I hG w hF hP hSelf hH hOne name k g t ht hroot hsub hrootMem s hs hm
+  have halive : (w.st (InstId.peer name k g)).life = .alive := by
+    cases hwho with
+    | inl heq => simpa [heq] using hlive
+    | inr hanc => exact ancestor_alive w hKids hcr hanc hlive
+  refine ⟨InstId.peer name k g, hrootMem, ?_, halive⟩
+  simp [fromSlot]
+
+/-- Ingress keeps every parent, life, priority queue and parked queue, and the
+only new box message is from the target. -/
+theorem ingress_view (I : Impl) (w w' : World) (dst : InstId) (label : String) (i : InstId)
+    (h : receiveIngress I w dst label = some w') :
+    (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+      (w'.st i).prio = (w.st i).prio ∧ (w'.st i).parked = (w.st i).parked ∧
+      (∀ m, m ∈ (w'.st i).box → m ∈ (w.st i).box ∨ (i = dst ∧ m.sender = dst)) := by
+  dsimp [receiveIngress] at h
+  split at h
+  · simp at h
+  · split at h
+    · simp at h
+    · split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · cases h
+            if hi : i = dst then
+              subst hi
+              refine ⟨?_, ?_, ?_, ?_, ?_⟩
+              · simp [setActor, chargeSender, bumpToken]
+              · simp [setActor, chargeSender, bumpToken]
+              · simp [setActor, chargeSender, bumpToken]
+              · simp [setActor, chargeSender, bumpToken]
+              · intro m hm
+                simp [setActor, chargeSender, bumpToken, List.mem_append] at hm
+                rcases hm with hm | hm
+                · exact Or.inl hm
+                · exact Or.inr ⟨rfl, by simp [hm]⟩
+            else
+              simp [setActor, hi]
+
+/-- The target of a successful ingress is alive. That is the only sender the
+step enqueues. -/
+theorem ingress_sender (I : Impl) (w w' : World) (dst : InstId) (label : String)
+    (h : receiveIngress I w dst label = some w') : (w.st dst).life = .alive :=
+  (ingress_ready I w w' dst label h).1
+
+private theorem ingress_cover (I : Impl) (w w' : World) (dst : InstId) (label : String)
+    (h : receiveIngress I w dst label = some w') :
+    w'.roster = w.roster ∧
+      (∀ i, (w'.st i).parent = (w.st i).parent) ∧
+      (∀ i, (w'.st i).life = .alive → (w.st i).life = .alive) ∧
+      (∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).box →
+        (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+          (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)) ∨
+          (m.sender = dst ∧ dst ∈ w.roster)) ∧
+      (∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).prio →
+        (∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∨ (m.sender = dst ∧ dst ∈ w.roster)) ∧
+      (∀ i, i ∈ w.roster → ∀ p, p ∈ (w'.st i).parked →
+        ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∨
+          (p.sender = dst ∧ dst ∈ w.roster)) ∧
+          ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)) ∨
+            (p.msg.sender = dst ∧ dst ∈ w.roster))) := by
+  refine ⟨(ingress_phase I w w' dst label dst h).2.2.2.2.1, ?_, ?_, ?_, ?_, ?_⟩
+  · intro i
+    exact (ingress_view I w w' dst label i h).2.1
+  · intro i hlive
+    exact ((ingress_view I w w' dst label i h).1).symm.trans hlive
+  · intro i hi m hm
+    rcases (ingress_view I w w' dst label i h).2.2.2.2 m hm with h0 | ⟨heq, hs⟩
+    · exact Or.inl ⟨m, h0, rfl⟩
+    · exact Or.inr (Or.inr ⟨hs, heq ▸ hi⟩)
+  · intro i _ m hm
+    exact Or.inl ⟨m, by simpa [(ingress_view I w w' dst label i h).2.2.1] using hm, rfl⟩
+  · intro i _ p hp
+    have hmem : p ∈ (w.st i).parked := by
+      simpa [(ingress_view I w w' dst label i h).2.2.2.1] using hp
+    exact ⟨Or.inl ⟨p, hmem, Or.inl rfl⟩, Or.inl ⟨p, hmem, Or.inr rfl⟩⟩
+
+/-- Ingress does not grow the held keys of a template with no subtree. The new
+message counts only when its sender, the live target, is a generation of that
+template. -/
+theorem held_ingress_empty (I : Impl) (w w' : World) (dst : InstId) (label name : String)
+    (h : receiveIngress I w dst label = some w') (hempty : templateSubtree I.desc name = "") :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  rcases ingress_cover I w w' dst label h with ⟨hros, hp, hlife, hbox, hprio, hpark⟩
+  refine held_kept I.desc w w' name (fun s => s = dst ∧ dst ∈ w.roster) hros hp hlife hbox hprio
+    hpark ?_
+  intro k _ s _ hs hpred
+  rcases hs with ⟨hs, hmem⟩
+  have hmemS : s ∈ w.roster := by rw [hs]; exact hmem
+  have hfrom : fromSlot name k s = true := by
+    rwa [slotPred_empty I.desc name k s hempty] at hpred
+  have hlive : (w.st s).life = .alive := by
+    rw [hs]
+    exact ingress_sender I w w' dst label h
+  exact ⟨s, hmemS, hfrom, hlive⟩
+
+/-- Ingress does not grow the held keys of a root template. The target is
+alive, and a member of the subtree is that key's root or one of its descendants,
+so the root generation was already alive. -/
+theorem held_ingress_root (I : Impl) (hG : GraphOk I.desc) (w w' : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (dst : InstId) (label name : String) (t : Template)
+    (h : receiveIngress I w dst label = some w')
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  rcases ingress_cover I w w' dst label h with ⟨hros, hp, hlife, hbox, hprio, hpark⟩
+  refine held_kept I.desc w w' name (fun s => s = dst ∧ dst ∈ w.roster) hros hp hlife hbox hprio
+    hpark ?_
+  intro k g s hgen hs hpred
+  rcases hs with ⟨hs, hmem⟩
+  have hmemS : s ∈ w.roster := by rw [hs]; exact hmem
+  have hm : isMember I.desc s t.subtree k = true := by
+    rwa [slotPred_root I.desc name k s t ht hsub] at hpred
+  have hlive : (w.st s).life = .alive := by
+    rw [hs]
+    exact ingress_sender I w w' dst label h
+  exact root_sender_slot I hG w hF hP hSelf hH hOne hKids hcr name k g t ht hroot hsub hgen s
+    hmemS hlive hm
+
+/-- In a reachable world, ingress does not grow the held keys of a template
+that is its own counted root: an empty subtree, or a nonempty root template. -/
+theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w w' : World) (hR : Reachable I N w) (dst : InstId) (label name : String)
+    (h : apply I (.ingress dst label) w = some w')
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  obtain ⟨hcr, hstep⟩ := apply_step I (.ingress dst label) w w' h
+  simp only [stepWorld] at hstep
+  cases hkind with
+  | inl hempty =>
+    exact held_ingress_empty I w w' dst label name hstep hempty
+  | inr hroot =>
+    obtain ⟨t, ht, hroot, hsub⟩ := hroot
+    have hI := inv_reachable I N w hL hR
+    exact held_ingress_root I hG w w' hI.forest (lane_birth I hL hG N w hR).parented
+      (lane_birth I hL hG N w hR).noSelf (hold_reach I N w hG hR)
+      (oneCohort_reachable I hG N w hR) hI.seal.childless hcr dst label name t hstep ht hroot hsub
 
 end Deadlock
