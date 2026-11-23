@@ -5253,6 +5253,64 @@ theorem slot_mail_birth (D : Description) (w w' : World) (fresh : InstId) (name 
     simp only [hf] at h ⊢
     exact sub_mail_birth D w w' fresh (templateSubtree D name) key hros hst hempty hno h
 
+/-- Keys held after a step were held before, so the count does not grow. -/
+theorem held_len_of_sub (D : Description) (w w' : World) (name : String)
+    (h : ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name) :
+    (heldKeys D w' name).length ≤ (heldKeys D w name).length :=
+  nodup_sub_len _ _ (heldKeys_nodup D w' name) h
+
+/-- One empty actor is appended. Its mailbox holds nothing, and no older actor
+named it as a parent, so a slot held afterwards was held before or is its key. -/
+theorem held_birth_len (D : Description) (w w' : World) (name : String) (id : InstId) (k g : Nat)
+    (hF : ParentForest w) (hnew : id ∉ w.roster)
+    (hros : w'.roster = w.roster ++ [id]) (hid : id = InstId.peer name k g)
+    (hst : ∀ i, i ≠ id → w'.st i = w.st i)
+    (hempty : (w'.st id).box = [] ∧ (w'.st id).prio = [] ∧ (w'.st id).parked = []) :
+    (heldKeys D w' name).length ≤ (heldKeys D w name).length + 1 := by
+  have hno : ∀ i, (w.st i).parent ≠ some id := by
+    intro i hp
+    exact hnew (hF.hosted i id hp)
+  exact held_extend_len D w w' name id k g hros hid hst hempty
+    (fun key hmail => slot_mail_birth D w w' id name hros hst hempty hno key hmail)
+
+theorem held_fold_core (D : Description) (w : World) (name : String) :
+    ∀ (ids : List InstId) (acc : List Nat),
+      (∀ id, id ∈ ids → ∃ n, id = InstId.core n) →
+      ids.foldl (fun acc id =>
+        match id with
+        | .peer n k _ =>
+          if n == name && heldAt D w name k && !acc.elem k then acc ++ [k] else acc
+        | .core _ => acc) acc = acc := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro acc _
+    rfl
+  | cons id ids ih =>
+    intro acc hcore
+    have ⟨n, hid⟩ := hcore id (List.mem_cons_self)
+    simp only [List.foldl_cons, hid]
+    exact ih acc (fun i hi => hcore i (List.mem_cons_of_mem _ hi))
+
+theorem coreRoster_core (D : Description) (id : InstId) (h : id ∈ coreRoster D) :
+    ∃ n, id = InstId.core n := by
+  unfold coreRoster at h
+  obtain ⟨t, ht, hid⟩ := List.mem_filterMap.mp h
+  cases hb : t.multiplicity == .one with
+  | false => simp [hb] at hid
+  | true =>
+    simp [hb] at hid
+    exact ⟨t.name, hid.symm⟩
+
+/-- The initial roster is cores only, so no per-peer key is held. -/
+theorem held_init (I : Impl) (N : Nat) (name : String) :
+    heldKeys I.desc (initWorld I N) name = [] := by
+  have hro := init_roster I N
+  unfold heldKeys
+  rw [hro]
+  exact held_fold_core I.desc (initWorld I N) name (coreRoster I.desc) []
+    (fun id hid => coreRoster_core I.desc id hid)
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
