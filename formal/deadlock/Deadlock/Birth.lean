@@ -723,7 +723,7 @@ theorem birth_seal (D : Description) (w : World) (id : InstId) (a : Actor)
   have hrel := birth_release D w id a h
   have hdead := releaseWorld_self_dead D w id a
   have hmem' : id ∈ (releaseWorld D w id a).roster := by
-    simpa [release_roster] using hmem
+    simpa [tomb_release_roster] using hmem
   exact birth_enqueue D (releaseWorld D w id a) id hrel hdead hmem'
     (release_slot_of D w id a h hlive)
 
@@ -1134,8 +1134,9 @@ theorem born_shape (D : Description) (w : World) (template : String) (k : Nat)
   simp [bornActor, withKeyTokens, withTokens]
 
 /-- Installing one peer whose key is not on the roster. `next` may bump one
-counter and does not touch the roster or an actor. -/
-theorem place_roster (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+counter and does not touch the roster or an actor.
+Workaround `nameSplit`: `Occ` has a different `place_roster`. -/
+theorem birth_place_roster (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
     (parent : Option InstId) (next : World → World)
     (hnros : ∀ u, (next u).roster = u.roster) :
     let id := InstId.peer template k (maxGen w template k)
@@ -1167,7 +1168,7 @@ theorem place_st_other (I : Impl) (w : World) (template : String) (k : Nat) (ini
     rw [setActor_other _ _ _ _ hne, hnst]
   simpa [placePeer, cellsSt] using hset
 
-theorem place_nextIx (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+theorem birth_place_nextIx (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
     (n : String) :
     (placePeer I w template k initial none
       (fun u => { u with nextIx := fun m => if m = template then k + 1 else u.nextIx m })).nextIx n =
@@ -1213,7 +1214,7 @@ theorem birth_lone (I : Impl) (w : World) (h : BirthInv I.desc w)
     intro g hmem
     have hlt := h.ixPast template k g hmem t ht hsup hsub
     omega
-  have hros := place_roster I w template k t.initial none (ixBump template k) (ixBump_roster template k)
+  have hros := birth_place_roster I w template k t.initial none (ixBump template k) (ixBump_roster template k)
   have hself := place_st_self I w template k t.initial none (ixBump template k) (ixBump_st template k)
   have hother (i : InstId) (hne : i ≠ id) :
       (placePeer I w template k t.initial none (ixBump template k)).st i = w.st i :=
@@ -1368,7 +1369,7 @@ theorem birth_lone (I : Impl) (w : World) (h : BirthInv I.desc w)
     rw [hros] at hmem
     rcases List.mem_append.mp hmem with hold | hnew
     · have hlt := h.ixPast n key g hold t' ht' hsup' hsub'
-      have hix := place_nextIx I w template k t.initial n
+      have hix := birth_place_nextIx I w template k t.initial n
       by_cases hn : n = template
       · rw [hix, ite_eq_left hn]
         have hlt' : key < k := by simpa [hn, hk] using hlt
@@ -1378,7 +1379,7 @@ theorem birth_lone (I : Impl) (w : World) (h : BirthInv I.desc w)
     · have hnew := List.mem_singleton.mp hnew
       unfold id at hnew
       cases hnew
-      rw [place_nextIx I w template k t.initial template, ite_eq_left rfl]
+      rw [birth_place_nextIx I w template k t.initial template, ite_eq_left rfl]
       omega
   · intro n key g hmem t' ht' hne
     rw [hros] at hmem
@@ -1461,7 +1462,7 @@ theorem birth_fresh (I : Impl) (w : World) (h : BirthInv I.desc w)
     intro g hmem
     have hlt := freshKey_gt I.desc w t.subtree template k g hsub htree hmem
     omega
-  have hros := place_roster I w template k t.initial parent (keyBump t.subtree k)
+  have hros := birth_place_roster I w template k t.initial parent (keyBump t.subtree k)
     (keyBump_roster t.subtree k)
   have hself := place_st_self I w template k t.initial parent (keyBump t.subtree k)
     (keyBump_st t.subtree k)
@@ -1665,8 +1666,9 @@ theorem birth_fresh (I : Impl) (w : World) (h : BirthInv I.desc w)
 
 /-- A named supervisor sits in a nonempty subtree. The empty-subtree arm of
 `subtreeEntry` rejects that template, and `GraphOk` has no such failures.
-`supervised_subtree` states the same fact; this copy stays here because Birth
-does not import Occ (Tomb and Step both export `detach_phase`). -/
+`supervised_subtree` states the same fact. Workaround `nameSplit`: Tomb's
+copy of the phase fact is `detach_phase_declared`, so this module can be
+imported next to Step. The subtree fact stays here. -/
 theorem birth_supervised (D : Description) (hG : GraphOk D) (template : String) (t : Template)
     (ht : templateOf D template = some t) (name : String)
     (hsup : t.supervisor = some name) : t.subtree ≠ "" := by

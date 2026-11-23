@@ -851,7 +851,8 @@ theorem fold_cells_st (D : Description) (ids : List InstId) (w : World) (i : Ins
     simp only [List.foldl_cons]
     exact (ih (readCells D w id)).trans (cellsSt D w id i)
 
-theorem peer_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : PeerRole I.desc (initWorld I N) := by
+/-- Workaround `nameSplit`: `Projects.peer_init` is the population fact. -/
+theorem peer_role_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : PeerRole I.desc (initWorld I N) := by
   intro n k g hl
   have hst : (initWorld I N).st (InstId.peer n k g) = absentActor := by
     unfold initWorld
@@ -880,7 +881,16 @@ theorem core_init (I : Impl) (hG : GraphOk I.desc) (N : Nat) : CoreRole I.desc (
     have hmem : InstId.core name ∈ coreRoster I.desc := by simpa [List.elem_iff] using hc
     obtain ⟨t, ht, hone, _⟩ := birth_core_template I.desc _ hG hmem
     exact ⟨t, ht, hone⟩
-  · simp [absentActor] at hl
+  ·     simp [absentActor] at hl
+
+/-- A reachable core was placed at the start. No step makes a core alive. -/
+theorem core_reachable (I : Impl) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : CoreRole I.desc w := by
+  induction hR with
+  | init => exact core_init I hG N
+  | step w w' a _ h ih =>
+    intro name hl
+    exact ih name (apply_core_prev I w w' a name h hl)
 
 /-- `execHead` runs `execRun` on the stored actor, or does nothing. -/
 theorem birth_head (I : Impl) (hG : GraphOk I.desc) (w w' : World) (id : InstId)
@@ -928,5 +938,525 @@ theorem birth_apply (I : Impl) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     simpa [stepWorld] using birth_timeout I.desc w w' id h hstep
   | stutter =>
     simpa [stutter_unchanged I w w' ha] using h
+
+/-- `setActor` keeps every life, so a per-peer peer stays per-peer. -/
+theorem peer_set (D : Description) (w : World) (id : InstId) (a : Actor) (hP : PeerRole D w)
+    (hl : a.life = (w.st id).life) : PeerRole D (setActor w id a) :=
+  peer_mono D w _ hP fun n key gen ha => (setActor_keeps_life w id _ a hl).symm.trans ha
+
+/-- A send or a call stores mail without bringing anyone to life. -/
+theorem enqueue_id_life (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).life = (w.st i).life := by
+  cases isCall <;>
+    (unfold enqueueOrPark
+     by_cases hlive : (w.st dst).life = .alive
+     · simp [hlive]
+       by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+       · simp [hroom]
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame]
+           simp [setActor]
+           by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken, issueCall, proceed_keeps_life]
+         · rw [if_neg hsame]
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip]
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall, proceed_keeps_life]
+           · by_cases hid : i = dst
+             · simp [hid, hlive]
+               rw [if_neg hflip]
+             · rw [if_neg hi, if_neg hid]
+       · simp [hroom]
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame]
+           simp [setActor]
+           by_cases hi : i = sender <;> simp [hi, chargeSender, bumpToken, issueCall]
+         · rw [if_neg hsame]
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip]
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall]
+           · by_cases hid : i = dst
+             · simp [hid, hlive]
+               rw [if_neg hflip]
+             · rw [if_neg hi, if_neg hid]
+     · rw [if_pos hlive]
+       by_cases hi : i = sender
+       · simp [hi, setActor, issueCall, finishCall, selectCall, proceed_keeps_life]
+       · simp [setActor, hi])
+
+/-- A reply resumes one caller and does not bring anyone to life. -/
+theorem reply_id_life (w : World) (sender : InstId) (k : Cont) (i : InstId) :
+    ((performReply w sender k).st i).life = (w.st i).life := by
+  unfold performReply
+  cases hr : k.replyTo with
+  | none =>
+    by_cases hi : i = sender
+    · rw [hi]; simp [setActor, proceed_keeps_life]
+    · simp [setActor, hi]
+  | some caller =>
+    cases hph : (w.st caller).phase with
+    | awaitReply dst ck =>
+      by_cases hd : dst = sender
+      · by_cases hm : (w.st sender).oweId = some (w.st caller).waitId
+        · by_cases hi : i = sender
+          · rw [hi]
+            by_cases hsc : sender = caller
+            · subst hsc
+              simp [setActor, hph, hd, hm, finishCall, proceed]
+              split <;> split <;> rfl
+            · simp [setActor, hph, hd, hm, hsc, proceed]
+              split <;> rfl
+          · by_cases hc : i = caller
+            · rw [hc]
+              have hflip : ¬caller = sender := fun h => hi (hc.trans h)
+              simp [setActor, hph, hd, hm, hflip, finishCall, proceed]
+              split <;> rfl
+            · simp [setActor, hi, hc, hph, hd, hm]
+        · by_cases hi : i = sender
+          · rw [hi]; simp [setActor, proceed_keeps_life, hph, hd, hm]
+          · simp [setActor, hi, hph, hd, hm]
+      · by_cases hi : i = sender
+        · rw [hi]; simp [setActor, proceed_keeps_life, hph, hd]
+        · simp [setActor, hi, hph, hd]
+    | idle =>
+      by_cases hi : i = sender
+      · rw [hi]; simp [setActor, proceed_keeps_life, hph]
+      · simp [setActor, hi, hph]
+    | run _ =>
+      by_cases hi : i = sender
+      · rw [hi]; simp [setActor, proceed_keeps_life, hph]
+      · simp [setActor, hi, hph]
+    | parked _ _ _ =>
+      by_cases hi : i = sender
+      · rw [hi]; simp [setActor, proceed_keeps_life, hph]
+      · simp [setActor, hi, hph]
+    | awaitEffect _ =>
+      by_cases hi : i = sender
+      · rw [hi]; simp [setActor, proceed_keeps_life, hph]
+      · simp [setActor, hi, hph]
+    | awaitPeer _ =>
+      by_cases hi : i = sender
+      · rw [hi]; simp [setActor, proceed_keeps_life, hph]
+      · simp [setActor, hi, hph]
+    | crashed =>
+      by_cases hi : i = sender
+      · rw [hi]; simp [setActor, proceed_keeps_life, hph]
+      · simp [setActor, hi, hph]
+
+/-- A cell wake that leaves `i` alive did not create that life. -/
+theorem tryWake_id_life (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) (h : ((tryWake D w dstId label writer).st i).life = .alive) :
+    (w.st i).life = .alive := by
+  unfold tryWake offerPrio at h
+  by_cases hskip : ((w.st dstId).life != .alive ||
+      (w.st dstId).prio.any (fun p => p.label == label)) = true
+  · simp [hskip] at h
+    exact h
+  · have hgo : ((w.st dstId).life != .alive ||
+        (w.st dstId).prio.any (fun p => p.label == label)) = false := by
+      simpa [Bool.not_eq_true] using hskip
+    simp only [hgo, ite_false] at h
+    by_cases hfull : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = true
+    · simp only [hfull, ite_true] at h
+      exact crashWorld_prev w i h
+    · have hroom : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = false := by
+        simpa [Bool.not_eq_true] using hfull
+      simp only [hroom, ite_false] at h
+      by_cases hi : i = dstId
+      · rw [hi] at h ⊢
+        simp [setActor] at h
+        exact h
+      · simpa [setActor, hi] using h
+
+theorem wake_id_life (D : Description) (w : World) (dst label : String) (writer i : InstId)
+    (h : ((wakeReaders D w dst label writer).st i).life = .alive) : (w.st i).life = .alive := by
+  unfold wakeReaders at h
+  suffices ∀ (ids : List InstId) (w0 : World),
+      ((ids.foldl (fun w id => tryWake D w id label writer) w0).st i).life = .alive →
+      (w0.st i).life = .alive from
+    this (readersOf w dst) w h
+  intro ids
+  induction ids with
+  | nil =>
+    intro _ h0
+    exact h0
+  | cons j js ih =>
+    intro w0 h0
+    rw [List.foldl_cons] at h0
+    exact tryWake_id_life D w0 j label writer i (ih _ h0)
+
+/-- Sealing a stage does not bring anyone to life. -/
+theorem terminate_prev (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (h : ((terminateStage D w id a).st i).life = .alive) : (w.st i).life = .alive := by
+  unfold terminateStage at h
+  exact dropDescendants_prev D w id i (shutdownActor_prev D (dropDescendants D w id) id i h)
+
+/-- The continuation after an effect keeps the lives the effect left. -/
+theorem commit_peer (D : Description) (w : World) (id : InstId) (next : Actor) (hP : PeerRole D w)
+    (hl : next.life = (w.st id).life) : PeerRole D (commitCont w id next) := by
+  unfold commitCont
+  split
+  · exact hP
+  · exact peer_set D w id next hP hl
+
+theorem may_per (D : Description) (w : World) (template : String) (t : Template)
+    (h : maySpawnRoot D w template t = true) : t.multiplicity = .perPeer := by
+  unfold maySpawnRoot at h
+  have h1 := (Bool.and_eq_true _ _).mp h
+  have h2 := (Bool.and_eq_true _ _).mp h1.1
+  have h3 := (Bool.and_eq_true _ _).mp h2.1
+  exact mul_per t h3.1
+
+/-- The peer `placePeer` admits is the template it was given, which is per-peer.
+Everyone else keeps the life they had. -/
+theorem place_peer_role (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World) (t : Template)
+    (hst : ∀ u i, (next u).st i = u.st i) (hP : PeerRole I.desc w)
+    (ht : templateOf I.desc template = some t) (hper : t.multiplicity = .perPeer) :
+    PeerRole I.desc (placePeer I w template k initial parent next) := by
+  intro n key g ha
+  let bornId := InstId.peer template k (maxGen w template k)
+  let born := { bornActor I.desc w template k initial with parent := parent }
+  have hstB : (placePeer I w template k initial parent next).st (InstId.peer n key g) =
+      (setActor (next { w with roster := w.roster ++ [bornId] }) bornId born).st
+        (InstId.peer n key g) := by
+    simp [placePeer, bornId, born, cellsSt]
+  rw [hstB] at ha
+  by_cases hnew : InstId.peer n key g = bornId
+  · unfold bornId at hnew
+    cases hnew
+    exact ⟨t, ht, hper⟩
+  · unfold bornId at hnew
+    rw [setActor_other _ _ _ born hnew] at ha
+    rw [hst] at ha
+    exact hP n key g ha
+
+/-- A scheduler birth admits one per-peer root and leaves every other life. -/
+theorem spawn_peer_role (I : Impl) (w w' : World) (template : String) (hP : PeerRole I.desc w)
+    (h : spawn I w template = some w') : PeerRole I.desc w' := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hgo : maySpawnRoot I.desc w template t = true
+    · simp only [hgo, ite_true] at h
+      have hper := may_per I.desc w template t hgo
+      cases hsup : t.supervisor with
+      | some supName =>
+        simp only [hsup] at h
+        cases h
+        exact place_peer_role I w template (freshKey I.desc w t.subtree) t.initial
+          (some (InstId.core supName))
+          (fun u => { u with nextKey := fun s =>
+            if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+          t (fun _ _ => rfl) hP ht hper
+      | none =>
+        simp only [hsup] at h
+        by_cases hsub : (t.subtree == "") = true
+        · simp only [hsub, ite_true] at h
+          cases h
+          exact place_peer_role I w template (w.nextIx template) t.initial none
+            (fun u => { u with nextIx := fun n =>
+              if n = template then w.nextIx template + 1 else u.nextIx n })
+            t (fun _ _ => rfl) hP ht hper
+        · have hsubF : (t.subtree == "") = false := by simpa [Bool.not_eq_true] using hsub
+          simp only [hsubF, ite_false] at h
+          cases h
+          exact place_peer_role I w template (freshKey I.desc w t.subtree) t.initial none
+            (fun u => { u with nextKey := fun s =>
+              if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+            t (fun _ _ => rfl) hP ht hper
+    · simp [hgo] at h
+
+/-- A child birth admits one per-peer actor at the parent's key, or changes nothing. -/
+theorem spawnChild_peer_role (I : Impl) (w w' : World) (parent : InstId) (child : String)
+    (hP : PeerRole I.desc w) (h : spawnChild I w parent child = some w') : PeerRole I.desc w' := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hcond : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+        (w.st parent).life == .alive) = true
+    · rw [hcond] at h
+      rw [ite_eq_left (by decide : true = true)] at h
+      cases parent with
+      | core _ => simp at h
+      | peer pname pk pg =>
+        dsimp only at h
+        by_cases hblock : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk = true
+        · rw [hblock] at h
+          rw [ite_eq_left (by decide : true = true)] at h
+          cases h
+          exact hP
+        · have hblockF : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk = false := by
+            cases hbb : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk
+            · rfl
+            · exact absurd hbb hblock
+          rw [hblockF] at h
+          rw [ite_eq_right (by decide : ¬ false = true)] at h
+          have hparts := by simpa [Bool.and_eq_true] using hcond
+          have hmul := mul_per t hparts.1.1
+          injection h with hw
+          subst hw
+          intro n key g ha
+          let bornId := InstId.peer child pk (maxGen w child pk)
+          by_cases hnew : InstId.peer n key g = bornId
+          · unfold bornId at hnew
+            cases hnew
+            exact ⟨t, ht, hmul⟩
+          · unfold bornId at hnew
+            simp [admitBorn, cellsSt, setActor, hnew] at ha
+            exact hP n key g ha
+    · have hcondF : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = false := by
+        cases hbb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive
+        · rfl
+        · exact absurd hbb hcond
+      rw [hcondF] at h
+      rw [ite_eq_right (by decide : ¬ false = true)] at h
+      by_cases hcond2 : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · rw [hcond2] at h
+        rw [ite_eq_left (by decide : true = true)] at h
+        cases h
+        exact hP
+      · have hcond2F : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hbb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)
+          · rfl
+          · exact absurd hbb hcond2
+        rw [hcond2F] at h
+        rw [ite_eq_right (by decide : ¬ false = true)] at h
+        simp at h
+
+/-- One effect keeps `PeerRole`. The only new life is a per-peer child or root. -/
+theorem execRun_peer_role (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (hP : PeerRole I.desc w) (hact : a.life = (w.st id).life) :
+    PeerRole I.desc (execRun I w id a k) := by
+  by_cases hliveB : (a.life == .alive) = true
+  · cases hk : k.rest with
+    | nil =>
+      simp only [execRun, hliveB, hk]
+      exact peer_set I.desc w id { a with phase := .idle, typestate := k.toState } hP (by simp [hact])
+    | cons e es =>
+      cases e with
+      | send dst label hint =>
+        simp only [execRun, hliveB, hk]
+        cases hr : route w I.desc id dst with
+        | none =>
+          simp only [hr]
+          exact peer_set I.desc (noteStale w id dst) id (proceed a (afterHead k))
+            (peer_mono _ _ _ hP fun n key gen ha => by simpa [noteStale_st] using ha)
+            (by simp [noteStale_st, proceed_keeps_life, hact])
+        | some dstId =>
+          simp only [hr]
+          exact peer_mono _ _ _ hP fun n key gen ha =>
+            (enqueue_id_life w I.desc id dstId _ false (afterHead k) _).symm.trans ha
+      | trySend dst label hint onFull onGone =>
+        simp only [execRun, hliveB, hk]
+        let goneK :=
+          { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone }
+        let fullK :=
+          { afterHead k with rest := onFull, toState := pickState (afterHead k).toState (afterHead k).toFull }
+        intro n key gen ha
+        cases hr : route w I.desc id dst with
+        | none =>
+          simp only [hr] at ha
+          exact hP n key gen
+            ((setActor_keeps_life (noteStale w id dst) id _ (proceed a goneK)
+              (by simp [noteStale_st, proceed_keeps_life, hact, goneK])).symm.trans ha)
+        | some dstId =>
+          simp only [hr] at ha
+          generalize hadm : ((w.st dstId).life == .alive && decide ((w.st dstId).parked = []) &&
+            decide ((w.st dstId).box.length < capBulk I.desc w.N dstId)) = admitted at ha
+          by_cases hcond : admitted = true
+          · simp only [hcond, ite_true] at ha
+            exact hP n key gen
+              ((enqueue_id_life w I.desc id dstId _ false (afterHead k) _).symm.trans ha)
+          · have hcondF : admitted = false := by
+              cases hbb : admitted
+              · rfl
+              · exact absurd hbb hcond
+            simp only [hcondF, ite_false] at ha
+            by_cases halive : ((w.st dstId).life == .alive) = true
+            · simp only [halive, ite_true] at ha
+              exact hP n key gen
+                ((setActor_keeps_life w id _ (proceed a fullK)
+                  (by simp [proceed_keeps_life, hact, fullK])).symm.trans ha)
+            · have haliveF : ((w.st dstId).life == .alive) = false := by
+                cases hbb : (w.st dstId).life == .alive
+                · rfl
+                · exact absurd hbb halive
+              simp only [haliveF, ite_false] at ha
+              exact hP n key gen
+                ((setActor_keeps_life w id _ (proceed a goneK)
+                  (by simp [proceed_keeps_life, hact, goneK])).symm.trans ha)
+      | call dst label hint onNotAdmitted onTimedOut =>
+        simp only [execRun, hliveB, hk]
+        cases hr : resolveId I.desc w id dst with
+        | none =>
+          simp only [hr]
+          exact peer_set I.desc (noteStale w id dst) id
+            (finishCall (issueCall a)
+              { afterHead k with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
+              .notAdmitted)
+            (peer_mono _ _ _ hP fun n key gen ha => by simpa [noteStale_st] using ha)
+            (by simp [noteStale_st, finishCall_life, issueCall, hact])
+        | some dstId =>
+          simp only [hr]
+          exact peer_mono _ _ _ hP fun n key gen ha =>
+            (enqueue_id_life w I.desc id dstId _ true
+              { afterHead k with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut } _).symm.trans ha
+      | reply =>
+        simp only [execRun, hliveB, hk]
+        exact peer_mono _ _ _ hP fun n key gen ha => (reply_id_life w id k _).symm.trans ha
+      | selfSchedule label =>
+        simp only [execRun, hliveB, hk]
+        intro n key gen ha
+        by_cases hdup : (a.prio.any (fun p => p.label == label)) = true
+        · simp only [hdup, ite_true] at ha
+          exact hP n key gen
+            ((setActor_keeps_life w id _ (proceed a (afterHead k))
+              (by simp [proceed_keeps_life, hact])).symm.trans ha)
+        · have hdupF : (a.prio.any (fun p => p.label == label)) = false := by
+            cases hbb : a.prio.any (fun p => p.label == label)
+            · rfl
+            · exact absurd hbb hdup
+          simp only [hdupF, ite_false] at ha
+          by_cases hroom : prioLoad a.prio < capPrio I.desc w.N id
+          · simp only [hroom, ite_true] at ha
+            exact hP n key gen
+              ((setActor_keeps_life w id _
+                (proceed { a with
+                  prio := upsertPrio a.prio
+                    { label := label, sender := id, callFrom := none, reliable := true, mid := a.nextMid },
+                  nextMid := a.nextMid + 1 } (afterHead k))
+                (by simp [proceed_keeps_life, hact])).symm.trans ha)
+          · simp only [hroom, ite_false] at ha
+            exact hP n key gen (crashWorld_prev w _ ha)
+      | cell dst label value =>
+        simp only [execRun, hliveB, hk]
+        let c : Cell := { value := max (w.cell dst label).value value, dirty := true }
+        intro n key gen ha
+        by_cases hdirty : (w.cell dst label).dirty = true
+        · simp only [hdirty, ite_true, c] at ha
+          exact hP n key gen
+            ((setActor_keeps_life (setCell w dst label c) id _
+              (proceed ((setCell w dst label c).st id) (afterHead k))
+              (by simp [setCell, proceed_keeps_life])).symm.trans ha)
+        · have hdirtyF : (w.cell dst label).dirty = false := by
+            cases hbb : (w.cell dst label).dirty
+            · rfl
+            · exact absurd hbb hdirty
+          simp only [hdirtyF, ite_false, c] at ha
+          exact hP n key gen (by
+            simpa [setCell] using
+              (setActor_keeps_life (setCell w dst label c) id _
+                (proceed ((setCell w dst label c).st id) (afterHead k))
+                (by simp [setCell, proceed_keeps_life])).symm.trans
+                (wake_id_life I.desc _ dst label id _ ha))
+      | internal =>
+        simp only [execRun, hliveB, hk]
+        exact peer_set I.desc w id { a with phase := .awaitEffect (afterHead k) } hP (by simp [hact])
+      | peer _ =>
+        simp only [execRun, hliveB, hk]
+        exact peer_set I.desc w id { a with phase := .awaitPeer _ } hP (by simp [hact])
+      | abort =>
+        simp only [execRun, hliveB, hk]
+        exact commit_peer I.desc (abortChildren I.desc w id) id
+          (proceed ((abortChildren I.desc w id).st id) (afterHead k))
+          (peer_mono _ _ _ hP fun n key gen ha => abortChildren_prev I.desc w id _ ha)
+          (by simp [proceed_keeps_life])
+      | spawn child =>
+        simp only [execRun, hliveB, hk]
+        cases hs : spawnChild I w id child with
+        | none =>
+          simp only [hs]
+          exact peer_mono _ _ _ hP fun n key gen ha => crashWorld_prev w _ ha
+        | some w' =>
+          simp only [hs]
+          exact commit_peer I.desc w' id (proceed (w'.st id) (afterHead k))
+            (spawnChild_peer_role I w w' id child hP hs) (by simp [proceed_keeps_life])
+      | terminate =>
+        have hliveA : a.life = .alive := by simpa [beq_iff_eq] using hliveB
+        have hstep := exec_term_step I w id a k hliveA ⟨es, hk⟩
+        revert hstep
+        generalize hw : execRun I w id a k = wR
+        intro hstep
+        cases hstep with
+        | fall =>
+          exact peer_mono _ _ _ hP fun n key gen ha => crashWorld_prev w _ ha
+        | crash _ _ _ =>
+          exact peer_mono _ _ _ hP fun n key gen ha => crashWorld_prev w _ ha
+        | lone _ _ _ _ _ _ _ =>
+          exact peer_mono _ _ _ hP fun n key gen ha => shutdownActor_prev I.desc w id _ ha
+        | tree _ _ _ _ =>
+          exact peer_mono _ _ _ hP fun n key gen ha => terminate_prev I.desc w id a _ ha
+        | cascade _ _ _ _ _ _ _ =>
+          exact peer_mono _ _ _ hP fun n key gen ha => terminate_prev I.desc w id a _ ha
+  · have hlf : (a.life == .alive) = false := by
+      cases hbb : a.life == .alive
+      · rfl
+      · exact absurd hbb hliveB
+    simp only [execRun, hlf]
+    exact hP
+
+/-- An enabled step keeps `PeerRole`. -/
+theorem peer_apply (I : Impl) (w w' : World) (a : Action) (hP : PeerRole I.desc w)
+    (h : apply I a w = some w') : PeerRole I.desc w' := by
+  have ⟨_, hstep⟩ := apply_step I a w w' h
+  cases a with
+  | recvBulk id =>
+    simpa [stepWorld] using peer_mono _ _ _ hP fun n key gen ha =>
+      (receiveBulk_keeps_life I w w' id _ (by simpa [stepWorld] using hstep)).symm.trans ha
+  | recvPrio id =>
+    exact peer_mono _ _ _ hP fun n key gen ha =>
+      (receivePrio_keeps_life I w w' id _ (by simpa [stepWorld] using hstep)).symm.trans ha
+  | exec id =>
+    have hhead : execHead I w id = some w' := by simpa [stepWorld] using hstep
+    unfold execHead at hhead
+    by_cases hlive : (w.st id).life = .alive
+    · simp only [hlive, ite_false] at hhead
+      cases hph : (w.st id).phase with
+      | run k =>
+        simp only [hph] at hhead
+        cases hhead
+        exact execRun_peer_role I w id (w.st id) k hP rfl
+      | idle => simp [hph] at hhead
+      | parked _ _ _ => simp [hph] at hhead
+      | awaitReply _ _ => simp [hph] at hhead
+      | awaitEffect _ => simp [hph] at hhead
+      | awaitPeer _ => simp [hph] at hhead
+      | crashed => simp [hph] at hhead
+    · simp [hlive] at hhead
+  | finish id =>
+    obtain ⟨k, _, hw⟩ := finish_proceed I w w' id (by simpa [stepWorld] using hstep)
+    rw [hw]
+    exact peer_set I.desc w id (proceed (w.st id) k) hP (by simp [proceed_keeps_life])
+  | spawn template =>
+    exact spawn_peer_role I w w' template hP (by simpa [stepWorld] using hstep)
+  | ingress dst label =>
+    exact peer_mono _ _ _ hP fun n key gen ha =>
+      ((ingress_phase I w w' dst label _ (by simpa [stepWorld] using hstep)).2.1).symm.trans ha
+  | callTimeout id =>
+    exact peer_mono _ _ _ hP fun n key gen ha =>
+      (callTimeout_life w w' id _ (by simpa [stepWorld] using hstep)).symm.trans ha
+  | stutter =>
+    have hstep := hstep
+    simp [stepWorld] at hstep
+    cases hstep.2
+    exact hP
+
+/-- A reachable peer was born per-peer. The initial world has no live peer.
+Workaround `nameSplit`: `Projects.peer_reachable` is the population fact. -/
+theorem peer_role_reachable (I : Impl) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : PeerRole I.desc w := by
+  induction hR with
+  | init => exact peer_role_init I hG N
+  | step w w' a _ h ih =>
+    exact peer_apply I w w' a ih h
 
 end Deadlock

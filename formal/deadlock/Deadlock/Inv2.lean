@@ -1,3 +1,4 @@
+import Deadlock.ChildBirth
 import Deadlock.Occ
 
 set_option autoImplicit false
@@ -38,24 +39,27 @@ theorem inv2_init (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) :
 theorem occ_apply (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action) (w w' : World)
     (hO : OccInv I w) (hS : SemInv I w) (hM : MailInv w) (hSlots : OpenSlots w)
     (hT : TyOk I.desc w) (hB : BulkFree I w) (hF : ParentForest w)
-    (h : apply I a w = some w') : OccInv I w' := by
+    (hBirth : BirthInv I.desc w) (hSeal : SealInv w) (h : apply I a w = some w') :
+    OccInv I w' := by
+  have ⟨hcr, hstep⟩ := apply_step I a w w' h
   cases a with
   | recvBulk id =>
-    simpa [apply] using occ_bulk I hL hG w id w' hO hS hM h
+    simpa [stepWorld] using occ_bulk I hL hG w id w' hO hS hM hstep
   | recvPrio id =>
-    simpa [apply] using occ_prio I hL hG w id w' hO h
+    simpa [stepWorld] using occ_prio I hL hG w id w' hO hstep
   | exec id =>
-    have hcr : w.crashed = false := (apply_step I (.exec id) w w' h).1
-    simpa [apply] using occ_head I hL hG w w' id hO hT hS hM hSlots h
-      (fun k hph => by simpa [contRest, hph] using hB id) hcr hF
+    simpa [stepWorld] using occ_head I hL hG w w' id hO hT hS hM hSlots hstep
+      (fun k hph => by simpa [contRest, hph] using hB id) hcr hSeal.childless
+      hBirth.parented hBirth.singleGen hBirth.noTombLive hBirth.present hSeal.quiet
+      hSeal.liveParked hBirth.plainBox hSeal.chain hBirth.noSelf hF
   | finish id =>
-    simpa [apply] using occ_finish I w w' id hO hS h
+    simpa [stepWorld] using occ_finish I w w' id hO hS hstep
   | spawn template =>
-    simpa [apply] using occ_spawn I hG w w' template hO h
+    simpa [stepWorld] using occ_spawn I hG w w' template hO hstep
   | ingress dst label =>
-    simpa [apply] using occ_ingress I w w' dst label hO h
+    simpa [stepWorld] using occ_ingress I w w' dst label hO hstep
   | callTimeout id =>
-    simpa [apply] using occ_timeout I w w' id hO hS.cont h
+    simpa [stepWorld] using occ_timeout I w w' id hO hS.cont hstep
   | stutter =>
     cases stutter_unchanged I w w' h
     exact hO
@@ -87,10 +91,13 @@ theorem after_scope (D : Description) (name : String) (a : Actor) (k : Cont)
 theorem cont_resumed (k : Cont) : contRest (resumed k) = k.rest := by
   cases hk : k.rest <;> simp [resumed, contRest, hk]
 
-/-- Parking, waiting, or proceeding all keep the same rest, so the scope carries. -/
+/-- A send keeps `k.rest`. A call keeps it when the target is alive, and runs
+`onNotAdmitted` when the target is not. `awaitReply` and `parked` both store
+`k.rest`. -/
 theorem enqueue_sender_cont (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
     (isCall : Bool) (k : Cont) :
-    contRest ((enqueueOrPark w D sender dst msg isCall k).st sender).phase = k.rest := by
+    contRest ((enqueueOrPark w D sender dst msg isCall k).st sender).phase =
+      (if isCall = true ∧ (w.st dst).life ≠ .alive then (selectCall k .notAdmitted).rest else k.rest) := by
   unfold enqueueOrPark
   by_cases hlive : (w.st dst).life = .alive
   · simp [hlive]
@@ -117,16 +124,8 @@ theorem enqueue_sender_cont (w : World) (D : Description) (sender dst : InstId) 
       simp [setActor_self]
       cases hk : k.rest <;> simp [proceed, hk, contRest]
     | true =>
-      by_cases hdead : ((w.st dst).life == .dead) = true
-      · have hEq : (w.st dst).life = .dead := by simpa [beq_iff_eq] using hdead
-        simp [hEq, setActor_self, contRest]
-      · have hbit : ((w.st dst).life == .dead) = false := by
-          cases hb : (w.st dst).life == .dead with
-          | true => exact absurd hb hdead
-          | false => rfl
-        have hEq : (w.st dst).life ≠ .dead := by simpa [beq_iff_eq] using hbit
-        simp [hEq, setActor_self, finishCall]
-        cases hk : k.rest <;> simp [proceed, hk, contRest]
+      simp [setActor_self, finishCall, selectCall, contRest]
+      cases hk : k.onNotAdmitted <;> simp [proceed, hk, contRest]
 
 /-- `proceed` is idle when the rest is empty and running otherwise, and either way
 the remaining program is still in scope. -/
@@ -1168,6 +1167,16 @@ theorem bulk_apply (I : Impl) (hL : LocalOk I) (a : Action) (w w' : World) (hB :
     cases stutter_unchanged I w w' h
     exact hB
 
+/-- Parent facts of every reachable world. `OpenSlots` is the reachable
+invariant's, and a child birth uses `PeerRole` and `CoreRole`. -/
+theorem birth_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : BirthInv I.desc w := by
+  induction hR with
+  | init => exact birth_init I hG N
+  | step w w' a prev ha ih =>
+    exact birth_apply I hG a w w' ih (inv_reachable I N w hL prev).2.2.1
+      (peer_role_reachable I hG N w prev) (core_reachable I hG N w prev) ha
+
 theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) : Inv2 I w := by
   induction hR with
@@ -1175,7 +1184,8 @@ theorem inv2_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   | step w w' a hw happly ih =>
     rcases ih with ⟨hI, hO, hT, hB⟩
     exact ⟨step_inv I hL w w' ⟨a, happly⟩ hI,
-      occ_apply I hL hG a w w' hO hI.1 hI.2.1 hI.2.2.1 hT hB hI.forest happly,
+      occ_apply I hL hG a w w' hO hI.1 hI.2.1 hI.2.2.1 hT hB hI.forest
+        (birth_reachable I hL hG N w hw) hI.seal happly,
       ty_step I hL hG N w w' a hw happly hT,     bulk_apply I hL a w w' hB happly⟩
 
 theorem residual_of_edge (D : Description) (e : Edge) (st : String) (he : e ∈ D.edges)
