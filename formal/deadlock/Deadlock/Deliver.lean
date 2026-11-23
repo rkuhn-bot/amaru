@@ -744,7 +744,7 @@ theorem dead_box_empty (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
     · cases only_terminate_kills I a w w' id ha hprev hdead with
       | inl hExecKill =>
         rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
-        have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
+        have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
           simp [apply, hact, execHead, hprev, hrun] at ha
           exact ha.symm
         rw [hstep]
@@ -869,7 +869,7 @@ theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : N
             rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, htpl, hsub, htm, hpk, hch⟩
             have hstep : ρ.cfg (i + n + 1) =
                 execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
-                  ⟨.terminate :: tail, toState, replyTo⟩ := by
+                  ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
               have hv := ρ.valid (i + n)
               simp [apply, hact, execHead, ih, hrun] at hv
               exact hv.symm
@@ -910,7 +910,7 @@ theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i 
             rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, htpl, hsub, htm, hpk, hch⟩
             have hstep : ρ.cfg (i + n + 1) =
                 execRun I (ρ.cfg (i + n)) id ((ρ.cfg (i + n)).st id)
-                  ⟨.terminate :: tail, toState, replyTo⟩ := by
+                  ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
               have hv := ρ.valid (i + n)
               simp [apply, hact, execHead, ih, hrun] at hv
               exact hv.symm
@@ -1205,7 +1205,8 @@ theorem send_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (
 /-- A blocking call from a checked program lands on a permanent core, or stays in the subtree. -/
 theorem call_lands_permanent (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hS : SemInv I w) (who : InstId) (k : Cont) (dst label : String) (hint : Nat) (es : List Eff)
-    (hph : (w.st who).phase = .run k) (hk : k.rest = .call dst label hint :: es)
+    (hph : (w.st who).phase = .run k) (na to : List Eff)
+    (hk : k.rest = .call dst label hint na to :: es)
     (dstId : InstId) (hr : route w I.desc who dst = some dstId) :
     terminableB I.desc (tname dstId) = false ∨ sameSubtree I.desc (tname who) (tname dstId) = true := by
   have hprog : effectsOk I.desc (tname who) (w.st who).typestate k.rest = true := by
@@ -1227,7 +1228,7 @@ theorem kill_prio_empty (I : Impl) (w : World) (id : InstId) (t : Template) (tai
     (toState : String) (replyTo : Option InstId)
     (ht : templateOf I.desc (tname id) = some t) (hsub : t.subtree = "")
     (htm : t.terminable = true) (hpk : hasParkedCall (w.st id).parked = false) :
-    ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩).st id).prio = [] := by
+    ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st id).prio = [] := by
   rw [exec_lone_release I w id t tail toState replyTo ht hsub htm hpk hch]
   unfold releaseWorld
   rw [release_prio]
@@ -1237,10 +1238,10 @@ theorem kill_off (I : Impl) (w : World) (who i : InstId) (t : Template) (tail : 
     (toState : String) (replyTo : Option InstId)
     (ht : templateOf I.desc (tname who) = some t) (hsub : t.subtree = "")
     (htm : t.terminable = true) (hpk : hasParkedCall (w.st who).parked = false) (hne : i ≠ who) :
-    ((execRun I w who (w.st who) ⟨.terminate :: tail, toState, replyTo⟩).st i).box = (w.st i).box ∧
-      ((execRun I w who (w.st who) ⟨.terminate :: tail, toState, replyTo⟩).st i).parked =
+    ((execRun I w who (w.st who) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st i).box = (w.st i).box ∧
+      ((execRun I w who (w.st who) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st i).parked =
         (w.st i).parked ∧
-      ((execRun I w who (w.st who) ⟨.terminate :: tail, toState, replyTo⟩).st i).prio =
+      ((execRun I w who (w.st who) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st i).prio =
         (w.st i).prio := by
   rw [exec_lone_release I w who t tail toState replyTo ht hsub htm hpk hch]
   refine ⟨?_, ?_, ?_⟩
@@ -1552,7 +1553,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
                     { label := label, sender := who, callFrom := none } false (afterHead k) id hid)
                   (enqueue_prio w I.desc who dstId
                     { label := label, sender := who, callFrom := none } false (afterHead k) id)
-          | call dst label hint =>
+          | call dst label hint na to =>
             simp only [execRun, hk]
             cases hr : route w I.desc who dst with
             | none =>
@@ -1589,7 +1590,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
                     { label := label, sender := who, callFrom := some who } true (afterHead k) id hid)
                   (enqueue_prio w I.desc who dstId
                     { label := label, sender := who, callFrom := some who } true (afterHead k) id)
-          | trySend dst label hint =>
+          | trySend dst label hint onFull onGone =>
             simp only [execRun, hk]
             cases hr : route w I.desc who dst with
             | none =>
@@ -1648,7 +1649,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
               (by by_cases hi : id = who <;> simp [setActor, hi])
               (by by_cases hi : id = who <;> simp [setActor, hi])
               (by by_cases hi : id = who <;> simp [setActor, hi])
-          | peer =>
+          | peer onTimeout =>
             simp only [execRun, hk]
             exact transport_free hold
               (by by_cases hi : id = who <;> simp [setActor, hi])
@@ -1656,7 +1657,7 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
               (by by_cases hi : id = who <;> simp [setActor, hi])
           | terminate =>
             have hcont : execRun I w who (w.st who) k =
-                execRun I w who (w.st who) ⟨.terminate :: es, k.toState, k.replyTo⟩ := by
+                execRun I w who (w.st who) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
               cases k
               simp at hk
               simp [hk]
@@ -2074,7 +2075,7 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
     (hdead : (w.st i).life ≠ .alive) (hne : i ≠ id) (hempty : (w.st i).prio = []) :
     ((execRun I w id (w.st id) k).st i).prio = [] := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil => simp [execRun, setActor, hne, hempty]
     | cons e tail =>
@@ -2086,16 +2087,16 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
         | some dstId =>
           simpa [hr, hempty] using enqueue_prio w I.desc id dstId
             { label := label, sender := id, callFrom := none } false
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i
-      | call dst label hint =>
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i
+      | call dst label hint na to =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed_prio, hempty]
         | some dstId =>
           simpa [hr, hempty] using enqueue_prio w I.desc id dstId
             { label := label, sender := id, callFrom := some id } true
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i
-      | trySend dst label hint =>
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i
+      | trySend dst label hint onFull onGone =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed_prio, hempty]
@@ -2104,12 +2105,12 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
           split
           · simpa [hempty] using enqueue_prio w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i
           · simp [setActor, hne, proceed_prio, hempty]
       | reply =>
-        simpa [execRun, hempty] using reply_prio w id ⟨.reply :: tail, toState, replyTo⟩ i
+        simpa [execRun, hempty] using reply_prio w id ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ i
       | internal => simp [execRun, setActor, hne, hempty]
-      | peer => simp [execRun, setActor, hne, hempty]
+      | peer onTimeout => simp [execRun, setActor, hne, hempty]
       | selfSchedule label =>
         simp only [execRun]
         by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
@@ -2127,7 +2128,7 @@ theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i 
           · simp [setCell, setActor, hne, proceed_life, hdead]
           · simp [setCell, setActor, hne, proceed_prio, hempty]
       | terminate =>
-        generalize hw : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ = wR at ⊢
+        generalize hw : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ = wR at ⊢
         have hstep := exec_term_step I w id (w.st id) tail toState replyTo
         rw [hw] at hstep
         cases hstep with
@@ -2225,7 +2226,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
     (hlive : ((execRun I w id (w.st id) k).st mb).life = .alive) :
     LaneSuffix ((w.st mb).prio) ((execRun I w id (w.st id) k).st mb).prio := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil =>
       exact suffix_of_eq (by
@@ -2247,8 +2248,8 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
           exact suffix_of_eq (by
             simpa [hr] using enqueue_prio w I.desc id dstId
               { label := label, sender := id, callFrom := none } false
-              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb)
-      | call dst label hint =>
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb)
+      | call dst label hint na to =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none =>
@@ -2261,8 +2262,8 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
           exact suffix_of_eq (by
             simpa [hr] using enqueue_prio w I.desc id dstId
               { label := label, sender := id, callFrom := some id } true
-              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb)
-      | trySend dst label hint =>
+              (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb)
+      | trySend dst label hint onFull onGone =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none =>
@@ -2276,20 +2277,20 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
           split
           · exact suffix_of_eq (enqueue_prio w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb)
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb)
           · exact suffix_of_eq (by
               by_cases hmb : mb = id
               · rw [hmb]; simp [setActor, proceed_prio]
               · simp [setActor, hmb, proceed_prio])
       | reply =>
-        exact suffix_of_eq (by simpa [execRun] using reply_prio w id ⟨.reply :: tail, toState, replyTo⟩ mb)
+        exact suffix_of_eq (by simpa [execRun] using reply_prio w id ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ mb)
       | internal =>
         exact suffix_of_eq (by
           simp [execRun]
           by_cases hmb : mb = id
           · rw [hmb]; simp [setActor]
           · simp [setActor, hmb])
-      | peer =>
+      | peer onTimeout =>
         exact suffix_of_eq (by
           simp [execRun]
           by_cases hmb : mb = id
@@ -2299,7 +2300,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
         simp only [execRun]
         by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
         · have hsame : ((setActor w id (proceed (w.st id)
-              (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩))).st mb).prio =
+              (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))).st mb).prio =
               (w.st mb).prio := by
             by_cases hmb : mb = id
             · rw [hmb, setActor_self, proceed_prio]
@@ -2314,7 +2315,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
                 nextMid := (w.st id).nextMid + 1 }
             have hsuf : LaneSuffix ((w.st mb).prio)
                 ((setActor w id (proceed grown
-                  (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩))).st mb).prio := by
+                  (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))).st mb).prio := by
               by_cases hmb : mb = id
               · rw [hmb, setActor_self, proceed_prio]
                 exact upsert_suffix _ _
@@ -2344,7 +2345,7 @@ theorem exec_prio_suffix (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : I
             · rw [hmb, setActor_self, proceed_prio]
             · simp [setActor, setCell, hmb, proceed_prio])
       | terminate =>
-        generalize hw : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ = wR at hlive ⊢
+        generalize hw : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ = wR at hlive ⊢
         have hstep := exec_term_step I w id (w.st id) tail toState replyTo
         rw [hw] at hstep
         cases hstep with

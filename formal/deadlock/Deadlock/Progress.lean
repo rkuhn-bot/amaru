@@ -205,7 +205,7 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
       cases route w I.desc id dst with
       | none => simp [setActor]
       | some dstId => exact enqueue_roster w I.desc id dstId _ false _
-    | trySend dst label hint =>
+    | trySend dst label hint onFull onGone =>
       simp [hk]
       cases hr : route w I.desc id dst with
       | none => simp [hr, setActor]
@@ -216,7 +216,7 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
         · simp [hroom]
           exact enqueue_roster w I.desc id dstId _ false _
         · simp [hroom, setActor]
-    | call dst label hint =>
+    | call dst label hint na to =>
       simp [hk]
       cases route w I.desc id dst with
       | none => simp [setActor]
@@ -258,7 +258,7 @@ theorem exec_roster (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont) 
         rw [wakes_roster _ I.desc _ dst label id]
         rfl
     | internal => simp [hk, setActor]
-    | peer => simp [hk, setActor]
+    | peer onTimeout => simp [hk, setActor]
     | terminate =>
       cases ht : templateOf I.desc (tname id) with
       | none => simp only [hk, ht]

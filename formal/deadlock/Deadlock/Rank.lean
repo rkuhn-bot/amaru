@@ -1301,7 +1301,7 @@ theorem terminate_commits (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N :
     hT id (.terminate :: es) (by simp [carried, hph]) (by simp [hasTerminate])
   obtain ⟨t, ht, htm⟩ := hterm
   have hbridge : execRun I w id (w.st id) { k with rest := .terminate :: es } =
-      execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ := by
+      execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
     cases k
     rfl
   rw [hbridge]
@@ -1314,7 +1314,7 @@ theorem terminate_commits (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N :
         simp [htm, hpk]
       have hsubB : (t.subtree == "") = true := by simpa [beq_iff_eq] using hsub
       by_cases hch : hasChild I.desc w id = true
-      · have hrun : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ =
+      · have hrun : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ =
             terminateStage I.desc w id (w.st id) := by simp [execRun, ht, hgo, hsubB, hch]
         have hdeadw : (w.st id).life = .dead := by
           rw [← hw, hrun]
@@ -1325,7 +1325,7 @@ theorem terminate_commits (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N :
           cases h : hasChild I.desc w id
           · rfl
           · exact absurd h hch
-        have hrun : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ =
+        have hrun : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ =
             releaseWorld I.desc w id (w.st id) := by simp [execRun, ht, hgo, hsubB, hcf]
         have hdeadw : (w.st id).life = .dead := by
           rw [← hw, hrun]
@@ -1336,7 +1336,7 @@ theorem terminate_commits (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N :
       have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall (w.st id).parked)) = true := by
         simp [htm, hne]
       have hsubB : (t.subtree == "") = false := by simpa [beq_iff_eq] using hsub
-      have hrun : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ =
+      have hrun : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ =
           terminateStage I.desc w id (w.st id) := by simp [execRun, ht, hgo, hsubB]
       have hdeadw : (w.st id).life = .dead := by
         rw [← hw, hrun]
@@ -1830,7 +1830,7 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
   apply term_ok_of I hL w _ hT
   intro i es hc ht
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases hrest : rest with
     | nil =>
       simp [execRun, hrest, setActor] at hc
@@ -1847,7 +1847,7 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           simp [hr, setActor] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
-            have heq := carried_proceed _ (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) es
+            have heq := carried_proceed _ (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es
               (by simpa [setActor] using hc)
             exact Or.inl ⟨.send dst label hint :: tail, hold, Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
           · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
@@ -1856,33 +1856,33 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false
-              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) es hc
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es hc
             exact Or.inl ⟨.send dst label hint :: tail, hold, Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
           · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := none } false
-              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hi
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
-      | call dst label hint =>
+      | call dst label hint na to =>
         simp [execRun, hrest] at hc
         cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
-            have heq := carried_proceed _ (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) es
+            have heq := carried_proceed _ (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es
               (by simpa [setActor] using hc)
-            exact Or.inl ⟨.call dst label hint :: tail, hold, Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
+            exact Or.inl ⟨.call dst label hint na to :: tail, hold, Or.inr ⟨.call dst label hint na to, by simp [afterHead, heq]⟩⟩
           · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
         | some dstId =>
           simp [hr] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) es hc
-            exact Or.inl ⟨.call dst label hint :: tail, hold, Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
+              (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es hc
+            exact Or.inl ⟨.call dst label hint na to :: tail, hold, Or.inr ⟨.call dst label hint na to, by simp [afterHead, heq]⟩⟩
           · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hi
+              (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp [execRun, hrest] at hc
         cases hr : route w I.desc id dst with
         | none =>
@@ -1890,8 +1890,8 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
-            exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-              Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+            exact Or.inl ⟨.trySend dst label hint onFull onGone :: tail, hold,
+              Or.inr ⟨.trySend dst label hint onFull onGone, by simp [afterHead, heq]⟩⟩
           · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
         | some dstId =>
           simp [hr] at hc
@@ -1900,25 +1900,25 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
             · rw [hi] at hc ⊢
               have heq := enqueue_carried w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } false
-                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) es hc
-              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+                (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es hc
+              exact Or.inl ⟨.trySend dst label hint onFull onGone :: tail, hold,
+                Or.inr ⟨.trySend dst label hint onFull onGone, by simp [afterHead, heq]⟩⟩
             · have hsame := enqueue_phase_other w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } false
-                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i hi
+                (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hi
               exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
           · by_cases hi : i = id
             · rw [hi] at hc ⊢
               have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
-              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+              exact Or.inl ⟨.trySend dst label hint onFull onGone :: tail, hold,
+                Or.inr ⟨.trySend dst label hint onFull onGone, by simp [afterHead, heq]⟩⟩
             · exact Or.inl ⟨es, by simpa [setActor, hi] using hc, Or.inl rfl⟩
       | reply =>
         simp [execRun, hrest] at hc
         unfold performReply at hc
         by_cases hi : i = id
         · rw [hi] at hc ⊢
-          have heq := reply_sender_rest w id ⟨.reply :: tail, toState, replyTo⟩ es hc
+          have heq := reply_sender_rest w id ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ es hc
           exact Or.inl ⟨.reply :: tail, hold, Or.inr ⟨.reply, by simp [afterHead, heq]⟩⟩
         · cases hto : replyTo with
           | none =>
@@ -1995,16 +1995,16 @@ theorem term_ok_exec (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (k : 
           simp [carried, afterHead] at hc
           exact Or.inl ⟨.internal :: tail, hold, Or.inr ⟨.internal, congrArg (List.cons .internal) hc⟩⟩
         · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
-      | peer =>
+      | peer onTimeout =>
         simp [execRun, hrest, setActor] at hc
         by_cases hi : i = id
         · rw [hi] at hc ⊢
           simp [carried, afterHead] at hc
-          exact Or.inl ⟨.peer :: tail, hold, Or.inr ⟨.peer, congrArg (List.cons .peer) hc⟩⟩
+          exact Or.inl ⟨(.peer onTimeout) :: tail, hold, Or.inr ⟨(.peer onTimeout), congrArg (List.cons (.peer onTimeout)) hc⟩⟩
         · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
       | terminate =>
-        have hrun : execRun I w id (w.st id) ⟨rest, toState, replyTo⟩ =
-            execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
+        have hrun : execRun I w id (w.st id) ⟨rest, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
+            execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
           simp [hrest]
         rw [hrun] at hc
         rcases execRun_terminate I w id (w.st id) tail toState replyTo with
@@ -2082,7 +2082,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
     k'.rest.length < k.rest.length := by
   have hT := term_ok_reachable I hL N w hR
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases hrest : rest with
     | nil => simp [execRun, hrest, setActor] at h
     | cons e tail =>
@@ -2097,28 +2097,28 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
         cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at h
-          exact after_shorter ⟨.send dst label hint :: tail, toState, replyTo⟩ k' _ (by simp [hrest]) h
+          exact after_shorter ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ k' _ (by simp [hrest]) h
         | some dstId =>
           simp [hr] at h
           have hc : carried ((enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := none } false
-              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)).st id).phase = some k'.rest := by
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)).st id).phase = some k'.rest := by
             simp [carried, h]
           have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false _ k'.rest hc
           exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
-      | call dst label hint =>
+      | call dst label hint na to =>
         simp [execRun, hrest] at h
         cases hr : route w I.desc id dst with
         | none =>
           simp [hr, setActor] at h
-          exact after_shorter ⟨.call dst label hint :: tail, toState, replyTo⟩ k' _ (by simp [hrest]) h
+          exact after_shorter ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ k' _ (by simp [hrest]) h
         | some dstId =>
           simp [hr] at h
           have hc : carried ((enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)).st id).phase = some k'.rest := by
+              (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)).st id).phase = some k'.rest := by
             simp [carried, h]
           have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true _ k'.rest hc
           exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp [execRun, hrest] at h
         cases hr : route w I.desc id dst with
         | none =>
@@ -2129,7 +2129,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           split at h
           · have hc : carried ((enqueueOrPark w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } false
-                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)).st id).phase =
+                (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)).st id).phase =
                 some k'.rest := by
               simp [carried, h]
             have heq := enqueue_carried w I.desc id dstId
@@ -2139,7 +2139,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
             exact after_shorter _ k' _ (by simp [hrest]) h
       | reply =>
         simp [execRun, hrest] at h
-        have hc : carried ((performReply w id ⟨.reply :: tail, toState, replyTo⟩).st id).phase = some k'.rest := by
+        have hc : carried ((performReply w id ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st id).phase = some k'.rest := by
           simp [carried, h]
         have heq := reply_sender_rest w id _ k'.rest hc
         exact run_tail_shorter _ _ _ (by simp [afterHead, hrest, heq])
@@ -2165,7 +2165,7 @@ theorem exec_shortens (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           exact after_shorter _ k' _ (by simp [hrest]) h
       | internal =>
         simp [execRun, hrest, setActor, carried] at h
-      | peer =>
+      | peer onTimeout =>
         simp [execRun, hrest, setActor, carried] at h
 
 theorem run_prefix {I : Impl} (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
@@ -2661,7 +2661,7 @@ theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : C
       | some dstId =>
         refine Or.inl ⟨enqueue_phase_other w I.desc id dstId _ false _ s hs,
           enqueue_life w I.desc id dstId _ false _ s⟩
-    | trySend dst label hint =>
+    | trySend dst label hint onFull onGone =>
       simp [execRun, hk]
       cases hr : route w I.desc id dst with
       | none => refine Or.inl ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
@@ -2673,7 +2673,7 @@ theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : C
             enqueue_life w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false _ s⟩
         · refine Or.inl ⟨?_, ?_⟩ <;> simp [setActor_other, hs, proceed_life]
-    | call dst label hint =>
+    | call dst label hint na to =>
       simp [execRun, hk]
       cases hr : route w I.desc id dst with
       | none => refine Or.inl ⟨?_, ?_⟩ <;> simp [hr, setActor_other, hs, proceed_life]
@@ -2700,11 +2700,11 @@ theorem exec_keeps_quiet (I : Impl) (w : World) (id : InstId) (a : Actor) (k : C
         · rw [wakes_life _ _ _ dst label id s]
           simp [setCell, setActor_other, hs, proceed_life]
     | internal => refine Or.inl ⟨?_, ?_⟩ <;> simp [execRun, hk, setActor_other, hs]
-    | peer => refine Or.inl ⟨?_, ?_⟩ <;> simp [execRun, hk, setActor_other, hs]
+    | peer onTimeout => refine Or.inl ⟨?_, ?_⟩ <;> simp [execRun, hk, setActor_other, hs]
     | terminate =>
-      have hkEta : k = ⟨.terminate :: rest, k.toState, k.replyTo⟩ := by
+      have hkEta : k = ⟨.terminate :: rest, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
         cases k with
-        | mk r toState replyTo =>
+        | mk r toState replyTo _ _ _ _ _ _ _ _ =>
           have : r = .terminate :: rest := hk
           subst this
           rfl
@@ -3363,10 +3363,10 @@ theorem selfLabels_of_no : ∀ es, noSelfSchedule es = true → selfLabels es = 
   | .send _ _ _ :: es, h => by
     simp [noSelfSchedule, selfLabels] at h
     exact selfLabels_of_no es h
-  | .trySend _ _ _ :: es, h => by
+  | .trySend _ _ _ onFull onGone :: es, h => by
     simp [noSelfSchedule, selfLabels] at h
     exact selfLabels_of_no es h
-  | .call _ _ _ :: es, h => by
+  | .call _ _ _ na to :: es, h => by
     simp [noSelfSchedule, selfLabels] at h
     exact selfLabels_of_no es h
   | .reply :: es, h => by
@@ -3379,7 +3379,7 @@ theorem selfLabels_of_no : ∀ es, noSelfSchedule es = true → selfLabels es = 
   | .internal :: es, h => by
     simp [noSelfSchedule, selfLabels] at h
     exact selfLabels_of_no es h
-  | .peer :: es, h => by
+  | (.peer onTimeout) :: es, h => by
     simp [noSelfSchedule, selfLabels] at h
     exact selfLabels_of_no es h
   | .terminate :: es, h => by
@@ -3438,10 +3438,10 @@ theorem cellWake_reader (D : Description) (writer state reader : String) (es : L
     | send d l n =>
       simp [effectsOk, cellWakeLabels, Bool.and_eq_true] at hok
       exact ih hok.2
-    | trySend d l n =>
+    | trySend d l n onFull onGone =>
       simp [effectsOk, cellWakeLabels, Bool.and_eq_true] at hok
       exact ih hok.2
-    | call d l n =>
+    | call d l n na to =>
       simp [effectsOk, cellWakeLabels, Bool.and_eq_true] at hok
       exact ih hok.2
     | reply =>
@@ -3453,7 +3453,7 @@ theorem cellWake_reader (D : Description) (writer state reader : String) (es : L
     | internal =>
       simp [effectsOk, cellWakeLabels] at hok
       exact ih hok
-    | peer =>
+    | peer onTimeout =>
       simp [effectsOk, cellWakeLabels] at hok
       exact ih hok
     | terminate =>
@@ -3571,7 +3571,7 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
     | internal =>
       simp [execRun, hrest, setActor, phaseFuel, afterHead]
       omega
-    | peer =>
+    | peer onTimeout =>
       simp [execRun, hrest, setActor, phaseFuel, afterHead]
       omega
     | selfSchedule label =>
@@ -3599,18 +3599,18 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
         | nil => simp [setCell, setActor, proceed, afterHead, phaseFuel, hrest, htail]
         | cons _ _ =>
           simp [setCell, setActor, proceed, afterHead, phaseFuel, hrest, htail]
-    | trySend dst label hint =>
+    | trySend dst label hint onFull onGone =>
       simp [execRun, hrest]
       cases hr : route w I.desc id dst with
       | none =>
         simp [hr, setActor]
-        exact proceed_after_fuel (w.st id) k (.trySend dst label hint) tail hrest
+        exact proceed_after_fuel (w.st id) k (.trySend dst label hint onFull onGone) tail hrest
       | some dstId =>
         simp [hr]
         split
         · exact enqueue_sender_fuel w I.desc id dstId
             { label := label, sender := id, callFrom := none, reliable := false } false k
-            (.trySend dst label hint) tail hrest
+            (.trySend dst label hint onFull onGone) tail hrest
         · cases htail : tail with
           | nil => simp [setActor, proceed, afterHead, phaseFuel, hrest, htail]
           | cons _ _ => simp [setActor, proceed, afterHead, phaseFuel, hrest, htail]
@@ -3679,12 +3679,12 @@ theorem exec_drops (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (
             simp [phaseFuel, hnow, heq, afterHead, hrest]
         simp [w'] at hbound
         omega
-    | call dst label hint =>
+    | call dst label hint na to =>
       simp [execRun, hrest]
       cases hr : route w I.desc id dst with
       | none =>
         simp [hr, setActor]
-        exact proceed_after_fuel (w.st id) k (.call dst label hint) tail hrest
+        exact proceed_after_fuel (w.st id) k (.call dst label hint na to) tail hrest
       | some dstId =>
         simp [hr]
         let w' := enqueueOrPark w I.desc id dstId { label := label, sender := id, callFrom := some id } true (afterHead k)
@@ -4389,7 +4389,7 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
     (∃ es0, carried ((w.st i).phase) = some es0 ∧ (es = es0 ∨ ∃ e, es0 = e :: es)) ∨
       ∃ tr ∈ I.transitions, tr.template = tname i ∧ es = tr.program := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases hrest : rest with
     | nil =>
       simp [execRun, hrest, setActor] at hc
@@ -4415,13 +4415,13 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := none } false
-              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) es hc
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es hc
             exact Or.inl ⟨.send dst label hint :: tail, hold,
               Or.inr ⟨.send dst label hint, by simp [afterHead, heq]⟩⟩
           · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := none } false
-              (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hi
+              (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
-      | call dst label hint =>
+      | call dst label hint na to =>
         simp [execRun, hrest] at hc
         cases hr : route w I.desc id dst with
         | none =>
@@ -4429,21 +4429,21 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
-            exact Or.inl ⟨.call dst label hint :: tail, hold,
-              Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
+            exact Or.inl ⟨.call dst label hint na to :: tail, hold,
+              Or.inr ⟨.call dst label hint na to, by simp [afterHead, heq]⟩⟩
           · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
         | some dstId =>
           simp [hr] at hc
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := enqueue_carried w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) es hc
-            exact Or.inl ⟨.call dst label hint :: tail, hold,
-              Or.inr ⟨.call dst label hint, by simp [afterHead, heq]⟩⟩
+              (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es hc
+            exact Or.inl ⟨.call dst label hint na to :: tail, hold,
+              Or.inr ⟨.call dst label hint na to, by simp [afterHead, heq]⟩⟩
           · have hsame := enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-              (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hi
+              (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hi
             exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp [execRun, hrest] at hc
         cases hr : route w I.desc id dst with
         | none =>
@@ -4451,8 +4451,8 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           by_cases hi : i = id
           · rw [hi] at hc ⊢
             have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
-            exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-              Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+            exact Or.inl ⟨.trySend dst label hint onFull onGone :: tail, hold,
+              Or.inr ⟨.trySend dst label hint onFull onGone, by simp [afterHead, heq]⟩⟩
           · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
         | some dstId =>
           simp [hr] at hc
@@ -4461,18 +4461,18 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
             · rw [hi] at hc ⊢
               have heq := enqueue_carried w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } false
-                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) es hc
-              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+                (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) es hc
+              exact Or.inl ⟨.trySend dst label hint onFull onGone :: tail, hold,
+                Or.inr ⟨.trySend dst label hint onFull onGone, by simp [afterHead, heq]⟩⟩
             · have hsame := enqueue_phase_other w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } false
-                (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i hi
+                (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hi
               exact Or.inl ⟨es, by simpa [hsame] using hc, Or.inl rfl⟩
           · by_cases hi : i = id
             · rw [hi] at hc ⊢
               have heq := carried_proceed _ _ es (by simpa [setActor] using hc)
-              exact Or.inl ⟨.trySend dst label hint :: tail, hold,
-                Or.inr ⟨.trySend dst label hint, by simp [afterHead, heq]⟩⟩
+              exact Or.inl ⟨.trySend dst label hint onFull onGone :: tail, hold,
+                Or.inr ⟨.trySend dst label hint onFull onGone, by simp [afterHead, heq]⟩⟩
             · exact Or.inl ⟨es, by simpa [setActor, hi] using hc, Or.inl rfl⟩
       | reply =>
         simp [execRun, hrest] at hc
@@ -4571,16 +4571,16 @@ theorem carried_origin_exec (I : Impl) (w : World) (id : InstId) (k : Cont)
           simp [carried, afterHead] at hc
           exact Or.inl ⟨.internal :: tail, hold, Or.inr ⟨.internal, congrArg (List.cons .internal) hc⟩⟩
         · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
-      | peer =>
+      | peer onTimeout =>
         simp [execRun, hrest, setActor] at hc
         by_cases hi : i = id
         · rw [hi] at hc ⊢
           simp [carried, afterHead] at hc
-          exact Or.inl ⟨.peer :: tail, hold, Or.inr ⟨.peer, congrArg (List.cons .peer) hc⟩⟩
+          exact Or.inl ⟨(.peer onTimeout) :: tail, hold, Or.inr ⟨(.peer onTimeout), congrArg (List.cons (.peer onTimeout)) hc⟩⟩
         · exact Or.inl ⟨es, by simpa [hi] using hc, Or.inl rfl⟩
       | terminate =>
-        have hrun : execRun I w id (w.st id) ⟨rest, toState, replyTo⟩ =
-            execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
+        have hrun : execRun I w id (w.st id) ⟨rest, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
+            execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
           simp [hrest]
         rw [hrun] at hc
         rcases execRun_terminate I w id (w.st id) tail toState replyTo with
@@ -4930,9 +4930,9 @@ is `crashWorld`, so the phase claim is only the branch that enqueues. -/
 theorem schedule_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (label : String) (tail : List Eff)
     (toState : String) (replyTo : Option InstId)
-    (hph : (w.st id).phase = .run ⟨.selfSchedule label :: tail, toState, replyTo⟩)
+    (hph : (w.st id).phase = .run ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)
     (hpre : ∀ i, (w.st i).phase ≠ .crashed) (i : InstId) :
-    ((execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩).st i).phase ≠ .crashed := by
+    ((execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st i).phase ≠ .crashed := by
   have hc : carried ((w.st id).phase) = some (.selfSchedule label :: tail) := by
     simp [carried, hph]
   have hdecl := sched_declared I w hS id _ hc label (self_head_label label tail)
@@ -4954,8 +4954,8 @@ theorem schedule_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (
 theorem lane_schedule (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (label : String) (tail : List Eff)
     (toState : String) (replyTo : Option InstId)
-    (hph : (w.st id).phase = .run ⟨.selfSchedule label :: tail, toState, replyTo⟩) :
-    LaneOk I (execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩) := by
+    (hph : (w.st id).phase = .run ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) :
+    LaneOk I (execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) := by
   have hc : carried ((w.st id).phase) = some (.selfSchedule label :: tail) := by simp [carried, hph]
   have hdecl := sched_declared I w hS id _ hc label (self_head_label label tail)
   obtain ⟨t, ht⟩ := src_template I hL w hS id _ hc
@@ -4966,12 +4966,12 @@ theorem lane_schedule (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : Wor
     let grown := upsertPrio (w.st id).prio msg
     let a := proceed
       { (w.st id) with prio := grown, nextMid := (w.st id).nextMid + 1 }
-      (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)
+      (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)
     have hup := lane_upsert I w hLane id msg (by simpa [msg] using hdecl) (by simp [msg])
     have hok : (laneLabels a.prio).Nodup ∧
         ∀ m ∈ a.prio, m.tombstone = true ∨ m.label ∈ prioLabels I (tname id) := by
       simpa [a, proceed_prio] using hup
-    have hstep : execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo⟩ =
+    have hstep : execRun I w id (w.st id) ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
         setActor w id a := by simp [execRun, hany, hlt, a, grown, msg]
     rw [hstep]
     exact lane_set I w hLane id a hok
@@ -5312,7 +5312,7 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
     (hLane : LaneOk I w) (hS : ProgSrc I w) (id : InstId) (k : Cont)
     (hph : (w.st id).phase = .run k) : LaneOk I (execRun I w id (w.st id) k) := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases hrest : rest with
     | nil =>
       exact lane_same I w _ hLane (fun i => by
@@ -5330,7 +5330,7 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
         | some dstId =>
           simp [hr]
           exact lane_same I w _ hLane (fun i => enqueue_prio w I.desc id dstId _ false _ i)
-      | call dst label hint =>
+      | call dst label hint na to =>
         simp [execRun, hrest]
         cases hr : route w I.desc id dst with
         | none =>
@@ -5342,10 +5342,10 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
       | internal =>
         exact lane_same I w _ hLane (fun i => by
           by_cases hi : i = id <;> simp [execRun, hrest, setActor, hi])
-      | peer =>
+      | peer onTimeout =>
         exact lane_same I w _ hLane (fun i => by
           by_cases hi : i = id <;> simp [execRun, hrest, setActor, hi])
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         exact lane_same I w _ hLane (fun i => by
           simp [execRun, hrest]
           cases hr : route w I.desc id dst with
@@ -5403,7 +5403,7 @@ theorem lane_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : World)
           exact wake_declared I w hS id _ hcar dst label (cell_head_label dst label value tail)
         let base := setCell w dst label { value := max (w.cell dst label).value value, dirty := true }
         let stepped := setActor base id
-          (proceed (base.st id) (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩))
+          (proceed (base.st id) (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
         have hbase := lane_same I w base hLane (fun _ => by simp [base, setCell])
         have hstepL : LaneOk I stepped := by
           apply lane_set I base hbase id _
@@ -5766,7 +5766,7 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
     (hph : (w.st id).phase = .run k) (i : InstId) :
     ((execRun I w id (w.st id) k).st i).phase ≠ .crashed := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases hrest : rest with
     | nil =>
       have hp : ({ (w.st id) with phase := Phase.idle, typestate := toState }).phase ≠ .crashed := by
@@ -5783,60 +5783,60 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
         | none =>
           simp only [hr]
           exact set_not_crashed w hpre id (proceed (w.st id) (afterHead
-            ⟨.send dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+            ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) (proceed_not_crashed _ _) i
         | some dstId =>
           simpa [hr] using enqueue_not_crashed w hpre I.desc id dstId
             { label := label, sender := id, callFrom := none } false
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i
-      | call dst label hint =>
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i
+      | call dst label hint na to =>
         simp only [execRun, hrest]
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr]
           exact set_not_crashed w hpre id (proceed (w.st id) (afterHead
-            ⟨.call dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+            ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) (proceed_not_crashed _ _) i
         | some dstId =>
           simpa [hr] using enqueue_not_crashed w hpre I.desc id dstId
             { label := label, sender := id, callFrom := some id } true
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i
       | internal =>
         have hp : ({ (w.st id) with phase := .awaitEffect (afterHead
-            ⟨.internal :: tail, toState, replyTo⟩) }).phase ≠ .crashed := by
+            ⟨.internal :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }).phase ≠ .crashed := by
           simp
         simpa [execRun, hrest] using set_not_crashed w hpre id _ hp i
-      | peer =>
+      | peer onTimeout =>
         have hp : ({ (w.st id) with phase := .awaitPeer (afterHead
-            ⟨.peer :: tail, toState, replyTo⟩) }).phase ≠ .crashed := by
+            ⟨(.peer onTimeout) :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }).phase ≠ .crashed := by
           simp
         simpa [execRun, hrest] using set_not_crashed w hpre id _ hp i
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp only [execRun, hrest]
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr]
           exact set_not_crashed w hpre id (proceed (w.st id) (afterHead
-            ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+            ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) (proceed_not_crashed _ _) i
         | some dstId =>
           simp only [hr]
           split
           · simpa using enqueue_not_crashed w hpre I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i
           · simpa using set_not_crashed w hpre id (proceed (w.st id) (afterHead
-              ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) (proceed_not_crashed _ _) i
+              ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) (proceed_not_crashed _ _) i
       | reply =>
         simp only [execRun, hrest]
         unfold performReply
         cases hto : replyTo with
         | none =>
           simpa [hto] using set_not_crashed w hpre id
-            (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+            (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
             (proceed_not_crashed _ _) i
         | some caller =>
           cases hcall : (w.st caller).phase with
           | awaitReply dst ck =>
             by_cases hd : dst = id
-            · let k' := afterHead ⟨.reply :: tail, toState, replyTo⟩
+            · let k' := afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩
               let resumed := proceed (w.st caller) ck
               let w1 := setActor w caller resumed
               have h1 : NoCrash w1 := set_not_crashed w hpre caller resumed (proceed_not_crashed _ _)
@@ -5849,34 +5849,34 @@ theorem exec_not_crashed (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : 
                   (afterHead { rest := .reply :: tail, toState := toState, replyTo := some caller }))
                 (proceed_not_crashed _ _) i
             · simpa [hto, hcall, hd] using set_not_crashed w hpre id
-                (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+                (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
                 (proceed_not_crashed _ _) i
           | idle =>
             simpa [hto, hcall] using set_not_crashed w hpre id
-              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
               (proceed_not_crashed _ _) i
           | run _ =>
             simpa [hto, hcall] using set_not_crashed w hpre id
-              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
               (proceed_not_crashed _ _) i
           | awaitEffect _ =>
             simpa [hto, hcall] using set_not_crashed w hpre id
-              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
               (proceed_not_crashed _ _) i
           | awaitPeer _ =>
             simpa [hto, hcall] using set_not_crashed w hpre id
-              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
               (proceed_not_crashed _ _) i
           | parked _ _ _ =>
             simpa [hto, hcall] using set_not_crashed w hpre id
-              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
               (proceed_not_crashed _ _) i
           | crashed =>
             simpa [hto, hcall] using set_not_crashed w hpre id
-              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo⟩))
+              (proceed (w.st id) (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩))
               (proceed_not_crashed _ _) i
       | cell dst label value =>
-        let k' := afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩
+        let k' := afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩
         let base := setCell w dst label { value := max (w.cell dst label).value value, dirty := true }
         let stepped := setActor base id (proceed (base.st id) k')
         have hbase : NoCrash base := by
@@ -7313,7 +7313,7 @@ theorem exec_queue (I : Impl) (hG : GraphOk I.desc) (w : World) (hH : MailHere I
     (hlive : ((execRun I w id (w.st id) k).st mb).life = .alive) :
     QueueGrow ((w.st mb).parked) ((execRun I w id (w.st id) k).st mb).parked := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil =>
       simpa [execRun] using queue_actor w id { (w.st id) with phase := .idle, typestate := toState } mb rfl
@@ -7325,60 +7325,60 @@ theorem exec_queue (I : Impl) (hG : GraphOk I.desc) (w : World) (hH : MailHere I
         | none =>
           simp only [hr]
           exact queue_actor w id (proceed (w.st id)
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_parked _ _)
         | some dstId =>
           simpa [hr] using plain_grow (enqueue_queue w I.desc id dstId
             { label := label, sender := id, callFrom := none } false
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb)
-      | call dst label hint =>
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb)
+      | call dst label hint na to =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr]
           exact queue_actor w id (proceed (w.st id)
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_parked _ _)
         | some dstId =>
           simpa [hr] using plain_grow (enqueue_queue w I.desc id dstId
             { label := label, sender := id, callFrom := some id } true
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb)
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb)
       | internal =>
         simpa [execRun] using queue_actor w id
-          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo⟩) }
+          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }
           mb rfl
-      | peer =>
+      | peer onTimeout =>
         simpa [execRun] using queue_actor w id
-          { (w.st id) with phase := .awaitPeer (afterHead ⟨.peer :: tail, toState, replyTo⟩) }
+          { (w.st id) with phase := .awaitPeer (afterHead ⟨(.peer onTimeout) :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }
           mb rfl
       | selfSchedule label =>
         simp only [execRun]
         by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
         · simpa [hany] using queue_actor w id (proceed (w.st id)
-            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_parked _ _)
         · by_cases hlt : prioLoad (w.st id).prio < capPrio I.desc w.N id
-          · simpa [hany, hlt] using queue_actor w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }, nextMid := (w.st id).nextMid + 1 } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_parked])
+          · simpa [hany, hlt] using queue_actor w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }, nextMid := (w.st id).nextMid + 1 } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (by simp [proceed_parked])
           · simpa [hany, hlt] using queue_actor w id { (w.st id) with phase := .crashed } mb rfl
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr]
           exact queue_actor w id (proceed (w.st id)
-            (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+            (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_parked _ _)
         | some dstId =>
           simp only [hr]
           split
           · simpa using plain_grow (enqueue_queue w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb)
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb)
           · exact queue_actor w id (proceed (w.st id)
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_parked _ _)
       | reply =>
         simp only [execRun]
         unfold performReply
         cases hto : replyTo with
         | none =>
           simpa [hto] using queue_actor w id (proceed (w.st id)
-            (afterHead ⟨.reply :: tail, toState, replyTo⟩)) mb (proceed_parked _ _)
+            (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_parked _ _)
         | some caller =>
           cases hcall : (w.st caller).phase with
           | awaitReply dst ck =>
@@ -7430,14 +7430,14 @@ theorem exec_queue (I : Impl) (hG : GraphOk I.desc) (w : World) (hH : MailHere I
             { value := max (w.cell dst label).value value, dirty := true }) id
             (proceed ((setCell w dst label
               { value := max (w.cell dst label).value value, dirty := true }).st id)
-              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb
             (by simpa [setCell] using proceed_parked _ _)
         · simp [hdirty]
           exact queue_actor (setCell w dst label
             { value := max (w.cell dst label).value value, dirty := true }) id
             (proceed ((setCell w dst label
               { value := max (w.cell dst label).value value, dirty := true }).st id)
-              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb
             (by simpa [setCell] using proceed_parked _ _)
       | terminate =>
         rcases execRun_terminate I w id (w.st id) tail toState replyTo with
@@ -7707,7 +7707,7 @@ theorem exec_sender_false (I : Impl) (w : World) (id : InstId) (k : Cont) (s mb 
       (w.st mb).parked.filter (fun p => keep p.sender))
     (hin : parkIndex (w.st mb).parked s < (w.st mb).parked.length) : False := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil =>
       simp only [execRun] at hk
@@ -7720,64 +7720,64 @@ theorem exec_sender_false (I : Impl) (w : World) (id : InstId) (k : Cont) (s mb 
         | none =>
           simp only [hr] at hk
           exact set_false w id (proceed (w.st id)
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb s keep
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
             (proceed_parked _ _) hs hk hin
         | some dstId =>
           simp only [hr] at hk
           exact plain_not_drop _ _ keep s (enqueue_queue w I.desc id dstId
             { label := label, sender := id, callFrom := none } false
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb) hk hs hin
-      | call dst label hint =>
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb) hk hs hin
+      | call dst label hint na to =>
         simp only [execRun] at hk
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr] at hk
           exact set_false w id (proceed (w.st id)
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb s keep
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
             (proceed_parked _ _) hs hk hin
         | some dstId =>
           simp only [hr] at hk
           exact plain_not_drop _ _ keep s (enqueue_queue w I.desc id dstId
             { label := label, sender := id, callFrom := some id } true
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb) hk hs hin
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb) hk hs hin
       | internal =>
         simp only [execRun] at hk
         exact set_false w id
-          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo⟩) }
+          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }
           mb s keep rfl hs hk hin
-      | peer =>
+      | peer onTimeout =>
         simp only [execRun] at hk
         exact set_false w id
-          { (w.st id) with phase := .awaitPeer (afterHead ⟨.peer :: tail, toState, replyTo⟩) }
+          { (w.st id) with phase := .awaitPeer (afterHead ⟨(.peer onTimeout) :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }
           mb s keep rfl hs hk hin
       | selfSchedule label =>
         simp only [execRun] at hk
         by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
         · simp only [hany] at hk
           exact set_false w id (proceed (w.st id)
-            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb s keep
+            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
             (proceed_parked _ _) hs hk hin
         · by_cases hlt : prioLoad (w.st id).prio < capPrio I.desc w.N id
           · simp only [hany, hlt] at hk
-            exact set_false w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }, nextMid := (w.st id).nextMid + 1 } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb s keep (by simp [proceed_parked]) hs hk hin
+            exact set_false w id (proceed { (w.st id) with prio := upsertPrio (w.st id).prio { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }, nextMid := (w.st id).nextMid + 1 } (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep (by simp [proceed_parked]) hs hk hin
           · simp only [hany, hlt] at hk
             exact set_false w id { (w.st id) with phase := .crashed } mb s keep rfl hs hk hin
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp only [execRun] at hk
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr] at hk
           exact set_false w id (proceed (w.st id)
-            (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb s keep
+            (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
             (proceed_parked _ _) hs hk hin
         | some dstId =>
           simp only [hr] at hk
           split at hk
           · exact plain_not_drop _ _ keep s (enqueue_queue w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb) hk hs hin
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb) hk hs hin
           · exact set_false w id (proceed (w.st id)
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb s keep
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
               (proceed_parked _ _) hs hk hin
       | reply =>
         simp only [execRun] at hk
@@ -7852,14 +7852,14 @@ theorem exec_sender_false (I : Impl) (w : World) (id : InstId) (k : Cont) (s mb 
             { value := max (w.cell dst label).value value, dirty := true }) id
             (proceed ((setCell w dst label
               { value := max (w.cell dst label).value value, dirty := true }).st id)
-              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb s keep
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
             (by simpa [setCell] using proceed_parked _ _) hs hk hin
         · simp only [hdirty] at hk
           exact set_false (setCell w dst label
             { value := max (w.cell dst label).value value, dirty := true }) id
             (proceed ((setCell w dst label
               { value := max (w.cell dst label).value value, dirty := true }).st id)
-              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb s keep
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb s keep
             (by simpa [setCell] using proceed_parked _ _) hs hk hin
       | terminate =>
         rcases execRun_terminate I w id (w.st id) tail toState replyTo with
@@ -8466,7 +8466,7 @@ theorem dedup_mem {α} [DecidableEq α] (xs : List α) (x : α) (h : x ∈ xs) :
 def callPairs (es : List Eff) : List (String × String) :=
   es.filterMap fun e =>
     match e with
-    | .call dst lab _ => some (dst, lab)
+    | .call dst lab _ na to => some (dst, lab)
     | _ => none
 
 theorem callSites_pairs (trs : List Transition) : callSites trs =
@@ -8475,7 +8475,8 @@ theorem callSites_pairs (trs : List Transition) : callSites trs =
     | tr :: ts => dedup (callPairs tr.program ++ callSites ts) := by
   cases trs <;> rfl
 
-theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (h : Eff.call d l n ∈ es) :
+theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (na to : List Eff)
+    (h : Eff.call d l n na to ∈ es) :
     (d, l) ∈ callPairs es := by
   induction es with
   | nil => cases h
@@ -8484,13 +8485,13 @@ theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (h : Eff.call d
     | head => simp [callPairs, List.filterMap]
     | tail _ ht =>
       cases e with
-      | call a b c =>
+      | call a b c na to =>
         rw [callPairs, List.filterMap_cons]
         exact List.mem_cons_of_mem _ (by simpa [callPairs] using ih ht)
       | send a b c =>
         rw [callPairs, List.filterMap_cons]
         simpa [callPairs] using ih ht
-      | trySend a b c =>
+      | trySend a b c onFull onGone =>
         rw [callPairs, List.filterMap_cons]
         simpa [callPairs] using ih ht
       | reply =>
@@ -8505,7 +8506,7 @@ theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (h : Eff.call d
       | internal =>
         rw [callPairs, List.filterMap_cons]
         simpa [callPairs] using ih ht
-      | peer =>
+      | peer onTimeout =>
         rw [callPairs, List.filterMap_cons]
         simpa [callPairs] using ih ht
       | terminate =>
@@ -8513,7 +8514,7 @@ theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (h : Eff.call d
         simpa [callPairs] using ih ht
 
 theorem call_in_sites (trs : List Transition) (tr : Transition) (hm : tr ∈ trs) (d l : String) (n : Nat)
-    (h : Eff.call d l n ∈ tr.program) : (d, l) ∈ callSites trs := by
+    (h : Eff.call d l n na to ∈ tr.program) : (d, l) ∈ callSites trs := by
   induction trs with
   | nil => cases hm
   | cons x xs ih =>
@@ -8844,7 +8845,8 @@ theorem exec_send_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k :
       (afterHead k) hA (Or.inl rfl)
 
 theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (dst label : String) (hint : Nat) (es : List Eff) (hk : k.rest = .call dst label hint :: es)
+    (dst label : String) (hint : Nat) (na to es : List Eff)
+    (hk : k.rest = .call dst label hint na to :: es)
     (hS : ProgSrc I w) (hA : MailAccepted I w) (ha : a = w.st id) (hph : (w.st id).phase = .run k) :
     MailAccepted I (execRun I w id a k) := by
   unfold execRun
@@ -8858,7 +8860,7 @@ theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
     have hsite : callSite I (tname dstId) label := by
       rw [hname]
       obtain ⟨tr, hmem, _, pre, happ⟩ := hS id k.rest (by simp [carried, hph])
-      have hin : Eff.call dst label hint ∈ tr.program := by
+      have hin : Eff.call dst label hint na to ∈ tr.program := by
         rw [← happ, hk]
         exact List.mem_append_right _ (List.Mem.head _)
       exact call_in_sites I.transitions tr hmem dst label hint hin
@@ -8888,7 +8890,8 @@ theorem try_fit_mail (I : Impl) (w : World) (id dstId : InstId) (label : String)
     copy_accepted I w2 id (proceed (w2.st id) k) h2 (by simp [proceed_box]) (by simp [proceed_parked])
 
 theorem exec_try_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
-    (dst label : String) (hint : Nat) (es : List Eff) (hk : k.rest = .trySend dst label hint :: es)
+    (dst label : String) (hint : Nat) (onFull onGone es : List Eff)
+    (hk : k.rest = .trySend dst label hint onFull onGone :: es)
     (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
   unfold execRun
   simp [hk, ha]
@@ -9132,9 +9135,9 @@ theorem terminate_accepted (I : Impl) (D : Description) (w : World) (id : InstId
 theorem exec_term_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (es : List Eff) (hk : k.rest = .terminate :: es) (hA : MailAccepted I w) (ha : a = w.st id) :
     MailAccepted I (execRun I w id a k) := by
-  have hk' : k = ⟨.terminate :: es, k.toState, k.replyTo⟩ := by
+  have hk' : k = ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
     cases k with
-    | mk rest toState replyTo =>
+    | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
       cases hk
       rfl
   rw [ha, hk']
@@ -9162,7 +9165,7 @@ theorem exec_run_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) 
     cases e with
     | internal =>
       exact copy_accepted I w id { a with phase := .awaitEffect (afterHead k) } hA (by rw [ha]) (by rw [ha])
-    | peer =>
+    | peer onTimeout =>
       exact copy_accepted I w id { a with phase := .awaitPeer (afterHead k) } hA (by rw [ha]) (by rw [ha])
     | selfSchedule label =>
       simp [hk, ha]
@@ -9218,10 +9221,10 @@ theorem exec_run_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) 
     | send dst label hint =>
       rw [← hk]
       exact exec_send_accepted I w id a k dst label hint es hk hA ha
-    | trySend dst label hint =>
+    | trySend dst label hint onFull onGone =>
       rw [← hk]
       exact exec_try_accepted I w id a k dst label hint es hk hA ha
-    | call dst label hint =>
+    | call dst label hint na to =>
       rw [← hk]
       exact exec_call_accepted I hL w id a k dst label hint es hk hS hA ha hph
     | cell dst label value =>
@@ -9614,9 +9617,9 @@ theorem exec_term_world (I : Impl) (w : World) (id : InstId) (k : Cont) (tail : 
         (t.subtree ≠ "" ∨ hasChild I.desc w id = true) ∧
         (t.subtree = "" → hasParkedCall (w.st id).parked = false) ∧
         execRun I w id (w.st id) k = terminateStage I.desc w id (w.st id)) := by
-  have hk' : k = ⟨.terminate :: tail, k.toState, k.replyTo⟩ := by
+  have hk' : k = ⟨.terminate :: tail, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
     cases k with
-    | mk rest toState replyTo =>
+    | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
       cases hk
       rfl
   rw [hk']
@@ -9628,7 +9631,7 @@ theorem exec_lone_release (I : Impl) (w : World) (id : InstId) (t : Template)
     (ht : templateOf I.desc (tname id) = some t) (hsub : t.subtree = "")
     (htm : t.terminable = true) (hpk : hasParkedCall (w.st id).parked = false)
     (hch : hasChild I.desc w id = false) :
-    execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ =
+    execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
       releaseWorld I.desc w id (w.st id) := by
   have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall (w.st id).parked)) = true := by
     simp [htm, hsub, hpk, bne]
@@ -9641,7 +9644,7 @@ theorem terminate_unblocks (I : Impl) (w : World) (id : InstId) (t : Template) (
     (htm : t.terminable = true) (hpk : hasParkedCall (w.st id).parked = false)
     (hch : hasChild I.desc w id = false)
     (hph : (w.st s).phase = .parked id false k) (hne : s ≠ id) :
-    waitKind ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩).st s) ≠
+    waitKind ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st s) ≠
       some (.blockingSend id) := by
   obtain ⟨p, hp, hs, hc⟩ := hM.bwd s id false k hph
   let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
@@ -9654,7 +9657,7 @@ theorem terminate_unblocks (I : Impl) (w : World) (id : InstId) (t : Template) (
     simp [setActor, hne, hphb]
   have hrel := release_resumes_send (setActor base id dead) id (w.st id).parked s k
     ⟨p, hp, hs, hc⟩ hne hphs
-  have hstep : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ =
+  have hstep : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
       releaseParked (setActor base id dead) id (w.st id).parked := by
     rw [exec_lone_release I w id t tail toState replyTo ht hsub htm hpk hch]
     simp [releaseWorld, base, dead]
@@ -9905,7 +9908,7 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
         left
         simp [hr]
         exact enqueue_life w I.desc id dstId _ false _ i
-    | trySend dst label hint =>
+    | trySend dst label hint onFull onGone =>
       simp [execRun, hk]
       cases hr : route w I.desc id dst with
       | none =>
@@ -9919,7 +9922,7 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
             { label := label, sender := id, callFrom := none, reliable := false } false _ i
         · left
           simp [setActor, hne, proceed_life]
-    | call dst label hint =>
+    | call dst label hint na to =>
       simp [execRun, hk]
       cases hr : route w I.desc id dst with
       | none =>
@@ -9955,7 +9958,7 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
     | internal =>
       left
       simp [execRun, hk, setActor, hne]
-    | peer =>
+    | peer onTimeout =>
       left
       simp [execRun, hk, setActor, hne]
     | terminate =>
@@ -10092,7 +10095,7 @@ ancestor's `terminate` aborting the actor. A sibling is not aborted. -/
 theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
     (h : apply I a w = some w') (hl : (w.st i).life = .alive) (hdead : (w'.st i).life ≠ .alive) :
     (∃ tail toState replyTo t,
-      a = .exec i ∧ (w.st i).phase = .run ⟨.terminate :: tail, toState, replyTo⟩ ∧
+      a = .exec i ∧ (w.st i).phase = .run ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ ∧
         templateOf I.desc (tname i) = some t ∧ t.subtree = "" ∧ t.terminable = true ∧
         hasParkedCall (w.st i).parked = false ∧ hasChild I.desc w i = false) ∨
       (∃ id t, a = .exec id ∧ templateOf I.desc (tname id) = some t ∧ t.terminable = true ∧
@@ -10140,12 +10143,12 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
                 rw [hme] at hdead
                 rw [hkept] at hdead
                 exact hdead hlid
-              · have hk' : k = ⟨.terminate :: tail, k.toState, k.replyTo⟩ := by
+              · have hk' : k = ⟨.terminate :: tail, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
                   cases k with
-                  | mk rest toState replyTo =>
+                  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
                     cases hk
                     rfl
-                have hphase : (w.st i).phase = .run ⟨.terminate :: tail, k.toState, k.replyTo⟩ := by
+                have hphase : (w.st i).phase = .run ⟨.terminate :: tail, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
                   rw [hk'] at hph
                   simpa [hme] using hph
                 exact Or.inl ⟨tail, k.toState, k.replyTo, t, by rw [hme], hphase,
@@ -10163,7 +10166,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
                 have heq := enqueue_life w I.desc id dstId
                   ({ label := label, sender := id, callFrom := none } : Msg) false (afterHead k) id
                 simp [heq, hlid] at hdead
-            | trySend dst label hint =>
+            | trySend dst label hint onFull onGone =>
               exfalso
               rw [hme] at hdead
               simp [execRun, hk] at hdead
@@ -10177,7 +10180,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
                     false (afterHead k) id
                   simp [heq, hlid] at hdead
                 · simp [setActor, proceed_life, hlid] at hdead
-            | call dst label hint =>
+            | call dst label hint na to =>
               exfalso
               rw [hme] at hdead
               simp [execRun, hk] at hdead
@@ -10214,7 +10217,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
               exfalso
               rw [hme] at hdead
               simp [execRun, hk, setActor, hlid] at hdead
-            | peer =>
+            | peer onTimeout =>
               exfalso
               rw [hme] at hdead
               simp [execRun, hk, setActor, hlid] at hdead
@@ -10345,7 +10348,7 @@ theorem busy_alive (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) (i : 
       · cases only_terminate_kills I a w w' i happ hwas hnow with
         | inl hExecKill =>
           rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
-          have hstep : w' = execRun I w i (w.st i) ⟨.terminate :: tail, toState, replyTo⟩ := by
+          have hstep : w' = execRun I w i (w.st i) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
             simp [apply, hact, execHead, hwas, hrun] at happ
             exact happ.symm
           let base :=
@@ -10354,7 +10357,7 @@ theorem busy_alive (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) (i : 
           let dead : Actor :=
             { base.st i with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
           have hrunEq :
-              execRun I w i (w.st i) ⟨.terminate :: tail, toState, replyTo⟩ =
+              execRun I w i (w.st i) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
                 releaseParked (setActor base i dead) i (w.st i).parked := by
             rw [exec_lone_release I w i t tail toState replyTo ht hsub htm hpk hch]
             simp [releaseWorld, base, dead]
@@ -10807,7 +10810,7 @@ theorem receiver_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
     | inl hExecKill =>
       rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
       have hM := (inv_reachable I N w hL hR).2.1
-      have hstep : w' = execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo⟩ := by
+      have hstep : w' = execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
         simp [apply, hact, execHead, halive, hrun] at h
         exact h.symm
       by_cases hne : s = dst
@@ -10817,7 +10820,7 @@ theorem receiver_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
         let dead : Actor :=
           { base.st dst with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
         have hrunEq :
-            execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo⟩ =
+            execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
               releaseParked (setActor base dst dead) dst (w.st dst).parked := by
           rw [exec_lone_release I w dst t tail toState replyTo ht hsub htm hpk hch]
           simp [releaseWorld, base, dead]
@@ -10833,7 +10836,7 @@ theorem receiver_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
       · have hclear :=
           terminate_unblocks I w dst t tail toState replyTo s k hM ht hsub htm hpk hch hph hne
         have hnow :
-            waitKind ((execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo⟩).st s) =
+            waitKind ((execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st s) =
               some (.blockingSend dst) := by
           have hphE := hph'
           rw [hstep] at hphE
@@ -11450,7 +11453,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
               simp [hr]
               exact Or.inl ((enqueue_phase_other w I.desc id dstId
                 ({ label := label, sender := id, callFrom := none } : Msg) false (afterHead kE) s hsne).trans hph)
-          | call name label hint =>
+          | call name label hint na to =>
             simp [execRun, hk]
             cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
@@ -11458,7 +11461,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
               simp [hr]
               exact Or.inl ((enqueue_phase_other w I.desc id dstId
                 ({ label := label, sender := id, callFrom := some id } : Msg) true (afterHead kE) s hsne).trans hph)
-          | trySend name label hint =>
+          | trySend name label hint onFull onGone =>
             simp [execRun, hk]
             cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
@@ -11488,7 +11491,7 @@ theorem blocking_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k
                 rw [wakes_phase (readersOf _ _) I.desc _ name label id s]
                 simp [setCell, setActor, hsne, hph])
           | internal => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
-          | peer => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
+          | peer onTimeout => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
           | terminate =>
             rcases exec_term_world I w id kE tail hk with
               hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
@@ -11785,7 +11788,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
               simp [hr]
               exact Or.inl ((enqueue_phase_other w I.desc id dstId
                 ({ label := label, sender := id, callFrom := none } : Msg) false (afterHead kE) s hsne).trans hph)
-          | call name label hint =>
+          | call name label hint na to =>
             simp [execRun, hk]
             cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
@@ -11793,7 +11796,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
               simp [hr]
               exact Or.inl ((enqueue_phase_other w I.desc id dstId
                 ({ label := label, sender := id, callFrom := some id } : Msg) true (afterHead kE) s hsne).trans hph)
-          | trySend name label hint =>
+          | trySend name label hint onFull onGone =>
             simp [execRun, hk]
             cases hr : route w I.desc id name with
             | none => exact Or.inl (by simp [hr, setActor, hsne, hph])
@@ -11820,7 +11823,7 @@ theorem await_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : 
                 rw [wakes_phase (readersOf _ _) I.desc _ name label id s]
                 simp [setCell, setActor, hsne, hph])
           | internal => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
-          | peer => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
+          | peer onTimeout => exact Or.inl (by simp [execRun, hk, setActor, hsne, hph])
           | terminate =>
             rcases exec_term_world I w id kE tail hk with
               hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
@@ -12006,7 +12009,7 @@ theorem kill_park_empty (I : Impl) (w : World) (id : InstId) (t : Template) (tai
     (toState : String) (replyTo : Option InstId)
     (ht : templateOf I.desc (tname id) = some t) (hsub : t.subtree = "")
     (htm : t.terminable = true) (hpk : hasParkedCall (w.st id).parked = false) :
-    ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩).st id).parked = [] := by
+    ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st id).parked = [] := by
   have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall (w.st id).parked)) = true := by
     simp [htm, hsub, hpk, bne]
   simp only [execRun, ht, hgo, ite_true]
@@ -12092,7 +12095,7 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
                 simp [hr]
                 simpa [hempty] using enqueue_miss_dead w I.desc j dstId id
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead k) hji hdead
-            | call name label hint =>
+            | call name label hint na to =>
               simp [execRun, hk]
               cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_parked, hempty]
@@ -12100,7 +12103,7 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
                 simp [hr]
                 simpa [hempty] using enqueue_miss_dead w I.desc j dstId id
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead k) hji hdead
-            | trySend name label hint =>
+            | trySend name label hint onFull onGone =>
               simp [execRun, hk]
               cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_parked, hempty]
@@ -12175,7 +12178,7 @@ theorem dead_no_mail (I : Impl) (a : Action) (w w' : World) (id : InstId)
                 have hw := wakes_parked I.desc (readersOf w1 name) w1 label j id
                 exact (hw.trans hbase).trans hempty
             | internal => simp [execRun, hk, setActor, hji, hempty]
-            | peer => simp [execRun, hk, setActor, hji, hempty]
+            | peer onTimeout => simp [execRun, hk, setActor, hji, hempty]
             | terminate =>
               rcases exec_term_world I w j k tail hk with
                 hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
@@ -12230,7 +12233,7 @@ theorem mailbox_alive (I : Impl) (hL : LocalOk I) (N : Nat) (w : World) (hR : Re
         | inl hExecKill =>
           rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
           have hcleared := kill_park_empty I w id t tail toState replyTo ht hsub htm hpk
-          have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
+          have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
             simp [apply, hact, execHead, halive, hrun] at happ
             exact happ.symm
           rw [hstep] at hne
@@ -12893,7 +12896,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
                 simp [hr] at hpost ⊢
                 exact enqueue_ty_wait w I.desc j dstId s
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead kE) hpost
-            | call name label hint =>
+            | call name label hint na to =>
               simp [execRun, hk] at hpost ⊢
               cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hs] at hpost ⊢
@@ -12901,7 +12904,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
                 simp [hr] at hpost ⊢
                 exact enqueue_ty_wait w I.desc j dstId s
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead kE) hpost
-            | trySend name label hint =>
+            | trySend name label hint onFull onGone =>
               simp [execRun, hk] at hpost ⊢
               cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hs] at hpost ⊢
@@ -12938,7 +12941,7 @@ theorem waiting_ty_step (I : Impl) (a : Action) (w w' : World) (s : InstId)
                 rw [wakeReaders]
                 exact (wakes_ty (readersOf w1 name) I.desc w1 name label j s).trans hbase
             | internal => simp [execRun, hk, setActor, hs]
-            | peer => simp [execRun, hk, setActor, hs]
+            | peer onTimeout => simp [execRun, hk, setActor, hs]
             | terminate =>
               rcases exec_term_world I w j kE tail hk with
                 hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
@@ -13247,7 +13250,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                 simp [hr]
                 exact Or.inl ((enqueue_phase_other w I.desc j dstId
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead kE) s hsj).trans hph)
-            | call name label hint =>
+            | call name label hint na to =>
               simp [execRun, hk]
               cases hr : route w I.desc j name with
               | none => exact Or.inl (by simp [hr, setActor, hsj, hph])
@@ -13255,7 +13258,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                 simp [hr]
                 exact Or.inl ((enqueue_phase_other w I.desc j dstId
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead kE) s hsj).trans hph)
-            | trySend name label hint =>
+            | trySend name label hint onFull onGone =>
               simp [execRun, hk]
               cases hr : route w I.desc j name with
               | none => exact Or.inl (by simp [hr, setActor, hsj, hph])
@@ -13286,7 +13289,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                   rw [wakes_phase (readersOf _ _) I.desc _ name label j s]
                   simp [setCell, setActor, hsj, hph])
             | internal => exact Or.inl (by simp [execRun, hk, setActor, hsj, hph])
-            | peer => exact Or.inl (by simp [execRun, hk, setActor, hsj, hph])
+            | peer onTimeout => exact Or.inl (by simp [execRun, hk, setActor, hsj, hph])
             | terminate =>
               rcases exec_term_world I w j kE tail hk with
                 hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
@@ -15166,12 +15169,12 @@ theorem terminate_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
   have hname := hTerm id (.terminate :: es) hc (by simp [hasTerminate])
   have hstep := exec_term_step I w id (w.st id) es k.toState k.replyTo
   have heq : execRun I w id (w.st id) k =
-      execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ := by
+      execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
     cases k
     simp at hrest
     rw [hrest]
   rw [heq]
-  generalize hw : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ = wR at hstep ⊢
+  generalize hw : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ = wR at hstep ⊢
   cases hstep
   · exact hT
   · rename_i t ht hsub htm hpark hch
@@ -15287,34 +15290,34 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
             exact enqueue_send_tag w I.desc id dstId
               { label := label, sender := id, callFrom := none } k (.send dst label hint) es hT hph
               hrest (by intro h; cases h) (by intro h; cases h) rfl
-        | trySend dst label hint =>
+        | trySend dst label hint onFull onGone =>
           simp [execRun, hrest]
           cases hroute : route w I.desc id dst with
           | none =>
             simp only [hroute]
             exact callTag_note w id id dst (proceed (w.st id) (afterHead k))
-              (run_tail_tag w id k (.trySend dst label hint) es hT hph hrest
+              (run_tail_tag w id k (.trySend dst label hint onFull onGone) es hT hph hrest
                 (by intro h; cases h) (by intro h; cases h))
           | some dstId =>
             simp
             split
             · exact enqueue_send_tag w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } k
-                (.trySend dst label hint) es hT hph hrest (by intro h; cases h) (by intro h; cases h) rfl
-            · exact run_tail_tag w id k (.trySend dst label hint) es hT hph hrest
+                (.trySend dst label hint onFull onGone) es hT hph hrest (by intro h; cases h) (by intro h; cases h) rfl
+            · exact run_tail_tag w id k (.trySend dst label hint onFull onGone) es hT hph hrest
                 (by intro h; cases h) (by intro h; cases h)
-        | call dst label hint =>
+        | call dst label hint na to =>
           simp [execRun, hrest]
           cases hroute : route w I.desc id dst with
           | none =>
             simp only [hroute]
             exact callTag_note w id id dst (proceed (w.st id) (afterHead k))
-              (run_tail_tag w id k (.call dst label hint) es hT hph hrest
+              (run_tail_tag w id k (.call dst label hint na to) es hT hph hrest
                 (by intro h; cases h) (by intro h; cases h))
           | some dstId =>
             simp
             exact enqueue_call_tag w I.desc id dstId
-              { label := label, sender := id, callFrom := some id } k (.call dst label hint) es hT hM
+              { label := label, sender := id, callFrom := some id } k (.call dst label hint na to) es hT hM
               hph hrest (by intro h; cases h) (by intro h; cases h) rfl
         | reply =>
           simp [execRun, hrest]
@@ -15349,9 +15352,9 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
           exact carry_step_tag w id k (.internal) es (.awaitEffect (afterHead k)) hT hph hrest
             (by intro h; cases h) (by intro h; cases h) (by simp [carriedCont])
             (by intro d kA hbad; cases hbad) (by intro d kA hbad; cases hbad)
-        | peer =>
+        | peer onTimeout =>
           simp [execRun, hrest]
-          exact carry_step_tag w id k (.peer) es (.awaitPeer (afterHead k)) hT hph hrest
+          exact carry_step_tag w id k ((.peer onTimeout)) es (.awaitPeer (afterHead k)) hT hph hrest
             (by intro h; cases h) (by intro h; cases h) (by simp [carriedCont])
             (by intro d kA hbad; cases hbad) (by intro d kA hbad; cases hbad)
         | terminate =>
@@ -15369,15 +15372,16 @@ structure MemberQuiet (w : World) (id : InstId) : Prop where
 A subtree member may call a sibling, so this does not apply there. -/
 theorem reachable_member_quiet (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     (w : World) (hR : Reachable I N w) (hT : CallTagInv w) (hM : MailInv w) (id : InstId)
-    (hterm : loneTerminableName I.desc (tname id)) : MemberQuiet w id := by
+    (hterm : loneTerminableName I.desc (tname id))
+    (hcall : ∀ callee k, ¬ CallWait (w.st id).phase callee k) : MemberQuiet w id := by
   obtain ⟨t, ht, htm, hsub⟩ := hterm
   have hparkF := terminable_no_parked_call I hL hG N w hR id ⟨t, ht, htm, hsub⟩
   have hplain : ∀ p, p ∈ (w.st id).parked → p.isCall = false := by
     simpa [hasParkedCall, List.any_eq_false] using hparkF
   refine ⟨?_, ?_, ?_, ?_⟩
   · intro callee k h
-    have hnot := terminable_not_caller I hL hG N w hR id callee k h t ht hsub
-    simp [htm] at hnot
+    -- A lone terminable may call (DECISIONS 2026-11-22). Quiet is the extra fact.
+    exact hcall callee k h
   · intro caller k h
     have hnot := no_terminable_call_target I hL hG N w hR caller id k h t ht
     have hsame : sameSubtree I.desc (tname caller) (tname id) = true := by simpa [htm] using hnot
@@ -15942,7 +15946,7 @@ theorem exec_owned (I : Impl) (w : World) (id : InstId) (w' : World)
             exact enqueue_owned w I.desc id dstId
               { label := label, sender := id, callFrom := none } false (afterHead k) hown
               (by intro c hc; cases hc)
-        | trySend dst label hint =>
+        | trySend dst label hint onFull onGone =>
           simp [execRun, hrest]
           cases hroute : route w I.desc id dst with
           | none =>
@@ -15957,7 +15961,7 @@ theorem exec_owned (I : Impl) (w : World) (id : InstId) (w' : World)
                 { label := label, sender := id, callFrom := none, reliable := false } false
                 (afterHead k) hown (by intro c hc; cases hc)
             · exact owned_keep w id (proceed (w.st id) (afterHead k)) hown (by simp [proceed_box])
-        | call dst label hint =>
+        | call dst label hint na to =>
           simp [execRun, hrest]
           cases hroute : route w I.desc id dst with
           | none =>
@@ -16037,18 +16041,18 @@ theorem exec_owned (I : Impl) (w : World) (id : InstId) (w' : World)
         | internal =>
           simp [execRun, hrest]
           exact owned_keep w id ({(w.st id) with phase := .awaitEffect (afterHead k)}) hown rfl
-        | peer =>
+        | peer onTimeout =>
           simp [execRun, hrest]
           exact owned_keep w id ({(w.st id) with phase := .awaitPeer (afterHead k)}) hown rfl
         | terminate =>
           have hstep := exec_term_step I w id (w.st id) es k.toState k.replyTo
           have heq : execRun I w id (w.st id) k =
-              execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ := by
+              execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
             cases k
             simp at hrest
             rw [hrest]
           rw [heq]
-          generalize hw : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo⟩ = wR
+          generalize hw : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ = wR
             at hstep ⊢
           cases hstep
           · exact hown
@@ -16908,7 +16912,7 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
     (hlive : ((execRun I w id (w.st id) k).st mb).life = .alive) :
     BoxGrow ((w.st mb).box) ((execRun I w id (w.st id) k).st mb).box := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil =>
       simpa [execRun] using box_actor w id { (w.st id) with phase := .idle, typestate := toState } mb rfl
@@ -16920,65 +16924,65 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
         | none =>
           simp only [hr]
           exact box_actor w id (proceed (w.st id)
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_box _ _)
         | some dstId =>
           simpa [hr] using enqueue_box w I.desc id dstId
             { label := label, sender := id, callFrom := none } false
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb
-      | call dst label hint =>
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb
+      | call dst label hint na to =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr]
           exact box_actor w id (proceed (w.st id)
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_box _ _)
         | some dstId =>
           simpa [hr] using enqueue_box w I.desc id dstId
             { label := label, sender := id, callFrom := some id } true
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb
       | internal =>
         simpa [execRun] using box_actor w id
-          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo⟩) }
+          { (w.st id) with phase := .awaitEffect (afterHead ⟨.internal :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }
           mb rfl
-      | peer =>
+      | peer onTimeout =>
         simpa [execRun] using box_actor w id
-          { (w.st id) with phase := .awaitPeer (afterHead ⟨.peer :: tail, toState, replyTo⟩) }
+          { (w.st id) with phase := .awaitPeer (afterHead ⟨(.peer onTimeout) :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) }
           mb rfl
       | selfSchedule label =>
         simp only [execRun]
         by_cases hany : ((w.st id).prio.any fun p => p.label == label) = true
         · simpa [hany] using box_actor w id (proceed (w.st id)
-            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+            (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_box _ _)
         · by_cases hlt : prioLoad (w.st id).prio < capPrio I.desc w.N id
           · simpa [hany, hlt] using box_actor w id (proceed { (w.st id) with
               prio := upsertPrio (w.st id).prio
                 { label := label, sender := id, callFrom := none, reliable := true,
                   mid := (w.st id).nextMid },
               nextMid := (w.st id).nextMid + 1 }
-              (afterHead ⟨.selfSchedule label :: tail, toState, replyTo⟩)) mb (by simp [proceed_box])
+              (afterHead ⟨.selfSchedule label :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (by simp [proceed_box])
           · simpa [hany, hlt] using box_actor w id { (w.st id) with phase := .crashed } mb rfl
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none =>
           simp only [hr]
           exact box_actor w id (proceed (w.st id)
-            (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+            (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_box _ _)
         | some dstId =>
           simp only [hr]
           split
           · simpa using enqueue_box w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb
           · exact box_actor w id (proceed (w.st id)
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_box _ _)
       | reply =>
         simp only [execRun]
         unfold performReply
         cases hto : replyTo with
         | none =>
           simpa [hto] using box_actor w id (proceed (w.st id)
-            (afterHead ⟨.reply :: tail, toState, replyTo⟩)) mb (proceed_box _ _)
+            (afterHead ⟨.reply :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb (proceed_box _ _)
         | some caller =>
           cases hcall : (w.st caller).phase with
           | awaitReply dst ck =>
@@ -17030,17 +17034,17 @@ theorem exec_box (I : Impl) (w : World) (id : InstId) (k : Cont) (mb : InstId)
             { value := max (w.cell dst label).value value, dirty := true }) id
             (proceed ((setCell w dst label
               { value := max (w.cell dst label).value value, dirty := true }).st id)
-              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb
             (by simpa [setCell] using proceed_box _ _)
         · simp [hdirty]
           exact box_actor (setCell w dst label
             { value := max (w.cell dst label).value value, dirty := true }) id
             (proceed ((setCell w dst label
               { value := max (w.cell dst label).value value, dirty := true }).st id)
-              (afterHead ⟨.cell dst label value :: tail, toState, replyTo⟩)) mb
+              (afterHead ⟨.cell dst label value :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩)) mb
             (by simpa [setCell] using proceed_box _ _)
       | terminate =>
-        rcases exec_term_world I w id ⟨.terminate :: tail, toState, replyTo⟩ tail rfl with
+        rcases exec_term_world I w id ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ tail rfl with
           hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
         · rw [hkept]
           exact Or.inl rfl
@@ -17312,7 +17316,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
     (hne : i ≠ id) (hidle : (w.st i).phase = .idle) (hdead : (w.st i).life ≠ .alive) :
     ((execRun I w id (w.st id) k).st i).phase = .idle := by
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil => simp [execRun, setActor, hne, hidle]
     | cons e tail =>
@@ -17324,16 +17328,16 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
         | some dstId =>
           simpa [hr, hidle] using enqueue_phase_other w I.desc id dstId
             { label := label, sender := id, callFrom := none } false
-            (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) i hne
-      | call dst label hint =>
+            (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hne
+      | call dst label hint na to =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed, hidle]
         | some dstId =>
           simpa [hr, hidle] using enqueue_phase_other w I.desc id dstId
             { label := label, sender := id, callFrom := some id } true
-            (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) i hne
-      | trySend dst label hint =>
+            (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hne
+      | trySend dst label hint onFull onGone =>
         simp only [execRun]
         cases hr : route w I.desc id dst with
         | none => simp [hr, setActor, hne, proceed, hidle]
@@ -17342,7 +17346,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
           split
           · simpa [hidle] using enqueue_phase_other w I.desc id dstId
               { label := label, sender := id, callFrom := none, reliable := false } false
-              (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) i hne
+              (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) i hne
           · simp [setActor, hne, proceed, hidle]
       | reply =>
         simp only [execRun, performReply]
@@ -17393,7 +17397,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
         · simp [hdirty, setCell, setActor, hne, proceed, wakeReaders, hwake, hidle]
         · simp [hdirty, setCell, setActor, hne, proceed, hidle]
       | internal => simp [execRun, setActor, hne, hidle]
-      | peer => simp [execRun, setActor, hne, hidle]
+      | peer onTimeout => simp [execRun, setActor, hne, hidle]
       | terminate =>
         have hkeep : ∀ (ps : List Parked) (w0 : World), (w0.st i).phase = .idle →
             ((releaseParked w0 id ps).st i).phase = .idle := by
@@ -17413,7 +17417,7 @@ theorem exec_keeps_idle (I : Impl) (w : World) (id i : InstId) (k : Cont)
                   simp [setActor, hi, resumeSender, hI]
                 · simp [setActor, hi, h0]
               exact ih _ hph
-        rcases exec_term_world I w id ⟨.terminate :: tail, toState, replyTo⟩ tail rfl with
+        rcases exec_term_world I w id ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ tail rfl with
           hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
         · simpa [hkept] using hidle
         · rw [hrel]
@@ -17484,7 +17488,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
   intro hyes
   have hne' : ¬ c = id := fun h => hne h.symm
   cases k with
-  | mk rest toState replyTo =>
+  | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
     cases rest with
     | nil =>
       rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
@@ -17504,7 +17508,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
           exact hno (Or.inr ⟨mb, p, hp, hc⟩)
     | cons e tail =>
       cases e with
-      | call dst label hint =>
+      | call dst label hint na to =>
         simp only [execRun] at hyes
         cases hr : route w I.desc id dst with
         | none =>
@@ -17524,14 +17528,14 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
           simp only [hr] at hyes
           rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
           · rcases enqueue_box_mem w I.desc id dstId msg true
-                (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb m hm with
+                (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb m hm with
               hold | ⟨_, heq, _⟩
             · exact hno (Or.inl ⟨mb, m, hold, hc⟩)
             · rw [heq] at hc
               injection hc with hid
               exact hne hid
           · rcases enqueue_parked_mem w I.desc id dstId msg true
-                (afterHead ⟨.call dst label hint :: tail, toState, replyTo⟩) mb p hp with
+                (afterHead ⟨.call dst label hint na to :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb p hp with
               hold | ⟨_, _, heq, _, _⟩
             · exact hno (Or.inr ⟨mb, p, hold, hc⟩)
             · rw [heq] at hc
@@ -17557,18 +17561,18 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
           simp only [hr] at hyes
           rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
           · rcases enqueue_box_mem w I.desc id dstId msg false
-                (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb m hm with
+                (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb m hm with
               hold | ⟨_, heq, _⟩
             · exact hno (Or.inl ⟨mb, m, hold, hc⟩)
             · rw [heq] at hc
               simp at hc
           · rcases enqueue_parked_mem w I.desc id dstId msg false
-                (afterHead ⟨.send dst label hint :: tail, toState, replyTo⟩) mb p hp with
+                (afterHead ⟨.send dst label hint :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb p hp with
               hold | ⟨_, _, heq, _, _⟩
             · exact hno (Or.inr ⟨mb, p, hold, hc⟩)
             · rw [heq] at hc
               simp at hc
-      | trySend dst label hint =>
+      | trySend dst label hint onFull onGone =>
         simp only [execRun] at hyes
         cases hr : route w I.desc id dst with
         | none =>
@@ -17591,13 +17595,13 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
             let msg : Msg := { label := label, sender := id, callFrom := none, reliable := false }
             rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
             · rcases enqueue_box_mem w I.desc id dstId msg false
-                  (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb m hm with
+                  (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb m hm with
                 hold | ⟨_, heq, _⟩
               · exact hno (Or.inl ⟨mb, m, hold, hc⟩)
               · rw [heq] at hc
                 simp at hc
             · rcases enqueue_parked_mem w I.desc id dstId msg false
-                  (afterHead ⟨.trySend dst label hint :: tail, toState, replyTo⟩) mb p hp with
+                  (afterHead ⟨.trySend dst label hint onFull onGone :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) mb p hp with
                 hold | ⟨_, _, heq, _, _⟩
               · exact hno (Or.inr ⟨mb, p, hold, hc⟩)
               · rw [heq] at hc
@@ -17775,7 +17779,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
             exact hno (Or.inr ⟨id, p, hp, hc⟩)
           · simp [setActor, hmb] at hp
             exact hno (Or.inr ⟨mb, p, hp, hc⟩)
-      | peer =>
+      | peer onTimeout =>
         simp [execRun, setActor] at hyes
         rcases hyes with ⟨mb, m, hm, hc⟩ | ⟨mb, p, hp, hc⟩
         · by_cases hmb : mb = id
@@ -17789,7 +17793,7 @@ theorem exec_no_foreign_call (I : Impl) (w : World) (id : InstId) (k : Cont) (c 
           · simp [setActor, hmb] at hp
             exact hno (Or.inr ⟨mb, p, hp, hc⟩)
       | terminate =>
-        rcases exec_term_world I w id ⟨.terminate :: tail, toState, replyTo⟩ tail rfl with
+        rcases exec_term_world I w id ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ tail rfl with
           hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
         · rw [hkept] at hyes
           exact hno hyes
@@ -18112,8 +18116,8 @@ theorem nonidle_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
           rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
           have hdie := terminate_commits I hL hG N w prev
             (inv3_reachable I hL hG N w prev).2 i
-            ⟨.terminate :: tail, toState, replyTo⟩ tail hrun h0
-          have hstep : w' = execRun I w i (w.st i) ⟨.terminate :: tail, toState, replyTo⟩ := by
+            ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ tail hrun h0
+          have hstep : w' = execRun I w i (w.st i) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
             simp [apply, hact, execHead, h0, hrun] at happ
             exact happ.symm
           rw [hstep] at hph
@@ -18136,7 +18140,7 @@ theorem kill_box_empty (I : Impl) (w : World) (id : InstId) (t : Template) (tail
     (toState : String) (replyTo : Option InstId)
     (ht : templateOf I.desc (tname id) = some t) (hsub : t.subtree = "")
     (htm : t.terminable = true) (hpk : hasParkedCall (w.st id).parked = false) :
-    ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩).st id).box = [] := by
+    ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st id).box = [] := by
   have hgo : (t.terminable && (t.subtree != "" || !hasParkedCall (w.st id).parked)) = true := by
     simp [htm, hsub, hpk, bne]
   simp only [execRun, ht, hgo, ite_true]
@@ -18494,7 +18498,7 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
                 simp [hr]
                 simpa [hempty] using enqueue_dead_box w I.desc j dstId id
                   ({ label := label, sender := j, callFrom := none } : Msg) false (afterHead k) hdead hempty
-            | call name label hint =>
+            | call name label hint na to =>
               simp [execRun, hk]
               cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_box, hempty]
@@ -18502,7 +18506,7 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
                 simp [hr]
                 simpa [hempty] using enqueue_dead_box w I.desc j dstId id
                   ({ label := label, sender := j, callFrom := some j } : Msg) true (afterHead k) hdead hempty
-            | trySend name label hint =>
+            | trySend name label hint onFull onGone =>
               simp [execRun, hk]
               cases hr : route w I.desc j name with
               | none => simp [hr, setActor, hji, proceed_box, hempty]
@@ -18555,7 +18559,7 @@ theorem dead_no_box (I : Impl) (a : Action) (w w' : World) (id : InstId)
                 have hw := wakes_box I.desc (readersOf w1 name) w1 label j id
                 exact (hw.trans hbase).trans hempty
             | internal => simp [execRun, hk, setActor, hji, hempty]
-            | peer => simp [execRun, hk, setActor, hji, hempty]
+            | peer onTimeout => simp [execRun, hk, setActor, hji, hempty]
             | terminate =>
               rcases exec_term_world I w j k tail hk with
                 hkept | ⟨_, _, _, _, _, _, hrel⟩ | ⟨t, _, _, _, _, hkill⟩
@@ -18593,7 +18597,7 @@ theorem box_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w
         | inl hExecKill =>
           rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
           have hcleared := kill_box_empty I w id t tail toState replyTo ht hsub htm hpk
-          have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo⟩ := by
+          have hstep : w' = execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
             simp [apply, hact, execHead, halive, hrun] at happ
             exact happ.symm
           rw [hstep] at hne
@@ -18712,7 +18716,7 @@ theorem call_stuck_false (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : 
 /-- No actor in a fair run stays blocked. -/
 theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)
     {N : Nat} (ρ : Run I N) (hF : Fair ρ) (x : InstId) (t : Nat) (hS : Stuck ρ x t)
-    (hwhy : peerFinishable I.desc x = true ∨ waitKind ((ρ.cfg t).st x) ≠ some .peer) : False := by
+    (hwhy : peerFinishable I.desc x = true ∨ waitKind ((ρ.cfg t).st x) ≠ some (.peer onTimeout)) : False := by
   obtain ⟨hs, hok⟩ := hG.ranked
   have halive := stuck_alive I hL hG ρ x t hS
   cases hwk : waitKind ((ρ.cfg t).st x) with
@@ -18720,7 +18724,7 @@ theorem never_stuck (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
   | some kind =>
     cases kind with
     | effect => exact not_stuck_effect_assumed ρ hF x t hS hwk
-    | peer =>
+    | peer onTimeout =>
       rcases hwhy with hf | hne
       · exact not_stuck_peer_assumed ρ hF x t hS hwk hf
       · exact absurd hwk hne
@@ -19453,7 +19457,7 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
               simp [hrte]
               simpa [enqueue_prio w I.desc id dstId
                 { label := label, sender := id, callFrom := none } false (afterHead k) r] using hm
-          | call dst label hint =>
+          | call dst label hint na to =>
             simp [execRun, hk]
             cases hrte : route w I.desc id dst with
             | none =>
@@ -19466,7 +19470,7 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
               simp [hrte]
               simpa [enqueue_prio w I.desc id dstId
                 { label := label, sender := id, callFrom := some id } true (afterHead k) r] using hm
-          | trySend dst label hint =>
+          | trySend dst label hint onFull onGone =>
             simp [execRun, hk]
             cases hrte : route w I.desc id dst with
             | none =>
@@ -19496,7 +19500,7 @@ theorem prio_mem_step (I : Impl) (a : Action) (w w' : World) (r : InstId) (m : M
               simp [execRun, hk, setActor]
               exact hm
             · simp [execRun, hk, setActor, hri, hm]
-          | peer =>
+          | peer onTimeout =>
             by_cases hri : r = id
             · subst hri
               simp [execRun, hk, setActor]
@@ -19747,7 +19751,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
     (h : apply I a w = some w')
     (hnot : ¬ ∃ id payload tail toState replyTo,
         a = .exec id ∧
-          (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo⟩) :
+          (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩) :
     (w'.cell dst label).value = (w.cell dst label).value ∧
       ((w.cell dst label).dirty = false → (w'.cell dst label).dirty = false) := by
   cases a with
@@ -19847,7 +19851,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
               rw [hd0, hl0] at hk
               exact False.elim (hnot ⟨id, v0, tail, k.toState, k.replyTo, rfl, by
                 cases k with
-                | mk rest toState replyTo =>
+                | mk rest toState replyTo _ _ _ _ _ _ _ _ =>
                   have hrest : rest = .cell dst label v0 :: tail := hk
                   rw [hrest] at hph
                   exact hph⟩)
@@ -19885,7 +19889,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
               simpa [hr, enqueue_cell] using
                 enqueue_cell w I.desc id dstId { label := l0, sender := id, callFrom := none }
                   false (afterHead k) dst label
-          | call d0 l0 hint =>
+          | call d0 l0 hint na to =>
             simp [execRun, hk]
             cases hr : route w I.desc id d0 with
             | none => simp [hr, setActor]
@@ -19893,7 +19897,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
               simpa [hr, enqueue_cell] using
                 enqueue_cell w I.desc id dstId { label := l0, sender := id, callFrom := some id }
                   true (afterHead k) dst label
-          | trySend d0 l0 hint =>
+          | trySend d0 l0 hint onFull onGone =>
             simp [execRun, hk]
             cases hr : route w I.desc id d0 with
             | none => simp [hr, setActor]
@@ -19911,7 +19915,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
             · simp [setActor]
             · split <;> simp [setActor]
           | internal => simp [execRun, hk, setActor]
-          | peer => simp [execRun, hk, setActor]
+          | peer onTimeout => simp [execRun, hk, setActor]
       | idle => simp [hph] at h
       | parked _ _ _ => simp [hph] at h
       | awaitReply _ _ => simp [hph] at h
@@ -19922,7 +19926,7 @@ theorem cell_quiet (I : Impl) (a : Action) (w w' : World) (dst label : String)
 
 theorem cell_write_value (I : Impl) (w : World) (id : InstId) (payload : Nat) (tail : List Eff)
     (toState : String) (replyTo : Option InstId) (dst label : String) :
-    let k : Cont := ⟨.cell dst label payload :: tail, toState, replyTo⟩
+    let k : Cont := ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩
     ((execRun I w id (w.st id) k).cell dst label).value = max (w.cell dst label).value payload ∧
       ((execRun I w id (w.st id) k).cell dst label).dirty = true := by
   intro k
@@ -19933,7 +19937,7 @@ theorem cell_ge_step (I : Impl) (a : Action) (w w' : World) (dst label : String)
     (h : apply I a w = some w') :
     (w.cell dst label).value ≤ (w'.cell dst label).value := by
   by_cases hwrite : ∃ id payload tail toState replyTo,
-      a = .exec id ∧ (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo⟩
+      a = .exec id ∧ (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩
   · rcases hwrite with ⟨id, payload, tail, toState, replyTo, ha, hph⟩
     rw [ha] at h
     simp only [apply] at h
@@ -20074,10 +20078,10 @@ theorem step_is_write (I : Impl) (a : Action) (w w' : World) (dst label : String
       ((w.cell dst label).dirty = false → (w'.cell dst label).dirty = false))) :
     ∃ id payload tail toState replyTo,
       a = .exec id ∧ (w.st id).life = .alive ∧
-        (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo⟩ ∧
-        w' = execRun I w id (w.st id) ⟨.cell dst label payload :: tail, toState, replyTo⟩ := by
+        (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ ∧
+        w' = execRun I w id (w.st id) ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
   by_cases hwrite : ∃ id payload tail toState replyTo,
-      a = .exec id ∧ (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo⟩
+      a = .exec id ∧ (w.st id).phase = .run ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩
   · rcases hwrite with ⟨id, payload, tail, toState, replyTo, ha, hph⟩
     rw [ha] at h
     simp only [apply] at h
@@ -20358,7 +20362,7 @@ theorem cell_wake_label (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (w : W
     (r : InstId) (dst label : String) (hlive : (w.st r).life = .alive) (hname : tname r = dst)
     (hmem : r ∈ w.roster) (hdirty : (w.cell dst label).dirty = false) (hLane : LaneOk I w)
     (hlab : label ∈ cellLabels I.desc dst) :
-    let k : Cont := ⟨.cell dst label payload :: tail, toState, replyTo⟩
+    let k : Cont := ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩
     hasLabel (((execRun I w id (w.st id) k).st r).prio) label := by
   intro k
   simp [k, execRun, hdirty, setCell, setActor]
@@ -20521,7 +20525,7 @@ theorem cell_fresh (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
           have hne : ¬∃ wid payload tail toState replyTo,
               ρ.act i = .exec wid ∧
                 ((ρ.cfg i).st wid).phase =
-                  .run ⟨.cell dst label payload :: tail, toState, replyTo⟩ := by
+                  .run ⟨.cell dst label payload :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
             intro hex
             rcases hex with ⟨_, _, _, _, _, ha, _⟩
             rw [heqt] at hact
