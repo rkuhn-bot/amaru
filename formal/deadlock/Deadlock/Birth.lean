@@ -1184,3 +1184,552 @@ theorem place_nextKey (I : Impl) (w : World) (template : String) (k : Nat) (init
   unfold placePeer
   dsimp
   rw [readCells_nextKey, setActor]
+
+/-- The counter step of an unsupervised lone root. -/
+abbrev ixBump (template : String) (k : Nat) (u : World) : World :=
+  { u with nextIx := fun m => if m = template then k + 1 else u.nextIx m }
+
+theorem ixBump_st (template : String) (k : Nat) (u : World) (i : InstId) :
+    (ixBump template k u).st i = u.st i := rfl
+
+theorem ixBump_roster (template : String) (k : Nat) (u : World) :
+    (ixBump template k u).roster = u.roster := rfl
+
+theorem alive_on_roster (w : World) (hO : ∀ id, (w.st id).life ≠ .absent → id ∈ w.roster)
+    (id : InstId) (hl : (w.st id).life = .alive) : id ∈ w.roster :=
+  hO id (by rw [hl]; intro hbad; cases hbad)
+
+/-- An unsupervised lone root born at `nextIx`. The key is past every earlier
+birth of that template (`ixPast`), the parent is `none`, and a non-absent
+actor is already on the roster, so the new generation is the only live one. -/
+theorem birth_lone (I : Impl) (w : World) (h : BirthInv I.desc w)
+    (hO : ∀ id, (w.st id).life ≠ .absent → id ∈ w.roster)
+    (template : String) (t : Template) (k : Nat)
+    (ht : templateOf I.desc template = some t) (hsup : t.supervisor = none)
+    (hsub : t.subtree = "") (hk : k = w.nextIx template) :
+    BirthInv I.desc (placePeer I w template k t.initial none (ixBump template k)) := by
+  let id := InstId.peer template k (maxGen w template k)
+  have hfresh : ∀ g, InstId.peer template k g ∉ w.roster := by
+    intro g hmem
+    have hlt := h.ixPast template k g hmem t ht hsup hsub
+    omega
+  have hros := place_roster I w template k t.initial none (ixBump template k) (ixBump_roster template k)
+  have hself := place_st_self I w template k t.initial none (ixBump template k) (ixBump_st template k)
+  have hother (i : InstId) (hne : i ≠ id) :
+      (placePeer I w template k t.initial none (ixBump template k)).st i = w.st i :=
+    place_st_other I w template k t.initial none (ixBump template k) i (ixBump_st template k) hne
+  have hborn := born_shape I.desc w template k t.initial (none : Option InstId)
+  refine ⟨?parented, ?single, ?tomb, ?present, ?box, ?self, ?park, ?live, ?onParent, ?ix, ?key⟩
+  · intro i t' hi ht'
+    rw [hros] at hi
+    rcases List.mem_append.mp hi with hold | hnew
+    · have hne : i ≠ id := by
+        intro heq
+        exact hfresh _ (heq ▸ hold)
+      rw [hother i hne]
+      exact h.parented i t' hold ht'
+    · have hiEq : i = id := List.mem_singleton.mp hnew
+      unfold id at hiEq
+      cases hiEq
+      have htEq : t' = t := by
+        have hsame : some t' = some t := by simpa [tname] using ht'.symm.trans ht
+        cases hsame
+        rfl
+      rw [hself]
+      simp [htEq, hsup]
+  · intro name key g1 g2 t' ht' hroot h1 h2
+    rw [hros] at h1
+    rw [hros] at h2
+    rcases List.mem_append.mp h1 with h1o | h1n
+    · rcases List.mem_append.mp h2 with h2o | h2n
+      · exact h.singleGen name key g1 g2 t' ht' hroot h1o h2o
+      · have h2eq := List.mem_singleton.mp h2n
+        unfold id at h2eq
+        cases h2eq
+        exact absurd h1o (hfresh g1)
+    · have h1eq := List.mem_singleton.mp h1n
+      unfold id at h1eq
+      cases h1eq
+      rcases List.mem_append.mp h2 with h2o | h2n
+      · exact absurd h2o (hfresh g2)
+      · have h2eq := List.mem_singleton.mp h2n
+        unfold id at h2eq
+        cases h2eq
+        rfl
+  · intro name key g host m hliveP hliveH hm htomb
+    by_cases hh : host = id
+    · rw [hh, hself] at hm
+      simp [bornActor, withKeyTokens, withTokens] at hm
+    · have hm0 : m ∈ (w.st host).prio := by
+        rw [hother host hh] at hm
+        exact hm
+      by_cases hp : InstId.peer name key g = id
+      · unfold id at hp
+        cases hp
+        have hold := h.tombOnParent host m hm0 htomb
+        cases hs : m.sender with
+        | core _ => simp [hs]
+        | peer n0 k0 g0 =>
+          simp only [hs] at hold
+          intro hn hk0
+          rcases hold with ⟨hmem, _, _⟩
+          exact hfresh g0 (by simpa [hn, hk0] using hmem)
+      · have hlive0 : (w.st (InstId.peer name key g)).life = .alive := by
+          rw [← hother _ hp]
+          exact hliveP
+        have hhost0 : (w.st host).life = .alive := by
+          rw [← hother host hh]
+          exact hliveH
+        exact h.noTombLive name key g host m hlive0 hhost0 hm0 htomb
+  · intro i hi
+    rw [hros] at hi
+    rcases List.mem_append.mp hi with hold | hnew
+    · have hne : i ≠ id := by
+        intro heq
+        exact hfresh _ (heq ▸ hold)
+      rw [hother i hne]
+      exact h.present i hold
+    · have hiEq : i = id := List.mem_singleton.mp hnew
+      unfold id at hiEq
+      cases hiEq
+      rw [hself]
+      intro hbad
+      rw [hborn.1] at hbad
+      cases hbad
+  · intro host m hm
+    by_cases hh : host = id
+    · rw [hh, hself] at hm
+      simp [bornActor, withKeyTokens, withTokens] at hm
+    · rw [hother host hh] at hm
+      exact h.plainBox host m hm
+  · intro i
+    by_cases hh : i = id
+    · rw [hh, hself]
+      intro hbad
+      rw [hborn.2.2.2.2] at hbad
+      cases hbad
+    · rw [hother i hh]
+      exact h.noSelf i
+  · intro host p hp
+    by_cases hh : host = id
+    · rw [hh, hself] at hp
+      simp [bornActor, withKeyTokens, withTokens] at hp
+    · rw [hother host hh] at hp
+      exact h.plainParked host p hp
+  · intro n key g1 g2 h1 h2
+    by_cases h1n : InstId.peer n key g1 = id
+    · by_cases h2n : InstId.peer n key g2 = id
+      · unfold id at h1n
+        unfold id at h2n
+        cases h1n
+        cases h2n
+        rfl
+      · have h2old : (w.st (InstId.peer n key g2)).life = .alive := by
+          rw [← hother _ h2n]
+          exact h2
+        unfold id at h1n
+        cases h1n
+        exact absurd (alive_on_roster w hO _ h2old) (hfresh g2)
+    · by_cases h2n : InstId.peer n key g2 = id
+      · have h1old : (w.st (InstId.peer n key g1)).life = .alive := by
+          rw [← hother _ h1n]
+          exact h1
+        unfold id at h2n
+        cases h2n
+        exact absurd (alive_on_roster w hO _ h1old) (hfresh g1)
+      · exact h.oneLive n key g1 g2 (by rw [← hother _ h1n]; exact h1)
+          (by rw [← hother _ h2n]; exact h2)
+  · intro host m hm htomb
+    by_cases hh : host = id
+    · rw [hh, hself] at hm
+      simp [bornActor, withKeyTokens, withTokens] at hm
+    · have hm0 : m ∈ (w.st host).prio := by
+        rw [hother host hh] at hm
+        exact hm
+      have hold := h.tombOnParent host m hm0 htomb
+      cases hs : m.sender with
+      | core _ => simp [hs]
+      | peer n key g =>
+        simp only [hs] at hold
+        rcases hold with ⟨hmem, hp, hd⟩
+        have hne : InstId.peer n key g ≠ id := by
+          intro heq
+          unfold id at heq
+          cases heq
+          exact hfresh _ hmem
+        refine ⟨?_, ?_, ?_⟩
+        · rw [hros]
+          exact List.mem_append_left _ hmem
+        · rw [hother _ hne]
+          exact hp
+        · rw [hother _ hne]
+          exact hd
+  · intro n key g hmem t' ht' hsup' hsub'
+    rw [hros] at hmem
+    rcases List.mem_append.mp hmem with hold | hnew
+    · have hlt := h.ixPast n key g hold t' ht' hsup' hsub'
+      have hix := place_nextIx I w template k t.initial n
+      by_cases hn : n = template
+      · rw [hix, ite_eq_left hn]
+        have hlt' : key < k := by simpa [hn, hk] using hlt
+        omega
+      · rw [hix, ite_eq_right hn]
+        exact hlt
+    · have hnew := List.mem_singleton.mp hnew
+      unfold id at hnew
+      cases hnew
+      rw [place_nextIx I w template k t.initial template, ite_eq_left rfl]
+      omega
+  · intro n key g hmem t' ht' hne
+    rw [hros] at hmem
+    rcases List.mem_append.mp hmem with hold | hnew
+    · have hlt := h.keyPast n key g hold t' ht' hne
+      simpa [place_nextKey I w template k t.initial (templateSubtree I.desc n)] using hlt
+    · have hnew := List.mem_singleton.mp hnew
+      unfold id at hnew
+      cases hnew
+      have hsub' : t'.subtree = "" := by
+        have hsame : some t' = some t := by rw [← ht', ht]
+        cases hsame
+        exact hsub
+      exact absurd hsub' hne
+
+/-- The counter step of a subtree key. Every member of `sub` shares it. -/
+abbrev keyBump (sub : String) (k : Nat) (u : World) : World :=
+  { u with nextKey := fun s => if s = sub then k + 1 else u.nextKey s }
+
+theorem keyBump_st (sub : String) (k : Nat) (u : World) (i : InstId) :
+    (keyBump sub k u).st i = u.st i := rfl
+
+theorem keyBump_roster (sub : String) (k : Nat) (u : World) :
+    (keyBump sub k u).roster = u.roster := rfl
+
+theorem freshKey_ge (D : Description) (w : World) (sub : String) :
+    w.nextKey sub ≤ freshKey D w sub := by
+  unfold freshKey
+  suffices ∀ (ids : List InstId) (start : Nat), start ≤ ids.foldl (fun m id =>
+      match id with
+      | .peer n k _ => if sub != "" && templateSubtree D n == sub then max m (k + 1) else m
+      | .core _ => m) start by
+    exact this w.roster (w.nextKey sub)
+  intro ids
+  induction ids with
+  | nil => intro start; simp
+  | cons id ids ih =>
+    intro start
+    simp only [List.foldl_cons]
+    cases id with
+    | core _ => exact ih start
+    | peer n k _ =>
+      by_cases hc : (sub != "" && templateSubtree D n == sub) = true
+      · simp only [hc, ite_true]
+        exact Nat.le_trans (Nat.le_max_left _ _) (ih (max start (k + 1)))
+      · have hf : (sub != "" && templateSubtree D n == sub) = false := by
+          cases hbb : sub != "" && templateSubtree D n == sub <;> simp_all
+        simp only [hf, ite_false]
+        exact ih start
+
+theorem place_key_nextIx (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (sub : String) (n : String) :
+    (placePeer I w template k initial parent (keyBump sub k)).nextIx n = w.nextIx n := by
+  unfold placePeer
+  dsimp
+  rw [readCells_nextIx, setActor]
+
+theorem place_key_nextKey (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (sub s : String) :
+    (placePeer I w template k initial parent (keyBump sub k)).nextKey s =
+      if s = sub then k + 1 else w.nextKey s := by
+  unfold placePeer
+  dsimp
+  rw [readCells_nextKey, setActor]
+
+/-- A root born at `freshKey`. The key is past every earlier key of the subtree,
+and the parent is the core the template names, or `none` when it names nobody. -/
+theorem birth_fresh (I : Impl) (w : World) (h : BirthInv I.desc w)
+    (hO : ∀ id, (w.st id).life ≠ .absent → id ∈ w.roster)
+    (template : String) (t : Template) (k : Nat) (parent : Option InstId)
+    (hpar : match t.supervisor with
+      | none => parent = none
+      | some name => parent = some (InstId.core name))
+    (ht : templateOf I.desc template = some t) (hsub : t.subtree ≠ "")
+    (hk : k = freshKey I.desc w t.subtree) :
+    BirthInv I.desc (placePeer I w template k t.initial parent (keyBump t.subtree k)) := by
+  let id := InstId.peer template k (maxGen w template k)
+  have htree : templateSubtree I.desc template = t.subtree := by simp [templateSubtree, ht]
+  have hfresh : ∀ g, InstId.peer template k g ∉ w.roster := by
+    intro g hmem
+    have hlt := freshKey_gt I.desc w t.subtree template k g hsub htree hmem
+    omega
+  have hros := place_roster I w template k t.initial parent (keyBump t.subtree k)
+    (keyBump_roster t.subtree k)
+  have hself := place_st_self I w template k t.initial parent (keyBump t.subtree k)
+    (keyBump_st t.subtree k)
+  have hother (i : InstId) (hne : i ≠ id) :
+      (placePeer I w template k t.initial parent (keyBump t.subtree k)).st i = w.st i :=
+    place_st_other I w template k t.initial parent (keyBump t.subtree k) i (keyBump_st t.subtree k) hne
+  have hborn := born_shape I.desc w template k t.initial parent
+  refine ⟨?parented, ?single, ?tomb, ?present, ?box, ?self, ?park, ?live, ?onParent, ?ix, ?key⟩
+  · intro i t' hi ht'
+    rw [hros] at hi
+    rcases List.mem_append.mp hi with hold | hnew
+    · have hne : i ≠ id := by
+        intro heq
+        exact hfresh _ (heq ▸ hold)
+      rw [hother i hne]
+      exact h.parented i t' hold ht'
+    · have hiEq : i = id := List.mem_singleton.mp hnew
+      unfold id at hiEq
+      cases hiEq
+      have htEq : t' = t := by
+        have hsame : some t' = some t := by simpa [tname] using ht'.symm.trans ht
+        cases hsame
+        rfl
+      rw [htEq, hself]
+      cases hsupv : t.supervisor with
+      | none =>
+        have hpnone : parent = none := by simpa [hsupv] using hpar
+        simpa [hsupv, hpnone, bornActor, withKeyTokens, withTokens]
+      | some name =>
+        have hpcore : parent = some (InstId.core name) := by simpa [hsupv] using hpar
+        simp [hsupv, hpcore, tname, bornActor, withKeyTokens, withTokens]
+  · intro name key g1 g2 t' ht' hroot h1 h2
+    rw [hros] at h1
+    rw [hros] at h2
+    rcases List.mem_append.mp h1 with h1o | h1n
+    · rcases List.mem_append.mp h2 with h2o | h2n
+      · exact h.singleGen name key g1 g2 t' ht' hroot h1o h2o
+      · have h2eq := List.mem_singleton.mp h2n
+        unfold id at h2eq
+        cases h2eq
+        exact absurd h1o (hfresh g1)
+    · have h1eq := List.mem_singleton.mp h1n
+      unfold id at h1eq
+      cases h1eq
+      rcases List.mem_append.mp h2 with h2o | h2n
+      · exact absurd h2o (hfresh g2)
+      · have h2eq := List.mem_singleton.mp h2n
+        unfold id at h2eq
+        cases h2eq
+        rfl
+  · intro name key g host m hliveP hliveH hm htomb
+    by_cases hh : host = id
+    · rw [hh, hself] at hm
+      simp [bornActor, withKeyTokens, withTokens] at hm
+    · have hm0 : m ∈ (w.st host).prio := by
+        rw [hother host hh] at hm
+        exact hm
+      by_cases hp : InstId.peer name key g = id
+      · unfold id at hp
+        cases hp
+        have hold := h.tombOnParent host m hm0 htomb
+        cases hs : m.sender with
+        | core _ => simp [hs]
+        | peer n0 k0 g0 =>
+          simp only [hs] at hold
+          intro hn hk0
+          rcases hold with ⟨hmem, _, _⟩
+          exact hfresh g0 (by simpa [hn, hk0] using hmem)
+      · have hlive0 : (w.st (InstId.peer name key g)).life = .alive := by
+          rw [← hother _ hp]
+          exact hliveP
+        have hhost0 : (w.st host).life = .alive := by
+          rw [← hother host hh]
+          exact hliveH
+        exact h.noTombLive name key g host m hlive0 hhost0 hm0 htomb
+  · intro i hi
+    rw [hros] at hi
+    rcases List.mem_append.mp hi with hold | hnew
+    · have hne : i ≠ id := by
+        intro heq
+        exact hfresh _ (heq ▸ hold)
+      rw [hother i hne]
+      exact h.present i hold
+    · have hiEq : i = id := List.mem_singleton.mp hnew
+      unfold id at hiEq
+      cases hiEq
+      rw [hself]
+      intro hbad
+      rw [hborn.1] at hbad
+      cases hbad
+  · intro host m hm
+    by_cases hh : host = id
+    · rw [hh, hself] at hm
+      simp [bornActor, withKeyTokens, withTokens] at hm
+    · rw [hother host hh] at hm
+      exact h.plainBox host m hm
+  · intro i
+    by_cases hh : i = id
+    · cases hsupv : t.supervisor with
+      | none =>
+        have hpnone : parent = none := by simpa [hsupv] using hpar
+        rw [hh, hself, hpnone]
+        intro hbad
+        simp [bornActor, withKeyTokens, withTokens] at hbad
+      | some name =>
+        have hpcore : parent = some (InstId.core name) := by simpa [hsupv] using hpar
+        rw [hh, hself, hpcore]
+        intro hbad
+        simp at hbad
+    · rw [hother i hh]
+      exact h.noSelf i
+  · intro host p hp
+    by_cases hh : host = id
+    · rw [hh, hself] at hp
+      simp [bornActor, withKeyTokens, withTokens] at hp
+    · rw [hother host hh] at hp
+      exact h.plainParked host p hp
+  · intro n key g1 g2 h1 h2
+    by_cases h1n : InstId.peer n key g1 = id
+    · by_cases h2n : InstId.peer n key g2 = id
+      · unfold id at h1n
+        unfold id at h2n
+        cases h1n
+        cases h2n
+        rfl
+      · have h2old : (w.st (InstId.peer n key g2)).life = .alive := by
+          rw [← hother _ h2n]
+          exact h2
+        unfold id at h1n
+        cases h1n
+        exact absurd (alive_on_roster w hO _ h2old) (hfresh g2)
+    · by_cases h2n : InstId.peer n key g2 = id
+      · have h1old : (w.st (InstId.peer n key g1)).life = .alive := by
+          rw [← hother _ h1n]
+          exact h1
+        unfold id at h2n
+        cases h2n
+        exact absurd (alive_on_roster w hO _ h1old) (hfresh g1)
+      · exact h.oneLive n key g1 g2 (by rw [← hother _ h1n]; exact h1)
+          (by rw [← hother _ h2n]; exact h2)
+  · intro host m hm htomb
+    by_cases hh : host = id
+    · rw [hh, hself] at hm
+      simp [bornActor, withKeyTokens, withTokens] at hm
+    · have hm0 : m ∈ (w.st host).prio := by
+        rw [hother host hh] at hm
+        exact hm
+      have hold := h.tombOnParent host m hm0 htomb
+      cases hs : m.sender with
+      | core _ => simp [hs]
+      | peer n key g =>
+        simp only [hs] at hold
+        rcases hold with ⟨hmem, hp, hd⟩
+        have hne : InstId.peer n key g ≠ id := by
+          intro heq
+          unfold id at heq
+          cases heq
+          exact hfresh _ hmem
+        refine ⟨?_, ?_, ?_⟩
+        · rw [hros]
+          exact List.mem_append_left _ hmem
+        · rw [hother _ hne]
+          exact hp
+        · rw [hother _ hne]
+          exact hd
+  · intro n key g hmem t' ht' hsup' hsub'
+    rw [hros] at hmem
+    have hix := place_key_nextIx I w template k t.initial parent t.subtree n
+    rw [hix]
+    rcases List.mem_append.mp hmem with hold | hnew
+    · exact h.ixPast n key g hold t' ht' hsup' hsub'
+    · have hnew := List.mem_singleton.mp hnew
+      unfold id at hnew
+      cases hnew
+      have hne' : t'.subtree ≠ "" := by
+        have hsame : some t' = some t := by simpa [tname] using ht'.symm.trans ht
+        cases hsame
+        exact hsub
+      exact absurd hsub' hne'
+  · intro n key g hmem t' ht' hne
+    rw [hros] at hmem
+    rcases List.mem_append.mp hmem with hold | hnew
+    · have hlt := h.keyPast n key g hold t' ht' hne
+      have hkey := place_key_nextKey I w template k t.initial parent t.subtree
+        (templateSubtree I.desc n)
+      by_cases hs : templateSubtree I.desc n = t.subtree
+      · rw [hkey, ite_eq_left hs]
+        have hlt0 : key < w.nextKey t.subtree := by simpa [hs] using hlt
+        have hge := freshKey_ge I.desc w t.subtree
+        omega
+      · rw [hkey, ite_eq_right hs]
+        exact hlt
+    · have hnew := List.mem_singleton.mp hnew
+      unfold id at hnew
+      cases hnew
+      have hkey := place_key_nextKey I w template k t.initial parent t.subtree
+        (templateSubtree I.desc template)
+      have hhere : templateSubtree I.desc template = t.subtree := htree
+      rw [hkey, hhere, ite_eq_left rfl]
+      omega
+
+/-- A named supervisor sits in a nonempty subtree. The empty-subtree arm of
+`subtreeEntry` rejects that template, and `GraphOk` has no such failures.
+`supervised_subtree` states the same fact; this copy stays here because Birth
+does not import Occ (Tomb and Step both export `detach_phase`). -/
+theorem birth_supervised (D : Description) (hG : GraphOk D) (template : String) (t : Template)
+    (ht : templateOf D template = some t) (name : String)
+    (hsup : t.supervisor = some name) : t.subtree ≠ "" := by
+  have hmap : D.templates.filterMap (subtreeEntry D) = [] :=
+    (List.append_eq_nil_iff.mp (by simpa only [subtreeFails_entry] using hG.subtrees)).1
+  have hent := filterMap_none (subtreeEntry D) D.templates hmap t (templateOf_mem D template t ht).1
+  intro heq
+  have hsubB : (t.subtree == "") = true := by simpa [beq_iff_eq] using heq
+  have hsome : t.supervisor.isSome = true := by simp [hsup]
+  unfold subtreeEntry at hent
+  simp [hsubB, hsome] at hent
+
+/-- Scheduler birth of a subtree root. A core supervisor takes `freshKey`; an
+unsupervised empty subtree takes `nextIx`; an unsupervised nonempty subtree
+takes `freshKey` with parent `none`. -/
+theorem birth_spawn (I : Impl) (hG : GraphOk I.desc) (w w' : World) (template : String)
+    (h : BirthInv I.desc w)
+    (hO : ∀ id, (w.st id).life ≠ .absent → id ∈ w.roster)
+    (hsp : spawn I w template = some w') : BirthInv I.desc w' := by
+  unfold spawn at hsp
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at hsp
+  | some t =>
+    simp only [ht] at hsp
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · rw [hmay] at hsp
+      rw [ite_eq_left (by decide : true = true)] at hsp
+      cases hsup : t.supervisor with
+      | some name =>
+        rw [hsup] at hsp
+        dsimp at hsp
+        let k := freshKey I.desc w t.subtree
+        have hsub := birth_supervised I.desc hG template t ht name hsup
+        injection hsp with hw
+        subst hw
+        exact birth_fresh I w h hO template t k (some (InstId.core name))
+          (by simp [hsup]) ht hsub rfl
+      | none =>
+        rw [hsup] at hsp
+        dsimp at hsp
+        by_cases hempty : (t.subtree == "") = true
+        · rw [hempty] at hsp
+          rw [ite_eq_left (by decide : true = true)] at hsp
+          let k := w.nextIx template
+          have hsub : t.subtree = "" := by simpa [beq_iff_eq] using hempty
+          injection hsp with hw
+          subst hw
+          exact birth_lone I w h hO template t k ht hsup hsub rfl
+        · have hf : (t.subtree == "") = false := by
+            cases hbb : t.subtree == ""
+            · rfl
+            · exact absurd hbb hempty
+          rw [hf] at hsp
+          rw [ite_eq_right (by decide : ¬ false = true)] at hsp
+          let k := freshKey I.desc w t.subtree
+          have hsub : t.subtree ≠ "" := by
+            intro heq
+            simp [beq_iff_eq, heq] at hf
+          injection hsp with hw
+          subst hw
+          exact birth_fresh I w h hO template t k none (by simp [hsup]) ht hsub rfl
+    · have hf : maySpawnRoot I.desc w template t = false := by
+        cases hbb : maySpawnRoot I.desc w template t
+        · rfl
+        · exact absurd hbb hmay
+      simp [hf] at hsp
