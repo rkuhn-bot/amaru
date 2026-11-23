@@ -1407,14 +1407,12 @@ theorem spawnChild_mask (I : Impl) (w : World) (parent : InstId) (child : String
     · next ht t =>
       split
       · split
-        · split
-          · simp [maskWorld_idem]
-          · simp only [Option.map]
-            have hkeep :=
-              born_kept I.desc w child pkey ht.initial (InstId.peer pname pkey pgen)
-            rw [admit_mask I w _ _ hkeep]
-            rw [admit_mask I (maskWorld w) _ _ hkeep, maskWorld_idem]
-        · rfl
+        · simp [maskWorld_idem]
+        · simp only [Option.map]
+          have hkeep :=
+            born_kept I.desc w child pkey ht.initial (InstId.peer pname pkey pgen)
+          rw [admit_mask I w _ _ hkeep]
+          rw [admit_mask I (maskWorld w) _ _ hkeep, maskWorld_idem]
       · split
         · simp [maskWorld_idem]
         · rfl
@@ -1479,31 +1477,35 @@ theorem execRun_mask (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
       · rw [mask_setActor, mask_setActor, maskWorld_idem]
         refine congrArg (setActor (maskWorld w) id) ?_
         apply mask_diff_ty <;> first | rfl | simp [phaseAnchored]
-      · show
-          maskWorld (setActor (abortChildren I.desc w id) id
-            (proceed ((abortChildren I.desc w id).st id) (afterHead k))) =
-          maskWorld (setActor (abortChildren I.desc (maskWorld w) id) id
-            (proceed ((abortChildren I.desc (maskWorld w) id).st id) (afterHead k)))
-        have hchildren := abortChildren_mask I.desc w id
-        have hst : maskActor ((abortChildren I.desc w id).st id) =
-            maskActor ((abortChildren I.desc (maskWorld w) id).st id) := by
+      · let wA := abortChildren I.desc w id
+        let wM := abortChildren I.desc (maskWorld w) id
+        have hchildren : maskWorld wA = maskWorld wM := abortChildren_mask I.desc w id
+        have hst : maskActor (wA.st id) = maskActor (wM.st id) := by
           have hws := congrArg (fun u : World => u.st id) hchildren
           simpa [maskWorld_st] using hws
-        calc
-          maskWorld (setActor (abortChildren I.desc w id) id
-              (proceed ((abortChildren I.desc w id).st id) (afterHead k)))
-            = maskWorld (setActor (maskWorld (abortChildren I.desc w id)) id
-                (proceed (maskActor ((abortChildren I.desc w id).st id)) (afterHead k))) :=
-              mask_set_proceed (abortChildren I.desc w id) id
-                ((abortChildren I.desc w id).st id) (afterHead k)
-          _ = maskWorld (setActor (maskWorld (abortChildren I.desc (maskWorld w) id)) id
-                (proceed (maskActor ((abortChildren I.desc (maskWorld w) id).st id))
-                  (afterHead k))) := by
-              rw [hchildren, hst]
-          _ = maskWorld (setActor (abortChildren I.desc (maskWorld w) id) id
-                (proceed ((abortChildren I.desc (maskWorld w) id).st id) (afterHead k))) :=
-              (mask_set_proceed (abortChildren I.desc (maskWorld w) id) id
-                ((abortChildren I.desc (maskWorld w) id).st id) (afterHead k)).symm
+        have hcr : wA.crashed = wM.crashed := by
+          simpa [maskWorld_crashed] using congrArg (fun u : World => u.crashed) hchildren
+        show maskWorld (commitCont wA id (proceed (wA.st id) (afterHead k))) =
+            maskWorld (commitCont wM id (proceed (wM.st id) (afterHead k)))
+        by_cases hbit : wA.crashed = true
+        · have hbitM : wM.crashed = true := by rw [← hcr, hbit]
+          simp [commitCont, hbit, hbitM, hchildren]
+        · have hcf : wA.crashed = false := by
+            cases hb : wA.crashed with
+            | false => rfl
+            | true => exact absurd hb hbit
+          have hcfM : wM.crashed = false := by rw [← hcr, hcf]
+          simp only [commitCont, hcf, hcfM, ite_false]
+          calc
+            maskWorld (setActor wA id (proceed (wA.st id) (afterHead k)))
+              = maskWorld (setActor (maskWorld wA) id
+                  (proceed (maskActor (wA.st id)) (afterHead k))) :=
+                mask_set_proceed wA id (wA.st id) (afterHead k)
+            _ = maskWorld (setActor (maskWorld wM) id
+                  (proceed (maskActor (wM.st id)) (afterHead k))) := by
+                rw [hchildren, hst]
+            _ = maskWorld (setActor wM id (proceed (wM.st id) (afterHead k))) :=
+                (mask_set_proceed wM id (wM.st id) (afterHead k)).symm
       · rename_i _x _tail _eff child _heq
         split
         · next w' hw =>
@@ -1518,7 +1520,17 @@ theorem execRun_mask (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
               simpa [maskWorld_st] using hws
             have hp : proceed (w'.st id) (afterHead k) = proceed (wM.st id) (afterHead k) := by
               rw [← proceed_erase (w'.st id), ← proceed_erase (wM.st id), hst]
-            simp [hp, mask_setActor, hs, maskWorld_idem]
+            have hcr : w'.crashed = wM.crashed := by
+              simpa [maskWorld_crashed] using congrArg (fun u : World => u.crashed) hs
+            by_cases hbit : w'.crashed = true
+            · have hbitM : wM.crashed = true := by rw [← hcr, hbit]
+              simp [commitCont, hbit, hbitM, hs]
+            · have hcf : w'.crashed = false := by
+                cases hb : w'.crashed with
+                | false => rfl
+                | true => exact absurd hb hbit
+              have hcfM : wM.crashed = false := by rw [← hcr, hcf]
+              simp [commitCont, hp, hcf, hcfM, mask_setActor, hs, maskWorld_idem]
         · next hnone =>
           have hs := spawnChild_mask I w id child
           rw [hnone] at hs
