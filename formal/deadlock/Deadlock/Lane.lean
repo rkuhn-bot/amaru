@@ -6544,4 +6544,119 @@ theorem held_in_parent (I : Impl) (hG : GraphOk I.desc) (w : World) (hcr : w.cra
         exact (heldKeys_mem I.desc w supName k).mpr
           ⟨InstId.peer supName k gL, hmemL, by simp [heldBit, hparentHeld], by simp [bitKey]⟩
 
+/-- Birthing one template does not hold a new key of another. The fresh actor's
+mailbox is empty and no older actor names it as a parent, so `slot_mail_birth`
+says every other template's mail was already held. -/
+theorem held_birth_other (D : Description) (w w' : World) (name : String) (fresh : InstId)
+    (hF : ParentForest w) (hnew : fresh ∉ w.roster) (hrosEq : w'.roster = w.roster ++ [fresh])
+    (hst : ∀ i, i ≠ fresh → w'.st i = w.st i)
+    (hempty : (w'.st fresh).box = [] ∧ (w'.st fresh).prio = [] ∧ (w'.st fresh).parked = [])
+    (hother : tname fresh ≠ name) :
+    ∀ key, key ∈ heldKeys D w' name → key ∈ heldKeys D w name := by
+  have hno : ∀ i, (w.st i).parent ≠ some fresh := by
+    intro i hp
+    exact hnew (hF.hosted i fresh hp)
+  refine held_sub D w w' name ?_ ?_ ?_
+  · intro id hid hname
+    have hmem : id ∈ w.roster ++ [fresh] := by simpa [hrosEq] using hid
+    rcases List.mem_append.mp hmem with hold | hfresh
+    · exact hold
+    · simp at hfresh
+      exact absurd (by simpa [hfresh] using hname) hother
+  · intro id hid hlive
+    have hne : id ≠ fresh := by
+      intro heq
+      exact hnew (heq ▸ hid)
+    rw [hst id hne] at hlive
+    exact hlive
+  · intro key hmail
+    exact Or.inl (slot_mail_birth D w w' fresh name hrosEq hst hempty hno key hmail)
+
+/-- A child birth does not grow a different template's held keys. An identity
+birth, including a blocked respawn, leaves every key where it was. -/
+theorem held_child_other (I : Impl) (w w' : World) (parent : InstId) (child name : String)
+    (hF : ParentForest w) (hother : child ≠ name) (h : spawnChild I w parent child = some w') :
+    ∀ key, key ∈ heldKeys I.desc w' name → key ∈ heldKeys I.desc w name := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hgo :
+        (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = true
+    · simp only [hgo, ite_true] at h
+      cases parent with
+      | core _ => simp at h
+      | peer pn pk pg =>
+        by_cases hblk : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk = true
+        · simp [hblk] at h
+          cases h
+          intro key hk
+          exact hk
+        · have hf : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk = false := by
+            cases hb : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk with
+            | false => rfl
+            | true => exact absurd hb hblk
+          simp only [hf] at h
+          cases h
+          let id := InstId.peer child pk (maxGen w child pk)
+          let born :=
+            { bornActor I.desc w child pk t.initial with parent := some (InstId.peer pn pk pg) }
+          have hotherName : tname id ≠ name := by simp [id, tname, hother]
+          refine held_birth_other I.desc w _ name id hF (gen_fresh w child pk)
+            (admit_roster I w id born) ?_ ?_ hotherName
+          · intro i hi
+            exact admit_st_other I w id i born hi
+          · have hself := admit_st_self I w id born
+            rw [hself]
+            simp [born, bornActor, withKeyTokens]
+    · have hf :
+          (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive) = false := by
+        cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hgo
+      simp only [hf] at h
+      by_cases hstay : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · simp only [hstay, ite_true] at h
+        cases h
+        intro key hk
+        exact hk
+      · have hstayF :
+            (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) with
+          | false => rfl
+          | true => exact absurd hb hstay
+        simp [hstayF] at h
+
+/-- An executed `spawn` is `spawnChild` and then the parent's continuation.
+Birthing `child` does not grow another template's held keys, and the
+continuation only rewrites the parent's phase. A refused spawn crashes, which
+drops no key into a new slot. -/
+theorem held_spawn_run (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (es : List Eff) (child name : String) (hF : ParentForest w)
+    (hk : k.rest = .spawn child :: es) (hother : child ≠ name) :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id a k) name → key ∈ heldKeys I.desc w name := by
+  intro key hmem
+  by_cases hlive : (a.life == .alive) = true
+  · simp only [execRun, hlive, hk] at hmem
+    cases hs : spawnChild I w id child with
+    | none =>
+      simp only [hs] at hmem
+      exact held_crash I.desc w name key hmem
+    | some w1 =>
+      simp only [hs] at hmem
+      have hp := proceed_fields (w1.st id) (afterHead k)
+      exact held_child_other I w w1 id child name hF hother hs key
+        (held_commit I.desc w1 id (proceed (w1.st id) (afterHead k)) name
+          hp.2.2.2.2 hp.2.2.1 hp.2.2.2.1 hp.2.1 hp.1 key hmem)
+  · have hf : (a.life == .alive) = false := by
+      cases hb : a.life == .alive with
+      | false => rfl
+      | true => exact absurd hb hlive
+    simp [execRun, hf] at hmem
+    exact hmem
+
 end Deadlock
