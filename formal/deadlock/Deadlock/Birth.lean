@@ -1733,3 +1733,180 @@ theorem birth_spawn (I : Impl) (hG : GraphOk I.desc) (w w' : World) (template : 
         · rfl
         · exact absurd hbb hmay
       simp [hf] at hsp
+
+/-- `deliver` reads cells and rewrites the receiver's phase. The mailbox it
+returns is the mailbox it was given. -/
+theorem deliver_kept (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) :
+    w1 = readCells I.desc w id ∧ a1.life = a.life ∧ a1.parent = a.parent ∧
+      a1.box = a.box ∧ a1.prio = a.prio ∧ a1.parked = a.parked := by
+  unfold deliver at h
+  dsimp at h
+  split at h
+  · simp at h
+  · split at h
+    · have heq := by simpa [Option.some.injEq] using h
+      rcases heq with ⟨rfl, rfl⟩
+      exact ⟨rfl, by simp, by simp, by simp, by simp, by simp⟩
+    · split at h
+      · split at h
+        · simp at h
+        · have heq := by simpa [Option.some.injEq] using h
+          rcases heq with ⟨rfl, rfl⟩
+          exact ⟨rfl, by simp, by simp, by simp, by simp, by simp⟩
+      · split at h
+        · simp at h
+        · split at h
+          · have heq := by simpa [Option.some.injEq] using h
+            rcases heq with ⟨rfl, rfl⟩
+            exact ⟨rfl, by simp, by simp, by simp, by simp, by simp⟩
+          · have heq := by simpa [Option.some.injEq] using h
+            rcases heq with ⟨rfl, rfl⟩
+            split <;> exact ⟨rfl, by simp, by simp, by simp, by simp, by simp⟩
+
+/-- Install the actor a receive built on top of `deliver`. The world underneath
+is `readCells`, so parent and life are the pre-world's. -/
+theorem birth_deliver_set (I : Impl) (w : World) (id : InstId) (passed installed : Actor)
+    (w1 : World) (a1 : Actor) (m : Msg) (h : BirthInv I.desc w)
+    (hdel : deliver I w id passed m = some (w1, a1))
+    (hpar : installed.parent = (w.st id).parent)
+    (hlife : installed.life = (w.st id).life)
+    (hbox : ∀ x, x ∈ installed.box → x.tombstone = false)
+    (hpark : ∀ p, p ∈ installed.parked → p.msg.tombstone = false)
+    (hprio : ∀ x, x ∈ installed.prio → x ∈ (w.st id).prio ∨ x.tombstone = false) :
+    BirthInv I.desc (setActor w1 id installed) := by
+  obtain ⟨hw, _, _, _, _, _⟩ := deliver_kept I w id passed m w1 a1 hdel
+  have hB := birth_cells I.desc w id h
+  rw [hw]
+  refine birth_set I.desc (readCells I.desc w id) id installed hB ?par (Or.inl ?life) hbox hpark ?prio
+  · rw [hpar]
+    exact (congrArg Actor.parent (cellsSt I.desc w id id)).symm
+  · rw [hlife]
+    exact (congrArg Actor.life (cellsSt I.desc w id id)).symm
+  · intro x hx
+    rcases hprio x hx with hmem | hplain
+    · exact Or.inl (by
+        rw [show ((readCells I.desc w id).st id).prio = (w.st id).prio from
+          congrArg Actor.prio (cellsSt I.desc w id id)]
+        exact hmem)
+    · exact Or.inr hplain
+
+/-- A bulk receive takes the box head, and when a send is parked behind it,
+appends that parked message. The parked message is plain (`plainParked`): an
+admit copies it into the box. The sender's resume changes phase only. -/
+theorem birth_bulk (I : Impl) (w w' : World) (id : InstId) (h : BirthInv I.desc w)
+    (hr : receiveBulk I w id = some w') : BirthInv I.desc w' := by
+  unfold receiveBulk at hr
+  dsimp at hr
+  split at hr
+  · simp at hr
+  · cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at hr
+      | cons p ps =>
+        simp only [hbox, hpark] at hr
+        cases hd : deliver I w id ({ (w.st id) with parked := ps }) p.msg with
+        | none =>
+          simp only [hbox] at hd
+          rw [hd] at hr
+          simp at hr
+        | some pair =>
+          obtain ⟨w1, a'⟩ := pair
+          simp only [hbox] at hd
+          rw [hd] at hr
+          have hw' : w' = setActor (creditLive (setActor w1 id a') (tname id) p.msg.sender) p.sender
+              (resumeSender ((creditLive (setActor w1 id a') (tname id) p.msg.sender).st p.sender)
+                p.isCall id) := by simpa [Option.some.injEq] using hr.symm
+          obtain ⟨_, hlA, hpA, hbA, hprA, hkA⟩ := deliver_kept I w id _ p.msg w1 a' hd
+          dsimp at hlA hpA hbA hprA hkA
+          have hplainP : ∀ q, q ∈ ps → q.msg.tombstone = false :=
+            park_tail (by simpa [hpark] using h.plainParked id)
+          have hset := birth_deliver_set I w id _ a' w1 a' p.msg h hd hpA hlA
+            (by intro x hx; rw [hbA] at hx; cases hx)
+            (by intro q hq; rw [hkA] at hq; exact hplainP q hq)
+            (by intro x hx; rw [hprA] at hx; exact Or.inl hx)
+          exact hw' ▸ birth_keep_line I.desc _ p.sender _
+            (birth_live I.desc _ (tname id) p.msg.sender hset) (resume_lineage _ _ _)
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp only [hbox, hpark] at hr
+        cases hd : deliver I w id ({ (w.st id) with box := ms }) m with
+        | none =>
+          simp only [hpark] at hd
+          rw [hd] at hr
+          simp at hr
+        | some pair =>
+          obtain ⟨w1, a'⟩ := pair
+          simp only [hpark] at hd
+          rw [hd] at hr
+          have hw' : w' = creditLive (setActor w1 id a') (tname id) m.sender := by
+            simpa [Option.some.injEq] using hr.symm
+          obtain ⟨_, hlA, hpA, hbA, hprA, hkA⟩ := deliver_kept I w id _ m w1 a' hd
+          dsimp at hlA hpA hbA hprA hkA
+          have hplainB : ∀ x, x ∈ ms → x.tombstone = false :=
+            plain_tail (by simpa [hbox] using h.plainBox id)
+          have hset := birth_deliver_set I w id _ a' w1 a' m h hd hpA hlA
+            (by intro x hx; rw [hbA] at hx; exact hplainB x hx)
+            (by intro q hq; rw [hkA] at hq; cases hq)
+            (by intro x hx; rw [hprA] at hx; exact Or.inl hx)
+          exact hw' ▸ birth_live I.desc _ (tname id) m.sender hset
+      | cons p ps =>
+        simp only [hbox, hpark] at hr
+        cases hd : deliver I w id ({ (w.st id) with box := ms }) m with
+        | none =>
+          simp only [hpark] at hd
+          rw [hd] at hr
+          simp at hr
+        | some pair =>
+          obtain ⟨w1, a'⟩ := pair
+          simp only [hpark] at hd
+          rw [hd] at hr
+          let admitted := { a' with box := a'.box ++ [p.msg], parked := ps }
+          have hw' : w' = setActor (creditLive (setActor w1 id admitted) (tname id) m.sender) p.sender
+              (resumeSender ((creditLive (setActor w1 id admitted) (tname id) m.sender).st p.sender)
+                p.isCall id) := by simpa [Option.some.injEq, admitted] using hr.symm
+          obtain ⟨_, hlA, hpA, hbA, hprA, _⟩ := deliver_kept I w id _ m w1 a' hd
+          dsimp at hlA hpA hbA hprA
+          have hplainB : ∀ x, x ∈ ms → x.tombstone = false :=
+            plain_tail (by simpa [hbox] using h.plainBox id)
+          have hplainM : p.msg.tombstone = false :=
+            h.plainParked id p (by rw [hpark]; exact List.mem_cons_self)
+          have hplainP : ∀ q, q ∈ ps → q.msg.tombstone = false :=
+            park_tail (by simpa [hpark] using h.plainParked id)
+          have hset := birth_deliver_set I w id _ admitted w1 a' m h hd
+            (by simp [admitted]; exact hpA) (by simp [admitted]; exact hlA)
+            (by
+              intro x hx
+              have hx' : x ∈ a'.box ++ [p.msg] := by simpa [admitted] using hx
+              exact plain_append (fun y hy => hplainB y (by rw [hbA] at hy; exact hy)) hplainM x hx')
+            (by intro q hq; exact hplainP q (by simpa [admitted] using hq))
+            (by
+              intro x hx
+              have hx' : x ∈ a'.prio := by simpa [admitted] using hx
+              rw [hprA] at hx'
+              exact Or.inl hx')
+          exact hw' ▸ birth_keep_line I.desc _ p.sender _
+            (birth_live I.desc _ (tname id) m.sender hset) (resume_lineage _ _ _)
+
+/-- A priority receive drops one message and leaves the rest of the lane.
+What stays was already there. -/
+theorem birth_prio (I : Impl) (w w' : World) (id : InstId) (h : BirthInv I.desc w)
+    (hr : receivePrio I w id = some w') : BirthInv I.desc w' := by
+  obtain ⟨m, pre, suf, w1, a1, _, _, hsplit, _, hdel, hw'⟩ := receivePrio_spec I w w' id hr
+  let passed := { (w.st id) with prio := pre ++ suf }
+  obtain ⟨_, hlA, hpA, hbA, hprA, hkA⟩ := deliver_kept I w id passed m w1 a1 hdel
+  have hset := birth_deliver_set I w id passed a1 w1 a1 m h hdel hpA hlA
+    (by intro x hx; rw [hbA] at hx; simpa [passed] using h.plainBox id x hx)
+    (by intro q hq; rw [hkA] at hq; simpa [passed] using h.plainParked id q hq)
+    (by
+      intro x hx
+      rw [hprA] at hx
+      have hx' : x ∈ pre ++ suf := by simpa [passed] using hx
+      refine Or.inl ?_
+      rw [hsplit]
+      rcases List.mem_append.mp hx' with hpre | hsuf
+      · exact List.mem_append_left _ hpre
+      · exact List.mem_append_right _ (List.mem_cons_of_mem _ hsuf))
+  exact hw' ▸ hset
