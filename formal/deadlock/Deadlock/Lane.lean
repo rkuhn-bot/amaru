@@ -2374,4 +2374,151 @@ theorem step_old_life (I : Impl) (w w' : World) (a : Action) (i : InstId)
     simp only [stepWorld] at h
     exact (callTimeout_life w w' id i h).symm.trans hlive
 
+/-- Parent links are all `descends` reads, so the same links give the same answer. -/
+theorem descends_st (w w' : World) (fuel : Nat) (anc desc : InstId)
+    (hp : ∀ i, (w'.st i).parent = (w.st i).parent) :
+    descends fuel w' anc desc = descends fuel w anc desc := by
+  induction fuel generalizing desc with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [descends]
+    by_cases heq : desc = anc
+    · simp [heq]
+    · have hbeq : (desc == anc) = false := by
+        simpa [beq_iff_eq] using heq
+      simp [hbeq]
+      rw [hp desc]
+      cases hpdesc : (w.st desc).parent with
+      | none => rfl
+      | some p =>
+        by_cases hanc : p = anc
+        · simp [hanc]
+        · by_cases hself : p = desc
+          · simp [hanc, hself]
+          · simp [hanc, hself]
+            exact ih p
+
+theorem sealed_st (w w' : World) (sender host : InstId)
+    (hros : w'.roster = w.roster) (hp : ∀ i, (w'.st i).parent = (w.st i).parent) :
+    sealedTogether w' sender host = sealedTogether w sender host := by
+  simp only [sealedTogether, hros]
+  exact congrArg (fun b => (sender == host) || b) (descends_st w w' w.roster.length sender host hp)
+
+theorem survives_st (w w' : World) (sender host : InstId)
+    (hros : w'.roster = w.roster) (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hlife : (w'.st host).life = (w.st host).life) :
+    survivesSender w' sender host = survivesSender w sender host := by
+  simp only [survivesSender, hlife, sealed_st w w' sender host hros hp]
+
+theorem actor_holds_st (D : Description) (w w' : World) (host : InstId) (sub : String) (k : Nat)
+    (a a' : Actor) (hros : w'.roster = w.roster)
+    (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hlife : (w'.st host).life = (w.st host).life)
+    (hbox : a'.box = a.box) (hprio : a'.prio = a.prio) (hpark : a'.parked = a.parked) :
+    actorHoldsSubtreeMail D w' host sub k a' = actorHoldsSubtreeMail D w host sub k a := by
+  simp only [actorHoldsSubtreeMail, hbox, hprio, hpark]
+  have hsurv : ∀ sender, survivesSender w' sender host = survivesSender w sender host :=
+    fun sender => survives_st w w' sender host hros hp hlife
+  simp [hsurv]
+
+theorem slot_mail_st (D : Description) (w w' : World) (name : String) (k : Nat)
+    (hros : w'.roster = w.roster)
+    (hst : ∀ i, (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+      (w'.st i).box = (w.st i).box ∧ (w'.st i).prio = (w.st i).prio ∧
+      (w'.st i).parked = (w.st i).parked) :
+    slotMailHeld D w' name k = slotMailHeld D w name k := by
+  have hp : ∀ i, (w'.st i).parent = (w.st i).parent := fun i => (hst i).2.1
+  let sub := templateSubtree D name
+  unfold slotMailHeld
+  have hsubMail : subtreeCoreMail D w' sub k = subtreeCoreMail D w sub k := by
+    unfold subtreeCoreMail
+    have hany : ∀ ids : List InstId,
+        ids.any (fun host => actorHoldsSubtreeMail D w' host sub k (w'.st host)) =
+        ids.any (fun host => actorHoldsSubtreeMail D w host sub k (w.st host)) := by
+      intro ids
+      induction ids with
+      | nil => rfl
+      | cons host ids ih =>
+        simp only [List.any_cons, Bool.or_eq_true]
+        have hh := actor_holds_st D w w' host sub k (w.st host) (w'.st host) hros hp (hst host).1
+          (hst host).2.2.1 (hst host).2.2.2.1 (hst host).2.2.2.2
+        rw [hh, ih]
+    simpa [hros] using hany w.roster
+  have hcore : slotCoreMail w' name k = slotCoreMail w name k := by
+    unfold slotCoreMail actorHoldsSlotMail
+    have hany : ∀ ids : List InstId,
+        ids.any (fun host =>
+          ((w'.st host).box.any (fun m => fromSlot name k m.sender && survivesSender w' m.sender host) ||
+            (w'.st host).prio.any (fun m => fromSlot name k m.sender && survivesSender w' m.sender host) ||
+            (w'.st host).parked.any (fun p =>
+              (fromSlot name k p.sender && survivesSender w' p.sender host) ||
+                (fromSlot name k p.msg.sender && survivesSender w' p.msg.sender host)))) =
+        ids.any (fun host =>
+          ((w.st host).box.any (fun m => fromSlot name k m.sender && survivesSender w m.sender host) ||
+            (w.st host).prio.any (fun m => fromSlot name k m.sender && survivesSender w m.sender host) ||
+            (w.st host).parked.any (fun p =>
+              (fromSlot name k p.sender && survivesSender w p.sender host) ||
+                (fromSlot name k p.msg.sender && survivesSender w p.msg.sender host)))) := by
+      intro ids
+      induction ids with
+      | nil => rfl
+      | cons host ids ih =>
+        simp only [List.any_cons]
+        have hsurv : ∀ s, survivesSender w' s host = survivesSender w s host :=
+          fun s => survives_st w w' s host hros hp (hst host).1
+        simp [hsurv, (hst host).2.2.1, (hst host).2.2.2.1, (hst host).2.2.2.2, ih]
+    simpa [hros] using hany w.roster
+  simp [sub, hsubMail, hcore]
+
+/-- `held_sub` for a step that keeps the roster and every life, parent, and queue.
+`finish` and `stutter` are such steps. A later send is not: it adds mail. -/
+theorem held_of_fields (D : Description) (w w' : World) (name : String)
+    (hros : w'.roster = w.roster)
+    (hst : ∀ i, (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+      (w'.st i).box = (w.st i).box ∧ (w'.st i).prio = (w.st i).prio ∧
+      (w'.st i).parked = (w.st i).parked) :
+    ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name := by
+  refine held_sub D w w' name ?_ ?_ ?_
+  · intro id hid _
+    simpa [hros] using hid
+  · intro id _ hlive
+    exact ((hst id).1).symm.trans hlive
+  · intro k hmail
+    exact Or.inl ((slot_mail_st D w w' name k hros hst).symm.trans hmail)
+
+theorem held_stutter (I : Impl) (w w' : World) (name : String)
+    (h : stepWorld I .stutter w = some w') :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  simp only [stepWorld] at h
+  split at h
+  · simp at h
+  · cases h
+    exact held_of_fields I.desc w w name (by rfl) (fun _ => ⟨rfl, rfl, rfl, rfl, rfl⟩)
+
+theorem held_finish (I : Impl) (w w' : World) (id : InstId) (name : String)
+    (h : stepWorld I (.finish id) w = some w') :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  simp only [stepWorld] at h
+  obtain ⟨k, _, hw⟩ := finish_proceed I w w' id h
+  rw [hw]
+  refine held_of_fields I.desc w _ name (setActor_roster _ _ _) ?_
+  intro i
+  by_cases hi : i = id
+  · subst hi
+    refine ⟨?_, ?_, ?_, ?_, ?_⟩
+    · simp [setActor, proceed_keeps_life]
+    · have hp : (proceed (w.st i) k).parent = (w.st i).parent := by
+        unfold proceed; split <;> rfl
+      simp [setActor, hp]
+    · have hb : (proceed (w.st i) k).box = (w.st i).box := by
+        unfold proceed; split <;> rfl
+      simp [setActor, hb]
+    · have hpr : (proceed (w.st i) k).prio = (w.st i).prio := by
+        unfold proceed; split <;> rfl
+      simp [setActor, hpr]
+    · have hkpark : (proceed (w.st i) k).parked = (w.st i).parked := by
+        unfold proceed; split <;> rfl
+      simp [setActor, hkpark]
+  · simp [setActor, hi]
+
 end Deadlock
