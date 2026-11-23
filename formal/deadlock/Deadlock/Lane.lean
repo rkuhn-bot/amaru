@@ -4554,6 +4554,216 @@ theorem held_exec_head (I : Impl) (hG : GraphOk I.desc) (w w' : World)
     | awaitPeer _ => simp [hph] at h
     | crashed => simp [hph] at h
 
+/-- A priority message after `enqueueTombstone` was already queued, or it is the
+child's tombstone. -/
+theorem tomb_prio (D : Description) (w : World) (child i : InstId) (m : Msg)
+    (hm : m ∈ ((enqueueTombstone D w child).st i).prio) :
+    m ∈ (w.st i).prio ∨ m.sender = child := by
+  unfold enqueueTombstone at hm
+  cases hp : (w.st child).parent with
+  | none =>
+    simp [hp] at hm
+    exact Or.inl hm
+  | some parent =>
+    simp only [hp] at hm
+    by_cases hl : ((w.st parent).life != .alive) = true
+    · simp [hl] at hm
+      exact Or.inl hm
+    · have hlive : ((w.st parent).life != .alive) = false := by
+        cases hb : (w.st parent).life != .alive with
+        | false => rfl
+        | true => exact absurd hb hl
+      simp only [hlive, Bool.false_eq_true, ite_false] at hm
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true, crashWorld, crashActor] at hm
+        split at hm
+        · split at hm <;> exact Or.inl hm
+        · exact Or.inl hm
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          cases hb : (tombstoneMsg D (w.st parent) child).label == "" with
+          | false => rfl
+          | true => exact absurd hb hlab
+        simp only [hlabF, Bool.false_eq_true, ite_false, offerPrio] at hm
+        split at hm
+        · simp [crashWorld, crashActor] at hm
+          split at hm
+          · split at hm <;> exact Or.inl hm
+          · exact Or.inl hm
+        · by_cases hip : i = parent
+          · simp [setActor, hip, List.mem_append] at hm
+            rcases hm with hm | rfl
+            · rw [hip]
+              exact Or.inl hm
+            · exact Or.inr rfl
+          · simp [setActor, hip] at hm
+            exact Or.inl hm
+
+theorem release_skip_prio (w : World) (id : InstId) (ps : List Parked)
+    (h : (w.st id).prio = []) : ((releaseParked w id ps).st id).prio = [] := by
+  induction ps generalizing w with
+  | nil => simpa [releaseParked] using h
+  | cons p ps ih =>
+    rw [releaseParked, List.foldl_cons]
+    split <;> rw [← releaseParked]
+    · exact ih _ h
+    · rename_i hskip
+      have hne : p.sender ≠ id := by
+        intro heq
+        simp [heq] at hskip
+      exact ih _ (by
+        have hdis : id ≠ p.sender := fun heq => hne heq.symm
+        simpa [setActor, hdis] using h)
+
+theorem release_victim_prio (D : Description) (w : World) (id : InstId) (a : Actor) :
+    ((releaseWorld D w id a).st id).prio = [] := by
+  simp only [releaseWorld]
+  exact release_skip_prio _ id a.parked (by simp [setActor])
+
+theorem release_skip_life (w : World) (id : InstId) (ps : List Parked)
+    (h : (w.st id).life = .dead) : ((releaseParked w id ps).st id).life = .dead := by
+  induction ps generalizing w with
+  | nil => simpa [releaseParked] using h
+  | cons p ps ih =>
+    rw [releaseParked, List.foldl_cons]
+    split <;> rw [← releaseParked]
+    · exact ih _ h
+    · rename_i hskip
+      have hne : p.sender ≠ id := by
+        intro heq
+        simp [heq] at hskip
+      exact ih _ (by
+        have hdis : id ≠ p.sender := fun heq => hne heq.symm
+        simpa [setActor, hdis] using h)
+
+theorem release_victim_life (D : Description) (w : World) (id : InstId) (a : Actor) :
+    ((releaseWorld D w id a).st id).life = .dead := by
+  simp only [releaseWorld]
+  exact release_skip_life _ id a.parked (by simp [setActor])
+
+theorem enqueueTombstone_roster (D : Description) (w : World) (child : InstId) :
+    (enqueueTombstone D w child).roster = w.roster := by
+  unfold enqueueTombstone
+  cases hp : (w.st child).parent with
+  | none => rfl
+  | some parent =>
+    simp only [hp]
+    by_cases hl : ((w.st parent).life != .alive) = true
+    · simp [hl]
+    · have hlive : ((w.st parent).life != .alive) = false := by
+        cases hb : (w.st parent).life != .alive with
+        | false => rfl
+        | true => exact absurd hb hl
+      simp only [hlive, Bool.false_eq_true, ite_false]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp [hlab, crashWorld_roster]
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          cases hb : (tombstoneMsg D (w.st parent) child).label == "" with
+          | false => rfl
+          | true => exact absurd hb hlab
+        simp only [hlabF, Bool.false_eq_true, ite_false, offerPrio]
+        split
+        · exact crashWorld_roster _
+        · exact setActor_roster _ _ _
+
+/-- Sealing one alive actor queues at most that actor's tombstone. Releasing it
+only deletes mail. An empty subtree or a root template therefore gains no held key. -/
+theorem held_seal (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (sealActor I.desc w id (w.st id)) name →
+      key ∈ heldKeys I.desc w name := by
+  let wR := releaseWorld I.desc w id (w.st id)
+  refine held_kept I.desc w _ name (fun s => s = id)
+    (by simpa [sealActor, wR] using (enqueueTombstone_roster I.desc wR id).trans (releaseWorld_roster I.desc w id (w.st id)))
+    ?_ ?_ ?_ ?_ ?_ ?_
+  · intro i
+    exact (enqueueTombstone_parent I.desc wR id i).trans (releaseWorld_parent I.desc w id (w.st id) i)
+  · intro i h
+    have hR := enqueueTombstone_life I.desc wR id i (by simpa [sealActor, wR] using h)
+    by_cases hi : i = id
+    · unfold wR at hR
+      rw [hi, release_victim_life I.desc w id (w.st id)] at hR
+      cases hR
+    · exact (releaseWorld_life_ne I.desc w id (w.st id) i hi).symm.trans hR
+  · intro i _ m hm
+    have hbox := (enqueueTombstone_lists I.desc wR id i).1
+    have hmR : m ∈ (wR.st i).box := by simpa [sealActor, wR, hbox] using hm
+    exact Or.inl ⟨m, (releaseWorld_sub I.desc w id (w.st id) i).1.mem hmR, rfl⟩
+  · intro i _ m hm
+    rcases tomb_prio I.desc wR id i m (by simpa [sealActor, wR] using hm) with hmR | hs
+    · by_cases hi : i = id
+      · unfold wR at hmR
+        rw [hi, release_victim_prio I.desc w id (w.st id)] at hmR
+        simp at hmR
+      · exact Or.inl ⟨m, by simpa [← (releaseWorld_prio I.desc w id (w.st id) i hi).1] using hmR, rfl⟩
+    · exact Or.inr hs
+  · intro i _ p hp
+    have hpk := (enqueueTombstone_lists I.desc wR id i).2
+    have hpR : p ∈ (wR.st i).parked := by simpa [sealActor, wR, hpk] using hp
+    have hold := (releaseWorld_sub I.desc w id (w.st id) i).2.mem hpR
+    exact ⟨Or.inl ⟨p, hold, Or.inl rfl⟩, Or.inl ⟨p, hold, Or.inr rfl⟩⟩
+  · intro key g s hgen hs hpred
+    cases hkind with
+    | inl hempty =>
+      have hfrom : fromSlot name key s = true := by
+        rwa [slotPred_empty I.desc name key s hempty] at hpred
+      exact ⟨s, by simpa [hs] using hmem, hfrom, by simpa [hs] using hlive⟩
+    | inr hroot =>
+      obtain ⟨t, ht, hrootT, hsub⟩ := hroot
+      have hm : isMember I.desc s t.subtree key = true := by
+        rwa [slotPred_root I.desc name key s t ht hsub] at hpred
+      exact root_sender_slot I hG w hF hP hSelf hH hOne hKids hcr name key g t ht hrootT hsub
+        hgen s (by simpa [hs] using hmem) (by simpa [hs] using hlive) hm
+
+/-- Releasing an actor only deletes mail and does not bring anyone to life, so
+no template gains a held key. -/
+theorem held_release (D : Description) (w : World) (id : InstId) (a : Actor) (name : String) :
+    ∀ key, key ∈ heldKeys D (releaseWorld D w id a) name → key ∈ heldKeys D w name := by
+  refine held_kept D w _ name (fun _ => False) (releaseWorld_roster D w id a)
+    (releaseWorld_parent D w id a) ?_ ?_ ?_ ?_ ?_
+  · intro i h
+    by_cases hi : i = id
+    · rw [hi, release_victim_life D w id a] at h
+      cases h
+    · exact (releaseWorld_life_ne D w id a i hi).symm.trans h
+  · intro i _ m hm
+    exact Or.inl ⟨m, (releaseWorld_sub D w id a i).1.mem hm, rfl⟩
+  · intro i _ m hm
+    by_cases hi : i = id
+    · rw [hi, release_victim_prio D w id a] at hm
+      simp at hm
+    · exact Or.inl ⟨m, by simpa [← (releaseWorld_prio D w id a i hi).1] using hm, rfl⟩
+  · intro i _ p hp
+    have hold := (releaseWorld_sub D w id a i).2.mem hp
+    exact ⟨Or.inl ⟨p, hold, Or.inl rfl⟩, Or.inl ⟨p, hold, Or.inr rfl⟩⟩
+  · intro _ _ _ _ hs _
+    exact False.elim hs
+
+/-- Shutting an actor down queues its tombstone only when it is alive, and that
+tombstone is the only new mail. -/
+theorem held_shutdown (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (name : String) (hmem : id ∈ w.roster)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (shutdownActor I.desc w id) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hk
+  unfold shutdownActor at hk
+  by_cases hbit : ((w.st id).life == .alive) = true
+  · have hlive : (w.st id).life = .alive := by simpa [beq_iff_eq] using hbit
+    simp [hbit] at hk
+    exact held_seal I hG w hF hP hSelf hH hOne hKids hcr id name hlive hmem hkind key hk
+  · simp [hbit] at hk
+    exact hk
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
