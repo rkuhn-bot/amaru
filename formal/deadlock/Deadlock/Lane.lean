@@ -3678,6 +3678,882 @@ theorem held_ingress_root (I : Impl) (hG : GraphOk I.desc) (w w' : World)
   exact root_sender_slot I hG w hF hP hSelf hH hOne hKids hcr name k g t ht hroot hsub hgen s
     hmemS hlive hm
 
+/-- `enqueueOrPark` does not touch a priority queue. -/
+theorem enqueue_prio (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) :
+    ((enqueueOrPark w D sender dst msg isCall k).st i).prio = (w.st i).prio := by
+  unfold enqueueOrPark
+  dsimp only
+  cases isCall <;> split <;> (try split) <;> (try split) <;>
+    (by_cases hi : i = sender
+     · subst hi
+       simp [setActor, finishCall, proceed, issueCall, chargeSender, bumpToken]
+       repeat' split <;> simp
+     · by_cases hd : i = dst
+       · subst hd
+         simp [setActor, hi, issueCall, chargeSender, bumpToken]
+       · simp [setActor, hi, hd])
+
+/-- A box message after `enqueueOrPark` was already there, or it is the message
+just enqueued and its sender is `msg.sender`. -/
+theorem enqueue_box (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) (m : Msg)
+    (hm : m ∈ ((enqueueOrPark w D sender dst msg isCall k).st i).box) :
+    m ∈ (w.st i).box ∨ m.sender = msg.sender := by
+  cases isCall <;>
+    (unfold enqueueOrPark at hm
+     by_cases hlive : (w.st dst).life = .alive
+     · simp [hlive] at hm
+       by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+       · simp [hroom] at hm
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame] at hm
+           simp [setActor] at hm
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hm
+             try rw [(proceed_fields _ k).2.2.2.2] at hm
+             try simp [List.mem_append, List.mem_singleton] at hm
+             rcases hm with hm | rfl
+             · rw [hi]; exact Or.inl hm
+             · exact Or.inr rfl
+           · simp [setActor, hi] at hm
+             exact Or.inl hm
+         · rw [if_neg hsame] at hm
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip] at hm
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hm
+             try rw [(proceed_fields _ k).2.2.2.2] at hm
+             try simp at hm
+             rw [hi]
+             exact Or.inl hm
+           · by_cases hid : i = dst
+             · simp [hid, hlive] at hm
+               rw [if_neg hflip] at hm
+               simp [List.mem_append, List.mem_singleton] at hm
+               rcases hm with hm | rfl
+               · rw [hid]; exact Or.inl hm
+               · exact Or.inr rfl
+             · rw [if_neg hi, if_neg hid] at hm
+               exact Or.inl hm
+       · simp [hroom] at hm
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame] at hm
+           simp [setActor] at hm
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hm
+             try rw [(proceed_fields _ k).2.2.2.2] at hm
+             try simp at hm
+             rw [hi]
+             exact Or.inl hm
+           · simp [setActor, hi] at hm
+             exact Or.inl hm
+         · rw [if_neg hsame] at hm
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip] at hm
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hm
+             try rw [(proceed_fields _ k).2.2.2.2] at hm
+             try simp at hm
+             rw [hi]
+             exact Or.inl hm
+           · by_cases hid : i = dst
+             · simp [hid, hlive] at hm
+               try rw [if_neg hflip] at hm
+               try simp at hm
+               rw [hid]
+               exact Or.inl hm
+             · rw [if_neg hi, if_neg hid] at hm
+               exact Or.inl hm
+     · rw [if_pos hlive] at hm
+       by_cases hi : i = sender
+       · simp [hi, setActor, issueCall, finishCall] at hm
+         try rw [(proceed_fields _ k).2.2.2.2] at hm
+         try rw [(proceed_fields _ (selectCall k _)).2.2.2.2] at hm
+         try simp at hm
+         rw [hi]
+         exact Or.inl hm
+       · simp [setActor, hi] at hm
+         exact Or.inl hm)
+
+/-- A parked entry after `enqueueOrPark` was already parked, or it is the entry
+just stored for this send: its sender is the executor and its message keeps
+`msg.sender`. -/
+theorem enqueue_park (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (i : InstId) (p : Parked)
+    (hp : p ∈ ((enqueueOrPark w D sender dst msg isCall k).st i).parked) :
+    p ∈ (w.st i).parked ∨ p.sender = sender ∧ p.msg.sender = msg.sender := by
+  cases isCall <;>
+    (unfold enqueueOrPark at hp
+     by_cases hlive : (w.st dst).life = .alive
+     · simp [hlive] at hp
+       by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+       · simp [hroom] at hp
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame] at hp
+           simp [setActor] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hp
+             try rw [(proceed_fields _ k).2.2.2.1] at hp
+             try simp at hp
+             rw [hi]
+             exact Or.inl hp
+           · simp [setActor, hi] at hp
+             exact Or.inl hp
+         · rw [if_neg hsame] at hp
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hp
+             try rw [(proceed_fields _ k).2.2.2.1] at hp
+             try simp at hp
+             rw [hi]
+             exact Or.inl hp
+           · by_cases hid : i = dst
+             · simp [hid, hlive] at hp
+               rw [if_neg hflip] at hp
+               simp at hp
+             · rw [if_neg hi, if_neg hid] at hp
+               exact Or.inl hp
+       · simp [hroom] at hp
+         by_cases hsame : sender = dst
+         · rw [if_pos hsame] at hp
+           simp [setActor] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall, List.mem_append, List.mem_singleton] at hp
+             try rw [(proceed_fields _ k).2.2.2.1] at hp
+             try simp [List.mem_append, List.mem_singleton] at hp
+             rcases hp with hp | rfl
+             · rw [hi]; exact Or.inl hp
+             · exact Or.inr ⟨rfl, rfl⟩
+           · simp [setActor, hi] at hp
+             exact Or.inl hp
+         · rw [if_neg hsame] at hp
+           have hflip : dst ≠ sender := fun h => hsame h.symm
+           simp [setActor, hflip] at hp
+           by_cases hi : i = sender
+           · simp [hi, chargeSender, bumpToken, issueCall] at hp
+             rw [hi]
+             exact Or.inl hp
+           · by_cases hid : i = dst
+             · simp [hid, hlive, List.mem_append, List.mem_singleton] at hp
+               try rw [if_neg hflip] at hp
+               try simp [List.mem_append, List.mem_singleton] at hp
+               rcases hp with hp | rfl
+               · rw [hid]; exact Or.inl hp
+               · exact Or.inr ⟨rfl, rfl⟩
+             · rw [if_neg hi, if_neg hid] at hp
+               exact Or.inl hp
+     · rw [if_pos hlive] at hp
+       by_cases hi : i = sender
+       · simp [hi, setActor, issueCall, finishCall] at hp
+         try rw [(proceed_fields _ k).2.2.2.1] at hp
+         try rw [(proceed_fields _ (selectCall k _)).2.2.2.1] at hp
+         try simp at hp
+         rw [hi]
+         exact Or.inl hp
+       · simp [setActor, hi] at hp
+         exact Or.inl hp)
+
+/-- Equal queues, the same roster and parents, and no resurrection keep every
+held key. A crash is the life half: alive afterwards was alive before. -/
+theorem held_queues_eq (D : Description) (w w' : World) (name : String)
+    (hros : w'.roster = w.roster)
+    (hp : ∀ i, (w'.st i).parent = (w.st i).parent)
+    (hlife : ∀ i, (w'.st i).life = .alive → (w.st i).life = .alive)
+    (hbox : ∀ i, (w'.st i).box = (w.st i).box)
+    (hprio : ∀ i, (w'.st i).prio = (w.st i).prio)
+    (hpark : ∀ i, (w'.st i).parked = (w.st i).parked) :
+    ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name := by
+  refine held_kept D w w' name (fun _ => False) hros hp hlife ?_ ?_ ?_ ?_
+  · intro i hi m hm
+    exact Or.inl ⟨m, by simpa [hbox i] using hm, rfl⟩
+  · intro i hi m hm
+    exact Or.inl ⟨m, by simpa [hprio i] using hm, rfl⟩
+  · intro i hi p hp
+    have hmem : p ∈ (w.st i).parked := by simpa [hpark i] using hp
+    exact ⟨Or.inl ⟨p, hmem, Or.inl rfl⟩, Or.inl ⟨p, hmem, Or.inr rfl⟩⟩
+  · intro _ _ _ _ hs _
+    exact False.elim hs
+
+theorem crash_queues (w : World) (i : InstId) :
+    ((crashWorld w).st i).box = (w.st i).box ∧ ((crashWorld w).st i).prio = (w.st i).prio ∧
+      ((crashWorld w).st i).parked = (w.st i).parked ∧
+      ((crashWorld w).st i).parent = (w.st i).parent := by
+  simp only [crashWorld]
+  by_cases hmem : decide (i ∈ w.roster) = true
+  · simp [hmem, crashActor]
+    split <;> simp
+  · simp [hmem]
+
+theorem held_crash (D : Description) (w : World) (name : String) :
+    ∀ k, k ∈ heldKeys D (crashWorld w) name → k ∈ heldKeys D w name := by
+  refine held_queues_eq D w (crashWorld w) name rfl (crashWorld_parent w) (crashWorld_prev w) ?_ ?_ ?_
+  · intro i; exact (crash_queues w i).1
+  · intro i; exact (crash_queues w i).2.1
+  · intro i; exact (crash_queues w i).2.2.1
+
+/-- `enqueueOrPark` keeps the roster, parents and lives. A new box or parked
+message is `msg`, whose sender is the executor `sender`. Priority mail is
+untouched. -/
+theorem enqueue_cover (w : World) (D : Description) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (hmsg : msg.sender = sender) :
+    let w' := enqueueOrPark w D sender dst msg isCall k
+    w'.roster = w.roster ∧
+      (∀ i, (w'.st i).parent = (w.st i).parent) ∧
+      (∀ i, (w'.st i).life = .alive → (w.st i).life = .alive) ∧
+      (∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).box →
+        (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+          (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)) ∨
+          m.sender = sender) ∧
+      (∀ i, i ∈ w.roster → ∀ m, m ∈ (w'.st i).prio →
+        (∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∨ m.sender = sender) ∧
+      (∀ i, i ∈ w.roster → ∀ p, p ∈ (w'.st i).parked →
+        ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∨
+          p.sender = sender) ∧
+          ((∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)) ∨
+            p.msg.sender = sender)) := by
+  refine ⟨enqueue_roster w D sender dst msg isCall k, enqueue_parent w D sender dst msg isCall k, ?_, ?_, ?_, ?_⟩
+  · intro i h
+    exact (enqueue_life w D sender dst msg isCall k i).symm.trans h
+  · intro i _ m hm
+    rcases enqueue_box w D sender dst msg isCall k i m hm with hm | hs
+    · exact Or.inl ⟨m, hm, rfl⟩
+    · exact Or.inr (Or.inr (hs.trans hmsg))
+  · intro i _ m hm
+    exact Or.inl ⟨m, by simpa [enqueue_prio w D sender dst msg isCall k i] using hm, rfl⟩
+  · intro i _ p hp
+    rcases enqueue_park w D sender dst msg isCall k i p hp with hp | ⟨hse, hms⟩
+    · exact ⟨Or.inl ⟨p, hp, Or.inl rfl⟩, Or.inl ⟨p, hp, Or.inr rfl⟩⟩
+    · exact ⟨Or.inr hse, Or.inr (hms.trans hmsg)⟩
+
+/-- A send from an actor that is already alive does not grow the held keys of a
+template with no subtree. The message counts only when that actor is a
+generation of the template. -/
+theorem held_enqueue_empty (D : Description) (w : World) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (name : String) (hmsg : msg.sender = sender)
+    (hlive : (w.st sender).life = .alive) (hmem : sender ∈ w.roster)
+    (hempty : templateSubtree D name = "") :
+    ∀ key, key ∈ heldKeys D (enqueueOrPark w D sender dst msg isCall k) name →
+      key ∈ heldKeys D w name := by
+  rcases enqueue_cover w D sender dst msg isCall k hmsg with ⟨hros, hp, hlife, hbox, hprio, hpark⟩
+  refine held_kept D w _ name (fun s => s = sender) hros hp hlife hbox hprio hpark ?_
+  intro key _ s _ hs hpred
+  have hfrom : fromSlot name key s = true := by
+    rwa [slotPred_empty D name key s hempty] at hpred
+  have hliveS : (w.st s).life = .alive := by simpa [hs] using hlive
+  have hmemS : s ∈ w.roster := by simpa [hs] using hmem
+  exact ⟨s, hmemS, hfrom, hliveS⟩
+
+/-- A send from an actor that is already alive does not grow the held keys of a
+root template. The actor is a member of the subtree or outside it. A member is
+the root or a descendant, so that root generation was already alive. -/
+theorem held_enqueue_root (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (sender dst : InstId) (msg : Msg) (isCall : Bool) (k : Cont) (name : String)
+    (t : Template) (hmsg : msg.sender = sender)
+    (hlive : (w.st sender).life = .alive) (hmem : sender ∈ w.roster)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (enqueueOrPark w I.desc sender dst msg isCall k) name →
+      key ∈ heldKeys I.desc w name := by
+  rcases enqueue_cover w I.desc sender dst msg isCall k hmsg with ⟨hros, hp, hlife, hbox, hprio, hpark⟩
+  refine held_kept I.desc w _ name (fun s => s = sender) hros hp hlife hbox hprio hpark ?_
+  intro key g s hgen hs hpred
+  have hm : isMember I.desc s t.subtree key = true := by
+    rwa [slotPred_root I.desc name key s t ht hsub] at hpred
+  have hliveS : (w.st s).life = .alive := by simpa [hs] using hlive
+  have hmemS : s ∈ w.roster := by simpa [hs] using hmem
+  exact root_sender_slot I hG w hF hP hSelf hH hOne hKids hcr name key g t ht hroot hsub hgen s
+    hmemS hliveS hm
+
+/-- `setActor` of an actor that keeps queues, life and parent keeps them for every id. -/
+theorem phase_queues (w : World) (id : InstId) (a : Actor) (i : InstId)
+    (hb : a.box = (w.st id).box) (hpr : a.prio = (w.st id).prio)
+    (hpa : a.parked = (w.st id).parked) (hpar : a.parent = (w.st id).parent)
+    (hl : a.life = (w.st id).life) :
+    ((setActor w id a).st i).box = (w.st i).box ∧
+      ((setActor w id a).st i).prio = (w.st i).prio ∧
+      ((setActor w id a).st i).parked = (w.st i).parked ∧
+      ((setActor w id a).st i).parent = (w.st i).parent ∧
+      ((setActor w id a).st i).life = (w.st i).life := by
+  by_cases hi : i = id
+  · subst hi
+    simp [setActor, hb, hpr, hpa, hpar, hl]
+  · simp [setActor, hi]
+
+theorem held_phase (D : Description) (w : World) (id : InstId) (a : Actor) (name : String)
+    (hb : a.box = (w.st id).box) (hpr : a.prio = (w.st id).prio)
+    (hpa : a.parked = (w.st id).parked) (hpar : a.parent = (w.st id).parent)
+    (hl : a.life = (w.st id).life) :
+    ∀ k, k ∈ heldKeys D (setActor w id a) name → k ∈ heldKeys D w name := by
+  refine held_queues_eq D w _ name (setActor_roster _ _ _) ?_ ?_ ?_ ?_ ?_
+  · intro i
+    exact (phase_queues w id a i hb hpr hpa hpar hl).2.2.2.1
+  · intro i h
+    exact ((phase_queues w id a i hb hpr hpa hpar hl).2.2.2.2).symm.trans h
+  · intro i
+    exact (phase_queues w id a i hb hpr hpa hpar hl).1
+  · intro i
+    exact (phase_queues w id a i hb hpr hpa hpar hl).2.1
+  · intro i
+    exact (phase_queues w id a i hb hpr hpa hpar hl).2.2.1
+
+/-- Noting a stale route does not change the actor map, so a following `setActor`
+of an unchanged actor keeps every held key. -/
+theorem held_noted (D : Description) (w : World) (id dstId : InstId) (dst : String) (a : Actor)
+    (name : String) (hb : a.box = (w.st id).box) (hpr : a.prio = (w.st id).prio)
+    (hpa : a.parked = (w.st id).parked) (hpar : a.parent = (w.st id).parent)
+    (hl : a.life = (w.st id).life) :
+    ∀ k, k ∈ heldKeys D (setActor (noteStale w id dst) id a) name → k ∈ heldKeys D w name := by
+  have hst : ∀ i, ((noteStale w id dst).st i) = w.st i := fun i => noteStale_st w id dst i
+  refine held_queues_eq D w _ name (setActor_roster _ _ _) ?_ ?_ ?_ ?_ ?_
+  · intro i
+    exact ((phase_queues (noteStale w id dst) id a i
+      (hb.trans (by simp [hst id])) (hpr.trans (by simp [hst id]))
+      (hpa.trans (by simp [hst id])) (hpar.trans (by simp [hst id]))
+      (hl.trans (by simp [hst id]))).2.2.2.1).trans (by simp [hst i])
+  · intro i h
+    have hq := phase_queues (noteStale w id dst) id a i
+      (hb.trans (by simp [hst id])) (hpr.trans (by simp [hst id]))
+      (hpa.trans (by simp [hst id])) (hpar.trans (by simp [hst id]))
+      (hl.trans (by simp [hst id]))
+    exact (hst i ▸ hq.2.2.2.2).symm.trans h
+  · intro i
+    exact ((phase_queues (noteStale w id dst) id a i
+      (hb.trans (by simp [hst id])) (hpr.trans (by simp [hst id]))
+      (hpa.trans (by simp [hst id])) (hpar.trans (by simp [hst id]))
+      (hl.trans (by simp [hst id]))).1).trans (by simp [hst i])
+  · intro i
+    exact ((phase_queues (noteStale w id dst) id a i
+      (hb.trans (by simp [hst id])) (hpr.trans (by simp [hst id]))
+      (hpa.trans (by simp [hst id])) (hpar.trans (by simp [hst id]))
+      (hl.trans (by simp [hst id]))).2.1).trans (by simp [hst i])
+  · intro i
+    exact ((phase_queues (noteStale w id dst) id a i
+      (hb.trans (by simp [hst id])) (hpr.trans (by simp [hst id]))
+      (hpa.trans (by simp [hst id])) (hpar.trans (by simp [hst id]))
+      (hl.trans (by simp [hst id]))).2.2.1).trans (by simp [hst i])
+
+/-- A `send` from an alive actor does not grow the held keys of an empty-subtree
+template or of a root template. The route's message is sent by that actor. A
+missing route changes no queue. -/
+theorem held_send (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (k : Cont) (dst label : String) (hint : Nat) (es : List Eff) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hk : k.rest = .send dst label hint :: es)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  simp only [execRun, hbit, hk] at hkK
+  cases hr : route w I.desc id dst with
+  | none =>
+    simp only [hr, noteStale_st] at hkK
+    exact held_noted I.desc w id id dst (proceed (w.st id) (afterHead k)) name
+      (proceed_fields _ _).2.2.2.2 (proceed_fields _ _).2.2.1 (proceed_fields _ _).2.2.2.1
+      (proceed_fields _ _).2.1 (proceed_fields _ _).1 key hkK
+  | some dstId =>
+    simp only [hr] at hkK
+    let msg : Msg := { label := label, sender := id, callFrom := none }
+    cases hkind with
+    | inl hempty =>
+      exact held_enqueue_empty I.desc w id dstId msg false (afterHead k) name rfl hlive hmem
+        hempty key hkK
+    | inr hroot =>
+      obtain ⟨t, ht, hrootT, hsub⟩ := hroot
+      exact held_enqueue_root I hG w hF hP hSelf hH hOne hKids hcr id dstId msg false
+        (afterHead k) name t rfl hlive hmem ht hrootT hsub key hkK
+
+/-- An admitted `trySend` is a send of an unreliable copy from the same alive
+actor. A missing route, a full lane and a dead target change no queue. -/
+theorem held_try (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (k : Cont) (dst label : String) (hint : Nat) (onFull onGone : List Eff)
+    (es : List Eff) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hk : k.rest = .trySend dst label hint onFull onGone :: es)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  simp only [execRun, hbit, hk] at hkK
+  cases hr : route w I.desc id dst with
+  | none =>
+    simp only [hr, noteStale_st] at hkK
+    exact held_noted I.desc w id id dst
+      (proceed (w.st id) { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone })
+      name (proceed_fields _ _).2.2.2.2 (proceed_fields _ _).2.2.1 (proceed_fields _ _).2.2.2.1
+      (proceed_fields _ _).2.1 (proceed_fields _ _).1 key hkK
+  | some dstId =>
+    simp only [hr] at hkK
+    by_cases hroom :
+        ((w.st dstId).life = .alive ∧ (w.st dstId).parked = []) ∧
+          (w.st dstId).box.length < capBulk I.desc w.N dstId
+    · simp [hroom] at hkK
+      let msg : Msg := { label := label, sender := id, callFrom := none, reliable := false }
+      cases hkind with
+      | inl hempty =>
+        exact held_enqueue_empty I.desc w id dstId msg false (afterHead k) name rfl hlive hmem
+          hempty key hkK
+      | inr hroot =>
+        obtain ⟨t, ht, hrootT, hsub⟩ := hroot
+        exact held_enqueue_root I hG w hF hP hSelf hH hOne hKids hcr id dstId msg false
+          (afterHead k) name t rfl hlive hmem ht hrootT hsub key hkK
+    · simp [hroom] at hkK
+      by_cases hliveT : (w.st dstId).life = .alive
+      · simp [hliveT] at hkK
+        exact held_phase I.desc w id
+          (proceed (w.st id) { afterHead k with rest := onFull, toState := pickState (afterHead k).toState (afterHead k).toFull })
+          name (proceed_fields _ _).2.2.2.2 (proceed_fields _ _).2.2.1
+          (proceed_fields _ _).2.2.2.1 (proceed_fields _ _).2.1 (proceed_fields _ _).1 key hkK
+      · simp [hliveT] at hkK
+        exact held_phase I.desc w id
+          (proceed (w.st id) { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone })
+          name (proceed_fields _ _).2.2.2.2 (proceed_fields _ _).2.2.1
+          (proceed_fields _ _).2.2.2.1 (proceed_fields _ _).2.1 (proceed_fields _ _).1 key hkK
+
+/-- A `call` from an alive actor enqueues one message from that actor, or, when
+the role does not resolve, finishes the call without queueing it. -/
+theorem held_call (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (k : Cont) (dst label : String) (hint : Nat)
+    (onNotAdmitted onTimedOut : List Eff) (es : List Eff) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hk : k.rest = .call dst label hint onNotAdmitted onTimedOut :: es)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  simp only [execRun, hbit, hk] at hkK
+  let kWait : Cont := { afterHead k with onNotAdmitted := onNotAdmitted, onTimedOut := onTimedOut }
+  cases hr : resolveId I.desc w id dst with
+  | none =>
+    simp only [hr, noteStale_st] at hkK
+    exact held_noted I.desc w id id dst
+      (finishCall (issueCall (w.st id)) kWait .notAdmitted) name
+      (finishCall_fields _ _ _).2.2.2.2 (finishCall_fields _ _ _).2.2.1
+      (finishCall_fields _ _ _).2.2.2.1 (finishCall_fields _ _ _).2.1
+      (finishCall_fields _ _ _).1 key hkK
+  | some dstId =>
+    simp only [hr] at hkK
+    let msg : Msg := { label := label, sender := id, callFrom := some id }
+    cases hkind with
+    | inl hempty =>
+      exact held_enqueue_empty I.desc w id dstId msg true kWait name rfl hlive hmem hempty key hkK
+    | inr hroot =>
+      obtain ⟨t, ht, hrootT, hsub⟩ := hroot
+      exact held_enqueue_root I hG w hF hP hSelf hH hOne hKids hcr id dstId msg true kWait
+        name t rfl hlive hmem ht hrootT hsub key hkK
+
+theorem upsert_mem (prio : List Msg) (msg m : Msg) (hm : m ∈ upsertPrio prio msg) :
+    m ∈ prio ∨ m = msg := by
+  unfold upsertPrio at hm
+  by_cases h : (prio.any (fun p => p.label == msg.label)) = true
+  · simp [h] at hm
+    exact Or.inl hm
+  · simp [h, List.mem_append, List.mem_singleton] at hm
+    rcases hm with hm | rfl
+    · exact Or.inl hm
+    · exact Or.inr rfl
+
+/-- One actor's priority lane gains messages from a single alive sender. Every
+other queue is unchanged, so an empty subtree or a root template gains no held
+key. -/
+theorem held_one_prio (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (a : Actor) (name : String)
+    (hb : a.box = (w.st id).box) (hpa : a.parked = (w.st id).parked)
+    (hpar : a.parent = (w.st id).parent) (hl : a.life = (w.st id).life)
+    (hpr : ∀ m, m ∈ a.prio →
+      (∃ m0, m0 ∈ (w.st id).prio ∧ m0.sender = m.sender) ∨ m.sender = id)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (setActor w id a) name → key ∈ heldKeys I.desc w name := by
+  refine held_kept I.desc w _ name (fun s => s = id) (setActor_roster _ _ _) ?_ ?_ ?_ ?_ ?_ ?_
+  · intro i
+    by_cases hi : i = id
+    · subst hi
+      simp [setActor, hpar]
+    · simp [setActor, hi]
+  · intro i h
+    by_cases hi : i = id
+    · subst hi
+      exact hl.symm.trans (by simpa [setActor] using h)
+    · simpa [setActor, hi] using h
+  · intro i _ m hm
+    by_cases hi : i = id
+    · subst hi
+      exact Or.inl ⟨m, by simpa [setActor, hb] using hm, rfl⟩
+    · exact Or.inl ⟨m, by simpa [setActor, hi] using hm, rfl⟩
+  · intro i _ m hm
+    by_cases hi : i = id
+    · rw [hi]
+      exact hpr m (by simpa [setActor, hi] using hm)
+    · exact Or.inl ⟨m, by simpa [setActor, hi] using hm, rfl⟩
+  · intro i _ p hp
+    by_cases hi : i = id
+    · rw [hi]
+      have hmemP : p ∈ (w.st id).parked := by simpa [setActor, hi, hpa] using hp
+      exact ⟨Or.inl ⟨p, hmemP, Or.inl rfl⟩, Or.inl ⟨p, hmemP, Or.inr rfl⟩⟩
+    · have hmemP : p ∈ (w.st i).parked := by simpa [setActor, hi] using hp
+      exact ⟨Or.inl ⟨p, hmemP, Or.inl rfl⟩, Or.inl ⟨p, hmemP, Or.inr rfl⟩⟩
+  · intro key g s hgen hs hpred
+    cases hkind with
+    | inl hempty =>
+      have hfrom : fromSlot name key s = true := by
+        rwa [slotPred_empty I.desc name key s hempty] at hpred
+      exact ⟨s, by simpa [hs] using hmem, hfrom, by simpa [hs] using hlive⟩
+    | inr hroot =>
+      obtain ⟨t, ht, hrootT, hsub⟩ := hroot
+      have hm : isMember I.desc s t.subtree key = true := by
+        rwa [slotPred_root I.desc name key s t ht hsub] at hpred
+      exact root_sender_slot I hG w hF hP hSelf hH hOne hKids hcr name key g t ht hrootT hsub
+        hgen s (by simpa [hs] using hmem) (by simpa [hs] using hlive) hm
+
+/-- `selfSchedule` either leaves the lane, appends one wake from the running
+actor, or crashes without queueing it. -/
+theorem held_self (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (k : Cont) (label : String) (es : List Eff) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hk : k.rest = .selfSchedule label :: es)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  simp only [execRun, hbit, hk] at hkK
+  by_cases hhas : ((w.st id).prio.any (fun p => p.label == label)) = true
+  · simp [hhas] at hkK
+    exact held_phase I.desc w id (proceed (w.st id) (afterHead k)) name
+      (proceed_fields _ _).2.2.2.2 (proceed_fields _ _).2.2.1 (proceed_fields _ _).2.2.2.1
+      (proceed_fields _ _).2.1 (proceed_fields _ _).1 key hkK
+  · have hhasF : ((w.st id).prio.any (fun p => p.label == label)) = false := by
+      cases hb : (w.st id).prio.any (fun p => p.label == label) with
+      | false => rfl
+      | true => exact absurd hb hhas
+    simp [hhasF] at hkK
+    by_cases hfit : prioLoad (w.st id).prio < capPrio I.desc w.N id
+    · simp [hfit] at hkK
+      let msg : Msg :=
+        { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }
+      let a := proceed { (w.st id) with prio := upsertPrio (w.st id).prio msg, nextMid := (w.st id).nextMid + 1 } (afterHead k)
+      have hpr : ∀ m, m ∈ a.prio →
+          (∃ m0, m0 ∈ (w.st id).prio ∧ m0.sender = m.sender) ∨ m.sender = id := by
+        intro m hm
+        have hm' : m ∈ upsertPrio (w.st id).prio msg := by
+          simpa [a, (proceed_fields _ _).2.2.1] using hm
+        rcases upsert_mem _ _ _ hm' with hm | rfl
+        · exact Or.inl ⟨m, hm, rfl⟩
+        · exact Or.inr rfl
+      exact held_one_prio I hG w hF hP hSelf hH hOne hKids hcr id a name
+        (by simp [a, (proceed_fields _ _).2.2.2.2])
+        (by simp [a, (proceed_fields _ _).2.2.2.1])
+        (by simp [a, (proceed_fields _ _).2.1])
+        (by simp [a, (proceed_fields _ _).1])
+        hpr hlive hmem hkind key hkK
+    · simp [hfit] at hkK
+      exact held_crash I.desc w name key hkK
+
+/-- Priority mail added on top of `w0` is either already there or sent by `writer`.
+Box, parked, parent and roster stay put, and a life that is alive afterwards was
+alive before. -/
+structure PrioExt (w0 w : World) (writer : InstId) : Prop where
+  ros : w.roster = w0.roster
+  par : ∀ i, (w.st i).parent = (w0.st i).parent
+  life : ∀ i, (w.st i).life = .alive → (w0.st i).life = .alive
+  box : ∀ i, (w.st i).box = (w0.st i).box
+  park : ∀ i, (w.st i).parked = (w0.st i).parked
+  prio : ∀ i m, m ∈ (w.st i).prio →
+    (∃ m0, m0 ∈ (w0.st i).prio ∧ m0.sender = m.sender) ∨ m.sender = writer
+
+theorem PrioExt.refl (w : World) (writer : InstId) : PrioExt w w writer where
+  ros := rfl
+  par := fun _ => rfl
+  life := fun _ h => h
+  box := fun _ => rfl
+  park := fun _ => rfl
+  prio := fun _ m hm => Or.inl ⟨m, hm, rfl⟩
+
+theorem PrioExt.trans {w0 w w' : World} {writer : InstId}
+    (h1 : PrioExt w0 w writer) (h2 : PrioExt w w' writer) : PrioExt w0 w' writer where
+  ros := h2.ros.trans h1.ros
+  par := fun i => (h2.par i).trans (h1.par i)
+  life := fun i h => h1.life i (h2.life i h)
+  box := fun i => (h2.box i).trans (h1.box i)
+  park := fun i => (h2.park i).trans (h1.park i)
+  prio := fun i m hm => by
+    rcases h2.prio i m hm with ⟨m0, hm0, hs⟩ | hs
+    · rcases h1.prio i m0 hm0 with ⟨m1, hm1, hs1⟩ | hw
+      · exact Or.inl ⟨m1, hm1, hs1.trans hs⟩
+      · exact Or.inr (hs.symm.trans hw)
+    · exact Or.inr hs
+
+theorem offer_ext (D : Description) (w : World) (host : InstId) (msg : Msg) (writer : InstId)
+    (hmsg : msg.sender = writer) : PrioExt w (offerPrio D w host msg) writer := by
+  unfold offerPrio
+  by_cases hfull : decide (prioLoad (w.st host).prio ≥ capPrio D w.N host) = true
+  · simp [hfull]
+    exact {
+      ros := rfl
+      par := crashWorld_parent w
+      life := crashWorld_prev w
+      box := fun i => (crash_queues w i).1
+      park := fun i => (crash_queues w i).2.2.1
+      prio := fun i m hm => Or.inl ⟨m, by simpa [(crash_queues w i).2.1] using hm, rfl⟩
+    }
+  · simp [hfull]
+    refine {
+      ros := setActor_roster _ _ _
+      par := ?_
+      life := ?_
+      box := ?_
+      park := ?_
+      prio := ?_
+    }
+    · intro i
+      by_cases hi : i = host
+      · rw [hi]; simp [setActor]
+      · simp [setActor, hi]
+    · intro i h
+      by_cases hi : i = host
+      · simpa [setActor, hi] using h
+      · simpa [setActor, hi] using h
+    · intro i
+      by_cases hi : i = host
+      · rw [hi]; simp [setActor]
+      · simp [setActor, hi]
+    · intro i
+      by_cases hi : i = host
+      · rw [hi]; simp [setActor]
+      · simp [setActor, hi]
+    · intro i m hm
+      by_cases hi : i = host
+      · simp [setActor, hi, List.mem_append] at hm
+        rcases hm with hm | rfl
+        · refine Or.inl ⟨m, ?_, rfl⟩
+          rw [hi]
+          exact hm
+        · exact Or.inr hmsg
+      · exact Or.inl ⟨m, by simpa [setActor, hi] using hm, rfl⟩
+
+theorem try_ext (D : Description) (w : World) (dstId : InstId) (label : String) (writer : InstId) :
+    PrioExt w (tryWake D w dstId label writer) writer := by
+  unfold tryWake
+  by_cases hskip :
+      ((w.st dstId).life != .alive || (w.st dstId).prio.any (fun p => p.label == label)) = true
+  · simp [hskip]
+    exact PrioExt.refl _ _
+  · simp [hskip]
+    exact offer_ext D w dstId _ writer rfl
+
+theorem wake_fold_ext (D : Description) (ids : List InstId) (w0 w : World) (dst label : String)
+    (writer : InstId) (h : PrioExt w0 w writer) :
+    PrioExt w0 (ids.foldl (fun acc id => tryWake D acc id label writer) w) writer := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons j js ih =>
+    rw [List.foldl_cons]
+    exact ih _ (h.trans (try_ext D w j label writer))
+
+theorem wake_ext (D : Description) (w : World) (dst label : String) (writer : InstId) :
+    PrioExt w (wakeReaders D w dst label writer) writer := by
+  unfold wakeReaders readersOf
+  exact wake_fold_ext D _ w w dst label writer (PrioExt.refl _ _)
+
+theorem held_prio_ext (I : Impl) (hG : GraphOk I.desc) (w w' : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (writer : InstId) (name : String) (hE : PrioExt w w' writer)
+    (hlive : (w.st writer).life = .alive) (hmem : writer ∈ w.roster)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc w' name → key ∈ heldKeys I.desc w name := by
+  refine held_kept I.desc w w' name (fun s => s = writer) hE.ros hE.par hE.life ?_ ?_ ?_ ?_
+  · intro i _ m hm
+    exact Or.inl ⟨m, by simpa [hE.box i] using hm, rfl⟩
+  · intro i _ m hm
+    exact hE.prio i m hm
+  · intro i _ p hp
+    have hmemP : p ∈ (w.st i).parked := by simpa [hE.park i] using hp
+    exact ⟨Or.inl ⟨p, hmemP, Or.inl rfl⟩, Or.inl ⟨p, hmemP, Or.inr rfl⟩⟩
+  · intro key g s hgen hs hpred
+    cases hkind with
+    | inl hempty =>
+      have hfrom : fromSlot name key s = true := by
+        rwa [slotPred_empty I.desc name key s hempty] at hpred
+      exact ⟨s, by simpa [hs] using hmem, hfrom, by simpa [hs] using hlive⟩
+    | inr hroot =>
+      obtain ⟨t, ht, hrootT, hsub⟩ := hroot
+      have hm : isMember I.desc s t.subtree key = true := by
+        rwa [slotPred_root I.desc name key s t ht hsub] at hpred
+      exact root_sender_slot I hG w hF hP hSelf hH hOne hKids hcr name key g t ht hrootT hsub
+        hgen s (by simpa [hs] using hmem) (by simpa [hs] using hlive) hm
+
+/-- A cell write wakes readers with a priority message from the writer, or
+leaves the queues alone when the cell was already dirty. -/
+theorem held_cell (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (k : Cont) (dst label : String) (value : Nat) (es : List Eff) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hk : k.rest = .cell dst label value :: es)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  simp only [execRun, hbit, hk] at hkK
+  let previous := w.cell dst label
+  let written : Cell := { value := max previous.value value, dirty := true }
+  let w1 := setCell w dst label written
+  let base := setActor w1 id (proceed (w1.st id) (afterHead k))
+  have hbase : PrioExt w base id := {
+    ros := by simp [base, w1, setCell, setActor_roster]
+    par := fun i => by
+      by_cases hi : i = id
+      · rw [hi]; simp [base, w1, setCell, setActor, (proceed_fields _ _).2.1]
+      · simp [base, w1, setCell, setActor, hi]
+    life := fun i h => by
+      by_cases hi : i = id
+      · simpa [base, w1, setCell, setActor, hi, (proceed_fields _ _).1] using h
+      · simpa [base, w1, setCell, setActor, hi] using h
+    box := fun i => by
+      by_cases hi : i = id
+      · rw [hi]; simp [base, w1, setCell, setActor, (proceed_fields _ _).2.2.2.2]
+      · simp [base, w1, setCell, setActor, hi]
+    park := fun i => by
+      by_cases hi : i = id
+      · rw [hi]; simp [base, w1, setCell, setActor, (proceed_fields _ _).2.2.2.1]
+      · simp [base, w1, setCell, setActor, hi]
+    prio := fun i m hm => by
+      by_cases hi : i = id
+      · exact Or.inl ⟨m, by simpa [base, w1, setCell, setActor, hi, (proceed_fields _ _).2.2.1] using hm, rfl⟩
+      · exact Or.inl ⟨m, by simpa [base, w1, setCell, setActor, hi] using hm, rfl⟩
+  }
+  by_cases hdirty : previous.dirty = true
+  · simp [hdirty, previous, written, w1, base] at hkK
+    exact held_prio_ext I hG w base hF hP hSelf hH hOne hKids hcr id name hbase hlive hmem hkind key hkK
+  · have hdirtyF : previous.dirty = false := by
+      cases hb : previous.dirty with
+      | false => rfl
+      | true => exact absurd hb hdirty
+    simp [hdirtyF, previous, written, w1, base] at hkK
+    exact held_prio_ext I hG w _ hF hP hSelf hH hOne hKids hcr id name
+      (hbase.trans (wake_ext I.desc base dst label id)) hlive hmem hkind key hkK
+
+/-- Effects that enqueue mail. The sender is the actor that runs. -/
+def effectEnqueues (e : Eff) : Bool :=
+  match e with
+  | .send _ _ _ => true
+  | .trySend _ _ _ _ _ => true
+  | .call _ _ _ _ _ => true
+  | .selfSchedule _ => true
+  | .cell _ _ _ => true
+  | .reply => false
+  | .internal => false
+  | .peer _ => false
+  | .abort => false
+  | .terminate => false
+  | .spawn _ => false
+
+/-- Running an enqueueing effect does not grow the held keys of an empty subtree
+or of a root template. The executor is alive, and that is the sender. -/
+theorem held_exec_enqueue (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (k : Cont) (e : Eff) (es : List Eff) (name : String)
+    (hlive : (w.st id).life = .alive) (hmem : id ∈ w.roster)
+    (hk : k.rest = e :: es) (he : effectEnqueues e = true)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  cases e with
+  | send dst label hint =>
+    exact held_send I hG w hF hP hSelf hH hOne hKids hcr id k dst label hint es name hlive hmem hk hkind
+  | trySend dst label hint onFull onGone =>
+    exact held_try I hG w hF hP hSelf hH hOne hKids hcr id k dst label hint onFull onGone es name
+      hlive hmem hk hkind
+  | call dst label hint onNotAdmitted onTimedOut =>
+    exact held_call I hG w hF hP hSelf hH hOne hKids hcr id k dst label hint onNotAdmitted onTimedOut
+      es name hlive hmem hk hkind
+  | selfSchedule label =>
+    exact held_self I hG w hF hP hSelf hH hOne hKids hcr id k label es name hlive hmem hk hkind
+  | cell dst label value =>
+    exact held_cell I hG w hF hP hSelf hH hOne hKids hcr id k dst label value es name hlive hmem hk hkind
+  | reply => simp [effectEnqueues] at he
+  | internal => simp [effectEnqueues] at he
+  | peer _ => simp [effectEnqueues] at he
+  | abort => simp [effectEnqueues] at he
+  | terminate => simp [effectEnqueues] at he
+  | spawn _ => simp [effectEnqueues] at he
+
+/-- An accepted `exec` of an enqueueing effect does not grow those held keys.
+`execHead` only runs an alive actor. -/
+theorem held_exec_head (I : Impl) (hG : GraphOk I.desc) (w w' : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hKids : DeadChildless w) (hcr : w.crashed = false)
+    (id : InstId) (name : String) (hmem : id ∈ w.roster)
+    (h : execHead I w id = some w')
+    (he : match (w.st id).phase with
+      | .run k => match k.rest with
+        | e :: _ => effectEnqueues e
+        | [] => false
+      | _ => false)
+    (hkind : templateSubtree I.desc name = "" ∨
+      ∃ t, templateOf I.desc name = some t ∧ rootOf I.desc t = true ∧ t.subtree ≠ "") :
+    ∀ key, key ∈ heldKeys I.desc w' name → key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  unfold execHead at h
+  by_cases hnot : (w.st id).life ≠ .alive
+  · simp [hnot] at h
+  · have hlive : (w.st id).life = .alive := Classical.byContradiction fun hne => hnot hne
+    simp [hnot] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h he
+      cases h
+      cases hk : k.rest with
+      | nil => simp [hk] at he
+      | cons e es =>
+        simp [hk] at he
+        exact held_exec_enqueue I hG w hF hP hSelf hH hOne hKids hcr id k e es name hlive hmem hk he
+          hkind key hkK
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
