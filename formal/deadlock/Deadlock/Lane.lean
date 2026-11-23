@@ -5064,6 +5064,118 @@ theorem held_terminate_run (I : Impl) (hG : GraphOk I.desc) (w : World)
       | true => exact absurd hb hbit
     simpa [execRun, hf] using hkK
 
+/-- `proceed` keeps the queues, the life and the parent, so it adds no held key. -/
+theorem held_proceed (D : Description) (w : World) (id : InstId) (k : Cont) (name : String) :
+    ∀ key, key ∈ heldKeys D (setActor w id (proceed (w.st id) k)) name →
+      key ∈ heldKeys D w name := by
+  intro key hk
+  have hf := proceed_fields (w.st id) k
+  exact held_phase D w id (proceed (w.st id) k) name
+    hf.2.2.2.2 hf.2.2.1 hf.2.2.2.1 hf.2.1 hf.1 key hk
+
+/-- A reply resumes the caller and the sender onto continuations already in
+their arms. Neither continuation carries mail. -/
+theorem held_reply (D : Description) (w : World) (sender : InstId) (k : Cont) (name : String) :
+    ∀ key, key ∈ heldKeys D (performReply w sender k) name → key ∈ heldKeys D w name := by
+  intro key hk
+  unfold performReply at hk
+  cases hr : k.replyTo with
+  | none =>
+    simp [hr] at hk
+    exact held_proceed D w sender (afterHead k) name key hk
+  | some caller =>
+    simp [hr] at hk
+    cases hp : (w.st caller).phase with
+    | awaitReply dst ck =>
+      simp [hp] at hk
+      by_cases hmatch : dst = sender ∧ (w.st sender).oweId = some (w.st caller).waitId
+      · rw [ite_eq_left hmatch] at hk
+        let w1 := setActor w caller (finishCall (w.st caller) ck .reply)
+        have hf := finishCall_fields (w.st caller) ck .reply
+        have h1 := held_phase D w caller (finishCall (w.st caller) ck .reply) name
+          hf.2.2.2.2 hf.2.2.1 hf.2.2.2.1 hf.2.1 hf.1
+        exact h1 key (held_proceed D w1 sender (afterHead k) name key hk)
+      · rw [ite_eq_right hmatch] at hk
+        exact held_proceed D w sender (afterHead k) name key hk
+    | idle =>
+      simp [hp] at hk
+      exact held_proceed D w sender (afterHead k) name key hk
+    | run _ =>
+      simp [hp] at hk
+      exact held_proceed D w sender (afterHead k) name key hk
+    | parked _ _ _ =>
+      simp [hp] at hk
+      exact held_proceed D w sender (afterHead k) name key hk
+    | awaitEffect _ =>
+      simp [hp] at hk
+      exact held_proceed D w sender (afterHead k) name key hk
+    | awaitPeer _ =>
+      simp [hp] at hk
+      exact held_proceed D w sender (afterHead k) name key hk
+    | crashed =>
+      simp [hp] at hk
+      exact held_proceed D w sender (afterHead k) name key hk
+
+/-- `reply` is not an `effectEnqueues` arm: both actors resume a continuation
+they already held. -/
+theorem held_exec_reply (I : Impl) (w : World) (id : InstId) (k : Cont) (es : List Eff)
+    (name : String) (hk : k.rest = .reply :: es) :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hkK
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · simp [execRun, hlive, hk] at hkK
+    exact held_reply I.desc w id k name key hkK
+  · have hf : ((w.st id).life == .alive) = false := by
+      cases hb : (w.st id).life == .alive with
+      | false => rfl
+      | true => exact absurd hb hlive
+    simpa [execRun, hf] using hkK
+
+/-- An empty rest, an internal effect and a peer effect only rewrite the
+executor's phase. -/
+theorem held_exec_phase (I : Impl) (w : World) (id : InstId) (k : Cont) (name : String)
+    (hquiet : match k.rest with
+      | [] => True
+      | .internal :: _ => True
+      | .peer _ :: _ => True
+      | _ => False) :
+    ∀ key, key ∈ heldKeys I.desc (execRun I w id (w.st id) k) name →
+      key ∈ heldKeys I.desc w name := by
+  intro key hk
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · cases hkrest : k.rest with
+    | nil =>
+      simp [execRun, hlive, hkrest] at hk
+      exact held_phase I.desc w id { (w.st id) with phase := .idle, typestate := k.toState } name
+        rfl rfl rfl rfl rfl key hk
+    | cons e es =>
+      cases e with
+      | internal =>
+        simp [execRun, hlive, hkrest] at hk
+        exact held_phase I.desc w id
+          { (w.st id) with phase := .awaitEffect (afterHead k) } name
+          rfl rfl rfl rfl rfl key hk
+      | peer onTimeout =>
+        simp [execRun, hlive, hkrest] at hk
+        exact held_phase I.desc w id
+          { (w.st id) with phase := .awaitPeer { afterHead k with onTimeout := onTimeout } } name
+          rfl rfl rfl rfl rfl key hk
+      | send _ _ _ => simp [hkrest] at hquiet
+      | trySend _ _ _ _ _ => simp [hkrest] at hquiet
+      | call _ _ _ _ _ => simp [hkrest] at hquiet
+      | reply => simp [hkrest] at hquiet
+      | selfSchedule _ => simp [hkrest] at hquiet
+      | cell _ _ _ => simp [hkrest] at hquiet
+      | abort => simp [hkrest] at hquiet
+      | terminate => simp [hkrest] at hquiet
+      | spawn _ => simp [hkrest] at hquiet
+  · have hf : ((w.st id).life == .alive) = false := by
+      cases hb : (w.st id).life == .alive with
+      | false => rfl
+      | true => exact absurd hb hlive
+    simpa [execRun, hf] using hk
+
 /-- A parent walk that starts off the fresh id never reads that id's new parent.
 No older actor named the fresh id, so the walk agrees with the world before the birth. -/
 theorem descends_birth (w w' : World) (fresh : InstId) (fuel : Nat) (anc desc : InstId)
@@ -5385,6 +5497,70 @@ theorem held_spawn_lone (I : Impl) (w w' : World) (template : String) (hF : Pare
   have hpre := held_le_lone I.desc w template
   have hplus := held_spawn_len I w w' template hF h
   omega
+
+/-- Admitting one empty actor adds at most its own key. -/
+theorem held_admit_len (I : Impl) (w : World) (id : InstId) (born : Actor) (name : String)
+    (k g : Nat) (hF : ParentForest w) (hnew : id ∉ w.roster) (hid : id = InstId.peer name k g)
+    (hempty : born.box = [] ∧ born.prio = [] ∧ born.parked = []) :
+    (heldKeys I.desc (admitBorn I w id born) name).length ≤
+      (heldKeys I.desc w name).length + 1 := by
+  refine held_birth_len I.desc w _ name id k g hF hnew (admit_roster I w id born) hid ?_ ?_
+  · intro i hi
+    exact admit_st_other I w id i born hi
+  · have hself := admit_st_self I w id born
+    exact ⟨by simp [hself, hempty.1], by simp [hself, hempty.2.1], by simp [hself, hempty.2.2]⟩
+
+/-- A per-peer parent births its child at its own key, or the step is the
+identity. Either way that child's held keys grow by at most one. -/
+theorem held_child_len (I : Impl) (w w' : World) (parent : InstId) (child : String)
+    (hF : ParentForest w) (h : spawnChild I w parent child = some w') :
+    (heldKeys I.desc w' child).length ≤ (heldKeys I.desc w child).length + 1 := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hgo :
+        (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = true
+    · simp only [hgo, ite_true] at h
+      cases parent with
+      | core _ => simp at h
+      | peer pn pk pg =>
+        by_cases hblk : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk = true
+        · simp [hblk] at h
+          cases h
+          exact Nat.le_succ _
+        · have hf : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk = false := by
+            cases hb : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk with
+            | false => rfl
+            | true => exact absurd hb hblk
+          simp only [hf] at h
+          cases h
+          let id := InstId.peer child pk (maxGen w child pk)
+          let born :=
+            { bornActor I.desc w child pk t.initial with parent := some (InstId.peer pn pk pg) }
+          exact held_admit_len I w id born child pk (maxGen w child pk) hF (gen_fresh w child pk)
+            rfl ⟨by simp [born, bornActor, withKeyTokens], by simp [born, bornActor, withKeyTokens],
+              by simp [born, bornActor, withKeyTokens]⟩
+    · have hf :
+          (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive) = false := by
+        cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hgo
+      simp only [hf] at h
+      by_cases hstay : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · simp only [hstay, ite_true] at h
+        cases h
+        exact Nat.le_succ _
+      · have hstayF :
+            (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) with
+          | false => rfl
+          | true => exact absurd hb hstay
+        simp [hstayF] at h
 
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
