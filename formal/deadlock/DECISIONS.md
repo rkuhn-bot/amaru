@@ -968,3 +968,63 @@ root and the parent's population under a per-peer supervisor.
 This supersedes the pool adoption of 2026-11-21 20:20 and the pool entries
 of 2026-11-22, including the live-count note above. `SpawnCount.lean` and
 `PoolPark.lean` recorded pool behaviour and are deleted.
+
+## 2026-11-23 — Accept error occupancy and the re-issue gap
+
+The `AcceptError` edge is occupancy 0 and legal 0. Both numbers are
+`Affine.ofNat`, so each is a pure `b` count with `a = 0`. The three
+neighbouring pairs fail `checkBool`:
+
+- occupancy 1 and legal 1, and occupancy 1 and legal 0, put two units of
+  occupancy into a capacity-1 mailbox, so Lemma 1 fails
+  (`accept_err_one_one`, `accept_err_one_zero`);
+- occupancy 0 and legal 1 keeps the occupancy sum at 1, and the ingress
+  check adds that legal count to the `Accepted` edge's occupancy. The sum
+  is 2, above capacity (`accept_err_zero_one`).
+
+The `(0, 0)` pair is what lets the error share the mailbox with `Accepted`.
+
+Nothing in the model issues the accept. The completion is environment
+ingress. Nothing bounds a detached call beyond the one mailbox slot, and
+nothing checks that a new accept is issued only after the result has been
+handled. `accept_fits_prio` sizes the priority lane. Completions arrive on
+the bulk lane; the mailbox bound is `accept_fits_occ`, `l1` and
+`accept_cap`. The re-issue rule is a production obligation in
+`RUST-CHANGES.md`.
+
+## 2026-11-23 — A state of maximum debt cannot send
+
+`sendsOk` requires `pathReserve(program) ≤ floorState(fromState)`.
+`floorState` is `budget - debt`. A straight send reserves
+`1 + landFloor(landing)`, and `landFloor` is that same floor, so an
+admitted send needs `debt(landing) ≥ debt(from) + 1` when both debts sit
+under the budget. Debt is at most the budget, so the state whose debt
+equals the budget has floor 0 and cannot be the source of a send.
+
+A one-state loop fails at once. `Deadlock/ForwardLimit.lean` is that
+loop: one core, state `idle`, one blocking self-edge of occupancy 1, and
+a transition that sends that label back to `idle`. `sendsOk` is false
+and `localOkB` is false. A two-state machine can send only toward the
+strictly higher debt, and cannot return. `localOk`, the checker, and the
+step semantics are unchanged. Whether a forwarding core should be
+admitted is open.
+
+## 2026-11-23 — A parked call's hold does not cover NotAdmitted
+
+`tokenHold` of `.parked target true` subtracts the call's own slot from
+the `NotAdmitted` reserve. `finishCall` of `.notAdmitted` spends that
+reserve in full. The two are not ordered.
+
+`Deadlock/TimeoutGap.lean` is the smallest description. One core, states
+`idle` (debt 2 toward `box`) and `busy` (debt 0). Budget is 2, so the
+floors are 0 and 2. The actor is parked on `.core "box"` with
+`onNotAdmitted` empty and landing state `busy`. `tokenHold` is 1.
+`finishCall` of `.notAdmitted` has `tokenHold` 2. `gap_old`, `gap_new`
+and `gap_grows` are closed by `decide`.
+
+`callTimeout` refunds one token per parked call entry of that caller and
+then runs `NotAdmitted`. The refund covers the extra unit when the entry
+is still queued. `OccInv` does not say that a `.parked _ true` phase has
+such an entry, so the slack step of `occ_timeout` is blocked on
+`1 ≤` the length of that filter. `refundParkedCall`, `tokenHold` and
+`callTimeout` are unchanged.

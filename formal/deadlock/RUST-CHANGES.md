@@ -34,3 +34,17 @@ Line numbers are from the Amaru tree this model was read against.
 - Decision: N67. The Lean model has no `Listen(addr)` tombstone and no
   respawn. Production is unchanged.
 - Status: pending
+
+## 4. Re-issue an accept only after the result is handled
+
+- Location: `crates/amaru-protocols/src/accept.rs:27`, `:39`
+- Change: issue the next accept only after the previous result has been
+  handled. `Network::new(&eff).accept(...).await` at `:27` is the call.
+  `:39` always schedules `PullAccept` after
+  `state.manager_config.accept_interval`, including when the result is
+  still outstanding and including after `AcceptError::Other` terminates
+  the stage at `:34-36`.
+- Decision: the Lean model does not issue the accept. The completion is
+  environment ingress. Nothing checks that a new accept waits until the
+  previous result has been handled. Completions arrive on the bulk lane.
+- Status: pending

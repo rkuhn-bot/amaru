@@ -532,10 +532,11 @@ box is at that capacity, `receiveIngress` is `none`.
 hold (`accept_checked`). `init_bounded` is the initial world.
 `both_results_consumed` replays `Accepted` then `AcceptError`, each received
 before the next arrives, and the core is still idle and not crashed.
-`second_completion_refused` is the non-vacuous bound: after `Accepted` is
+`second_completion_refused` is the capacity-1 refusal: after `Accepted` is
 queued, a second ingress of either label is `none` and exactly one
-completion is outstanding. The module is `Deadlock.Accept`. It is not
-imported by `Deadlock.lean`, and it is not one of the headline theorems.
+completion is outstanding.
+The module is `Deadlock.Accept`. It is not imported by `Deadlock.lean`,
+and it is not one of the headline theorems.
 
 ## Restrictions that are still in force
 
