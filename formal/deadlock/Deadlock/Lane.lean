@@ -1150,4 +1150,138 @@ theorem parked_sender_not_dead (w : World) (hPark : ParkedFromLive w)
     (hp : p ∈ (w.st host).parked) : (w.st p.sender).life ≠ .dead :=
   hPark host p hlive hp
 
+/-! One root actor per subtree key. A second scheduler root takes a fresh key,
+and a child birth is not a root. -/
+
+/-- Root actors of one nonempty subtree use distinct keys. -/
+def OneCohort (D : Description) (roster : List InstId) : Prop :=
+  ∀ sub k n1 g1 n2 g2 t1 t2,
+    sub ≠ "" →
+    templateOf D n1 = some t1 → templateOf D n2 = some t2 →
+    t1.subtree = sub → t2.subtree = sub →
+    rootOf D t1 = true → rootOf D t2 = true →
+    InstId.peer n1 k g1 ∈ roster → InstId.peer n2 k g2 ∈ roster →
+    n1 = n2 ∧ g1 = g2
+
+theorem oneCohort_same (D : Description) {r r' : List InstId} (h : r' = r) (hc : OneCohort D r) :
+    OneCohort D r' := by
+  simpa [h] using hc
+
+/-- The id a birth appends is not an old root at its own key. -/
+theorem oneCohort_snoc (D : Description) (roster : List InstId) (id : InstId)
+    (h : OneCohort D roster)
+    (hdis : ∀ n k g t, id = InstId.peer n k g →
+      templateOf D n = some t → rootOf D t = true → t.subtree ≠ "" →
+      ∀ n2 g2, InstId.peer n2 k g2 ∈ roster → templateSubtree D n2 = t.subtree → False) :
+    OneCohort D (roster ++ [id]) := by
+  intro sub k n1 g1 n2 g2 t1 t2 hsub ht1 ht2 hs1 hs2 hr1 hr2 hm1 hm2
+  rcases List.mem_append.mp hm1 with hm1 | hm1
+  · rcases List.mem_append.mp hm2 with hm2 | hm2
+    · exact h sub k n1 g1 n2 g2 t1 t2 hsub ht1 ht2 hs1 hs2 hr1 hr2 hm1 hm2
+    · simp only [List.mem_singleton] at hm2
+      exact False.elim (hdis n2 k g2 t2 hm2.symm ht2 hr2 (by rw [hs2]; exact hsub) n1 g1 hm1
+        (by simp [templateSubtree, ht1, hs1, hs2]))
+  · simp only [List.mem_singleton] at hm1
+    rcases List.mem_append.mp hm2 with hm2 | hm2
+    · exact False.elim (hdis n1 k g1 t1 hm1.symm ht1 hr1 (by rw [hs1]; exact hsub) n2 g2 hm2
+        (by simp [templateSubtree, ht2, hs1, hs2]))
+    · simp only [List.mem_singleton] at hm2
+      have hids : InstId.peer n1 k g1 = InstId.peer n2 k g2 := hm1.trans hm2.symm
+      cases hids
+      exact ⟨rfl, rfl⟩
+
+theorem coreRoster_peer (D : Description) (name : String) (k g : Nat) :
+    InstId.peer name k g ∉ coreRoster D := by
+  intro h
+  unfold coreRoster at h
+  obtain ⟨t, _, hif⟩ := List.mem_filterMap.mp h
+  by_cases hone : (t.multiplicity == .one) = true
+  · simp [hone] at hif
+  · simp [hone] at hif
+
+theorem oneCohort_init (I : Impl) (N : Nat) : OneCohort I.desc (initWorld I N).roster := by
+  intro sub k n1 g1 n2 g2 t1 t2 _ _ _ _ _ _ _ hm1 _
+  rw [init_roster] at hm1
+  exact absurd hm1 (coreRoster_peer I.desc n1 k g1)
+
+theorem setActor_roster (w : World) (id : InstId) (a : Actor) :
+    (setActor w id a).roster = w.roster := rfl
+
+theorem crashWorld_roster (w : World) : (crashWorld w).roster = w.roster := rfl
+
+theorem commit_roster (w : World) (id : InstId) (next : Actor) :
+    (commitCont w id next).roster = w.roster := by
+  unfold commitCont
+  split
+  · rfl
+  · exact setActor_roster _ _ _
+
+theorem offer_roster (D : Description) (w : World) (host : InstId) (msg : Msg) :
+    (offerPrio D w host msg).roster = w.roster := by
+  unfold offerPrio
+  by_cases hfull : decide (prioLoad (w.st host).prio >= capPrio D w.N host) = true
+  · simp [hfull, crashWorld_roster]
+  · simp [hfull, setActor_roster]
+
+theorem tryWake_roster (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer : InstId) : (tryWake D w dstId label writer).roster = w.roster := by
+  unfold tryWake
+  by_cases hskip :
+      ((w.st dstId).life != .alive || (w.st dstId).prio.any (fun p => p.label == label)) = true
+  · simp [hskip]
+  · simp [hskip, offer_roster]
+
+theorem wake_roster (D : Description) (ids : List InstId) (w : World) (dst label : String)
+    (writer : InstId) :
+    (ids.foldl (fun w id => tryWake D w id label writer) w).roster = w.roster := by
+  induction ids generalizing w with
+  | nil => rfl
+  | cons j js ih =>
+    rw [List.foldl_cons, ih, tryWake_roster]
+
+theorem wakeReaders_roster (D : Description) (w : World) (dst label : String) (writer : InstId) :
+    (wakeReaders D w dst label writer).roster = w.roster := by
+  unfold wakeReaders readersOf
+  exact wake_roster D _ w dst label writer
+
+theorem reply_roster (w : World) (sender : InstId) (k : Cont) :
+    (performReply w sender k).roster = w.roster := by
+  unfold performReply
+  split
+  · exact setActor_roster _ _ _
+  · split
+    · split
+      · exact setActor_roster _ _ _
+      · exact setActor_roster _ _ _
+    · exact setActor_roster _ _ _
+
+theorem abortChildren_roster (D : Description) (w : World) (parent : InstId) :
+    (abortChildren D w parent).roster = w.roster := by
+  unfold abortChildren
+  have hfold : ∀ (ids : List InstId) (w0 : World),
+      (ids.foldl (fun acc c =>
+        if isChild acc parent c && (acc.st c).life == .alive then
+          shutdownActor D (dropDescendants D acc c) c
+        else acc) w0).roster = w0.roster := by
+    intro ids
+    induction ids with
+    | nil => intro _; rfl
+    | cons c cs ih =>
+      intro w0
+      rw [List.foldl_cons]
+      by_cases hgo : (isChild w0 parent c && (w0.st c).life == .alive) = true
+      · simp only [hgo, ite_true]
+        have hsh : (shutdownActor D (dropDescendants D w0 c) c).roster = w0.roster :=
+          (shutdown_roster D (dropDescendants D w0 c) c).trans (drop_roster D w0 c)
+        exact (ih _).trans hsh
+      · simp only [hgo, ite_false]
+        exact ih w0
+  exact hfold w.roster w
+
+theorem admit_roster (I : Impl) (w : World) (id : InstId) (a : Actor) :
+    (admitBorn I w id a).roster = w.roster ++ [id] := by
+  unfold admitBorn
+  rw [readCells_roster]
+  exact setActor_roster _ _ _
+
 end Deadlock
