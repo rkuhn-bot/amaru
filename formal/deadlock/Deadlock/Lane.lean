@@ -6438,4 +6438,110 @@ theorem held_le_root_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
     (hold_reach I N w hG hR) (oneCohort_reachable I hG N w hR) hcr name t ht hroot hsub sup hsup
     hlive
 
+/-! A per-peer child's held keys are its parent's. `birth_supervised` says
+`GraphOk` gives that child a nonempty subtree, so there is no empty-subtree
+child whose mail could outlive the parent. A core supervisor makes the template
+itself the subtree root, counted by `rootOutstanding`. -/
+
+/-- A per-peer supervisor is the peer at this actor's own key. -/
+theorem peer_parent (I : Impl) (w : World) (hF : ParentForest w) (hP : Parented I.desc w)
+    (hH : Hold I w) (child : String) (k g : Nat) (t ts : Template) (supName : String)
+    (hmem : InstId.peer child k g ∈ w.roster) (ht : templateOf I.desc child = some t)
+    (hsup : t.supervisor = some supName) (hts : templateOf I.desc supName = some ts)
+    (hmul : ts.multiplicity = .perPeer) :
+    ∃ gP, InstId.peer supName k gP ∈ w.roster ∧
+      (w.st (InstId.peer child k g)).parent = some (InstId.peer supName k gP) := by
+  have hp := hP (InstId.peer child k g) t hmem (by simpa [tname] using ht)
+  rw [hsup] at hp
+  obtain ⟨p, hpar, htn, hrest⟩ := hp
+  have hmemP : p ∈ w.roster := hF.hosted _ _ hpar
+  cases p with
+  | core n =>
+    obtain ⟨tp, htp, hrole⟩ := hH.role (.core n) hmemP
+    have htp' : templateOf I.desc n = some tp := by simpa [tname] using htp
+    have hn : n = supName := by simpa [tname] using htn
+    rw [hn] at htp'
+    have hsame : tp = ts := by injection htp'.symm.trans hts
+    have hone : ts.multiplicity = .one := by
+      simpa [tmb_role, hsame] using hrole
+    cases hone.symm.trans hmul
+  | peer n pk pg =>
+    have hn : n = supName := by simpa [tname] using htn
+    have hkeyEq : memberKey (InstId.peer child k g) = some pk := hrest
+    simp [memberKey] at hkeyEq
+    have hpk : pk = k := hkeyEq.symm
+    exact ⟨pg, by simpa [hn, hpk] using hmemP, by simpa [hn, hpk] using hpar⟩
+
+/-- Two templates of one nonempty subtree hold a key for the same mail. -/
+theorem slot_mail_same (D : Description) (w : World) (name1 name2 sub : String) (k : Nat)
+    (h1 : templateSubtree D name1 = sub) (h2 : templateSubtree D name2 = sub) (hne : sub ≠ "") :
+    slotMailHeld D w name1 k = slotMailHeld D w name2 k := by
+  have hneB : (sub == "") = false := by simpa [beq_iff_eq] using hne
+  simp [slotMailHeld, h1, h2, hneB]
+
+/-- A key held by a per-peer child is held by its per-peer parent. The parent
+is the peer at the same key. Alive children keep that parent alive; held mail
+is the shared subtree's mail, so it holds the parent's key as well. -/
+theorem held_in_parent (I : Impl) (hG : GraphOk I.desc) (w : World) (hcr : w.crashed = false)
+    (hP : Parented I.desc w) (hF : ParentForest w) (hH : Hold I w) (hKids : DeadChildless w)
+    (child supName : String) (t ts : Template) (ht : templateOf I.desc child = some t)
+    (hts : templateOf I.desc supName = some ts) (hsup : t.supervisor = some supName)
+    (hmul : ts.multiplicity = .perPeer) (k : Nat) (hk : k ∈ heldKeys I.desc w child) :
+    k ∈ heldKeys I.desc w supName := by
+  obtain ⟨id, hid, hbit, hkey⟩ := (heldKeys_mem I.desc w child k).mp hk
+  cases id with
+  | core _ => simp [heldBit] at hbit
+  | peer n key g =>
+    simp only [heldBit, Bool.and_eq_true] at hbit
+    simp only [bitKey] at hkey
+    have hn : n = child := by simpa [beq_iff_eq] using hbit.1
+    rw [hn] at hid hbit
+    rw [hkey] at hid
+    have hheld : heldAt I.desc w child k = true := by simpa [hkey] using hbit.2
+    have hmulC : t.multiplicity = .perPeer :=
+      member_per I.desc hG child t ht (birth_supervised I.desc hG child t ht supName hsup)
+    have hshare :=
+      per_sup_same I.desc hG child t ht hmulC supName hsup ts hts hmul
+    obtain ⟨gP, hmemP, _⟩ :=
+      peer_parent I w hF hP hH child k g t ts supName hid ht hsup hts hmul
+    by_cases hmail : slotMailHeld I.desc w child k = true
+    · have hsubC : templateSubtree I.desc child = t.subtree := by simp [templateSubtree, ht]
+      have hsubP : templateSubtree I.desc supName = ts.subtree := by simp [templateSubtree, hts]
+      have hmailP : slotMailHeld I.desc w supName k = true := by
+        rw [← slot_mail_same I.desc w child supName t.subtree k hsubC
+          (by rw [hsubP, hshare.1]) (birth_supervised I.desc hG child t ht supName hsup)]
+        exact hmail
+      have hparentHeld : heldAt I.desc w supName k = true := by
+        unfold heldAt
+        apply _root_.List.any_eq_true.mpr
+        refine ⟨InstId.peer supName k gP, hmemP, ?_⟩
+        simp [hmailP]
+      exact (heldKeys_mem I.desc w supName k).mpr
+        ⟨InstId.peer supName k gP, hmemP, by simp [heldBit, hparentHeld], by simp [bitKey]⟩
+    · unfold heldAt at hheld
+      obtain ⟨idA, hidA, hbA⟩ := _root_.List.any_eq_true.mp hheld
+      cases idA with
+      | core _ => simp at hbA
+      | peer nA kA gA =>
+        simp only [Bool.and_eq_true] at hbA
+        have hnA : nA = child := by simpa [beq_iff_eq] using hbA.1.1
+        have hkA : kA = k := by simpa [beq_iff_eq] using hbA.1.2
+        rw [hnA, hkA] at hidA hbA
+        have hliveA : (w.st (InstId.peer child k gA)).life = .alive := by
+          cases hbb : (w.st (InstId.peer child k gA)).life == .alive with
+          | true => exact (beq_iff_eq).mp hbb
+          | false =>
+            rw [hbb, Bool.false_or] at hbA
+            exact absurd hbA.2 hmail
+        obtain ⟨gL, hmemL, hparL⟩ :=
+          peer_parent I w hF hP hH child k gA t ts supName hidA ht hsup hts hmul
+        have hparentLive := kids_alive w hKids hcr _ _ hliveA hparL
+        have hparentHeld : heldAt I.desc w supName k = true := by
+          unfold heldAt
+          apply _root_.List.any_eq_true.mpr
+          refine ⟨InstId.peer supName k gL, hmemL, ?_⟩
+          simp [hparentLive]
+        exact (heldKeys_mem I.desc w supName k).mpr
+          ⟨InstId.peer supName k gL, hmemL, by simp [heldBit, hparentHeld], by simp [bitKey]⟩
+
 end Deadlock
