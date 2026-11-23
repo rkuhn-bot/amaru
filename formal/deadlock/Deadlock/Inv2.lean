@@ -606,17 +606,17 @@ theorem scope_killSubtree (w : World) (D : Description) (sub : String) (key : Na
   simpa [killSubtree, killMembers] using scope_killFold D w sub key w.roster s h
 
 theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree I w)
-    (hph : (w.st id).phase = .run k) : BulkFree I (execRun I w id (w.st id) k) := by
+    (hlive : (w.st id).life = .alive) (hph : (w.st id).phase = .run k) :
+    BulkFree I (execRun I w id (w.st id) k) := by
+  have hgo : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
   apply bulk_or I w _ hB
   intro i
-  cases k with
-  | mk rest toState replyTo =>
-    cases hrest : rest with
+  cases hrest : k.rest with
     | nil =>
       by_cases hi : i = id
       · rw [hi]
-        simp [execRun, hrest, setActor, contRest, scope_empty]
-      · simp [execRun, hrest, setActor, hi]
+        simp [execRun, hgo, hrest, setActor, contRest, scope_empty]
+      · simp [execRun, hgo, hrest, setActor, hi]
     | cons e es =>
       cases e with
       | send dst label hint =>
@@ -624,58 +624,63 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
         · have htail := scope_tail I.desc (tname id) (.send dst label hint) es
             (by simpa [contRest, hph, hrest] using hB id)
           rw [hi]
-          simp [execRun, hrest]
+          simp [execRun, hgo, hrest]
           cases hr : route w I.desc id dst with
           | none =>
             simp [hr, setActor_self]
-            exact Or.inl (scope_proceed I.desc (tname id) (w.st id) ⟨es, toState, replyTo⟩ htail)
+            exact Or.inl (scope_proceed I.desc (tname id) (w.st id) (afterHead k)
+              (by simpa [afterHead, hrest, List.tail_cons] using htail))
           | some dstId =>
             simp [hr]
             exact Or.inl (by simpa [enqueue_sender_cont, afterHead, List.tail_cons] using htail)
-        · simp [execRun, hrest]
+        · simp [execRun, hgo, hrest]
           cases hr : route w I.desc id dst with
           | none => simp [hr, setActor, hi]
           | some dstId =>
             simp [hr]
             exact Or.inr (enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := none } false
-              ⟨es, toState, replyTo⟩ i hi)
-      | call dst label hint =>
+              (afterHead k) i hi)
+      | call dst label hint onNotAdmitted onTimedOut =>
         by_cases hi : i = id
-        · have htail := scope_tail I.desc (tname id) (.call dst label hint) es
+        · have htail := scope_tail I.desc (tname id)
+            (.call dst label hint onNotAdmitted onTimedOut) es
             (by simpa [contRest, hph, hrest] using hB id)
           rw [hi]
-          simp [execRun, hrest]
-          cases hr : resolveId I.desc id dst with
+          simp [execRun, hgo, hrest]
+          cases hr : resolveId I.desc w id dst with
           | none =>
             simp [hr, setActor_self, noteStale_st]
-            exact Or.inl (scope_proceed I.desc (tname id) (w.st id) ⟨es, toState, replyTo⟩ htail)
+            exact Or.inl (scope_proceed I.desc (tname id) (w.st id) (afterHead k)
+              (by simpa [afterHead, hrest, List.tail_cons] using htail))
           | some dstId =>
             simp [hr]
             exact Or.inl (by simpa [enqueue_sender_cont, afterHead, List.tail_cons] using htail)
-        · simp [execRun, hrest]
-          cases hr : resolveId I.desc id dst with
+        · simp [execRun, hgo, hrest]
+          cases hr : resolveId I.desc w id dst with
           | none => simp [hr, setActor, hi, noteStale_st]
           | some dstId =>
             simp [hr]
             exact Or.inr (enqueue_phase_other w I.desc id dstId { label := label, sender := id, callFrom := some id } true
-              ⟨es, toState, replyTo⟩ i hi)
-      | trySend dst label hint =>
+              (afterHead k) i hi)
+      | trySend dst label hint onFull onGone =>
         by_cases hi : i = id
-        · have htail := scope_tail I.desc (tname id) (.trySend dst label hint) es
+        · have htail := scope_tail I.desc (tname id) (.trySend dst label hint onFull onGone) es
             (by simpa [contRest, hph, hrest] using hB id)
           rw [hi]
-          simp [execRun, hrest]
+          simp [execRun, hgo, hrest]
           cases hr : route w I.desc id dst with
           | none =>
             simp [hr, setActor_self]
-            exact Or.inl (scope_proceed I.desc (tname id) (w.st id) ⟨es, toState, replyTo⟩ htail)
+            exact Or.inl (scope_proceed I.desc (tname id) (w.st id) (afterHead k)
+              (by simpa [afterHead, hrest, List.tail_cons] using htail))
           | some dstId =>
             simp [hr]
             split
             · exact Or.inl (by simpa [enqueue_sender_cont, afterHead, List.tail_cons] using htail)
             · simp [setActor_self]
-              exact Or.inl (scope_proceed I.desc (tname id) (w.st id) ⟨es, toState, replyTo⟩ htail)
-        · simp [execRun, hrest]
+              exact Or.inl (scope_proceed I.desc (tname id) (w.st id) (afterHead k)
+              (by simpa [afterHead, hrest, List.tail_cons] using htail))
+        · simp [execRun, hgo, hrest]
           cases hr : route w I.desc id dst with
           | none => simp [hr, setActor, hi]
           | some dstId =>
@@ -683,18 +688,18 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             split
             · exact Or.inr (enqueue_phase_other w I.desc id dstId
                 { label := label, sender := id, callFrom := none, reliable := false } false
-                ⟨es, toState, replyTo⟩ i hi)
+                (afterHead k) i hi)
             · simp [setActor, hi]
       | reply =>
-        simp [execRun, hrest]
+        simp [execRun, hgo, hrest]
         unfold performReply
-        cases hto : replyTo with
+        cases hto : k.replyTo with
         | none =>
           simp [hto, setActor]
           by_cases hi : i = id
           · rw [hi]
             simp [setActor]
-            exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, none⟩
+            exact Or.inl (after_scope I.desc (tname id) (w.st id) k
               (by simpa [contRest, hph, hrest] using hB id))
           · simp [hi]
         | some caller =>
@@ -710,7 +715,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
                   simp [setActor]
                   exact Or.inl (after_scope I.desc (tname id)
                     (if id = caller then finishCall (w.st caller) ck .reply else w.st id)
-                    ⟨.reply :: es, toState, some caller⟩
+                    k
                     (by simpa [contRest, hph, hrest] using hB id))
                 · by_cases hc : i = caller
                   · by_cases hself : caller = id
@@ -731,14 +736,14 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
                 by_cases hi : i = id
                 · rw [hi]
                   simp [setActor]
-                  exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+                  exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                     (by simpa [contRest, hph, hrest] using hB id))
                 · simp [hi]
             · simp [hd, setActor]
               by_cases hi : i = id
               · rw [hi]
                 simp [setActor]
-                exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+                exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                   (by simpa [contRest, hph, hrest] using hB id))
               · simp [hi]
           | idle =>
@@ -746,7 +751,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             by_cases hi : i = id
             · rw [hi]
               simp [setActor]
-              exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+              exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                 (by simpa [contRest, hph, hrest] using hB id))
             · simp [hi]
           | run ck =>
@@ -754,7 +759,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             by_cases hi : i = id
             · rw [hi]
               simp [setActor]
-              exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+              exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                 (by simpa [contRest, hph, hrest] using hB id))
             · simp [hi]
           | parked dst b ck =>
@@ -762,7 +767,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             by_cases hi : i = id
             · rw [hi]
               simp [setActor]
-              exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+              exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                 (by simpa [contRest, hph, hrest] using hB id))
             · simp [hi]
           | awaitEffect ck =>
@@ -770,7 +775,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             by_cases hi : i = id
             · rw [hi]
               simp [setActor]
-              exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+              exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                 (by simpa [contRest, hph, hrest] using hB id))
             · simp [hi]
           | awaitPeer ck =>
@@ -778,7 +783,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             by_cases hi : i = id
             · rw [hi]
               simp [setActor]
-              exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+              exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                 (by simpa [contRest, hph, hrest] using hB id))
             · simp [hi]
           | crashed =>
@@ -786,11 +791,11 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
             by_cases hi : i = id
             · rw [hi]
               simp [setActor]
-              exact Or.inl (after_scope I.desc (tname id) (w.st id) ⟨.reply :: es, toState, some caller⟩
+              exact Or.inl (after_scope I.desc (tname id) (w.st id) k
                 (by simpa [contRest, hph, hrest] using hB id))
             · simp [hi]
       | selfSchedule label =>
-        simp only [execRun, hrest]
+        simp only [execRun, hgo, hrest]
         split
         · by_cases hi : i = id
           · rw [hi]
@@ -818,7 +823,7 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
               simp [setActor, contRest, scope_empty]
             · simp [setActor, hi]
       | cell dst label value =>
-        simp only [execRun, hrest]
+        simp only [execRun, hgo, hrest]
         split
         · by_cases hi : i = id
           · rw [hi]
@@ -847,19 +852,75 @@ theorem bulk_exec (I : Impl) (w : World) (id : InstId) (k : Cont) (hB : BulkFree
         · rw [hi]
           have htail := scope_tail I.desc (tname id) (.internal) es
             (by simpa [contRest, hph, hrest] using hB id)
-          simp [execRun, hrest, setActor, contRest]
-          exact Or.inl htail
-        · simp [execRun, hrest, setActor, hi]
-      | peer =>
+          simp [execRun, hgo, hrest, setActor, contRest]
+          exact Or.inl (by simpa [afterHead, hrest, List.tail_cons] using htail)
+        · simp [execRun, hgo, hrest, setActor, hi]
+      | peer onTimeout =>
         by_cases hi : i = id
         · rw [hi]
-          have htail := scope_tail I.desc (tname id) (.peer) es
+          have htail := scope_tail I.desc (tname id) (.peer onTimeout) es
             (by simpa [contRest, hph, hrest] using hB id)
-          simp [execRun, hrest, setActor, contRest]
-          exact Or.inl htail
-        · simp [execRun, hrest, setActor, hi]
+          simp [execRun, hgo, hrest, setActor, contRest]
+          exact Or.inl (by simpa [afterHead, hrest, List.tail_cons] using htail)
+        · simp [execRun, hgo, hrest, setActor, hi]
+      | abort =>
+        simp only [execRun, hgo, hrest]
+        have htail := scope_tail I.desc (tname id) .abort es
+          (by simpa [contRest, hph, hrest] using hB id)
+        by_cases hcr : (abortChildren I.desc w id).crashed = true
+        · simp only [commitCont, hcr, ite_true]
+          exact Or.inl (scope_empty I.desc (tname i))
+        · have hcrF : (abortChildren I.desc w id).crashed = false := by
+            cases hbb : (abortChildren I.desc w id).crashed
+            · rfl
+            · exact absurd hbb hcr
+          simp only [commitCont, hcrF, ite_false]
+          by_cases hi : i = id
+          · simp [setActor, hi]
+            exact Or.inl (scope_proceed I.desc (tname id) ((abortChildren I.desc w id).st id) (afterHead k)
+              (by simpa [afterHead, hrest, List.tail_cons] using htail))
+          · simp [setActor, hi]
+            exact Or.inl (scope_empty I.desc (tname i))
+      | spawn child =>
+        simp only [execRun, hgo, hrest]
+        have htail := scope_tail I.desc (tname id) (.spawn child) es
+          (by simpa [contRest, hph, hrest] using hB id)
+        cases hs : spawnChild I w id child with
+        | none =>
+          simp only [hs]
+          by_cases hmem : i ∈ w.roster
+          · simp only [crashWorld, hmem, ite_true, crashActor]
+            by_cases hla : ((w.st i).life == .alive) = true
+            · simp [hla, contRest]
+              exact Or.inl (scope_empty I.desc (tname i))
+            · have hlaF : ((w.st i).life == .alive) = false := by
+                cases hbb : (w.st i).life == .alive
+                · rfl
+                · exact absurd hbb hla
+              simp [hlaF]
+          · simp [crashWorld, hmem]
+        | some w' =>
+          simp only [hs]
+          by_cases hcr : w'.crashed = true
+          · simp only [commitCont, hcr, ite_true]
+            rcases spawnChild_phase I w w' id child i hs with hsame | hidle
+            · exact Or.inr hsame
+            · exact Or.inl (by simpa [contRest, hidle] using scope_empty I.desc (tname i))
+          · have hcrF : w'.crashed = false := by
+              cases hbb : w'.crashed
+              · rfl
+              · exact absurd hbb hcr
+            simp only [commitCont, hcrF, ite_false]
+            by_cases hi : i = id
+            · simp [setActor, hi]
+              exact Or.inl (scope_proceed I.desc (tname id) (w'.st id) (afterHead k)
+                (by simpa [afterHead, hrest, List.tail_cons] using htail))
+            · simp [setActor, hi]
+              rcases spawnChild_phase I w w' id child i hs with hsame | hidle
+              · exact Or.inr hsame
+              · exact Or.inl (by simpa [contRest, hidle] using scope_empty I.desc (tname i))
       | terminate =>
-        simp [execRun, hrest]
+        simp [execRun, hgo, hrest]
         cases htpl : templateOf I.desc (tname id) with
         | none => simp [htpl]
         | some t =>
@@ -893,7 +954,7 @@ theorem bulk_head (I : Impl) (w w' : World) (id : InstId) (hB : BulkFree I w)
     | run k =>
       simp [hph] at h
       cases h
-      exact bulk_exec I w id k hB hph
+      exact bulk_exec I w id k hB hlive hph
     | idle => simp [hph] at h
     | parked _ _ _ => simp [hph] at h
     | awaitReply _ _ => simp [hph] at h

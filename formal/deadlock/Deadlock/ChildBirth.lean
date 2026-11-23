@@ -1459,4 +1459,63 @@ theorem peer_role_reachable (I : Impl) (hG : GraphOk I.desc) (N : Nat) (w : Worl
   | step w w' a _ h ih =>
     exact peer_apply I w w' a ih h
 
+/-- A child birth leaves every phase as it was, except the admitted actor, which
+is idle. A blocked or refused spawn changes nothing. -/
+theorem spawnChild_phase (I : Impl) (w w' : World) (parent : InstId) (child : String) (i : InstId)
+    (h : spawnChild I w parent child = some w') :
+    (w'.st i).phase = (w.st i).phase ∨ (w'.st i).phase = .idle := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hcond : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+        (w.st parent).life == .alive) = true
+    · rw [hcond] at h
+      rw [ite_eq_left (by decide : true = true)] at h
+      cases parent with
+      | core _ => simp at h
+      | peer pname pk pg =>
+        dsimp only at h
+        by_cases hblock : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk = true
+        · rw [hblock] at h
+          rw [ite_eq_left (by decide : true = true)] at h
+          cases h
+          exact Or.inl rfl
+        · have hblockF : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk = false := by
+            cases hbb : slotRespawnBlocked I.desc w (InstId.peer pname pk pg) child pk
+            · rfl
+            · exact absurd hbb hblock
+          rw [hblockF] at h
+          rw [ite_eq_right (by decide : ¬ false = true)] at h
+          injection h with hw
+          subst hw
+          let bornId := InstId.peer child pk (maxGen w child pk)
+          by_cases hnew : i = bornId
+          · unfold bornId at hnew
+            cases hnew
+            exact Or.inr (by simp [admitBorn, cellsSt, setActor, bornActor, withKeyTokens])
+          · unfold bornId at hnew
+            exact Or.inl (by simp [admitBorn, cellsSt, setActor, hnew])
+    · have hcondF : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = false := by
+        cases hbb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive
+        · rfl
+        · exact absurd hbb hcond
+      rw [hcondF] at h
+      rw [ite_eq_right (by decide : ¬ false = true)] at h
+      by_cases hcond2 : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · rw [hcond2] at h
+        rw [ite_eq_left (by decide : true = true)] at h
+        cases h
+        exact Or.inl rfl
+      · have hcond2F : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hbb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)
+          · rfl
+          · exact absurd hbb hcond2
+        rw [hcond2F] at h
+        rw [ite_eq_right (by decide : ¬ false = true)] at h
+        simp at h
+
 end Deadlock
