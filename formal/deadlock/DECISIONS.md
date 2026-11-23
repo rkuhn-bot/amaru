@@ -1024,10 +1024,9 @@ and `gap_grows` are closed by `decide`.
 
 `callTimeout` refunds one token per parked call entry of that caller and
 then runs `NotAdmitted`. The refund covers the extra unit when the entry
-is still queued. `OccInv` does not say that a `.parked _ true` phase has
-such an entry, so the slack step of `occ_timeout` is blocked on
-`1 ≤` the length of that filter. `refundParkedCall`, `tokenHold` and
-`callTimeout` are unchanged.
+is still queued. `OccInv.parkedCall` is the other case: the
+`NotAdmitted` hold is already within the tokens. `refundParkedCall`,
+`tokenHold` and `callTimeout` are unchanged.
 
 ## 2026-11-23 — Sealing the callee drops a parked call
 
@@ -1058,3 +1057,38 @@ again. `credit_covers_notAdmitted` is the one extra token against a hold
 that grows by one. pure-stage does the same with the caller:
 `terminate_stage` leaves a sender that is waiting on a call until the
 deadline, and does not resume it as a failed send.
+
+## 2026-11-23 — A parked call is queued or already covered
+
+`OccInv.parkedCall` is the missing entry. While the caller is alive, a
+phase `.parked dst true` means the call is still in `(st dst).parked`,
+or `tokenHold` of `finishCall` with `.notAdmitted` is already at most
+the caller's tokens. A dead parked actor is exempt: the clause is only
+required while `life = .alive`.
+
+The target's death is not a conjunct. `refundParkedCall` credits an
+alive target and is not itself a step. `callTimeout` then runs
+`finishCall` and leaves the parked phase in that same step. A seal takes
+the credited branch only after the target is dead. Storing the death in
+the clause would leave that in-step refund with no `OccInv`.
+
+An admit moves a parked call into the mailbox and resumes the sender in
+the same step. `receiveBulk`, when both the box and the parked list are
+nonempty, credits the box head's sender rather than the parked caller.
+The intermediate still has that caller in `.parked _ true` with the
+entry gone, and `hold_na_bound` says a timeout from there is one token
+short. `MailInv` already treats the mailbox update and the sender's
+phase update as one step. `OccInv` is proved on the post-resume world.
+
+`occ_timeout` cases on the clause. An entry refunds at least one token,
+and `hold_na_bound` bounds the `NotAdmitted` hold by the parked hold plus
+the call's own slot. A caller already covered stays covered because the
+refund is nonnegative. `tokenHold` is still the phase's reserve. The
+clause is what makes the extra unit available. `tokenHold`, `gateHold`,
+`receiveIngress` and `callTimeout` are unchanged.
+
+Workarounds recorded with the proof: the clause applies only while the
+caller is alive; the target's death is not a conjunct; the admit
+intermediate is the post-resume world; a parked timeout uses `occ_set`
+because both the tokens and the hold rise by the refunded slot; a
+consumed entry is credited to `budgetHolder`.
