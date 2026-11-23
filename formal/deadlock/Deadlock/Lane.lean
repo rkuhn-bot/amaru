@@ -2521,4 +2521,685 @@ theorem held_finish (I : Impl) (w w' : World) (id : InstId) (name : String)
       simp [setActor, hkpark]
   · simp [setActor, hi]
 
+/-! A receive or a timeout deletes mail, or moves one parked message into the
+box. The sender does not change, and a host that survives afterwards survived
+before, so a slot held afterwards was held before. -/
+
+/-- Messages, priority messages, and parked entries whose sender satisfies
+`pred` at a host that `surv` still counts. -/
+def queuesHold (pred surv : InstId → Bool) (a : Actor) : Bool :=
+  a.box.any (fun m => pred m.sender && surv m.sender) ||
+    a.prio.any (fun m => pred m.sender && surv m.sender) ||
+    a.parked.any (fun p =>
+      (pred p.sender && surv p.sender) || (pred p.msg.sender && surv p.msg.sender))
+
+theorem subtree_queues (D : Description) (w : World) (host : InstId) (sub : String) (k : Nat)
+    (a : Actor) :
+    actorHoldsSubtreeMail D w host sub k a =
+      queuesHold (fromSubtree D sub k) (fun s => survivesSender w s host) a := by
+  unfold actorHoldsSubtreeMail queuesHold
+  rfl
+
+theorem core_queues (w : World) (name : String) (k : Nat) (host : InstId) (a : Actor) :
+    actorHoldsSlotMail w host name k a =
+      queuesHold (fromSlot name k) (fun s => survivesSender w s host) a := by
+  unfold actorHoldsSlotMail queuesHold
+  rfl
+
+theorem mem_any {α : Type} (p : α → Bool) (l : List α) (x : α) (hx : x ∈ l) (hp : p x = true) :
+    l.any p = true :=
+  _root_.List.any_eq_true.mpr ⟨x, hx, hp⟩
+
+theorem any_imp (ids : List InstId) (p q : InstId → Bool)
+    (h : ∀ i, i ∈ ids → p i = true → q i = true) (hp : ids.any p = true) : ids.any q = true := by
+  induction ids with
+  | nil => simp at hp
+  | cons i ids ih =>
+    simp only [List.any_cons, Bool.or_eq_true] at hp ⊢
+    cases hp with
+    | inl hi => exact Or.inl (h i (List.Mem.head _) hi)
+    | inr ht => exact Or.inr (ih (fun j hj => h j (List.Mem.tail _ hj)) ht)
+
+/-- A sender in the new box was in the old box, or was parked there. -/
+theorem box_prev (held : InstId → Bool) (oldB : List Msg) (oldP : List Parked) (newB : List Msg)
+    (h : ∀ m, m ∈ newB →
+      (∃ m0, m0 ∈ oldB ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ oldP ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)))
+    (hany : newB.any (fun m => held m.sender) = true) :
+    oldB.any (fun m => held m.sender) = true ∨
+      oldP.any (fun p => held p.sender || held p.msg.sender) = true := by
+  obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hany
+  rcases h m hm with ⟨m0, hm0, hs⟩ | ⟨p, hp, hs⟩
+  · exact Or.inl (mem_any _ _ m0 hm0 (by simpa [hs] using hh))
+  · apply Or.inr
+    cases hs with
+    | inl hps =>
+      exact mem_any _ _ p hp (by
+        have : held p.sender = true := by simpa [hps] using hh
+        simp [this])
+    | inr hpm =>
+      exact mem_any _ _ p hp (by
+        have : held p.msg.sender = true := by simpa [hpm] using hh
+        simp [this])
+
+theorem prio_prev (held : InstId → Bool) (oldP newP : List Msg)
+    (h : ∀ m, m ∈ newP → ∃ m0, m0 ∈ oldP ∧ m0.sender = m.sender)
+    (hany : newP.any (fun m => held m.sender) = true) :
+    oldP.any (fun m => held m.sender) = true := by
+  obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hany
+  obtain ⟨m0, hm0, hs⟩ := h m hm
+  exact mem_any _ _ m0 hm0 (by simpa [hs] using hh)
+
+theorem park_prev (held : InstId → Bool) (oldP newP : List Parked)
+    (h : ∀ p, p ∈ newP →
+      (∃ q, q ∈ oldP ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∧
+        (∃ q, q ∈ oldP ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)))
+    (hany : newP.any (fun p => held p.sender || held p.msg.sender) = true) :
+    oldP.any (fun q => held q.sender || held q.msg.sender) = true := by
+  obtain ⟨p, hp, hh⟩ := _root_.List.any_eq_true.mp hany
+  rcases h p hp with ⟨⟨q1, hq1, hwho1⟩, ⟨q2, hq2, hwho2⟩⟩
+  simp only [Bool.or_eq_true] at hh
+  cases hh with
+  | inl hs =>
+    cases hwho1 with
+    | inl heq =>
+      exact mem_any _ _ q1 hq1 (by
+        have : held q1.sender = true := by simpa [heq] using hs
+        simp [this])
+    | inr heq =>
+      exact mem_any _ _ q1 hq1 (by
+        have : held q1.msg.sender = true := by simpa [heq] using hs
+        simp [this])
+  | inr hs =>
+    cases hwho2 with
+    | inl heq =>
+      exact mem_any _ _ q2 hq2 (by
+        have : held q2.sender = true := by simpa [heq] using hs
+        simp [this])
+    | inr heq =>
+      exact mem_any _ _ q2 hq2 (by
+        have : held q2.msg.sender = true := by simpa [heq] using hs
+        simp [this])
+
+theorem queues_prev (pred surv surv' : InstId → Bool) (a a' : Actor)
+    (hsurv : ∀ s, surv' s = true → surv s = true)
+    (hbox : ∀ m, m ∈ a'.box →
+      (∃ m0, m0 ∈ a.box ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ a.parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)))
+    (hprio : ∀ m, m ∈ a'.prio → ∃ m0, m0 ∈ a.prio ∧ m0.sender = m.sender)
+    (hpark : ∀ p, p ∈ a'.parked →
+      (∃ q, q ∈ a.parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∧
+        (∃ q, q ∈ a.parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender)))
+    (h : queuesHold pred surv' a' = true) : queuesHold pred surv a = true := by
+  have hback : ∀ s, (pred s && surv' s) = true → (pred s && surv s) = true := by
+    intro s hs
+    simp only [Bool.and_eq_true] at hs
+    simp [hs.1, hsurv s hs.2]
+  unfold queuesHold at h ⊢
+  simp only [Bool.or_eq_true] at h ⊢
+  rcases h with (hboxA | hprioA) | hparkA
+  · have hboxH : a'.box.any (fun m => pred m.sender && surv m.sender) = true := by
+      obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hboxA
+      exact mem_any _ _ m hm (hback _ hh)
+    rcases box_prev (fun s => pred s && surv s) a.box a.parked a'.box hbox hboxH with hB | hP
+    · exact Or.inl (Or.inl hB)
+    · exact Or.inr hP
+  · have hprioH : a'.prio.any (fun m => pred m.sender && surv m.sender) = true := by
+      obtain ⟨m, hm, hh⟩ := _root_.List.any_eq_true.mp hprioA
+      exact mem_any _ _ m hm (hback _ hh)
+    exact Or.inl (Or.inr (prio_prev (fun s => pred s && surv s) a.prio a'.prio hprio hprioH))
+  · have hparkH :
+        a'.parked.any (fun p =>
+          (pred p.sender && surv p.sender) || (pred p.msg.sender && surv p.msg.sender)) = true := by
+      obtain ⟨p, hp, hh⟩ := _root_.List.any_eq_true.mp hparkA
+      simp only [Bool.or_eq_true] at hh
+      cases hh with
+      | inl hs => exact mem_any _ _ p hp (by simp [hback _ hs])
+      | inr hs => exact mem_any _ _ p hp (by simp [hback _ hs])
+    exact Or.inr (park_prev (fun s => pred s && surv s) a.parked a'.parked hpark hparkH)
+
+theorem slot_mail_prev (D : Description) (w w' : World) (name : String) (k : Nat)
+    (hros : w'.roster = w.roster)
+    (hst : ∀ i, (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent)
+    (hbox : ∀ i m, m ∈ (w'.st i).box →
+      (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)))
+    (hprio : ∀ i m, m ∈ (w'.st i).prio → ∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender)
+    (hpark : ∀ i p, p ∈ (w'.st i).parked →
+      (∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∧
+        (∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender))) :
+    slotMailHeld D w' name k = true → slotMailHeld D w name k = true := by
+  intro hmail
+  have hp : ∀ i, (w'.st i).parent = (w.st i).parent := fun i => (hst i).2
+  have hlife : ∀ i, (w'.st i).life = (w.st i).life := fun i => (hst i).1
+  unfold slotMailHeld at hmail ⊢
+  by_cases hempty : (templateSubtree D name == "") = true
+  · simp only [hempty, ite_true] at hmail ⊢
+    unfold slotCoreMail at hmail ⊢
+    simp only [core_queues] at hmail ⊢
+    rw [hros] at hmail
+    refine any_imp w.roster _ _ ?_ hmail
+    intro host _ hh
+    exact queues_prev (fromSlot name k) (fun s => survivesSender w s host)
+      (fun s => survivesSender w' s host) (w.st host) (w'.st host)
+      (fun s hs => by simpa [survives_st w w' s host hros hp (hlife host)] using hs)
+      (hbox host) (hprio host) (hpark host) hh
+  · have hne : (templateSubtree D name == "") = false := by
+      cases hb : templateSubtree D name == "" with
+      | false => rfl
+      | true => exact absurd hb hempty
+    simp only [hne, ite_false] at hmail ⊢
+    unfold subtreeCoreMail at hmail ⊢
+    simp only [subtree_queues] at hmail ⊢
+    rw [hros] at hmail
+    refine any_imp w.roster _ _ ?_ hmail
+    intro host _ hh
+    exact queues_prev (fromSubtree D (templateSubtree D name) k)
+      (fun s => survivesSender w s host) (fun s => survivesSender w' s host)
+      (w.st host) (w'.st host)
+      (fun s hs => by simpa [survives_st w w' s host hros hp (hlife host)] using hs)
+      (hbox host) (hprio host) (hpark host) hh
+
+/-- `held_sub` when the roster, every life, and every parent stay, and every
+sender queued afterwards was already queued on that host. -/
+theorem held_of_mail (D : Description) (w w' : World) (name : String)
+    (hros : w'.roster = w.roster)
+    (hst : ∀ i, (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent)
+    (hbox : ∀ i m, m ∈ (w'.st i).box →
+      (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+        (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)))
+    (hprio : ∀ i m, m ∈ (w'.st i).prio → ∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender)
+    (hpark : ∀ i p, p ∈ (w'.st i).parked →
+      (∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.sender ∨ q.msg.sender = p.sender)) ∧
+        (∃ q, q ∈ (w.st i).parked ∧ (q.sender = p.msg.sender ∨ q.msg.sender = p.msg.sender))) :
+    ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name := by
+  refine held_sub D w w' name ?_ ?_ ?_
+  · intro id hid _
+    simpa [hros] using hid
+  · intro id _ hlive
+    exact ((hst id).1).symm.trans hlive
+  · intro k hm
+    exact Or.inl (slot_mail_prev D w w' name k hros hst hbox hprio hpark hm)
+
+theorem deliver_queues (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
+    (w1 : World) (a1 : Actor) (h : deliver I w id a m = some (w1, a1)) :
+    a1.box = a.box ∧ a1.prio = a.prio ∧ a1.parked = a.parked ∧
+      a1.life = a.life ∧ a1.parent = a.parent ∧ ∀ i, w1.st i = w.st i := by
+  by_cases hl : a.life = .alive
+  · have hne : (a.life ≠ .alive) = false := by simpa [hl]
+    by_cases hnew : (m.tombstone && newerGeneration (readCells I.desc w id) m) = true
+    · simp [deliver, hne, hnew] at h
+      rcases h with ⟨hw, ha⟩
+      subst hw
+      subst ha
+      exact ⟨rfl, rfl, rfl, rfl, rfl, fun i => cellsSt I.desc w id i⟩
+    · have hnewF : (m.tombstone && newerGeneration (readCells I.desc w id) m) = false := by
+        cases hb : m.tombstone && newerGeneration (readCells I.desc w id) m with
+        | false => rfl
+        | true => exact absurd hb hnew
+      simp [deliver, hne, hnewF] at h
+      cases hf : findDeliver I (tname id) a.typestate m with
+      | none =>
+        simp only [hf] at h
+        by_cases hkeep : m.callFrom.isSome = true ∨ m.tombstone = true
+        · simp [hkeep] at h
+        · simp [hkeep] at h
+          rcases h with ⟨hw, ha⟩
+          subst hw
+          subst ha
+          exact ⟨rfl, rfl, rfl, rfl, rfl, fun i => cellsSt I.desc w id i⟩
+      | some tr =>
+        simp only [hf] at h
+        by_cases hacc : m.callFrom.isSome = true ∧ tr.acceptsCall = false
+        · simp [hacc] at h
+        · simp [hacc] at h
+          rcases h with ⟨hw, ha⟩
+          subst hw
+          refine ⟨?_, ?_, ?_, ?_, ?_, fun i => cellsSt I.desc w id i⟩
+          · rw [← ha]; split <;> rfl
+          · rw [← ha]; split <;> rfl
+          · rw [← ha]; split <;> rfl
+          · rw [← ha]; split <;> rfl
+          · rw [← ha]; split <;> rfl
+  · have hne : (a.life ≠ .alive) = true := by simp [hl]
+    simp [deliver, hne] at h
+
+theorem creditLive_fields (w : World) (name : String) (sender i : InstId) :
+    ((creditLive w name sender).st i).box = (w.st i).box ∧
+      ((creditLive w name sender).st i).prio = (w.st i).prio ∧
+      ((creditLive w name sender).st i).parked = (w.st i).parked ∧
+      ((creditLive w name sender).st i).life = (w.st i).life ∧
+      ((creditLive w name sender).st i).parent = (w.st i).parent := by
+  unfold creditLive creditSender
+  by_cases h : i = budgetHolder w sender
+  · subst h
+    simp [setActor, bumpToken]
+  · simp [setActor, h, bumpToken]
+
+theorem resume_fields (a : Actor) (c : Bool) (dst : InstId) :
+    (resumeSender a c dst).box = a.box ∧ (resumeSender a c dst).prio = a.prio ∧
+      (resumeSender a c dst).parked = a.parked ∧ (resumeSender a c dst).life = a.life ∧
+      (resumeSender a c dst).parent = a.parent := by
+  unfold resumeSender
+  split
+  · split
+    · simp
+    · unfold proceed
+      split <;> simp
+  · simp
+
+/-- Crediting the live generation and resuming the parked sender do not move a
+queue, a life, or a parent. -/
+theorem resume_set_fields (w : World) (id : InstId) (c : Bool) (dst i : InstId) :
+    ((setActor w id (resumeSender (w.st id) c dst)).st i).box = (w.st i).box ∧
+      ((setActor w id (resumeSender (w.st id) c dst)).st i).prio = (w.st i).prio ∧
+      ((setActor w id (resumeSender (w.st id) c dst)).st i).parked = (w.st i).parked ∧
+      ((setActor w id (resumeSender (w.st id) c dst)).st i).life = (w.st i).life ∧
+      ((setActor w id (resumeSender (w.st id) c dst)).st i).parent = (w.st i).parent := by
+  by_cases h : i = id
+  · subst h
+    simp [setActor]
+    exact resume_fields (w.st i) c dst
+  · simp [setActor, h]
+
+theorem eq_view (a b : Actor)
+    (hl : b.life = a.life) (hp : b.parent = a.parent) (hpr : b.prio = a.prio)
+    (hpa : b.parked = a.parked) (hb : b.box = a.box) :
+    b.life = a.life ∧ b.parent = a.parent ∧
+      (∀ m, m ∈ b.prio → ∃ m0, m0 ∈ a.prio ∧ m0.sender = m.sender) ∧
+      (∀ p, p ∈ b.parked → p ∈ a.parked) ∧
+      (∀ m, m ∈ b.box →
+        (∃ m0, m0 ∈ a.box ∧ m0.sender = m.sender) ∨
+          (∃ p, p ∈ a.parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender))) := by
+  refine ⟨hl, hp, ?_, ?_, ?_⟩
+  · intro m hm
+    exact ⟨m, by simpa [hpr] using hm, rfl⟩
+  · intro p hpm
+    simpa [hpa] using hpm
+  · intro m hm
+    exact Or.inl ⟨m, by simpa [hb] using hm, rfl⟩
+
+theorem held_from_view (D : Description) (w w' : World) (name : String)
+    (hros : w'.roster = w.roster)
+    (hv : ∀ i,
+      (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+        (∀ m, m ∈ (w'.st i).prio → ∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∧
+        (∀ p, p ∈ (w'.st i).parked → p ∈ (w.st i).parked) ∧
+        (∀ m, m ∈ (w'.st i).box →
+          (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+            (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender)))) :
+    ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name := by
+  refine held_of_mail D w w' name hros ?_ ?_ ?_ ?_
+  · intro i
+    exact ⟨(hv i).1, (hv i).2.1⟩
+  · intro i m hm
+    exact (hv i).2.2.2.2 m hm
+  · intro i m hm
+    exact (hv i).2.2.1 m hm
+  · intro i p hp
+    have hmem := (hv i).2.2.2.1 p hp
+    exact ⟨⟨p, hmem, Or.inl rfl⟩, ⟨p, hmem, Or.inr rfl⟩⟩
+
+theorem mem_skip_mid (m x : Msg) (pre suf : List Msg) (hx : x ∈ pre ++ suf) :
+    x ∈ pre ++ m :: suf := by
+  simp only [List.mem_append, List.mem_cons] at hx ⊢
+  rcases hx with hx | hx
+  · exact Or.inl hx
+  · exact Or.inr (Or.inr hx)
+
+/-- A bulk receive deletes the delivered message or moves one parked message
+into the box. Crediting and resuming do not touch a queue. -/
+theorem bulk_view (I : Impl) (w w' : World) (id i : InstId)
+    (h : receiveBulk I w id = some w') :
+    (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+      (∀ m, m ∈ (w'.st i).prio → ∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∧
+      (∀ p, p ∈ (w'.st i).parked → p ∈ (w.st i).parked) ∧
+      (∀ m, m ∈ (w'.st i).box →
+        (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+          (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender))) := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          rw [← hbox] at hdel
+          have hq := deliver_queues I w id { (w.st id) with parked := ps } p.msg w1 a1 hdel
+          have hres := resume_set_fields
+            (creditLive (setActor w1 id a1) (tname id) p.msg.sender) p.sender p.isCall id i
+          have hcred := creditLive_fields (setActor w1 id a1) (tname id) p.msg.sender i
+          rcases hres with ⟨rb, rpr, rpa, rl, rpar⟩
+          rcases hcred with ⟨cb, cpr, cpa, cl, cpar⟩
+          rw [rl, rpar, rpr, rpa, rb, cl, cpar, cpr, cpa, cb]
+          by_cases hi : i = id
+          · subst hi
+            simp [setActor]
+            rcases hq with ⟨ab, apr, apa, al, apar, _⟩
+            refine ⟨al, apar, ?_, ?_, ?_⟩
+            · intro m hm
+              exact ⟨m, by simpa [apr] using hm, rfl⟩
+            · intro q hqmem
+              rw [apa] at hqmem
+              rw [hpark]
+              exact List.mem_cons_of_mem p hqmem
+            · intro m hm
+              rw [ab] at hm
+              exact Or.inl ⟨m, hm, rfl⟩
+          · simp [setActor, hi]
+            have hst := hq.2.2.2.2.2 i
+            exact eq_view (w.st i) (w1.st i) (congrArg Actor.life hst) (congrArg Actor.parent hst)
+              (congrArg Actor.prio hst) (congrArg Actor.parked hst) (congrArg Actor.box hst)
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          rw [← hpark] at hdel
+          have hq := deliver_queues I w id { (w.st id) with box := ms } m w1 a1 hdel
+          have hcred := creditLive_fields (setActor w1 id a1) (tname id) m.sender i
+          rcases hcred with ⟨cb, cpr, cpa, cl, cpar⟩
+          rw [cl, cpar, cpr, cpa, cb]
+          by_cases hi : i = id
+          · subst hi
+            simp [setActor]
+            rcases hq with ⟨ab, apr, apa, al, apar, _⟩
+            refine ⟨al, apar, ?_, ?_, ?_⟩
+            · intro x hx
+              exact ⟨x, by simpa [apr] using hx, rfl⟩
+            · intro q hqmem
+              rw [apa, hpark] at hqmem
+              cases hqmem
+            · intro x hx
+              rw [ab] at hx
+              exact Or.inl ⟨x, by rw [hbox]; exact List.mem_cons_of_mem m hx, rfl⟩
+          · simp [setActor, hi]
+            have hst := hq.2.2.2.2.2 i
+            exact eq_view (w.st i) (w1.st i) (congrArg Actor.life hst) (congrArg Actor.parent hst)
+              (congrArg Actor.prio hst) (congrArg Actor.parked hst) (congrArg Actor.box hst)
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          rw [← hpark] at hdel
+          have hq := deliver_queues I w id { (w.st id) with box := ms } m w1 a1 hdel
+          let admitted := { a1 with box := a1.box ++ [p.msg], parked := ps }
+          have hres := resume_set_fields
+            (creditLive (setActor w1 id admitted) (tname id) m.sender) p.sender p.isCall id i
+          have hcred := creditLive_fields (setActor w1 id admitted) (tname id) m.sender i
+          rcases hres with ⟨rb, rpr, rpa, rl, rpar⟩
+          rcases hcred with ⟨cb, cpr, cpa, cl, cpar⟩
+          rw [rl, rpar, rpr, rpa, rb, cl, cpar, cpr, cpa, cb]
+          by_cases hi : i = id
+          · subst hi
+            simp [setActor, admitted]
+            rcases hq with ⟨ab, apr, apa, al, apar, _⟩
+            refine ⟨al, apar, ?_, ?_, ?_⟩
+            · intro x hx
+              exact ⟨x, by simpa [apr] using hx, rfl⟩
+            · intro q hqmem
+              rw [hpark]
+              exact List.mem_cons_of_mem p hqmem
+            · intro x hx
+              rw [ab] at hx
+              simp only [List.mem_append, List.mem_singleton] at hx
+              rcases hx with hx | hx
+              · exact Or.inl ⟨x, by rw [hbox]; exact List.mem_cons_of_mem m hx, rfl⟩
+              · subst hx
+                exact Or.inr ⟨p, by rw [hpark]; exact List.Mem.head _, Or.inr rfl⟩
+          · simp [setActor, hi]
+            have hst := hq.2.2.2.2.2 i
+            exact eq_view (w.st i) (w1.st i) (congrArg Actor.life hst) (congrArg Actor.parent hst)
+              (congrArg Actor.prio hst) (congrArg Actor.parked hst) (congrArg Actor.box hst)
+
+theorem held_receive (I : Impl) (w w' : World) (id : InstId) (name : String)
+    (h : stepWorld I (.recvBulk id) w = some w') :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  simp only [stepWorld] at h
+  exact held_from_view I.desc w w' name (receiveBulk_roster I w w' id h)
+    (fun i => bulk_view I w w' id i h)
+
+theorem prio_view (I : Impl) (w w' : World) (id i : InstId)
+    (h : receivePrio I w id = some w') :
+    (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+      (∀ m, m ∈ (w'.st i).prio → ∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∧
+      (∀ p, p ∈ (w'.st i).parked → p ∈ (w.st i).parked) ∧
+      (∀ m, m ∈ (w'.st i).box →
+        (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+          (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender))) := by
+  obtain ⟨m, pre, suf, w1, a1, _, _, hprio, _, hdel, hw⟩ := receivePrio_spec I w w' id h
+  have hq := deliver_queues I w id { (w.st id) with prio := pre ++ suf } m w1 a1 hdel
+  rw [hw]
+  by_cases hi : i = id
+  · subst hi
+    simp [setActor]
+    rcases hq with ⟨ab, apr, apa, al, apar, _⟩
+    refine ⟨al, apar, ?_, ?_, ?_⟩
+    · intro x hx
+      rw [apr] at hx
+      exact ⟨x, by rw [hprio]; exact mem_skip_mid m x pre suf hx, rfl⟩
+    · intro q hqmem
+      rw [apa] at hqmem
+      exact hqmem
+    · intro x hx
+      rw [ab] at hx
+      exact Or.inl ⟨x, hx, rfl⟩
+  · simp [setActor, hi]
+    have hst := hq.2.2.2.2.2 i
+    exact eq_view (w.st i) (w1.st i) (congrArg Actor.life hst) (congrArg Actor.parent hst)
+      (congrArg Actor.prio hst) (congrArg Actor.parked hst) (congrArg Actor.box hst)
+
+theorem held_prio (I : Impl) (w w' : World) (id : InstId) (name : String)
+    (h : stepWorld I (.recvPrio id) w = some w') :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  simp only [stepWorld] at h
+  exact held_from_view I.desc w w' name (receivePrio_roster I w w' id h)
+    (fun i => prio_view I w w' id i h)
+
+theorem detachBox_sender (a : Actor) (caller : InstId) (m : Msg) (hm : m ∈ (detachBox a caller).box) :
+    ∃ m0, m0 ∈ a.box ∧ m0.sender = m.sender := by
+  unfold detachBox at hm
+  obtain ⟨m0, hm0, heq⟩ := _root_.List.mem_map.mp hm
+  exact ⟨m0, hm0, by simpa [heq] using (detachMsg_sender caller m0).symm⟩
+
+theorem detach_fields (a : Actor) (caller : InstId) (cid : Nat) :
+    (detachReply (detachBox a caller) caller cid).life = a.life ∧
+      (detachReply (detachBox a caller) caller cid).parent = a.parent ∧
+      (detachReply (detachBox a caller) caller cid).prio = a.prio ∧
+      (detachReply (detachBox a caller) caller cid).parked = a.parked ∧
+      (∀ m, m ∈ (detachReply (detachBox a caller) caller cid).box →
+        ∃ m0, m0 ∈ a.box ∧ m0.sender = m.sender) := by
+  unfold detachReply
+  split
+  · refine ⟨by simp [detachBox], by simp [detachBox], by simp [detachBox], by simp [detachBox], ?_⟩
+    intro m hm
+    exact detachBox_sender a caller m (by simpa [detachBox] using hm)
+  · refine ⟨by simp [detachBox], by simp [detachBox], by simp [detachBox], by simp [detachBox], ?_⟩
+    intro m hm
+    exact detachBox_sender a caller m hm
+
+theorem finishCall_fields (a : Actor) (k : Cont) (r : CallResult) :
+    (finishCall a k r).life = a.life ∧ (finishCall a k r).parent = a.parent ∧
+      (finishCall a k r).prio = a.prio ∧ (finishCall a k r).parked = a.parked ∧
+      (finishCall a k r).box = a.box := by
+  unfold finishCall proceed
+  split <;> simp
+
+theorem proceed_fields (a : Actor) (k : Cont) :
+    (proceed a k).life = a.life ∧ (proceed a k).parent = a.parent ∧
+      (proceed a k).prio = a.prio ∧ (proceed a k).parked = a.parked ∧
+      (proceed a k).box = a.box := by
+  unfold proceed
+  split <;> simp
+
+theorem creditSender_fields (w : World) (name : String) (sender i : InstId) :
+    ((creditSender w name sender).st i).box = (w.st i).box ∧
+      ((creditSender w name sender).st i).prio = (w.st i).prio ∧
+      ((creditSender w name sender).st i).parked = (w.st i).parked ∧
+      ((creditSender w name sender).st i).life = (w.st i).life ∧
+      ((creditSender w name sender).st i).parent = (w.st i).parent := by
+  unfold creditSender
+  by_cases h : i = sender
+  · subst h
+    simp [setActor, bumpToken]
+  · simp [setActor, h, bumpToken]
+
+theorem credit_fold_fields (w : World) (dst caller : InstId) (ps : List Parked) (i : InstId) :
+    ((ps.foldl (fun w _ => creditSender w (tname dst) caller) w).st i).life = (w.st i).life ∧
+      ((ps.foldl (fun w _ => creditSender w (tname dst) caller) w).st i).parent = (w.st i).parent ∧
+      ((ps.foldl (fun w _ => creditSender w (tname dst) caller) w).st i).prio = (w.st i).prio ∧
+      ((ps.foldl (fun w _ => creditSender w (tname dst) caller) w).st i).parked = (w.st i).parked ∧
+      ((ps.foldl (fun w _ => creditSender w (tname dst) caller) w).st i).box = (w.st i).box := by
+  induction ps generalizing w with
+  | nil => simp
+  | cons p ps ih =>
+    simp only [List.foldl_cons]
+    have hc := creditSender_fields w (tname dst) caller i
+    have h := ih (creditSender w (tname dst) caller)
+    exact ⟨h.1.trans hc.2.2.2.1, h.2.1.trans hc.2.2.2.2, h.2.2.1.trans hc.2.1,
+      h.2.2.2.1.trans hc.2.2.1, h.2.2.2.2.trans hc.1⟩
+
+theorem refund_fields (w : World) (caller dst i : InstId) :
+    ((refundParkedCall w caller dst).st i).life = (w.st i).life ∧
+      ((refundParkedCall w caller dst).st i).parent = (w.st i).parent ∧
+      ((refundParkedCall w caller dst).st i).prio = (w.st i).prio ∧
+      ((refundParkedCall w caller dst).st i).box = (w.st i).box ∧
+      (∀ p, p ∈ ((refundParkedCall w caller dst).st i).parked → p ∈ (w.st i).parked) := by
+  have hlife := (refundCall_fields w caller dst i).2.1
+  have hprio := (refund_call_frame w caller dst i).2.1
+  have hpar := refund_call_parent w caller dst i
+  have hbox := refundCall_box w caller dst i
+  have hpark := (refundCall_fields w caller dst i).2.2.2
+  refine ⟨hlife, hpar, hprio, hbox, ?_⟩
+  intro p hp
+  rw [hpark] at hp
+  by_cases hi : i = dst
+  · simp [hi] at hp
+    simpa [hi] using hp.1
+  · simp [hi] at hp
+    exact hp
+
+/-- A call timeout detaches the callee's box or deletes the parked call.
+Neither step adds a sender. -/
+theorem timeout_view (w w' : World) (id i : InstId) (h : callTimeout w id = some w') :
+    (w'.st i).life = (w.st i).life ∧ (w'.st i).parent = (w.st i).parent ∧
+      (∀ m, m ∈ (w'.st i).prio → ∃ m0, m0 ∈ (w.st i).prio ∧ m0.sender = m.sender) ∧
+      (∀ p, p ∈ (w'.st i).parked → p ∈ (w.st i).parked) ∧
+      (∀ m, m ∈ (w'.st i).box →
+        (∃ m0, m0 ∈ (w.st i).box ∧ m0.sender = m.sender) ∨
+          (∃ p, p ∈ (w.st i).parked ∧ (p.sender = m.sender ∨ p.msg.sender = m.sender))) := by
+  unfold callTimeout at h
+  by_cases hlive : ((w.st id).life != .alive) = true
+  · simp [hlive] at h
+  · have hliveF : ((w.st id).life != .alive) = false := by
+      cases hb : (w.st id).life != .alive with
+      | false => rfl
+      | true => exact absurd hb hlive
+    simp [hliveF] at h
+    cases hph : (w.st id).phase with
+    | awaitReply dst k =>
+      simp [hph] at h
+      cases h
+      let cid := (w.st id).waitId
+      let host := detachReply (detachBox (w.st dst) id) id cid
+      let w1 := setActor w dst host
+      have hd := detach_fields (w.st dst) id cid
+      have hf := finishCall_fields (w1.st id) k .timedOut
+      by_cases hi : i = id
+      · simp [setActor, hi]
+        by_cases heq : id = dst
+        · simp [w1, host, setActor, heq, cid] at hd hf ⊢
+          rcases hd with ⟨dl, dpar, dpr, dpa, dbox⟩
+          rcases hf with ⟨fl, fpar, fpr, fpa, fb⟩
+          refine ⟨fl.trans dl, fpar.trans dpar, ?_, ?_, ?_⟩
+          · intro m hm
+            rw [fpr, dpr] at hm
+            exact ⟨m, hm, rfl⟩
+          · intro p hp
+            rw [fpa, dpa] at hp
+            exact hp
+          · intro m hm
+            rw [fb] at hm
+            exact Or.inl (dbox m hm)
+        · simp [w1, setActor, heq] at hf ⊢
+          exact eq_view (w.st id) (finishCall (w.st id) k .timedOut) hf.1 hf.2.1 hf.2.2.1
+            hf.2.2.2.1 hf.2.2.2.2
+      · simp [setActor, hi]
+        by_cases hdst : i = dst
+        · simp [w1, host, setActor, hdst]
+          rcases hd with ⟨dl, dpar, dpr, dpa, dbox⟩
+          refine ⟨dl, dpar, ?_, ?_, ?_⟩
+          · intro m hm
+            rw [dpr] at hm
+            exact ⟨m, hm, rfl⟩
+          · intro p hp
+            rw [dpa] at hp
+            exact hp
+          · intro m hm
+            exact Or.inl (dbox m hm)
+        · simp [w1, setActor, hdst]
+          exact ⟨fun m hm => ⟨m, hm, rfl⟩, fun m hm => Or.inl ⟨m, hm, rfl⟩⟩
+    | parked dst c k =>
+      by_cases hc : c = true
+      · simp [hph, hc] at h
+        cases h
+        have hr := refund_fields w id dst i
+        have hf := finishCall_fields ((refundParkedCall w id dst).st id) k .notAdmitted
+        by_cases hi : i = id
+        · simp [setActor, hi] at hr ⊢
+          rcases hr with ⟨rl, rpar, rpr, rb, rpa⟩
+          rcases hf with ⟨fl, fpar, fpr, fpa, fb⟩
+          refine ⟨fl.trans rl, fpar.trans rpar, ?_, ?_, ?_⟩
+          · intro m hm
+            rw [fpr, rpr] at hm
+            exact ⟨m, hm, rfl⟩
+          · intro p hp
+            rw [fpa] at hp
+            exact rpa p hp
+          · intro m hm
+            rw [fb, rb] at hm
+            exact Or.inl ⟨m, hm, rfl⟩
+        · simp [setActor, hi]
+          rcases hr with ⟨rl, rpar, rpr, rb, rpa⟩
+          refine ⟨rl, rpar, ?_, rpa, ?_⟩
+          · intro m hm
+            rw [rpr] at hm
+            exact ⟨m, hm, rfl⟩
+          · intro m hm
+            rw [rb] at hm
+            exact Or.inl ⟨m, hm, rfl⟩
+      · simp [hph, hc] at h
+    | awaitPeer k =>
+      simp [hph] at h
+      cases h
+      by_cases hi : i = id
+      · simp [setActor, hi]
+        have hp := proceed_fields (w.st id)
+          { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout }
+        exact eq_view (w.st id) _ hp.1 hp.2.1 hp.2.2.1 hp.2.2.2.1 hp.2.2.2.2
+      · simp [setActor, hi]
+        exact ⟨fun m hm => ⟨m, hm, rfl⟩, fun m hm => Or.inl ⟨m, hm, rfl⟩⟩
+    | idle => simp [hph] at h
+    | run _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+theorem held_timeout (I : Impl) (w w' : World) (id : InstId) (name : String)
+    (h : stepWorld I (.callTimeout id) w = some w') :
+    ∀ k, k ∈ heldKeys I.desc w' name → k ∈ heldKeys I.desc w name := by
+  simp only [stepWorld] at h
+  exact held_from_view I.desc w w' name (call_roster w w' id h) (fun i => timeout_view w w' id i h)
+
 end Deadlock
