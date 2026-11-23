@@ -1526,4 +1526,246 @@ theorem call_roster (w w' : World) (id : InstId) (h : callTimeout w id = some w'
       exact setActor_roster _ _ _
     · simp at h
 
+theorem execRun_grow (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
+    (hid : id ∈ w.roster) : RosterGrow I w (execRun I w id a k) := by
+  cases hbit : a.life == .alive with
+  | false =>
+    simp [execRun, hbit]
+    exact RosterGrow.keep _ rfl
+  | true =>
+    cases hk : k.rest with
+    | nil =>
+      simp [execRun, hbit, hk]
+      exact RosterGrow.keep _ (setActor_roster _ _ _)
+    | cons e es =>
+      cases e with
+      | send dst label hint =>
+        simp only [execRun, hbit, hk]
+        cases hr : route w I.desc id dst with
+        | none =>
+          simp only [hr]
+          exact RosterGrow.keep _ (by simp [noteStale_roster, setActor_roster])
+        | some dstId =>
+          simp only [hr]
+          exact RosterGrow.keep _ (enqueue_roster w I.desc id dstId _ false _)
+      | trySend dst label hint onFull onGone =>
+        simp only [execRun, hbit, hk]
+        cases hr : route w I.desc id dst with
+        | none =>
+          simp only [hr]
+          exact RosterGrow.keep _ (by simp [noteStale_roster, setActor_roster])
+        | some dstId =>
+          simp
+          by_cases hroom :
+              ((w.st dstId).life = .alive ∧ (w.st dstId).parked = []) ∧
+                (w.st dstId).box.length < capBulk I.desc w.N dstId
+          · simp [hroom]
+            exact RosterGrow.keep _ (enqueue_roster w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false } false (afterHead k))
+          · simp [hroom]
+            by_cases hliveT : (w.st dstId).life = .alive
+            · simp [hliveT]
+              exact RosterGrow.keep _ (setActor_roster _ _ _)
+            · simp [hliveT]
+              exact RosterGrow.keep _ (setActor_roster _ _ _)
+      | call dst label hint onNotAdmitted onTimedOut =>
+        simp only [execRun, hbit, hk]
+        cases hr : resolveId I.desc w id dst with
+        | none =>
+          simp only [hr]
+          exact RosterGrow.keep _ (by simp [noteStale_roster, setActor_roster])
+        | some dstId =>
+          simp only [hr]
+          exact RosterGrow.keep _ (enqueue_roster w I.desc id dstId _ true _)
+      | reply =>
+        simp only [execRun, hbit, hk]
+        exact RosterGrow.keep _ (reply_roster w id k)
+      | selfSchedule label =>
+        simp only [execRun, hbit, hk]
+        by_cases hhas : (a.prio.any (fun p => p.label == label)) = true
+        · rw [hhas]
+          exact RosterGrow.keep _ (setActor_roster _ _ _)
+        · have hhasF : (a.prio.any (fun p => p.label == label)) = false := by
+            cases hb : a.prio.any (fun p => p.label == label) with
+            | false => rfl
+            | true => exact absurd hb hhas
+          rw [hhasF]
+          by_cases hfit : prioLoad a.prio < capPrio I.desc w.N id
+          · rw [if_pos hfit]
+            exact RosterGrow.keep _ (setActor_roster _ _ _)
+          · rw [if_neg hfit]
+            exact RosterGrow.keep _ (crashWorld_roster _)
+      | cell dst label value =>
+        simp only [execRun, hbit, hk]
+        by_cases hdirty : (w.cell dst label).dirty = true
+        · simp [hdirty]
+          exact RosterGrow.keep _ (by simp [setCell, setActor_roster])
+        · have hdirtyF : (w.cell dst label).dirty = false := by
+            cases hb : (w.cell dst label).dirty with
+            | false => rfl
+            | true => exact absurd hb hdirty
+          simp [hdirtyF]
+          exact RosterGrow.keep _ (by simp [wakeReaders_roster, setCell, setActor_roster])
+      | internal =>
+        simp only [execRun, hbit, hk]
+        exact RosterGrow.keep _ (setActor_roster _ _ _)
+      | peer _ =>
+        simp only [execRun, hbit, hk]
+        exact RosterGrow.keep _ (setActor_roster _ _ _)
+      | abort =>
+        simp only [execRun, hbit, hk]
+        exact RosterGrow.keep _ ((commit_roster _ _ _).trans (abortChildren_roster I.desc w id))
+      | spawn child =>
+        simp only [execRun, hbit, hk]
+        cases hs : spawnChild I w id child with
+        | none =>
+          simp
+          exact RosterGrow.keep _ (crashWorld_roster _)
+        | some wB =>
+          simp
+          have hg := spawnChild_grow I w id child wB hid hs
+          have hc := commit_roster wB id (proceed (wB.st id) (afterHead k))
+          cases hg with
+          | keep hr => exact RosterGrow.keep _ (hc.trans hr)
+          | root template k0 g0 t ht hroot hros hfresh =>
+            exact RosterGrow.root _ template k0 g0 t ht hroot (hc.trans hros) hfresh
+          | child childName k0 g0 t parent ht hsup hmem hpeer hros =>
+            exact RosterGrow.child _ childName k0 g0 t parent ht hsup hmem hpeer (hc.trans hros)
+      | terminate =>
+        simp only [execRun, hbit, hk]
+        cases ht : templateOf I.desc (tname id) with
+        | none =>
+          simp
+          exact RosterGrow.keep _ (crashWorld_roster _)
+        | some t =>
+          simp
+          by_cases hcore : (t.multiplicity == .one) = true
+          · rw [hcore]
+            exact RosterGrow.keep _ (crashWorld_roster _)
+          · have hcoreF : (t.multiplicity == .one) = false := by
+              cases hb : t.multiplicity == .one with
+              | false => rfl
+              | true => exact absurd hb hcore
+            simp [hcoreF]
+            by_cases htree : (t.multiplicity == .perPeer) = true ∧ ¬ t.subtree = ""
+            · simp [htree]
+              exact RosterGrow.keep _
+                ((shutdown_roster I.desc (dropDescendants I.desc w id) id).trans
+                  (drop_roster I.desc w id))
+            · simp [htree]
+              by_cases hlone :
+                  ((t.terminable = true ∧ t.subtree = "") ∧ hasParkedCall a.parked = false) ∧
+                    hasChild I.desc w id = false
+              · simp [hlone]
+                exact RosterGrow.keep _ (shutdown_roster I.desc w id)
+              · simp [hlone]
+                by_cases hcasc :
+                    ((t.terminable = true ∧ t.subtree = "") ∧ hasParkedCall a.parked = false) ∧
+                      hasChild I.desc w id = true
+                · simp [hcasc]
+                  exact RosterGrow.keep _
+                    ((shutdown_roster I.desc (dropDescendants I.desc w id) id).trans
+                      (drop_roster I.desc w id))
+                · simp [hcasc]
+                  exact RosterGrow.keep _ (crashWorld_roster _)
+
+theorem exec_grow (I : Impl) (w w' : World) (id : InstId) (hH : Hold I w)
+    (h : execHead I w id = some w') : RosterGrow I w w' := by
+  unfold execHead at h
+  by_cases hlive : (w.st id).life ≠ .alive
+  · simp [hlive] at h
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | run k =>
+      simp [hph] at h
+      cases h
+      have hlife : (w.st id).life = .alive :=
+        Classical.byContradiction fun hne => hlive hne
+      have hid := hH.rostered id (by rw [hlife]; intro hbad; cases hbad)
+      exact execRun_grow I w id (w.st id) k hid
+    | idle => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | awaitEffect _ => simp [hph] at h
+    | awaitPeer _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+theorem step_grow (I : Impl) (w w' : World) (a : Action) (hH : Hold I w)
+    (h : stepWorld I a w = some w') : RosterGrow I w w' := by
+  cases a with
+  | stutter =>
+    simp only [stepWorld] at h
+    split at h
+    · simp at h
+    · cases h
+      exact RosterGrow.keep _ rfl
+  | spawn template =>
+    simp only [stepWorld] at h
+    exact spawn_grow I w w' template h
+  | exec id =>
+    simp only [stepWorld] at h
+    exact exec_grow I w w' id hH h
+  | recvBulk id =>
+    simp only [stepWorld] at h
+    exact RosterGrow.keep _ (receiveBulk_roster I w w' id h)
+  | recvPrio id =>
+    simp only [stepWorld] at h
+    exact RosterGrow.keep _ (receivePrio_roster I w w' id h)
+  | finish id =>
+    simp only [stepWorld] at h
+    exact RosterGrow.keep _ (finish_roster I w w' id h)
+  | ingress dst label =>
+    simp only [stepWorld] at h
+    exact RosterGrow.keep _ (ingress_phase I w w' dst label dst h).2.2.2.2.1
+  | callTimeout id =>
+    simp only [stepWorld] at h
+    exact RosterGrow.keep _ (call_roster w w' id h)
+
+/-- A step keeps one root actor per nonempty subtree key. A new root takes a
+fresh key. A child of a per-peer stage is not a root. -/
+theorem oneCohort_of_grow (I : Impl) (w w' : World) (hH : Hold I w)
+    (h : OneCohort I.desc w.roster) (hg : RosterGrow I w w') :
+    OneCohort I.desc w'.roster := by
+  cases hg with
+  | keep hr => exact oneCohort_same I.desc hr h
+  | root template k g t ht _ hros hfresh =>
+    rw [hros]
+    refine oneCohort_snoc I.desc w.roster (InstId.peer template k g) h ?_
+    intro n k' g' t' hid ht' _ hsub n2 g2 hmem htree
+    have hids : InstId.peer template k g = InstId.peer n k' g' := hid
+    cases hids
+    have hteq : t' = t := by
+      injection ht'.symm.trans ht
+    rw [hteq] at htree hsub
+    exact hfresh n2 g2 hmem htree hsub
+  | child childName k g t parent ht hsup hmem hpeer hros =>
+    rw [hros]
+    refine oneCohort_snoc I.desc w.roster (InstId.peer childName k g) h ?_
+    intro n k' g' t' hid ht' hr _ _ _ _ _
+    have hids : InstId.peer childName k g = InstId.peer n k' g' := hid
+    cases hids
+    have hteq : t' = t := by
+      injection ht'.symm.trans ht
+    rw [hteq] at hr
+    obtain ⟨s, hs, hmul⟩ := hH.role parent hmem
+    have hper : s.multiplicity = .perPeer := by
+      cases parent with
+      | core _ =>
+        rcases hpeer with ⟨_, hp⟩
+        cases hp
+      | peer _ _ _ =>
+        simpa [tmb_role] using hmul
+    have hrootF := child_not_root I.desc childName (tname parent) t s ht hs hsup hper
+    rw [hrootF] at hr
+    exact False.elim (by simp at hr)
+
+theorem oneCohort_reachable (I : Impl) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : OneCohort I.desc w.roster := by
+  induction hR with
+  | init => exact oneCohort_init I N
+  | step w w' a hprev ha ih =>
+    have ⟨_, hstep⟩ := apply_step I a w w' ha
+    exact oneCohort_of_grow I w w' (hold_reach I N w hG hprev) ih
+      (step_grow I w w' a (hold_reach I N w hG hprev) hstep)
+
 end Deadlock
