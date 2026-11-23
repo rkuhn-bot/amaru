@@ -6132,4 +6132,310 @@ theorem reach_N (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w) : w.N = 
   | step w w' a prev ha ih =>
     exact (step_N I a w w' (apply_step I a w w' ha).2).trans ih
 
+/-! A core-supervised root's held keys are the generations `rootOutstanding`
+counts: alive, or a tombstone still on the live core. -/
+
+/-- One queued subtree message, with the sender `slotMailHeld` is looking at. -/
+theorem subtree_hold_sender (D : Description) (w : World) (sub : String) (k : Nat)
+    (h : subtreeCoreMail D w sub k = true) :
+    ∃ host sender, host ∈ w.roster ∧ isMember D sender sub k = true ∧
+      survivesSender w sender host = true ∧
+      ((∃ m, m ∈ (w.st host).box ∧ m.sender = sender) ∨
+        (∃ m, m ∈ (w.st host).prio ∧ m.sender = sender) ∨
+        (∃ p, p ∈ (w.st host).parked ∧ (p.sender = sender ∨ p.msg.sender = sender))) := by
+  unfold subtreeCoreMail at h
+  obtain ⟨host, hhost, hhold⟩ := _root_.List.any_eq_true.mp h
+  unfold actorHoldsSubtreeMail at hhold
+  simp only [fromSubtree, Bool.or_eq_true] at hhold
+  rcases hhold with (hbox | hprio) | hpark
+  · obtain ⟨m, hm, hheld⟩ := _root_.List.any_eq_true.mp hbox
+    simp only [Bool.and_eq_true] at hheld
+    exact ⟨host, m.sender, hhost, hheld.1, hheld.2, Or.inl ⟨m, hm, rfl⟩⟩
+  · obtain ⟨m, hm, hheld⟩ := _root_.List.any_eq_true.mp hprio
+    simp only [Bool.and_eq_true] at hheld
+    exact ⟨host, m.sender, hhost, hheld.1, hheld.2, Or.inr (Or.inl ⟨m, hm, rfl⟩)⟩
+  · obtain ⟨p, hp, hheld⟩ := _root_.List.any_eq_true.mp hpark
+    simp only [Bool.or_eq_true] at hheld
+    rcases hheld with hheld | hheld
+    · simp only [Bool.and_eq_true] at hheld
+      exact ⟨host, p.sender, hhost, hheld.1, hheld.2, Or.inr (Or.inr ⟨p, hp, Or.inl rfl⟩)⟩
+    · simp only [Bool.and_eq_true] at hheld
+      exact ⟨host, p.msg.sender, hhost, hheld.1, hheld.2, Or.inr (Or.inr ⟨p, hp, Or.inr rfl⟩)⟩
+
+/-- A core-supervised root is wired to that core. `rootOf` says the supervisor
+is multiplicity one, and a multiplicity-one roster actor is a core. -/
+theorem root_core_parent (I : Impl) (w : World) (hF : ParentForest w) (hP : Parented I.desc w)
+    (hH : Hold I w) (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hmem : InstId.peer name k g ∈ w.roster) (sup : String) (hsup : t.supervisor = some sup) :
+    (w.st (InstId.peer name k g)).parent = some (InstId.core sup) := by
+  have hp := hP (InstId.peer name k g) t hmem (by simpa [tname] using ht)
+  rw [hsup] at hp
+  obtain ⟨p, hpar, htn, _⟩ := hp
+  have hmemP : p ∈ w.roster := hF.hosted _ _ hpar
+  obtain ⟨tp, htp, hrole⟩ := hH.role p hmemP
+  simp only [rootOf, hsup] at hroot
+  cases htS : templateOf I.desc sup with
+  | none => simp [htS] at hroot
+  | some tS =>
+    simp only [htS] at hroot
+    have hone : tS.multiplicity = .one := by
+      cases hmul : tS.multiplicity with
+      | one => rfl
+      | perPeer =>
+        rw [hmul] at hroot
+        have hbeq : (Multiplicity.perPeer == Multiplicity.one) = false := rfl
+        rw [hbeq] at hroot
+        cases hroot
+    have htp' : templateOf I.desc (tname p) = some tp := htp
+    rw [htn] at htp'
+    have hsame : tp = tS := by
+      injection htp'.symm.trans htS
+    cases p with
+    | core n =>
+      have hn : n = sup := by simpa [tname] using htn
+      simpa [hn] using hpar
+    | peer n pk pg =>
+      have hbad : tp.multiplicity = .perPeer := by simpa [tmb_role] using hrole
+      rw [hsame, hone] at hbad
+      cases hbad
+
+/-- The first parent step of a strict-ancestor chain is the recorded parent. -/
+theorem parent_step (w : World) (sender host root : InstId)
+    (hpar : (w.st sender).parent = some host) (hs : StrictAncestor w sender root) :
+    host = root ∨ StrictAncestor w host root := by
+  cases hs with
+  | edge he =>
+    left
+    have hp := he.1
+    rw [hpar] at hp
+    injection hp
+  | tail he hrest =>
+    right
+    have hp := he.1
+    rw [hpar] at hp
+    injection hp with hmid
+    simpa [hmid] using hrest
+
+/-- A dead core-supervised root whose subtree mail is still held has its
+tombstone on the live core. Program mail is `mailInFlight`, and
+`member_mail_tomb` turns that into the tombstone. A tombstone already on a
+priority lane sits on the dead sender's parent (`BirthInv.tombOnParent`): the
+parent of a descendant is dead with the root, so the only live host is the
+core. Parked mail from that sender is either still blocking, which keeps the
+sender alive, or halted, which `ParkedFromLive` has already dropped. -/
+theorem dead_root_tomb (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hB : BirthInv I.desc w) (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hcr : w.crashed = false) (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (hmem : InstId.peer name k g ∈ w.roster)
+    (hdead : (w.st (InstId.peer name k g)).life = .dead)
+    (hmail : slotMailHeld I.desc w name k = true) (sup : String) (hsup : t.supervisor = some sup)
+    (hlive : (w.st (InstId.core sup)).life = .alive) :
+    slotTombstoneQueued w (InstId.core sup) name k = true := by
+  have hS : SemInv I w := hI.1
+  have hM : MailInv w := hI.2.1
+  have hF : ParentForest w := hI.forest
+  have hSeal : SealInv w := hI.seal
+  have hpar :=
+    root_core_parent I w hF hB.parented hH name k g t ht hroot hmem sup hsup
+  have hne : (t.subtree == "") = false := by simpa [beq_iff_eq] using hsub
+  have hmailS : subtreeCoreMail I.desc w t.subtree k = true := by
+    simpa [slotMailHeld, templateSubtree, ht, hne] using hmail
+  obtain ⟨host, sender, hhost, hfrom, hsurv, hwhere⟩ := subtree_hold_sender I.desc w t.subtree k hmailS
+  have hhostLive : (w.st host).life = .alive := by
+    simp only [survivesSender, Bool.and_eq_true] at hsurv
+    exact (beq_iff_eq).mp hsurv.1
+  have hrootLive : (w.st sender).life = .alive → False := by
+    intro hliveS
+    have hmemS : sender ∈ w.roster := hS.rostered sender hliveS
+    cases member_root_id I hG w hF hB.parented hB.noSelf hH hOne name k g t ht hroot hsub hmem
+        sender hmemS hfrom with
+    | inl heq =>
+      have hdeadS : (w.st sender).life = .dead := by simpa [heq] using hdead
+      exact life_dead_ne_alive (hdeadS.symm.trans hliveS)
+    | inr hs =>
+      exact life_dead_ne_alive (hdead.symm.trans (ancestor_alive w hSeal.childless hcr hs hliveS))
+  have hflight (hmemS : sender ∈ w.roster) (m : Msg) (hm : m ∈ (w.st host).box ∨ m ∈ (w.st host).prio)
+      (htomb : m.tombstone = false) (hsend : m.sender = sender) : mailInFlight w sender = true := by
+    exact flight_of_msg w sender host m hhost hhostLive htomb
+      (by simp [sealedTogether, hsend]) (by simpa [hsend] using hm)
+  rcases hwhere with hbox | hprio | hpark
+  · obtain ⟨m, hm, hsend⟩ := hbox
+    have hmemS := hSeal.hostedMail host m (Or.inl hm)
+    rw [hsend] at hmemS
+    exact member_mail_tomb I hG w hF hB.parented hB.noSelf hH hOne hSeal.chain hcr name k g t
+      ht hroot hsub hmem hdead (InstId.core sup) hpar hlive sender hmemS hfrom
+      (hflight hmemS m (Or.inl hm) (hB.plainBox host m hm) hsend)
+  · obtain ⟨m, hm, hsend⟩ := hprio
+    have hmemS := hSeal.hostedMail host m (Or.inr hm)
+    rw [hsend] at hmemS
+    by_cases htom : m.tombstone = true
+    · have hon := hB.tombOnParent host m hm htom
+      cases sender with
+      | core _ => simp [isMember] at hfrom
+      | peer sn sk sg =>
+        simp only [hsend] at hon
+        obtain ⟨_, hparentS, _⟩ := hon
+        cases member_root_id I hG w hF hB.parented hB.noSelf hH hOne name k g t ht hroot hsub hmem
+            (.peer sn sk sg) hmemS hfrom with
+        | inl heq =>
+          have hhostId : host = InstId.core sup := by
+            have hparentR : (w.st (InstId.peer name k g)).parent = some host := by
+              simpa [heq] using hparentS
+            rw [hpar] at hparentR
+            injection hparentR with hhostId
+            exact hhostId.symm
+          have hqueued := holds_slot w host name k g
+            ⟨m, hm, htom, by simpa [heq] using hsend⟩
+          simpa [hhostId] using hqueued
+        | inr hs =>
+          cases parent_step w (.peer sn sk sg) host (InstId.peer name k g) hparentS hs with
+          | inl hhostR =>
+            exact False.elim (life_dead_ne_alive
+              (hdead.symm.trans (by simpa [hhostR] using hhostLive)))
+          | inr hrest =>
+            exact False.elim (life_dead_ne_alive
+              (hdead.symm.trans (ancestor_alive w hSeal.childless hcr hrest hhostLive)))
+    · have hplain : m.tombstone = false := by
+        cases htomb : m.tombstone with
+        | false => rfl
+        | true => exact absurd htomb htom
+      exact member_mail_tomb I hG w hF hB.parented hB.noSelf hH hOne hSeal.chain hcr name k g t
+        ht hroot hsub hmem hdead (InstId.core sup) hpar hlive sender hmemS hfrom
+        (hflight hmemS m (Or.inr hm) hplain hsend)
+  · obtain ⟨p, hp, hwho⟩ := hpark
+    have hps : p.sender = sender := by
+      rcases hwho with hwho | hwho
+      · exact hwho
+      · exact (hSeal.parkedFrom host p hp).trans hwho
+    rcases hM.fwd host p hp with ⟨_, hph⟩ | hhalt
+    · rw [hps] at hph
+      have hliveS : (w.st sender).life = .alive := by
+        apply Classical.byContradiction
+        intro hne
+        rcases hS.idleOff sender hne with hidle | hcrash
+        · rw [hph] at hidle
+          cases hidle
+        · rw [hph] at hcrash
+          cases hcrash
+      exact False.elim (hrootLive hliveS)
+    · exact False.elim (hSeal.liveParked host p hhostLive hp (by
+        simpa [Halted, hps] using hhalt))
+
+/-- A bit that implies another bit is counted no more often. -/
+theorem fold_count_le (b1 b2 : InstId → Bool) :
+    ∀ (ids : List InstId),
+      (∀ id, id ∈ ids → b1 id = true → b2 id = true) →
+      ∀ n, ids.foldl (fun n id => if b1 id = true then n + 1 else n) n ≤
+        ids.foldl (fun n id => if b2 id = true then n + 1 else n) n := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro _ n
+    simp
+  | cons id ids ih =>
+    intro h n
+    simp only [List.foldl_cons]
+    have hhead := h id (List.Mem.head _)
+    have htail : ∀ id', id' ∈ ids → b1 id' = true → b2 id' = true :=
+      fun id' hmem => h id' (List.Mem.tail _ hmem)
+    by_cases hb : b1 id = true
+    · have hb2 := hhead hb
+      rw [ite_eq_left hb, ite_eq_left hb2]
+      exact ih htail (n + 1)
+    · rw [ite_eq_right hb]
+      by_cases hb2 : b2 id = true
+      · rw [ite_eq_left hb2]
+        have htailLe := ih htail n
+        have hshift := step_shift b2 ids n 1
+        rw [hshift]
+        exact Nat.le_trans htailLe (Nat.le_succ _)
+      · rw [ite_eq_right hb2]
+        exact ih htail n
+
+/-- A generation that holds a core-supervised root's key is alive, or the core
+still has its tombstone. A dead generation's held mail is that tombstone
+(`dead_root_tomb`). -/
+theorem lone_implies_root (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hB : BirthInv I.desc w) (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hcr : w.crashed = false) (name : String) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (sup : String) (hsup : t.supervisor = some sup)
+    (hlive : (w.st (InstId.core sup)).life = .alive) (id : InstId) (hmem : id ∈ w.roster)
+    (hb : loneBit I.desc w name id = true) : rootBit I.desc w sup name id = true := by
+  cases id with
+  | core _ => simp [loneBit] at hb
+  | peer child key gen =>
+    simp only [loneBit, Bool.and_eq_true] at hb
+    have heq : child = name := by simpa [beq_iff_eq] using hb.1
+    rw [heq] at hmem hb
+    by_cases hliveId : (w.st (InstId.peer name key gen)).life = .alive
+    · have hbA : ((w.st (InstId.peer name key gen)).life == .alive) = true := by
+        simpa [beq_iff_eq] using hliveId
+      simp [rootBit, heq, hbA]
+    · have hflag := hb.2
+      have hmail : slotMailHeld I.desc w name key = true := by
+        cases hbb : (w.st (InstId.peer name key gen)).life == .alive with
+        | true => exact absurd ((beq_iff_eq).mp hbb) hliveId
+        | false =>
+          rw [hbb, Bool.false_or] at hflag
+          exact hflag
+      have hdead : (w.st (InstId.peer name key gen)).life = .dead := by
+        cases hl : (w.st (InstId.peer name key gen)).life with
+        | alive => exact absurd hl hliveId
+        | absent => exact absurd hl (hB.present _ hmem)
+        | dead => rfl
+      have htomb := dead_root_tomb I hG w hI hB hH hOne hcr name key gen t ht hroot hsub hmem
+        hdead hmail sup hsup hlive
+      simp [rootBit, heq, htomb]
+
+theorem bitKeys_le_root (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hB : BirthInv I.desc w) (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hcr : w.crashed = false) (name : String) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (sup : String) (hsup : t.supervisor = some sup)
+    (hlive : (w.st (InstId.core sup)).life = .alive) :
+    (bitKeys I.desc w name).length ≤ rootOutstanding I.desc w sup name := by
+  have hcard := card_go (loneBit I.desc w name) (bitKey name) w.roster [] (by simp)
+  have himp : ∀ id, id ∈ w.roster →
+      loneBit I.desc w name id = true → rootBit I.desc w sup name id = true :=
+    fun id hmem hb =>
+      lone_implies_root I hG w hI hB hH hOne hcr name t ht hroot hsub sup hsup hlive id hmem hb
+  have hcount :=
+    fold_count_le (loneBit I.desc w name) (rootBit I.desc w sup name) w.roster himp 0
+  have hfold : rootOutstanding I.desc w sup name =
+      w.roster.foldl (fun n id => if rootBit I.desc w sup name id = true then n + 1 else n) 0 := by
+    rw [root_filter]
+    exact (fold_count (rootBit I.desc w sup name) w.roster).symm
+  have hlen : (bitKeys I.desc w name).length ≤
+      w.roster.foldl (fun n id => if loneBit I.desc w name id = true then n + 1 else n) 0 := by
+    simpa [bitKeys, Nat.zero_add] using hcard
+  exact Nat.le_trans hlen (by simpa [hfold] using hcount)
+
+/-- Held keys of a core-supervised root are at most the generations that root's
+core still counts: each held key has a generation that is alive or whose
+tombstone is queued. The core is the live supervisor `maySpawnRoot` checks. -/
+theorem held_le_root (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hI : Inv I w) (hB : BirthInv I.desc w) (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (hcr : w.crashed = false) (name : String) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (sup : String) (hsup : t.supervisor = some sup)
+    (hlive : (w.st (InstId.core sup)).life = .alive) :
+    (heldKeys I.desc w name).length ≤ rootOutstanding I.desc w sup name :=
+  Nat.le_trans (held_le_bit I.desc w name)
+    (bitKeys_le_root I hG w hI hB hH hOne hcr name t ht hroot hsub sup hsup hlive)
+
+/-- In a reachable world the same count holds. `lane_birth` is the copy of
+`birth_reachable` this file can see. -/
+theorem held_le_root_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hcr : w.crashed = false) (name : String) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (sup : String) (hsup : t.supervisor = some sup)
+    (hlive : (w.st (InstId.core sup)).life = .alive) :
+    (heldKeys I.desc w name).length ≤ rootOutstanding I.desc w sup name :=
+  held_le_root I hG w (inv_reachable I N w hL hR) (lane_birth I hL hG N w hR)
+    (hold_reach I N w hG hR) (oneCohort_reachable I hG N w hR) hcr name t ht hroot hsub sup hsup
+    hlive
+
 end Deadlock
