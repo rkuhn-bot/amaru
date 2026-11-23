@@ -536,4 +536,548 @@ def heldKeys (D : Description) (w : World) (name : String) : List Nat :=
       if n == name && heldAt D w name k && !acc.elem k then acc ++ [k] else acc
     | .core _ => acc) []
 
+/-- This generation occupies the slot: it is alive, or the slot's mail is held.
+`loneOutstanding` adds one per such generation. `heldKeys` adds the key once. -/
+def loneBit (D : Description) (w : World) (name : String) (id : InstId) : Bool :=
+  match id with
+  | .peer child k _ => child == name && ((w.st id).life == .alive || slotMailHeld D w name k)
+  | .core _ => false
+
+def bitKey (name : String) (id : InstId) : Nat :=
+  match id with
+  | .peer _ k _ => k
+  | .core _ => 0
+
+def pushKey (acc : List Nat) (k : Nat) : List Nat :=
+  if acc.elem k = true then acc else acc ++ [k]
+
+theorem pushKey_len (acc : List Nat) (k : Nat) (h : acc.Nodup) :
+    (pushKey acc k).length ≤ acc.length + 1 ∧ (pushKey acc k).Nodup := by
+  unfold pushKey
+  by_cases hseen : acc.elem k = true
+  · rw [if_pos hseen]
+    exact And.intro (Nat.le_add_right _ _) h
+  · rw [if_neg hseen]
+    refine And.intro ?_ ?_
+    · rw [List.length_append, List.length_singleton]
+      exact Nat.le_refl _
+    · have hne : k ∉ acc := by
+        intro hk
+        have : acc.elem k = true := by simpa [List.elem_iff] using hk
+        exact hseen this
+      have htail : ([k] : List Nat).Nodup := by simp
+      have hdis : ∀ a ∈ acc, ∀ b ∈ [k], a ≠ b := by
+        intro a ha b hb
+        simp at hb
+        subst hb
+        intro heq
+        exact hne (heq ▸ ha)
+      exact List.nodup_append.mpr (And.intro h (And.intro htail hdis))
+
+theorem step_shift (bit : InstId → Bool) :
+    ∀ (ids : List InstId) (start extra : Nat),
+      ids.foldl (fun n id => if bit id = true then n + 1 else n) (start + extra) =
+        ids.foldl (fun n id => if bit id = true then n + 1 else n) start + extra := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro start extra
+    simp
+  | cons id ids ih =>
+    intro start extra
+    simp only [List.foldl_cons]
+    cases hb : bit id with
+    | false =>
+      simp
+      exact ih start extra
+    | true =>
+      simp
+      rw [Nat.add_right_comm start extra 1]
+      exact ih (start + 1) extra
+
+theorem card_go (bit : InstId → Bool) (key : InstId → Nat) :
+    ∀ (ids : List InstId) (acc : List Nat), acc.Nodup →
+      (ids.foldl (fun acc id => if bit id = true then pushKey acc (key id) else acc) acc).length ≤
+        acc.length + ids.foldl (fun n id => if bit id = true then n + 1 else n) 0 := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro acc _
+    simp
+  | cons id ids ih =>
+    intro acc hnd
+    simp only [List.foldl_cons]
+    cases hb : bit id with
+    | false =>
+      simp
+      simpa using ih acc hnd
+    | true =>
+      simp
+      have hpush := pushKey_len acc (key id) hnd
+      have htail := ih (pushKey acc (key id)) hpush.2
+      have hshift := step_shift bit ids 0 1
+      have hshift' :
+          ids.foldl (fun n id => if bit id = true then n + 1 else n) 1 =
+            ids.foldl (fun n id => if bit id = true then n + 1 else n) 0 + 1 := by
+        simpa using hshift
+      rw [hshift']
+      omega
+
+theorem loneBit_match (D : Description) (w : World) (name : String) (id : InstId) :
+    loneBit D w name id =
+      match id with
+      | .peer child k _ => child == name && ((w.st id).life == .alive || slotMailHeld D w name k)
+      | .core _ => false := by
+  cases id <;> rfl
+
+theorem lone_sum (D : Description) (w : World) (name : String) :
+    ∀ (ids : List InstId) (n : Nat),
+      ids.foldl (fun n id => if loneBit D w name id = true then n + 1 else n) n =
+        ids.foldl (fun n id =>
+          match id with
+          | .peer child k _ =>
+            if child == name && ((w.st id).life == .alive || slotMailHeld D w name k) then n + 1
+            else n
+          | .core _ => n) n := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro _
+    rfl
+  | cons id ids ih =>
+    intro n
+    simp only [List.foldl_cons]
+    cases id with
+    | core c =>
+      have hb : loneBit D w name (.core c) = false := rfl
+      rw [hb]
+      exact ih n
+    | peer child k g =>
+      have hb : loneBit D w name (.peer child k g) =
+          (child == name && ((w.st (.peer child k g)).life == .alive || slotMailHeld D w name k)) := rfl
+      rw [hb]
+      exact ih _
+
+/-- One entry per key that has a live generation or held mail. A later
+generation of that key does not append again. -/
+def bitKeys (D : Description) (w : World) (name : String) : List Nat :=
+  w.roster.foldl (fun acc id =>
+    if loneBit D w name id = true then pushKey acc (bitKey name id) else acc) []
+
+/-- Distinct held keys are at most the generation count. A second generation of
+a key that already holds mail increments `loneOutstanding` and not the key. -/
+theorem bitKeys_le_lone (D : Description) (w : World) (name : String) :
+    (bitKeys D w name).length ≤ loneOutstanding D w name := by
+  have hcard := card_go (loneBit D w name) (bitKey name) w.roster [] (by simp)
+  have hsum := lone_sum D w name w.roster 0
+  have hfold : loneOutstanding D w name =
+      w.roster.foldl (fun n id => if loneBit D w name id = true then n + 1 else n) 0 := by
+    unfold loneOutstanding
+    exact hsum.symm
+  simpa [bitKeys, hfold, Nat.zero_add] using hcard
+
+theorem push_mem (acc : List Nat) (k x : Nat) : x ∈ pushKey acc k ↔ x ∈ acc ∨ x = k := by
+  unfold pushKey
+  by_cases h : acc.elem k = true
+  · rw [ite_eq_left h]
+    constructor
+    · intro hx
+      exact Or.inl hx
+    · intro hx
+      cases hx with
+      | inl hx => exact hx
+      | inr hx =>
+        rw [hx]
+        exact (List.elem_iff).mp h
+  · rw [ite_eq_right h]
+    simp [List.mem_append]
+
+theorem fold_push_mem (bit : InstId → Bool) (key : InstId → Nat) :
+    ∀ (ids : List InstId) (acc : List Nat) (k : Nat),
+      k ∈ ids.foldl (fun acc id => if bit id = true then pushKey acc (key id) else acc) acc ↔
+        k ∈ acc ∨ ∃ id, id ∈ ids ∧ bit id = true ∧ key id = k := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro acc k
+    simp [List.mem_nil_iff]
+  | cons id ids ih =>
+    intro acc k
+    simp only [List.foldl_cons]
+    by_cases hb : bit id = true
+    · rw [ite_eq_left hb, ih, push_mem]
+      constructor
+      · intro hk
+        cases hk with
+        | inl hk =>
+          cases hk with
+          | inl hk => exact Or.inl hk
+          | inr hk => exact Or.inr ⟨id, List.Mem.head _, hb, hk.symm⟩
+        | inr hk =>
+          obtain ⟨id', hmem, hbit, hkey⟩ := hk
+          exact Or.inr ⟨id', List.Mem.tail _ hmem, hbit, hkey⟩
+      · intro hk
+        cases hk with
+        | inl hk => exact Or.inl (Or.inl hk)
+        | inr hk =>
+          obtain ⟨id', hid, hbit, hkey⟩ := hk
+          cases hid with
+          | head => exact Or.inl (Or.inr hkey.symm)
+          | tail _ hmem => exact Or.inr ⟨id', hmem, hbit, hkey⟩
+    · rw [ite_eq_right hb, ih]
+      constructor
+      · intro hk
+        cases hk with
+        | inl hk => exact Or.inl hk
+        | inr hk =>
+          obtain ⟨id', hmem, hbit, hkey⟩ := hk
+          exact Or.inr ⟨id', List.Mem.tail _ hmem, hbit, hkey⟩
+      · intro hk
+        cases hk with
+        | inl hk => exact Or.inl hk
+        | inr hk =>
+          obtain ⟨id', hid, hbit, hkey⟩ := hk
+          cases hid with
+          | head => exact absurd hbit hb
+          | tail _ hmem => exact Or.inr ⟨id', hmem, hbit, hkey⟩
+
+theorem bitKeys_mem (D : Description) (w : World) (name : String) (k : Nat) :
+    k ∈ bitKeys D w name ↔ ∃ id, id ∈ w.roster ∧ loneBit D w name id = true ∧ bitKey name id = k := by
+  simpa [bitKeys] using fold_push_mem (loneBit D w name) (bitKey name) w.roster [] k
+
+theorem heldAt_bit (D : Description) (w : World) (name : String) (k : Nat) :
+    heldAt D w name k = true ↔ ∃ id, id ∈ w.roster ∧ loneBit D w name id = true ∧ bitKey name id = k := by
+  unfold heldAt
+  constructor
+  · intro h
+    obtain ⟨id, hid, hb⟩ := _root_.List.any_eq_true.mp h
+    cases id with
+    | core _ => simp at hb
+    | peer n key g =>
+      simp only [Bool.and_eq_true] at hb
+      have hname : (n == name) = true := hb.1.1
+      have hkey : (key == k) = true := hb.1.2
+      have hlive : ((w.st (.peer n key g)).life == .alive || slotMailHeld D w name k) = true := hb.2
+      have hk : key = k := by simpa [beq_iff_eq] using hkey
+      refine ⟨.peer n key g, hid, ?_, ?_⟩
+      · simp only [loneBit, hname, Bool.true_and]
+        rw [hk] at hlive ⊢
+        exact hlive
+      · exact hk
+  · intro ⟨id, hid, hbit, hkey⟩
+    apply _root_.List.any_eq_true.mpr
+    refine ⟨id, hid, ?_⟩
+    cases id with
+    | core _ => simp [loneBit] at hbit
+    | peer n key g =>
+      simp only [loneBit, Bool.and_eq_true] at hbit
+      simp only [bitKey] at hkey
+      rw [hkey] at hbit
+      simp [hbit.1, hkey, hbit.2, Bool.and_true]
+
+theorem nodup_sub_len (l1 l2 : List Nat) (h1 : l1.Nodup)
+    (hsub : ∀ k, k ∈ l1 → k ∈ l2) : l1.length ≤ l2.length := by
+  induction l1 generalizing l2 with
+  | nil => simp
+  | cons a l1 ih =>
+    have hnd := (List.nodup_cons).mp h1
+    have ha : a ∈ l2 := hsub a (List.Mem.head _)
+    have htail := ih (l2.erase a) hnd.2 (fun k hk => by
+      have hk2 := hsub k (List.Mem.tail _ hk)
+      have hne : k ≠ a := by
+        intro heq
+        exact hnd.1 (heq ▸ hk)
+      exact (List.mem_erase_of_ne hne).mpr hk2)
+    have herase := List.length_erase_of_mem ha
+    have hpos := List.length_pos_of_mem ha
+    have hlen : (a :: l1).length = l1.length + 1 := by simp
+    rw [hlen]
+    have hle : l1.length ≤ l2.length - 1 := by
+      rw [← herase]
+      exact htail
+    omega
+
+def heldBit (D : Description) (w : World) (name : String) (id : InstId) : Bool :=
+  match id with
+  | .peer n k _ => n == name && heldAt D w name k
+  | .core _ => false
+
+theorem fold_push_nodup (bit : InstId → Bool) (key : InstId → Nat) :
+    ∀ (ids : List InstId) (acc : List Nat), acc.Nodup →
+      (ids.foldl (fun acc id => if bit id = true then pushKey acc (key id) else acc) acc).Nodup := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro acc h
+    exact h
+  | cons id ids ih =>
+    intro acc h
+    simp only [List.foldl_cons]
+    by_cases hb : bit id = true
+    · rw [ite_eq_left hb]
+      exact ih _ (pushKey_len acc (key id) h).2
+    · rw [ite_eq_right hb]
+      exact ih acc h
+
+theorem held_step_push (D : Description) (w : World) (name : String) (acc : List Nat) (id : InstId) :
+    (match id with
+      | .peer n k _ =>
+        if n == name && heldAt D w name k && !acc.elem k then acc ++ [k] else acc
+      | .core _ => acc) =
+      (match id with
+        | .peer n k _ => if n == name && heldAt D w name k = true then pushKey acc k else acc
+        | .core _ => acc) := by
+  cases id with
+  | core _ => rfl
+  | peer n k _ =>
+    by_cases hbit : (n == name && heldAt D w name k) = true
+    · have hname : (n == name) = true := by
+        simp only [Bool.and_eq_true] at hbit
+        exact hbit.1
+      have hheld : heldAt D w name k = true := by
+        simp only [Bool.and_eq_true] at hbit
+        exact hbit.2
+      cases hseen : acc.elem k with
+      | true =>
+        simp [hname, hheld, hseen, pushKey, Bool.and_true, Bool.true_and]
+      | false =>
+        simp [hname, hheld, hseen, pushKey]
+    · have hnot : ¬ (n == name && heldAt D w name k) = true := hbit
+      cases hn : (n == name) with
+      | false => simp [hn, pushKey]
+      | true =>
+        cases hh : heldAt D w name k with
+        | false => simp [hn, hh, pushKey]
+        | true =>
+          have : (n == name && heldAt D w name k) = true := by simp [hn, hh]
+          exact absurd this hnot
+
+theorem held_push_bit (D : Description) (w : World) (name : String) (acc : List Nat) (id : InstId) :
+    (match id with
+      | .peer n k _ => if n == name && heldAt D w name k = true then pushKey acc k else acc
+      | .core _ => acc) =
+      (if heldBit D w name id = true then pushKey acc (bitKey name id) else acc) := by
+  cases id with
+  | core _ =>
+    simp [heldBit]
+  | peer _ _ _ =>
+    simp [heldBit, bitKey]
+
+theorem held_fold_push (D : Description) (w : World) (name : String) :
+    ∀ (ids : List InstId) (acc : List Nat),
+      ids.foldl (fun acc id =>
+        match id with
+        | .peer n k _ =>
+          if n == name && heldAt D w name k && !acc.elem k then acc ++ [k] else acc
+        | .core _ => acc) acc =
+        ids.foldl (fun acc id =>
+          if heldBit D w name id = true then pushKey acc (bitKey name id) else acc) acc := by
+  intro ids
+  induction ids with
+  | nil =>
+    intro _
+    rfl
+  | cons id ids ih =>
+    intro acc
+    simp only [List.foldl_cons]
+    rw [held_step_push D w name acc id, held_push_bit D w name acc id]
+    exact ih _
+
+theorem heldKeys_mem (D : Description) (w : World) (name : String) (k : Nat) :
+    k ∈ heldKeys D w name ↔
+      ∃ id, id ∈ w.roster ∧ heldBit D w name id = true ∧ bitKey name id = k := by
+  have hfold := held_fold_push D w name w.roster []
+  have hmem := fold_push_mem (heldBit D w name) (bitKey name) w.roster [] k
+  unfold heldKeys
+  rw [hfold]
+  constructor
+  · intro hk
+    cases hmem.mp hk with
+    | inl hempty => simp at hempty
+    | inr h => exact h
+  · intro h
+    exact hmem.mpr (Or.inr h)
+
+/-- `heldKeys` and `bitKeys` record the same keys: a key is held exactly when
+some generation of it is alive or the slot's mail is still queued. -/
+theorem held_mem_bit (D : Description) (w : World) (name : String) (k : Nat) :
+    k ∈ heldKeys D w name ↔ k ∈ bitKeys D w name := by
+  rw [heldKeys_mem, bitKeys_mem]
+  constructor
+  · intro ⟨id, hid, hbit, hkey⟩
+    cases id with
+    | core _ => simp [heldBit] at hbit
+    | peer n key g =>
+      simp only [heldBit, Bool.and_eq_true] at hbit
+      simp only [bitKey] at hkey
+      have hheld : heldAt D w name k = true := by simpa [hkey] using hbit.2
+      exact (heldAt_bit D w name k).mp hheld
+  · intro ⟨id, hid, hbit, hkey⟩
+    have hheld : heldAt D w name k = true := (heldAt_bit D w name k).mpr ⟨id, hid, hbit, hkey⟩
+    cases id with
+    | core _ => simp [loneBit] at hbit
+    | peer n key g =>
+      simp only [loneBit, Bool.and_eq_true] at hbit
+      simp only [bitKey] at hkey
+      refine ⟨.peer n key g, hid, ?_, hkey⟩
+      simp only [heldBit, hbit.1, hkey, hheld, Bool.and_true, Bool.true_and]
+
+theorem heldKeys_nodup (D : Description) (w : World) (name : String) :
+    (heldKeys D w name).Nodup := by
+  have hfold := held_fold_push D w name w.roster []
+  have hnd := fold_push_nodup (heldBit D w name) (bitKey name) w.roster [] (by simp)
+  unfold heldKeys
+  rw [hfold]
+  exact hnd
+
+theorem bitKeys_nodup (D : Description) (w : World) (name : String) :
+    (bitKeys D w name).Nodup := by
+  simpa [bitKeys] using fold_push_nodup (loneBit D w name) (bitKey name) w.roster [] (by simp)
+
+theorem held_le_bit (D : Description) (w : World) (name : String) :
+    (heldKeys D w name).length ≤ (bitKeys D w name).length := by
+  exact nodup_sub_len _ _ (heldKeys_nodup D w name)
+    (fun k hk => (held_mem_bit D w name k).mp hk)
+
+theorem held_le_lone (D : Description) (w : World) (name : String) :
+    (heldKeys D w name).length ≤ loneOutstanding D w name :=
+  Nat.le_trans (held_le_bit D w name) (bitKeys_le_lone D w name)
+
+/-- A birth appends one empty alive actor and leaves every earlier actor. A
+held key afterwards was held before, or it is the new key. -/
+theorem held_extend (D : Description) (w w' : World) (name : String) (id : InstId) (k g : Nat)
+    (hros : w'.roster = w.roster ++ [id])
+    (hid : id = InstId.peer name k g)
+    (hst : ∀ i, i ≠ id → w'.st i = w.st i)
+    (hempty : (w'.st id).box = [] ∧ (w'.st id).prio = [] ∧ (w'.st id).parked = [])
+    (hmail : ∀ key, slotMailHeld D w' name key = true → slotMailHeld D w name key = true) :
+    ∀ key, key ∈ heldKeys D w' name → key ∈ heldKeys D w name ∨ key = k := by
+  intro key hk
+  rw [held_mem_bit, bitKeys_mem] at hk
+  obtain ⟨wit, hwit, hbit, hwk⟩ := hk
+  by_cases hnew : wit = id
+  · cases wit with
+    | core _ => simp [loneBit] at hbit
+    | peer n key' g' =>
+      have hwk' : key' = key := by simpa [bitKey] using hwk
+      have hid' : InstId.peer n key' g' = InstId.peer name k g := by
+        rw [hnew]
+        exact hid
+      cases hid'
+      exact Or.inr hwk'.symm
+  · have hmem : wit ∈ w.roster := by
+      have hmem' : wit ∈ w.roster ++ [id] := by rw [← hros]; exact hwit
+      simp [List.mem_append] at hmem'
+      cases hmem' with
+      | inl h => exact h
+      | inr h =>
+        have : wit = id := by simpa [List.mem_singleton] using h
+        exact absurd this hnew
+    have hst' := hst wit hnew
+    rw [held_mem_bit, bitKeys_mem]
+    refine Or.inl ⟨wit, hmem, ?_, ?_⟩
+    · cases wit with
+      | core _ => simp [loneBit] at hbit
+      | peer n key' g' =>
+        simp only [loneBit, Bool.and_eq_true] at hbit
+        have hnameb : (n == name) = true := hbit.1
+        have hflag := hbit.2
+        simp only [loneBit, hnameb, Bool.true_and]
+        rw [← hst']
+        by_cases hlive : (w'.st (.peer n key' g')).life = .alive
+        · have hb : ((w'.st (.peer n key' g')).life == .alive) = true := by
+            simpa [beq_iff_eq] using hlive
+          simp [hb]
+        · have hslot : slotMailHeld D w' name key' = true := by
+            cases hbb : (w'.st (.peer n key' g')).life == .alive with
+            | true =>
+              exact absurd (beq_iff_eq.mp hbb) hlive
+            | false =>
+              rw [hbb, Bool.false_or] at hflag
+              exact hflag
+          have hold := hmail key' hslot
+          simp [hold]
+    · exact hwk
+
+theorem held_extend_len (D : Description) (w w' : World) (name : String) (id : InstId) (k g : Nat)
+    (hros : w'.roster = w.roster ++ [id])
+    (hid : id = InstId.peer name k g)
+    (hst : ∀ i, i ≠ id → w'.st i = w.st i)
+    (hempty : (w'.st id).box = [] ∧ (w'.st id).prio = [] ∧ (w'.st id).parked = [])
+    (hmail : ∀ key, slotMailHeld D w' name key = true → slotMailHeld D w name key = true) :
+    (heldKeys D w' name).length ≤ (heldKeys D w name).length + 1 := by
+  have hsub := held_extend D w w' name id k g hros hid hst hempty hmail
+  have hlen := nodup_sub_len _ (heldKeys D w name ++ [k]) (heldKeys_nodup D w' name) (fun key hk => by
+    cases hsub key hk with
+    | inl hold => exact List.mem_append_left _ hold
+    | inr heq =>
+      rw [heq]
+      exact List.mem_append_right _ (List.Mem.head _))
+  simpa [List.length_append] using hlen
+
+/-- A key held after a step that births nobody of `name`, resurrects nobody,
+and only queues mail from a generation that was already alive, was held before. -/
+theorem held_sub (D : Description) (w w' : World) (name : String)
+    (hros : ∀ id, id ∈ w'.roster → tname id = name → id ∈ w.roster)
+    (hlife : ∀ id, id ∈ w.roster → (w'.st id).life = .alive → (w.st id).life = .alive)
+    (hmail : ∀ k, slotMailHeld D w' name k = true →
+      slotMailHeld D w name k = true ∨
+        ∃ id, id ∈ w.roster ∧ fromSlot name k id = true ∧ (w.st id).life = .alive) :
+    ∀ k, k ∈ heldKeys D w' name → k ∈ heldKeys D w name := by
+  intro k hk
+  rw [held_mem_bit] at hk ⊢
+  rw [bitKeys_mem] at hk ⊢
+  obtain ⟨id, hid, hbit, hkey⟩ := hk
+  have hname : tname id = name := by
+    cases id with
+    | core _ => simp [loneBit] at hbit
+    | peer n _ _ =>
+      simp only [loneBit, Bool.and_eq_true] at hbit
+      simp [tname, beq_iff_eq.mp hbit.1]
+  have hold := hros id hid hname
+  cases id with
+  | core _ => simp [loneBit] at hbit
+  | peer n key g =>
+    simp only [loneBit, Bool.and_eq_true] at hbit
+    simp only [bitKey] at hkey
+    have hnameb : (n == name) = true := hbit.1
+    have hflag : ((w'.st (.peer n key g)).life == .alive || slotMailHeld D w' name key) = true := hbit.2
+    by_cases hlive : (w'.st (.peer n key g)).life = .alive
+    · have holdLive := hlife _ hold hlive
+      refine ⟨.peer n key g, hold, ?_, hkey⟩
+      simp only [loneBit, hnameb, Bool.true_and]
+      rw [hkey] at holdLive ⊢
+      have hb : ((w.st (.peer n k g)).life == .alive) = true := by
+        simpa [beq_iff_eq] using holdLive
+      simp [hb]
+    · have hmailK : slotMailHeld D w' name key = true := by
+        cases hbb : (w'.st (.peer n key g)).life == .alive with
+        | true =>
+          have : (w'.st (.peer n key g)).life = .alive := by simpa [beq_iff_eq] using hbb
+          exact absurd this hlive
+        | false =>
+          rw [hbb, Bool.false_or] at hflag
+          exact hflag
+      rw [hkey] at hmailK
+      cases hmail k hmailK with
+      | inl holdMail =>
+        refine ⟨.peer n key g, hold, ?_, hkey⟩
+        simp only [loneBit, hnameb, Bool.true_and]
+        rw [hkey]
+        simp [holdMail]
+      | inr hwho =>
+        obtain ⟨id', hid', hfrom, halive⟩ := hwho
+        cases id' with
+        | core _ => simp [fromSlot] at hfrom
+        | peer n' key' g' =>
+          simp only [fromSlot, Bool.and_eq_true] at hfrom
+          have hn' : n' = name := by simpa [beq_iff_eq] using hfrom.1
+          have hk' : key' = k := by simpa [beq_iff_eq] using hfrom.2
+          refine ⟨.peer n' key' g', hid', ?_, hk'⟩
+          simp only [loneBit]
+          rw [hn', hk'] at halive ⊢
+          have hb : ((w.st (.peer name k g')).life == .alive) = true := by
+            simpa [beq_iff_eq] using halive
+          simp [hb]
+
 end Deadlock
