@@ -5064,6 +5064,195 @@ theorem held_terminate_run (I : Impl) (hG : GraphOk I.desc) (w : World)
       | true => exact absurd hb hbit
     simpa [execRun, hf] using hkK
 
+/-- A parent walk that starts off the fresh id never reads that id's new parent.
+No older actor named the fresh id, so the walk agrees with the world before the birth. -/
+theorem descends_birth (w w' : World) (fresh : InstId) (fuel : Nat) (anc desc : InstId)
+    (hp : ∀ i, i ≠ fresh → (w'.st i).parent = (w.st i).parent)
+    (hno : ∀ i, (w.st i).parent ≠ some fresh) (hdesc : desc ≠ fresh) :
+    descends fuel w' anc desc = descends fuel w anc desc := by
+  induction fuel generalizing desc with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [descends]
+    by_cases heq : desc = anc
+    · simp [heq]
+    · have hbeq : (desc == anc) = false := by simpa [beq_iff_eq] using heq
+      simp only [hbeq]
+      have hpdesc := hp desc hdesc
+      rw [hpdesc]
+      cases hpar : (w.st desc).parent with
+      | none => rfl
+      | some p =>
+        have hpne : p ≠ fresh := by
+          intro hpf
+          exact hno desc (by rw [hpar, hpf])
+        by_cases hanc : p = anc
+        · simp [hanc]
+        · by_cases hself : p = desc
+          · simp [hself]
+          · simp [hanc, hself]
+            exact ih p hpne
+
+/-- Growing the roster only lengthens the parent walk. A host that still survives
+the sender survived it before the birth. -/
+theorem survives_birth (w w' : World) (fresh sender host : InstId)
+    (hlen : w.roster.length ≤ w'.roster.length)
+    (hp : ∀ i, i ≠ fresh → (w'.st i).parent = (w.st i).parent)
+    (hno : ∀ i, (w.st i).parent ≠ some fresh)
+    (hlife : (w'.st host).life = (w.st host).life) (hhost : host ≠ fresh)
+    (h : survivesSender w' sender host = true) : survivesSender w sender host = true := by
+  simp only [survivesSender, Bool.and_eq_true] at h ⊢
+  refine ⟨by rw [← hlife]; exact h.1, ?_⟩
+  cases hsw : sealedTogether w sender host with
+  | false => simp
+  | true =>
+    have hnot : sealedTogether w' sender host = false := by
+      cases hs' : sealedTogether w' sender host with
+      | false => rfl
+      | true => simp [hs'] at h
+    simp only [sealedTogether, Bool.or_eq_true] at hsw
+    rcases hsw with heq | hd
+    · simp [sealedTogether, heq] at hnot
+    · have hlong := descends_mono w sender host w.roster.length w'.roster.length hlen hd
+      have hsame : descends w'.roster.length w' sender host = true := by
+        rw [descends_birth w w' fresh _ sender host hp hno hhost]
+        exact hlong
+      simp [sealedTogether, hsame] at hnot
+
+theorem bool_any_imp {α : Type} (xs : List α) (p q : α → Bool)
+    (h : ∀ a, p a = true → q a = true) (hp : xs.any p = true) : xs.any q = true := by
+  obtain ⟨a, ha, hpa⟩ := (_root_.List.any_eq_true).mp hp
+  exact (_root_.List.any_eq_true).mpr ⟨a, ha, h a hpa⟩
+
+theorem holds_slot_empty (w : World) (host : InstId) (name : String) (key : Nat) (a : Actor)
+    (hb : a.box = []) (hpr : a.prio = []) (hpa : a.parked = []) :
+    actorHoldsSlotMail w host name key a = false := by
+  simp [actorHoldsSlotMail, hb, hpr, hpa]
+
+theorem holds_sub_empty (D : Description) (w : World) (host : InstId) (sub : String) (key : Nat)
+    (a : Actor) (hb : a.box = []) (hpr : a.prio = []) (hpa : a.parked = []) :
+    actorHoldsSubtreeMail D w host sub key a = false := by
+  simp [actorHoldsSubtreeMail, hb, hpr, hpa]
+
+/-- An older host holds a slot after the birth only when it held that slot before.
+The fresh actor's mailbox is empty, and a host that survives now survived then. -/
+theorem holds_slot_birth (w w' : World) (fresh host : InstId) (name : String) (key : Nat)
+    (hlen : w.roster.length ≤ w'.roster.length)
+    (hp : ∀ i, i ≠ fresh → (w'.st i).parent = (w.st i).parent)
+    (hno : ∀ i, (w.st i).parent ≠ some fresh) (hhost : host ≠ fresh)
+    (hst : w'.st host = w.st host)
+    (h : actorHoldsSlotMail w' host name key (w'.st host) = true) :
+    actorHoldsSlotMail w host name key (w.st host) = true := by
+  rw [hst] at h
+  have hlife : (w'.st host).life = (w.st host).life := congrArg Actor.life hst
+  have hsurv : ∀ s, survivesSender w' s host = true → survivesSender w s host = true :=
+    fun s hs => survives_birth w w' fresh s host hlen hp hno hlife hhost hs
+  simp only [actorHoldsSlotMail, Bool.or_eq_true] at h ⊢
+  rcases h with hleft | hpark
+  · rcases hleft with hbox | hprio
+    · exact Or.inl (Or.inl (bool_any_imp _ _ _ (fun m hm => by
+        simp only [Bool.and_eq_true] at hm ⊢
+        exact ⟨hm.1, hsurv _ hm.2⟩) hbox))
+    · exact Or.inl (Or.inr (bool_any_imp _ _ _ (fun m hm => by
+        simp only [Bool.and_eq_true] at hm ⊢
+        exact ⟨hm.1, hsurv _ hm.2⟩) hprio))
+  · exact Or.inr (bool_any_imp _ _ _ (fun p hm => by
+      simp only [Bool.or_eq_true, Bool.and_eq_true] at hm ⊢
+      rcases hm with hm | hm
+      · exact Or.inl ⟨hm.1, hsurv _ hm.2⟩
+      · exact Or.inr ⟨hm.1, hsurv _ hm.2⟩) hpark)
+
+theorem holds_sub_birth (D : Description) (w w' : World) (fresh host : InstId) (sub : String)
+    (key : Nat) (hlen : w.roster.length ≤ w'.roster.length)
+    (hp : ∀ i, i ≠ fresh → (w'.st i).parent = (w.st i).parent)
+    (hno : ∀ i, (w.st i).parent ≠ some fresh) (hhost : host ≠ fresh)
+    (hst : w'.st host = w.st host)
+    (h : actorHoldsSubtreeMail D w' host sub key (w'.st host) = true) :
+    actorHoldsSubtreeMail D w host sub key (w.st host) = true := by
+  rw [hst] at h
+  have hlife : (w'.st host).life = (w.st host).life := congrArg Actor.life hst
+  have hsurv : ∀ s, survivesSender w' s host = true → survivesSender w s host = true :=
+    fun s hs => survives_birth w w' fresh s host hlen hp hno hlife hhost hs
+  simp only [actorHoldsSubtreeMail, Bool.or_eq_true] at h ⊢
+  rcases h with hleft | hpark
+  · rcases hleft with hbox | hprio
+    · exact Or.inl (Or.inl (bool_any_imp _ _ _ (fun m hm => by
+        simp only [Bool.and_eq_true] at hm ⊢
+        exact ⟨hm.1, hsurv _ hm.2⟩) hbox))
+    · exact Or.inl (Or.inr (bool_any_imp _ _ _ (fun m hm => by
+        simp only [Bool.and_eq_true] at hm ⊢
+        exact ⟨hm.1, hsurv _ hm.2⟩) hprio))
+  · exact Or.inr (bool_any_imp _ _ _ (fun p hm => by
+      simp only [Bool.or_eq_true, Bool.and_eq_true] at hm ⊢
+      rcases hm with hm | hm
+      · exact Or.inl ⟨hm.1, hsurv _ hm.2⟩
+      · exact Or.inr ⟨hm.1, hsurv _ hm.2⟩) hpark)
+
+/-- Mail held in a slot after one empty actor is appended was held before it.
+The new mailbox contributes nothing, and every older host still had the same queues. -/
+theorem core_mail_birth (w w' : World) (fresh : InstId) (name : String) (key : Nat)
+    (hros : w'.roster = w.roster ++ [fresh])
+    (hst : ∀ i, i ≠ fresh → w'.st i = w.st i)
+    (hempty : (w'.st fresh).box = [] ∧ (w'.st fresh).prio = [] ∧ (w'.st fresh).parked = [])
+    (hno : ∀ i, (w.st i).parent ≠ some fresh)
+    (h : slotCoreMail w' name key = true) : slotCoreMail w name key = true := by
+  have hlen : w.roster.length ≤ w'.roster.length := by
+    rw [hros, List.length_append, List.length_singleton]
+    omega
+  have hp : ∀ i, i ≠ fresh → (w'.st i).parent = (w.st i).parent :=
+    fun i hi => congrArg Actor.parent (hst i hi)
+  obtain ⟨host, hmem, hhold⟩ := (_root_.List.any_eq_true).mp h
+  have hmem' : host ∈ w.roster ++ [fresh] := by simpa [hros] using hmem
+  simp only [List.mem_append, List.mem_singleton] at hmem'
+  rcases hmem' with hold | rfl
+  · by_cases hhost : host = fresh
+    · rw [hhost] at hhold
+      simp [holds_slot_empty w' fresh name key (w'.st fresh) hempty.1 hempty.2.1 hempty.2.2] at hhold
+    · have hback := holds_slot_birth w w' fresh host name key hlen hp hno hhost (hst host hhost) hhold
+      exact (_root_.List.any_eq_true).mpr ⟨host, hold, hback⟩
+  · simp [holds_slot_empty w' host name key (w'.st host) hempty.1 hempty.2.1 hempty.2.2] at hhold
+
+theorem sub_mail_birth (D : Description) (w w' : World) (fresh : InstId) (sub : String) (key : Nat)
+    (hros : w'.roster = w.roster ++ [fresh])
+    (hst : ∀ i, i ≠ fresh → w'.st i = w.st i)
+    (hempty : (w'.st fresh).box = [] ∧ (w'.st fresh).prio = [] ∧ (w'.st fresh).parked = [])
+    (hno : ∀ i, (w.st i).parent ≠ some fresh)
+    (h : subtreeCoreMail D w' sub key = true) : subtreeCoreMail D w sub key = true := by
+  have hlen : w.roster.length ≤ w'.roster.length := by
+    rw [hros, List.length_append, List.length_singleton]
+    omega
+  have hp : ∀ i, i ≠ fresh → (w'.st i).parent = (w.st i).parent :=
+    fun i hi => congrArg Actor.parent (hst i hi)
+  obtain ⟨host, hmem, hhold⟩ := (_root_.List.any_eq_true).mp h
+  have hmem' : host ∈ w.roster ++ [fresh] := by simpa [hros] using hmem
+  simp only [List.mem_append, List.mem_singleton] at hmem'
+  rcases hmem' with hold | rfl
+  · by_cases hhost : host = fresh
+    · rw [hhost] at hhold
+      simp [holds_sub_empty D w' fresh sub key (w'.st fresh) hempty.1 hempty.2.1 hempty.2.2] at hhold
+    · have hback := holds_sub_birth D w w' fresh host sub key hlen hp hno hhost
+        (hst host hhost) hhold
+      exact (_root_.List.any_eq_true).mpr ⟨host, hold, hback⟩
+  · simp [holds_sub_empty D w' host sub key (w'.st host) hempty.1 hempty.2.1 hempty.2.2] at hhold
+
+/-- Appending one empty actor does not start holding a slot that was clear. -/
+theorem slot_mail_birth (D : Description) (w w' : World) (fresh : InstId) (name : String)
+    (hros : w'.roster = w.roster ++ [fresh])
+    (hst : ∀ i, i ≠ fresh → w'.st i = w.st i)
+    (hempty : (w'.st fresh).box = [] ∧ (w'.st fresh).prio = [] ∧ (w'.st fresh).parked = [])
+    (hno : ∀ i, (w.st i).parent ≠ some fresh) (key : Nat)
+    (h : slotMailHeld D w' name key = true) : slotMailHeld D w name key = true := by
+  simp only [slotMailHeld] at h ⊢
+  by_cases hemptySub : (templateSubtree D name == "") = true
+  · simp only [hemptySub, ite_true] at h ⊢
+    exact core_mail_birth w w' fresh name key hros hst hempty hno h
+  · have hf : (templateSubtree D name == "") = false := by
+      cases hb : templateSubtree D name == "" with
+      | false => rfl
+      | true => exact absurd hb hemptySub
+    simp only [hf] at h ⊢
+    exact sub_mail_birth D w w' fresh (templateSubtree D name) key hros hst hempty hno h
+
 /-- In a reachable world, ingress does not grow the held keys of a template
 that is its own counted root: an empty subtree, or a nonempty root template. -/
 theorem held_ingress_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
