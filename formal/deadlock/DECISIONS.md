@@ -1047,5 +1047,14 @@ parked list is empty.
 
 The same step is what a later `callTimeout` of the caller would see: the
 phase is still parked and the filter `refundParkedCall` uses is empty.
-The clause is not preserved, so it is not added to `OccInv`. The step
-semantics are unchanged.
+The step semantics are unchanged.
+
+The ledger still balances. `seal_shifts_one` is one more token on `box`
+and one less queued entry. `shift_keeps_budget` is the sum. `led_budget`
+is 2, the parked hold is 1 and `NotAdmitted` spends 2
+(`led_hold_parked`, `led_hold_done`). `timeout_keeps_tokens` is the
+deadline after the seal: the filter is empty, so nothing is credited
+again. `credit_covers_notAdmitted` is the one extra token against a hold
+that grows by one. pure-stage does the same with the caller:
+`terminate_stage` leaves a sender that is waiting on a call until the
+deadline, and does not resume it as a failed send.

@@ -1,4 +1,4 @@
-import Deadlock.Semantics
+import Deadlock.Occupy
 
 set_option autoImplicit false
 
@@ -197,5 +197,122 @@ theorem seal_drops_parked_call :
   rw [hact, hrun]
   unfold terminateStage
   rw [descendants_id, shutdown_eq]
+
+theorem pre_token_box : (dropWorld.st caller).tokens "box" = 1 := by
+  simp [dropWorld, caller, callee, callerA]
+
+theorem seal_token_box : (wDead.st caller).tokens "box" = 2 := by
+  simp [wDead, setActor, caller, callee, wCred, creditLive, budgetHolder, creditSender, bumpToken,
+    dropWorld, callerA, tname]
+
+theorem pre_owed : owed dropWorld.st "box" caller dropWorld.roster = 1 := by
+  simp [owed, slot, countParked, countFrom, dropWorld, caller, callee, entry, callMsg, tname, calleeA]
+
+theorem post_owed : owed wDead.st "box" caller wDead.roster = 0 := by
+  simp [owed, slot, countParked, countFrom, wDead, deadA, setActor, caller, callee, wCred,
+    creditLive, budgetHolder, creditSender, bumpToken, dropWorld, callerA, tname]
+
+/-- The seal moves one queued call into the caller's tokens. A budget that
+held before the step still holds: the credit and the dropped entry cancel. -/
+theorem seal_shifts_one :
+    (wDead.st caller).tokens "box" = (dropWorld.st caller).tokens "box" + 1 ∧
+      owed wDead.st "box" caller wDead.roster + 1 =
+        owed dropWorld.st "box" caller dropWorld.roster := by
+  refine ⟨?_, ?_⟩
+  · rw [seal_token_box, pre_token_box]; omega
+  · rw [post_owed, pre_owed]
+
+theorem shift_keeps_budget (tok : Int) (queued budget : Nat)
+    (h : tok + (queued : Int) = (budget : Int)) (hq : 1 ≤ queued) :
+    (tok + 1) + ((queued - 1 : Nat) : Int) = (budget : Int) := by
+  omega
+
+/-- `NotAdmitted` after the seal. The parked list is already empty, so the
+timeout credits nothing and the tokens stay at the seal's value. -/
+theorem timeout_keeps_tokens :
+    ∃ w', callTimeout wDead caller = some w' ∧
+      (∀ d, (w'.st caller).tokens d = (wDead.st caller).tokens d) ∧
+      (w'.st callee).parked = [] ∧
+      (w'.st caller).phase = (finishCall (wDead.st caller) waitK .notAdmitted).phase := by
+  have hlive : ((wDead.st caller).life != .alive) = false := by
+    have hl : (wDead.st caller).life = .alive := by
+      simp [wDead, setActor, caller, callee]
+      exact cred_st_caller.2.2
+    simp [hl]
+  have hph : (wDead.st caller).phase = .parked callee true waitK := dead_caller
+  have hempty : ((wDead.st callee).parked.filter
+      (fun p => p.sender == caller && p.isCall)).isEmpty = true := by
+    simp [dead_parked]
+  unfold callTimeout
+  simp only [hlive, ite_false, hph]
+  have hrefund : refundParkedCall wDead caller callee = wDead := by
+    simp [refundParkedCall, hempty]
+  rw [hrefund]
+  refine ⟨setActor wDead caller (finishCall (wDead.st caller) waitK .notAdmitted), rfl, ?_, ?_, ?_⟩
+  · intro d
+    simp [setActor, finishCall, selectCall, proceed, waitK]
+  · exact dead_parked
+  · simp [setActor, finishCall, selectCall, proceed, waitK]
+
+/-!
+The hold gap on a real budget. `idle` owes 2 toward `box` and `busy` owes 0,
+so the parked hold subtracts the call's slot (1) and `NotAdmitted` spends the
+full landing floor (2). The seal's extra token is that one unit.
+-/
+
+def ledCallerT : Template :=
+  { name := "caller", multiplicity := .one, capacity := Affine.ofNat 1,
+    priorityCapacity := Affine.ofNat 1, priorityBound := Affine.ofNat 1,
+    states := ["idle", "busy"], initial := "idle", terminable := false,
+    untimedPeer := false, mustFit := true }
+
+def ledIdle : Edge :=
+  { src := "caller", srcState := "idle", dst := "box", kind := .blocking,
+    reliability := .reliable, effect := .send, label := "m", scope := .intra,
+    occupancy := Affine.ofNat 2, repliesInDequeue := false, ingress := false,
+    ingressLegal := none, cell := Inhabited.default }
+
+def ledBusy : Edge :=
+  { src := "caller", srcState := "busy", dst := "box", kind := .blocking,
+    reliability := .reliable, effect := .send, label := "m", scope := .intra,
+    occupancy := Affine.ofNat 0, repliesInDequeue := false, ingress := false,
+    ingressLegal := none, cell := Inhabited.default }
+
+def ledDesc : Description :=
+  { name := "ledger", freshNames := false, templates := [ledCallerT, boxT],
+    edges := [ledIdle, ledBusy], compatibility := .all, steps := [], cellEffects := [] }
+
+def ledK : Cont :=
+  { toState := "idle", replyTo := none, rest := [], onNotAdmitted := [],
+    toNotAdmitted := "busy" }
+
+def ledParked : Actor :=
+  { life := .alive, typestate := "idle",
+    phase := .parked (.peer "box" 0 0) true ledK,
+    box := [], prio := [], parked := [], tokens := fun _ => 1 }
+
+def ledDone : Actor := finishCall ledParked ledK .notAdmitted
+
+theorem led_budget : budget ledDesc "caller" "box" = 2 := by
+  decide
+
+theorem led_hold_parked : tokenHold ledDesc "caller" "box" ledParked = 1 := by
+  decide
+
+theorem led_hold_done : tokenHold ledDesc "caller" "box" ledDone = 2 := by
+  decide
+
+theorem led_one_unit :
+    tokenHold ledDesc "caller" "box" ledDone =
+      tokenHold ledDesc "caller" "box" ledParked + 1 := by
+  decide
+
+/-- One credited token covers a hold that grows by one. The pre-step slack
+is `hold ≤ tokens`. The seal adds one token and does not change the hold.
+`NotAdmitted` then raises the hold by at most that one unit and credits nothing. -/
+theorem credit_covers_notAdmitted (hold hold' : Nat) (tok : Int)
+    (hpre : (hold : Int) ≤ tok) (hgrow : hold' ≤ hold + 1) :
+    (hold' : Int) ≤ tok + 1 := by
+  omega
 
 end Deadlock.ParkDrop
