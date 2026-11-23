@@ -1284,4 +1284,246 @@ theorem admit_roster (I : Impl) (w : World) (id : InstId) (a : Actor) :
   rw [readCells_roster]
   exact setActor_roster _ _ _
 
+/-- What a step does to the roster. A scheduler spawn appends one root at a
+fresh key. A per-peer parent appends one child at its own key. Every other
+step keeps the roster. -/
+inductive RosterGrow (I : Impl) (w : World) : World → Prop where
+  | keep (w' : World) : w'.roster = w.roster → RosterGrow I w w'
+  | root (w' : World) (template : String) (k g : Nat) (t : Template) :
+      templateOf I.desc template = some t →
+      rootOf I.desc t = true →
+      w'.roster = w.roster ++ [InstId.peer template k g] →
+      (∀ n2 g2, InstId.peer n2 k g2 ∈ w.roster → templateSubtree I.desc n2 = t.subtree →
+        t.subtree ≠ "" → False) →
+      RosterGrow I w w'
+  | child (w' : World) (child : String) (k g : Nat) (t : Template) (parent : InstId) :
+      templateOf I.desc child = some t →
+      t.supervisor = some (tname parent) →
+      parent ∈ w.roster →
+      (∃ g0, parent = InstId.peer (tname parent) k g0) →
+      w'.roster = w.roster ++ [InstId.peer child k g] →
+      RosterGrow I w w'
+
+theorem maySpawn_root (D : Description) (w : World) (template : String) (t : Template)
+    (h : maySpawnRoot D w template t = true) : rootOf D t = true := by
+  unfold maySpawnRoot at h
+  simp only [Bool.and_eq_true] at h
+  exact h.1.1.2
+
+/-- A child of a per-peer stage is not a scheduler root. -/
+theorem child_not_root (D : Description) (child parent : String) (t s : Template)
+    (ht : templateOf D child = some t) (hs : templateOf D parent = some s)
+    (hsup : t.supervisor = some parent) (hper : s.multiplicity = .perPeer) :
+    rootOf D t = false := by
+  unfold rootOf
+  simp [hsup, hs, hper]
+  decide
+
+theorem spawn_grow (I : Impl) (w w' : World) (template : String)
+    (h : spawn I w template = some w') : RosterGrow I w w' := by
+  unfold spawn at h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · have hroot : rootOf I.desc t = true := maySpawn_root I.desc w template t hmay
+      simp only [hmay, ite_true] at h
+      cases hsup : t.supervisor with
+      | some name =>
+        rw [hsup] at h
+        cases h
+        exact RosterGrow.root (placePeer I w template (freshKey I.desc w t.subtree) t.initial
+            (some (InstId.core name)) (fun u =>
+              { u with nextKey := fun s =>
+                  if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s }))
+          template (freshKey I.desc w t.subtree)
+          (maxGen w template (freshKey I.desc w t.subtree)) t ht hroot
+          (place_roster I w template (freshKey I.desc w t.subtree) t.initial
+            (some (InstId.core name)) (fun u =>
+              { u with nextKey := fun s =>
+                  if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+            (fun _ => rfl))
+          (by
+            intro n2 g2 hmem htree hne
+            exact Nat.lt_irrefl _ (freshKey_gt I.desc w t.subtree n2
+              (freshKey I.desc w t.subtree) g2 hne htree hmem))
+      | none =>
+        rw [hsup] at h
+        by_cases hempty : (t.subtree == "") = true
+        · rw [hempty] at h
+          cases h
+          exact RosterGrow.root (placePeer I w template (w.nextIx template) t.initial none
+              (fun u => { u with nextIx := fun n =>
+                  if n = template then w.nextIx template + 1 else u.nextIx n }))
+            template (w.nextIx template) (maxGen w template (w.nextIx template)) t ht hroot
+            (place_roster I w template (w.nextIx template) t.initial none
+              (fun u => { u with nextIx := fun n =>
+                  if n = template then w.nextIx template + 1 else u.nextIx n })
+              (fun _ => rfl))
+            (by
+              intro _ _ _ _ hne
+              exact hne (by simpa [beq_iff_eq] using hempty))
+        · have hf : (t.subtree == "") = false := by
+            cases hb : t.subtree == "" with
+            | false => rfl
+            | true => exact absurd hb hempty
+          rw [hf] at h
+          cases h
+          exact RosterGrow.root (placePeer I w template (freshKey I.desc w t.subtree) t.initial none
+              (fun u => { u with nextKey := fun s =>
+                  if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s }))
+            template (freshKey I.desc w t.subtree)
+            (maxGen w template (freshKey I.desc w t.subtree)) t ht hroot
+            (place_roster I w template (freshKey I.desc w t.subtree) t.initial none
+              (fun u => { u with nextKey := fun s =>
+                  if s = t.subtree then freshKey I.desc w t.subtree + 1 else u.nextKey s })
+              (fun _ => rfl))
+            (by
+              intro n2 g2 hmem htree hne
+              exact Nat.lt_irrefl _ (freshKey_gt I.desc w t.subtree n2
+                (freshKey I.desc w t.subtree) g2 hne htree hmem))
+    · simp [hmay] at h
+
+theorem spawnChild_grow (I : Impl) (w : World) (parent : InstId) (child : String) (w' : World)
+    (hid : parent ∈ w.roster) (h : spawnChild I w parent child = some w') :
+    RosterGrow I w w' := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hgo :
+        (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = true
+    · simp only [hgo, ite_true] at h
+      cases parent with
+      | core _ => simp at h
+      | peer pn pk pg =>
+        by_cases hblk : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk = true
+        · simp [hblk] at h
+          cases h
+          exact RosterGrow.keep w rfl
+        · have hf : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk = false := by
+            cases hb : slotRespawnBlocked I.desc w (InstId.peer pn pk pg) child pk with
+            | false => rfl
+            | true => exact absurd hb hblk
+          simp only [hf, ite_false] at h
+          cases h
+          have hsup : t.supervisor = some pn := by
+            have hgo' := hgo
+            simp only [Bool.and_eq_true] at hgo'
+            have hnamed : supNamed t.supervisor pn = true := by
+              simpa [tname] using hgo'.1.2
+            cases hsv : t.supervisor with
+            | none => simp [supNamed, hsv] at hnamed
+            | some n =>
+              simp [supNamed, hsv, beq_iff_eq] at hnamed
+              rw [hnamed]
+          exact RosterGrow.child (admitBorn I w (InstId.peer child pk (maxGen w child pk))
+              { bornActor I.desc w child pk t.initial with parent := some (InstId.peer pn pk pg) })
+            child pk (maxGen w child pk) t (InstId.peer pn pk pg) ht
+            (by simpa [tname] using hsup) hid ⟨pg, rfl⟩
+            (admit_roster I w (InstId.peer child pk (maxGen w child pk)) _)
+    · have hf :
+          (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive) = false := by
+        cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hgo
+      simp only [hf, ite_false] at h
+      by_cases hstay : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · simp only [hstay, ite_true] at h
+        cases h
+        exact RosterGrow.keep w rfl
+      · have hstayF :
+            (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = false := by
+          cases hb : t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) with
+          | false => rfl
+          | true => exact absurd hb hstay
+        simp [hstayF] at h
+
+theorem receiveBulk_roster (I : Impl) (w w' : World) (id : InstId)
+    (h : receiveBulk I w id = some w') : w'.roster = w.roster := by
+  unfold receiveBulk at h
+  by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
+  · simp [hready] at h
+  · simp [hready] at h
+    cases hbox : (w.st id).box with
+    | nil =>
+      cases hpark : (w.st id).parked with
+      | nil => simp [hbox, hpark] at h
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          rw [setActor_roster, creditLive_roster, setActor_roster]
+          rw [← hbox] at hdel
+          exact deliver_roster I w id { (w.st id) with parked := ps } p.msg w1 a1 hdel
+    | cons m ms =>
+      cases hpark : (w.st id).parked with
+      | nil =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          rw [creditLive_roster, setActor_roster]
+          rw [← hpark] at hdel
+          exact deliver_roster I w id { (w.st id) with box := ms } m w1 a1 hdel
+      | cons p ps =>
+        simp [hbox, hpark] at h
+        split at h
+        · cases h
+        · next w1 a1 hdel =>
+          cases h
+          rw [setActor_roster, creditLive_roster, setActor_roster]
+          rw [← hpark] at hdel
+          exact deliver_roster I w id { (w.st id) with box := ms } m w1 a1 hdel
+
+theorem receivePrio_roster (I : Impl) (w w' : World) (id : InstId)
+    (h : receivePrio I w id = some w') : w'.roster = w.roster := by
+  obtain ⟨m, pre, suf, w1, a1, _, _, _, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+  rw [hw', setActor_roster]
+  exact deliver_roster I w id { (w.st id) with prio := pre ++ suf } m w1 a1 hdel
+
+theorem finish_roster (I : Impl) (w w' : World) (id : InstId)
+    (h : finishWait I w id = some w') : w'.roster = w.roster := by
+  unfold finishWait at h
+  by_cases hlive : (w.st id).life ≠ .alive
+  · simp [hlive] at h
+  · simp [hlive] at h
+    cases hph : (w.st id).phase with
+    | awaitEffect _ =>
+      simp [hph] at h
+      cases h
+      exact setActor_roster _ _ _
+    | awaitPeer _ =>
+      simp [hph] at h
+      cases h
+      exact setActor_roster _ _ _
+    | idle => simp [hph] at h
+    | run _ => simp [hph] at h
+    | parked _ _ _ => simp [hph] at h
+    | awaitReply _ _ => simp [hph] at h
+    | crashed => simp [hph] at h
+
+theorem call_roster (w w' : World) (id : InstId) (h : callTimeout w id = some w') :
+    w'.roster = w.roster := by
+  unfold callTimeout at h
+  dsimp at h
+  split at h
+  · simp at h
+  · split at h
+    · cases h
+      exact setActor_roster _ _ _
+    · cases h
+      exact (setActor_roster _ _ _).trans (refund_call_roster w id _)
+    · cases h
+      exact setActor_roster _ _ _
+    · simp at h
+
 end Deadlock
