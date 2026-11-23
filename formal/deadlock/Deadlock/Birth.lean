@@ -1126,3 +1126,61 @@ theorem birth_ingress (I : Impl) (w w' : World) (dst : InstId) (label : String)
             · intro m hm
               rw [hpr] at hm
               exact Or.inl hm
+
+theorem born_shape (D : Description) (w : World) (template : String) (k : Nat)
+    (initial : String) (parent : Option InstId) :
+    let a := { bornActor D w template k initial with parent := parent }
+    a.life = .alive ∧ a.box = [] ∧ a.prio = [] ∧ a.parked = [] ∧ a.parent = parent := by
+  simp [bornActor, withKeyTokens, withTokens]
+
+/-- Installing one peer whose key is not on the roster. `next` may bump one
+counter and does not touch the roster or an actor. -/
+theorem place_roster (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World)
+    (hnros : ∀ u, (next u).roster = u.roster) :
+    let id := InstId.peer template k (maxGen w template k)
+    (placePeer I w template k initial parent next).roster = w.roster ++ [id] := by
+  unfold placePeer
+  dsimp
+  rw [cellsRoster, setActor, hnros]
+
+theorem place_st_self (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World)
+    (hnst : ∀ u i, (next u).st i = u.st i) :
+    let id := InstId.peer template k (maxGen w template k)
+    (placePeer I w template k initial parent next).st id =
+      { bornActor I.desc w template k initial with parent := parent } := by
+  intro id
+  have hset : (setActor (next { w with roster := w.roster ++ [id] }) id
+      { bornActor I.desc w template k initial with parent := parent }).st id =
+      { bornActor I.desc w template k initial with parent := parent } := setActor_self _ _ _
+  simpa [placePeer, cellsSt, hnst] using hset
+
+theorem place_st_other (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (parent : Option InstId) (next : World → World) (i : InstId)
+    (hnst : ∀ u j, (next u).st j = u.st j)
+    (hne : i ≠ InstId.peer template k (maxGen w template k)) :
+    (placePeer I w template k initial parent next).st i = w.st i := by
+  have hset : (setActor (next { w with roster := w.roster ++ [InstId.peer template k (maxGen w template k)] })
+      (InstId.peer template k (maxGen w template k))
+      { bornActor I.desc w template k initial with parent := parent }).st i = w.st i := by
+    rw [setActor_other _ _ _ _ hne, hnst]
+  simpa [placePeer, cellsSt] using hset
+
+theorem place_nextIx (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (n : String) :
+    (placePeer I w template k initial none
+      (fun u => { u with nextIx := fun m => if m = template then k + 1 else u.nextIx m })).nextIx n =
+      if n = template then k + 1 else w.nextIx n := by
+  unfold placePeer
+  dsimp
+  rw [readCells_nextIx, setActor]
+
+theorem place_nextKey (I : Impl) (w : World) (template : String) (k : Nat) (initial : String)
+    (s : String) :
+    (placePeer I w template k initial none
+      (fun u => { u with nextIx := fun m => if m = template then k + 1 else u.nextIx m })).nextKey s =
+      w.nextKey s := by
+  unfold placePeer
+  dsimp
+  rw [readCells_nextKey, setActor]
