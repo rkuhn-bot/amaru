@@ -1910,3 +1910,160 @@ theorem birth_prio (I : Impl) (w w' : World) (id : InstId) (h : BirthInv I.desc 
       · exact List.mem_append_left _ hpre
       · exact List.mem_append_right _ (List.mem_cons_of_mem _ hsuf))
   exact hw' ▸ hset
+
+theorem plain_park_snoc {ps : List Parked} {e : Parked}
+    (h : ∀ p, p ∈ ps → p.msg.tombstone = false) (he : e.msg.tombstone = false) :
+    ∀ p, p ∈ ps ++ [e] → p.msg.tombstone = false := by
+  intro p hp
+  rcases List.mem_append.mp hp with hp | hp
+  · exact h p hp
+  · simp at hp
+    rw [hp]
+    exact he
+
+theorem issue_finish_line (a : Actor) (k : Cont) (r : CallResult) :
+    (finishCall (issueCall a) k r).life = a.life ∧ (finishCall (issueCall a) k r).parent = a.parent ∧
+      (finishCall (issueCall a) k r).box = a.box ∧ (finishCall (issueCall a) k r).prio = a.prio ∧
+      (finishCall (issueCall a) k r).parked = a.parked := by
+  rcases issue_lineage a with ⟨hl, hp, hb, hpr, hk⟩
+  rcases finish_lineage (issueCall a) k r with ⟨hl', hp', hb', hpr', hk'⟩
+  exact ⟨hl'.trans hl, hp'.trans hp, hb'.trans hb, hpr'.trans hpr, hk'.trans hk⟩
+
+/-- A send or a call stores one plain message, in the box when it fits and in
+the parked list otherwise, then sets the sender's phase. Charge, issue, and
+proceed touch tokens and phase only. A dead target stores nothing. -/
+theorem birth_mail (D : Description) (w : World) (sender dst : InstId) (msg : Msg)
+    (isCall : Bool) (k : Cont) (h : BirthInv D w) (hm : msg.tombstone = false) :
+    BirthInv D (enqueueOrPark w D sender dst msg isCall k) := by
+  by_cases hlive : (w.st dst).life = .alive
+  · by_cases hroom : (w.st dst).parked = [] ∧ (w.st dst).box.length < capBulk D w.N dst
+    · cases isCall with
+      | false =>
+        by_cases hsame : sender = dst
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+          · simpa [chargeSender, bumpToken] using (proceed_lineage _ k).2.1
+          · simpa [chargeSender, bumpToken] using (proceed_lineage _ k).1
+          · intro m hmem
+            rw [(proceed_lineage _ k).2.2.1] at hmem
+            simp only [chargeSender, bumpToken] at hmem
+            refine plain_append (h.plainBox dst) ?_ m hmem
+            simp [hm]
+          · intro p hp
+            rw [(proceed_lineage _ k).2.2.2.2] at hp
+            simp only [chargeSender, bumpToken] at hp
+            exact h.plainParked dst p hp
+          · intro m hmem
+            rw [(proceed_lineage _ k).2.2.2.1] at hmem
+            simp only [chargeSender, bumpToken] at hmem
+            exact Or.inl hmem
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_keep_line D _ sender _ ?_ ?_
+          · refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+            · simp
+            · exact hlive.symm
+            · intro m hmem
+              refine plain_append (h.plainBox dst) ?_ m hmem
+              simp [hm]
+            · intro p hp
+              exact h.plainParked dst p (by simpa using hp)
+            · intro m hmem
+              exact Or.inl (by simpa using hmem)
+          · simp only [setActor, hsame]
+            simpa [chargeSender, bumpToken] using proceed_lineage _ k
+      | true =>
+        by_cases hsame : sender = dst
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · intro m hmem
+            simp only [issueCall, chargeSender, bumpToken] at hmem
+            refine plain_append (h.plainBox dst) ?_ m hmem
+            simp [hm]
+          · intro p hp
+            simp only [issueCall, chargeSender, bumpToken] at hp
+            exact h.plainParked dst p hp
+          · intro m hmem
+            simp only [issueCall, chargeSender, bumpToken] at hmem
+            exact Or.inl hmem
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_keep_line D _ sender _ ?_ ?_
+          · refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+            · simp
+            · exact hlive.symm
+            · intro m hmem
+              refine plain_append (h.plainBox dst) ?_ m hmem
+              simp [hm]
+            · intro p hp
+              exact h.plainParked dst p (by simpa using hp)
+            · intro m hmem
+              exact Or.inl (by simpa using hmem)
+          · simp [setActor, hsame, issueCall, chargeSender, bumpToken]
+    · cases isCall with
+      | false =>
+        by_cases hsame : sender = dst
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+          · simp [chargeSender, bumpToken]
+          · simp [chargeSender, bumpToken]
+          · intro m hmem
+            simp only [chargeSender, bumpToken] at hmem
+            exact h.plainBox dst m hmem
+          · intro p hp
+            simp only [chargeSender, bumpToken] at hp
+            refine plain_park_snoc (h.plainParked dst) ?_ p hp
+            simp [hm]
+          · intro m hmem
+            simp only [chargeSender, bumpToken] at hmem
+            exact Or.inl hmem
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_keep_line D _ sender _ ?_ ?_
+          · refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+            · simp
+            · exact hlive.symm
+            · intro m hmem
+              exact h.plainBox dst m (by simpa using hmem)
+            · intro p hp
+              refine plain_park_snoc (h.plainParked dst) ?_ p hp
+              simp [hm]
+            · intro m hmem
+              exact Or.inl (by simpa using hmem)
+          · simp [setActor, hsame, chargeSender, bumpToken]
+      | true =>
+        by_cases hsame : sender = dst
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+          · simp [issueCall, chargeSender, bumpToken]
+          · simp [issueCall, chargeSender, bumpToken]
+          · intro m hmem
+            simp only [issueCall, chargeSender, bumpToken] at hmem
+            exact h.plainBox dst m hmem
+          · intro p hp
+            simp only [issueCall, chargeSender, bumpToken] at hp
+            refine plain_park_snoc (h.plainParked dst) ?_ p hp
+            simp [hm]
+          · intro m hmem
+            simp only [issueCall, chargeSender, bumpToken] at hmem
+            exact Or.inl hmem
+        · simp [enqueueOrPark, hlive, hroom, hsame]
+          refine birth_keep_line D _ sender _ ?_ ?_
+          · refine birth_set D w dst _ h ?_ (Or.inl ?_) ?_ ?_ ?_
+            · simp
+            · exact hlive.symm
+            · intro m hmem
+              exact h.plainBox dst m (by simpa using hmem)
+            · intro p hp
+              refine plain_park_snoc (h.plainParked dst) ?_ p hp
+              simp [hm]
+            · intro m hmem
+              exact Or.inl (by simpa using hmem)
+          · simp [setActor, hsame, issueCall, chargeSender, bumpToken]
+  · cases isCall with
+    | false =>
+      simp [enqueueOrPark, hlive]
+      exact birth_keep_line D w sender (proceed (w.st sender) k) h (proceed_lineage _ _)
+    | true =>
+      simp [enqueueOrPark, hlive]
+      exact birth_keep_line D w sender (finishCall (issueCall (w.st sender)) k .notAdmitted) h
+        (issue_finish_line _ _ _)
