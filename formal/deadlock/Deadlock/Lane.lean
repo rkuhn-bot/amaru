@@ -1080,4 +1080,74 @@ theorem held_sub (D : Description) (w w' : World) (name : String)
             simpa [beq_iff_eq] using halive
           simp [hb]
 
+/-! A root tombstone waits on descendant mail, and that mail is what the
+parent's slot count sees. -/
+
+/-- `sealedTogether` is true of an actor and itself, so a root's own mail is the
+base of the descendant test. -/
+theorem sealed_self (w : World) (id : InstId) : sealedTogether w id id = true := by
+  simp [sealedTogether]
+
+/-- Receiving a root tombstone tests `mailInFlight` of its sender. That test is
+`sealedTogether`: the sender of the queued message is the root, or a descendant
+the parent chain records. Descendant mail and the root's own mail are the same
+test. -/
+theorem tomb_waits_on_descendant (w : World) (root host : InstId) (m : Msg)
+    (hhost : host ∈ w.roster) (hlive : (w.st host).life = .alive)
+    (ht : m.tombstone = false) (hs : sealedTogether w root m.sender = true)
+    (hm : m ∈ (w.st host).box ∨ m ∈ (w.st host).prio) :
+    mailInFlight w root = true :=
+  flight_of_msg w root host m hhost hlive ht hs hm
+
+/-- Mail in flight at a descendant is mail in flight at every recorded ancestor. -/
+theorem flight_strict (w : World) (hF : ParentForest w) {desc anc : InstId}
+    (h : StrictAncestor w desc anc) (hf : mailInFlight w desc = true) :
+    mailInFlight w anc = true := by
+  induction h with
+  | edge he => exact flight_ancestor w hF _ _ he.1 hf
+  | tail he _ ih => exact ih (flight_ancestor w hF _ _ he.1 hf)
+
+/-- A live descendant has a live ancestor. A dead parent has no live child. -/
+theorem ancestor_alive (w : World) (hKids : DeadChildless w) (hcr : w.crashed = false)
+    {desc anc : InstId} (h : StrictAncestor w desc anc)
+    (hlive : (w.st desc).life = .alive) : (w.st anc).life = .alive := by
+  induction h with
+  | edge he => exact kids_alive w hKids hcr _ _ hlive he.1
+  | tail he _ ih => exact ih (kids_alive w hKids hcr _ _ hlive he.1)
+
+/-- A dead root whose mail is still in flight has its tombstone on the live parent.
+The parent-dead branch of `TombChain` contradicts the parent being alive. -/
+theorem dead_flight_tomb (w : World) (hChain : TombChain w) (hcr : w.crashed = false)
+    (root parent : InstId) (hdead : (w.st root).life = .dead)
+    (hpar : (w.st root).parent = some parent) (hlive : (w.st parent).life = .alive)
+    (hf : mailInFlight w root = true) : HoldsTomb w parent root := by
+  have hstep := hChain root hcr hdead hf
+  rw [hpar] at hstep
+  rcases hstep with hliveH | hdeadP
+  · exact hliveH.2
+  · exact absurd hlive hdeadP.1
+
+/-- Program mail from the root, or from a recorded descendant, keeps that tombstone
+queued. Parked mail is not a second path: this hypothesis is `mailInFlight`, which
+only reads live boxes and priority lanes. -/
+theorem descendant_mail_tomb (w : World) (hChain : TombChain w) (hF : ParentForest w)
+    (hcr : w.crashed = false) (root parent sender : InstId)
+    (hdead : (w.st root).life = .dead) (hpar : (w.st root).parent = some parent)
+    (hlive : (w.st parent).life = .alive)
+    (hwho : sender = root ∨ StrictAncestor w sender root)
+    (hf : mailInFlight w sender = true) : HoldsTomb w parent root := by
+  have hroot : mailInFlight w root = true := by
+    rcases hwho with hwho | hwho
+    · simpa [hwho] using hf
+    · exact flight_strict w hF hwho hf
+  exact dead_flight_tomb w hChain hcr root parent hdead hpar hlive hroot
+
+/-- A live host does not park mail from a dead sender. `ParkedFromLive` is the
+negative; a seal also drops those entries, so a held slot's remaining mail is
+program mail in a box or a priority lane. -/
+theorem parked_sender_not_dead (w : World) (hPark : ParkedFromLive w)
+    (host : InstId) (p : Parked) (hlive : (w.st host).life = .alive)
+    (hp : p ∈ (w.st host).parked) : (w.st p.sender).life ≠ .dead :=
+  hPark host p hlive hp
+
 end Deadlock
