@@ -7,7 +7,9 @@ factors times each template's budget fits in `totalOcc.eval N`, which Lemma 1
 puts under `capBulk`.
 -/
 import Deadlock.Birth
+import Deadlock.ChildBirth
 import Deadlock.Occ
+import Deadlock.Step
 
 set_option autoImplicit false
 
@@ -1278,12 +1280,6 @@ theorem abortChildren_roster (D : Description) (w : World) (parent : InstId) :
         exact ih w0
   exact hfold w.roster w
 
-theorem admit_roster (I : Impl) (w : World) (id : InstId) (a : Actor) :
-    (admitBorn I w id a).roster = w.roster ++ [id] := by
-  unfold admitBorn
-  rw [readCells_roster]
-  exact setActor_roster _ _ _
-
 /-- What a step does to the roster. A scheduler spawn appends one root at a
 fresh key. A per-peer parent appends one child at its own key. Every other
 step keeps the roster. -/
@@ -1767,5 +1763,246 @@ theorem oneCohort_reachable (I : Impl) (hG : GraphOk I.desc) (N : Nat) (w : Worl
     have ⟨_, hstep⟩ := apply_step I a w w' ha
     exact oneCohort_of_grow I w w' (hold_reach I N w hG hprev) ih
       (step_grow I w w' a (hold_reach I N w hG hprev) hstep)
+
+/-! A subtree member at one key walks its parent chain to that key's root. -/
+
+/-- `isMember` names a per-peer template of that subtree. -/
+theorem member_template (D : Description) (id : InstId) (sub : String) (k : Nat)
+    (hsub : sub ≠ "") (hm : isMember D id sub k = true) :
+    ∃ role g t, id = InstId.peer role k g ∧ templateOf D role = some t ∧ t.subtree = sub := by
+  cases id with
+  | core _ => simp [isMember] at hm
+  | peer role ix g =>
+    simp only [isMember, Bool.and_eq_true, beq_iff_eq, bne_iff_ne] at hm
+    rcases hm with ⟨⟨hk, _⟩, htree⟩
+    subst hk
+    unfold templateSubtree at htree
+    cases ht : templateOf D role with
+    | none =>
+      simp [ht] at htree
+      exact absurd htree hsub
+    | some t =>
+      simp only [ht] at htree
+      exact ⟨role, g, t, rfl, ht, htree⟩
+
+/-- A checked template of a nonempty subtree is per-peer. -/
+theorem entry_of_graph (D : Description) (hG : GraphOk D) (name : String) (t : Template)
+    (ht : templateOf D name = some t) : subtreeEntry D t = none := by
+  have hmap : D.templates.filterMap (subtreeEntry D) = [] :=
+    (List.append_eq_nil_iff.mp (by simpa only [subtreeFails_entry] using hG.subtrees)).1
+  exact filterMap_none (subtreeEntry D) D.templates hmap t (templateOf_mem D name t ht).1
+
+theorem member_per (D : Description) (hG : GraphOk D) (name : String) (t : Template)
+    (ht : templateOf D name = some t) (hsub : t.subtree ≠ "") : t.multiplicity = .perPeer := by
+  have hent := entry_of_graph D hG name t ht
+  cases hmul : t.multiplicity with
+  | perPeer => rfl
+  | one => exact False.elim (subtreeEntry_not_one D t hsub hmul hent)
+
+/-- A member that is not the subtree root names a per-peer supervisor in the
+same subtree. A missing supervisor template fails `supervisorInSubtree`, and a
+multiplicity-one supervisor would make this template the root. -/
+theorem member_sup (D : Description) (hG : GraphOk D) (name : String) (t : Template)
+    (ht : templateOf D name = some t) (hsub : t.subtree ≠ "")
+    (hrootF : rootOf D t = false) :
+    ∃ supName ts, t.supervisor = some supName ∧ templateOf D supName = some ts ∧
+      ts.multiplicity = .perPeer ∧ ts.subtree = t.subtree ∧ ts.name ≠ t.name := by
+  have hmul := member_per D hG name t ht hsub
+  have hent := entry_of_graph D hG name t ht
+  cases hsup : t.supervisor with
+  | none =>
+    unfold rootOf at hrootF
+    rw [hsup] at hrootF
+    cases hrootF
+  | some supName =>
+    cases hts : templateOf D supName with
+    | none =>
+      have hsi := entry_sup_in D t hent hsub hmul (by simp [hsup])
+      unfold supervisorInSubtree at hsi
+      simp [hsup, hts] at hsi
+    | some ts =>
+      have hone : (ts.multiplicity == .one) = false := by
+        simpa [rootOf, hsup, hts] using hrootF
+      have hper : ts.multiplicity = .perPeer := by
+        cases hmul : ts.multiplicity with
+        | perPeer => rfl
+        | one =>
+          have hb : (ts.multiplicity == .one) = true := by
+            rw [hmul]
+            decide
+          rw [hb] at hone
+          cases hone
+      obtain ⟨hsame, hdiff⟩ := per_sup_same D hG name t ht hmul supName hsup ts hts hper
+      exact ⟨supName, ts, rfl, hts, hper, hsame, hdiff⟩
+
+/-- Following the recorded parent reaches the one root of this subtree key.
+The step is well-founded because a parent is not its child. -/
+theorem member_ancestor (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w) (hH : Hold I w)
+    (sub : String) (k : Nat) (id : InstId) (hsub : sub ≠ "")
+    (hid : id ∈ w.roster) (hm : isMember I.desc id sub k = true) :
+    ∃ root, root ∈ w.roster ∧ isMember I.desc root sub k = true ∧
+      (∃ t, templateOf I.desc (tname root) = some t ∧ rootOf I.desc t = true) ∧
+      (id = root ∨ StrictAncestor w id root) := by
+  let D := I.desc
+  let C : InstId → Prop := fun id =>
+    id ∈ w.roster → isMember D id sub k = true →
+      ∃ root, root ∈ w.roster ∧ isMember D root sub k = true ∧
+        (∃ t, templateOf D (tname root) = some t ∧ rootOf D t = true) ∧
+        (id = root ∨ StrictAncestor w id root)
+  have hstep : ∀ id, (∀ parent, ParentEdge w id parent → C parent) → C id := by
+    intro id ih hid hm
+    obtain ⟨role, g, t, hidEq, ht, htree⟩ := member_template D id sub k hsub hm
+    by_cases hroot : rootOf D t = true
+    · refine ⟨id, hid, hm, ⟨t, ?_, hroot⟩, Or.inl rfl⟩
+      rw [hidEq]
+      simpa [tname] using ht
+    · have hrootF : rootOf D t = false := by
+        cases hbb : rootOf D t
+        · rfl
+        · exact absurd hbb hroot
+      have hsubT : t.subtree ≠ "" := by rwa [← htree] at hsub
+      obtain ⟨supName, ts, hsup, hts, hper, hsame, _⟩ :=
+        member_sup D hG role t ht hsubT hrootF
+      have hwired := hP id t hid (by rw [hidEq]; simpa [tname] using ht)
+      rw [hsup] at hwired
+      obtain ⟨p, hpar, hname, hkeyp⟩ := hwired
+      have hhosted := hF.hosted id p hpar
+      have hne : id ≠ p := by
+        intro heq
+        apply hSelf id
+        rw [hpar, heq]
+      cases p with
+      | core cname =>
+        obtain ⟨s, hs, hmul⟩ := hH.role (InstId.core cname) hhosted
+        rw [hname] at hs
+        have htsEq : s = ts := by
+          injection hs.symm.trans hts
+        rw [htsEq, hper] at hmul
+        simp [tmb_role] at hmul
+      | peer n pk pg =>
+        have hn : n = supName := by simpa [tname] using hname
+        have hkeyId : memberKey id = some k := by
+          rw [hidEq]
+          simp [memberKey]
+        have hk : pk = k := by
+          rw [hkeyId] at hkeyp
+          injection hkeyp with hk
+          exact hk.symm
+        rw [hk] at hpar hhosted hne
+        let parent := InstId.peer n k pg
+        have hsubS : ts.subtree = sub := hsame.trans htree
+        have htsN : templateOf D n = some ts := by
+          simpa [hn] using hts
+        have htreeP : templateSubtree D n = sub := by
+          simp [templateSubtree, htsN, hsubS]
+        have hneB : (sub != "") = true := by simp [bne_iff_ne, hsub]
+        have hmP : isMember D parent sub k = true := by
+          simp [isMember, parent, htreeP, hneB]
+        have hparent := ih parent ⟨hpar, hne⟩ hhosted hmP
+        obtain ⟨root, hmemR, hmR, hpack, hanc⟩ := hparent
+        refine ⟨root, hmemR, hmR, hpack, ?_⟩
+        cases hanc with
+        | inl heq =>
+          exact Or.inr (by simpa [heq] using
+            (StrictAncestor.edge ⟨hpar, hne⟩ : StrictAncestor w id parent))
+        | inr htail =>
+          exact Or.inr (StrictAncestor.tail ⟨hpar, hne⟩ htail)
+  exact (hF.wf).fix hstep id hid hm
+
+/-- The root `member_ancestor` finds is the one root actor of that key. -/
+theorem member_root_id (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (hrootMem : InstId.peer name k g ∈ w.roster)
+    (id : InstId) (hid : id ∈ w.roster) (hm : isMember I.desc id t.subtree k = true) :
+    id = InstId.peer name k g ∨ StrictAncestor w id (InstId.peer name k g) := by
+  obtain ⟨root, hmemR, hmR, ⟨tr, htr, hrootR⟩, hanc⟩ :=
+    member_ancestor I hG w hF hP hSelf hH t.subtree k id hsub hid hm
+  obtain ⟨roleR, gR, tr', hrEq, htr', hsubR⟩ :=
+    member_template I.desc root t.subtree k hsub hmR
+  have htrR : templateOf I.desc roleR = some tr := by
+    simpa [hrEq, tname] using htr
+  have hteq : tr' = tr := by
+    injection htr'.symm.trans htrR
+  rw [hteq] at hsubR
+  obtain ⟨hn, hg⟩ := hOne t.subtree k name g roleR gR t tr hsub ht htrR rfl hsubR hroot hrootR
+    hrootMem (by simpa [hrEq] using hmemR)
+  have hrootId : root = InstId.peer name k g := by
+    rw [hrEq, ← hn, ← hg]
+  cases hanc with
+  | inl heq =>
+    exact Or.inl (heq.trans hrootId)
+  | inr hs =>
+    exact Or.inr (by simpa [hrootId] using hs)
+
+/-- A subtree member is sealed with the root of its key. `sealedTogether` is the
+test `mailInFlight` uses, so a root tombstone waits on this member's mail by
+the same test as the root's own mail (`tomb_waits_on_descendant`). -/
+theorem member_sealed (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster)
+    (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (hrootMem : InstId.peer name k g ∈ w.roster)
+    (id : InstId) (hid : id ∈ w.roster) (hm : isMember I.desc id t.subtree k = true) :
+    sealedTogether w (InstId.peer name k g) id = true := by
+  cases member_root_id I hG w hF hP hSelf hH hOne name k g t ht hroot hsub hrootMem id hid hm with
+  | inl heq =>
+    simpa [sealedTogether, heq]
+  | inr hs =>
+    have hd := descends_of_strict w hF hs
+    simp [sealedTogether, hd]
+
+/-- Program mail from a subtree member keeps the dead root's tombstone on the
+live parent. The member is the root or a recorded descendant, and
+`descendant_mail_tomb` is `TombChain` on that chain. The queued tombstone is
+what `slotTombstoneQueued` counts. -/
+theorem member_mail_tomb (I : Impl) (hG : GraphOk I.desc) (w : World)
+    (hF : ParentForest w) (hP : Parented I.desc w) (hSelf : NoSelfParent w)
+    (hH : Hold I w) (hOne : OneCohort I.desc w.roster) (hChain : TombChain w)
+    (hcr : w.crashed = false) (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (hrootMem : InstId.peer name k g ∈ w.roster)
+    (hdead : (w.st (InstId.peer name k g)).life = .dead) (parent : InstId)
+    (hpar : (w.st (InstId.peer name k g)).parent = some parent)
+    (hlive : (w.st parent).life = .alive) (id : InstId) (hid : id ∈ w.roster)
+    (hm : isMember I.desc id t.subtree k = true) (hf : mailInFlight w id = true) :
+    slotTombstoneQueued w parent name k = true := by
+  have hwho :=
+    member_root_id I hG w hF hP hSelf hH hOne name k g t ht hroot hsub hrootMem id hid hm
+  obtain ⟨m, hmPrio, htom, hs⟩ :=
+    descendant_mail_tomb w hChain hF hcr (InstId.peer name k g) parent id hdead hpar hlive hwho hf
+  exact slot_sees_tomb w parent name k g m hmPrio htom hs
+
+/-- Workaround `lane_birth`: `birth_reachable` is stated where `Inv2` is proved,
+and this file cannot import that. The induction is the same one. -/
+theorem lane_birth (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
+    (hR : Reachable I N w) : BirthInv I.desc w := by
+  induction hR with
+  | init => exact birth_init I hG N
+  | step w w' a prev ha ih =>
+    exact birth_apply I hG a w w' ih (inv_reachable I N w hL prev).2.2.1
+      (peer_role_reachable I hG N w prev) (core_reachable I hG N w prev) ha
+
+/-- In a reachable world the parent chain is the one `TombChain` reads, so held
+descendant mail of a dead root is a counted tombstone on the live parent. -/
+theorem member_mail_tomb_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hcr : w.crashed = false)
+    (name : String) (k g : Nat) (t : Template)
+    (ht : templateOf I.desc name = some t) (hroot : rootOf I.desc t = true)
+    (hsub : t.subtree ≠ "") (hrootMem : InstId.peer name k g ∈ w.roster)
+    (hdead : (w.st (InstId.peer name k g)).life = .dead) (parent : InstId)
+    (hpar : (w.st (InstId.peer name k g)).parent = some parent)
+    (hlive : (w.st parent).life = .alive) (id : InstId) (hid : id ∈ w.roster)
+    (hm : isMember I.desc id t.subtree k = true) (hf : mailInFlight w id = true) :
+    slotTombstoneQueued w parent name k = true := by
+  have hB := lane_birth I hL hG N w hR
+  have hI := inv_reachable I N w hL hR
+  exact member_mail_tomb I hG w hI.forest hB.parented hB.noSelf (hold_reach I N w hG hR)
+    (oneCohort_reachable I hG N w hR) hI.seal.chain hcr name k g t ht hroot hsub hrootMem
+    hdead parent hpar hlive id hid hm hf
 
 end Deadlock
