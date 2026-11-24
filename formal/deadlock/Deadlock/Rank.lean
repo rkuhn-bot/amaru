@@ -17439,61 +17439,59 @@ theorem receiver_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Na
   cases Classical.em ((w'.st dst).life = .alive) with
   | inl h' => exact h'
   | inr hdead =>
-    cases only_terminate_kills I a w w' dst h halive hdead with
-    | inl hExecKill =>
-      rcases hExecKill with ⟨tail, toState, replyTo, t, hact, hrun, ht, hsub, htm, hpk, hch⟩
-      have hM := (inv_reachable I N w hL hR).2.1
-      have hstep : w' = execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ := by
-        simp [apply, hact, execHead, halive, hrun] at h
-        exact h.symm
-      by_cases hne : s = dst
-      · let base :=
-          refundParked (refundMsgs (readCells I.desc w dst) (tname dst) (w.st dst).box) (tname dst)
-            (w.st dst).parked
-        let dead : Actor :=
-          { base.st dst with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
-        have hrunEq :
-            execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
-              releaseParked (setActor base dst dead) dst (w.st dst).parked := by
-          rw [exec_lone_release I w dst t tail toState replyTo ht hsub htm hpk hch]
-          simp [releaseWorld, base, dead]
-        have hidle : ((setActor base dst dead).st dst).phase = .idle := by simp [setActor, dead]
-        have hn : ∀ d c ck, ((setActor base dst dead).st dst).phase ≠ .parked d c ck := by
-          intro d c ck hbad
-          simp [hidle] at hbad
-        have hstay :=
-          (release_keeps_nonparked (setActor base dst dead) dst (w.st dst).parked dst hn).1
-        rw [hne] at hph'
-        rw [hstep, hrunEq, hstay, hidle] at hph'
-        cases hph'
-      · have hclear :=
-          terminate_unblocks I w dst t tail toState replyTo s k hM ht hsub htm hpk hch hph hne
-        have hnow :
-            waitKind ((execRun I w dst (w.st dst) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st s) =
-              some (.blockingSend dst) := by
-          have hphE := hph'
-          rw [hstep] at hphE
-          simp [waitKind, hphE]
+    -- Four ways, not three. `Eff.abort` is a live effect: `effectOk`'s catch-all
+    -- accepts it, and `abortChildren` seals each live child and then advances the
+    -- parent. A non-crashing abort is none of shutdown, stage or crash.
+    rcases only_terminate_kills I a w w' dst h halive hdead with hsh | hstage | hcrash | habort
+    · rcases hsh with ⟨kT, tail, t, _hact, _hrun, _hk, ht, hper, hsub, htm, hpk, hch, hw⟩
+      by_cases hsd : s = dst
+      · have hdie := shutdownActor_died I.desc w dst dst (by
+          intro heq
+          exact hdead (by rw [hw]; exact heq.trans halive))
+        rw [hsd, hw] at hph'
+        rcases hdie.2 with hidle | hcr
+        · rw [hidle] at hph'
+          cases hph'
+        · rw [hcr] at hph'
+          cases hph'
+      · have hM := (inv_reachable I N w hL hR).2.1
+        have heq := exec_lone_release I w dst t tail kT.toState kT.replyTo ht hper hsub htm hpk hch
+        have hclear := terminate_unblocks I w dst t tail kT.toState kT.replyTo s k hM ht hper hsub
+          htm hpk hch halive hph hsd
+        have hnow : waitKind (w'.st s) = some (.blockingSend dst) := by simp [waitKind, hph']
+        rw [hw, ← heq] at hnow
         exact False.elim (hclear hnow)
-    | inr hSubKill =>
-      rcases hSubKill with ⟨who, t, hact, ht, htm, hdesc, hpk, hw, _hwho⟩
+    · rcases hstage with ⟨who, _t, _hact, _ht, _hdesc, _hpre, hw, _⟩
       by_cases hsd : s = dst
       · have hdie := terminate_died_idle I.desc w who dst (by
           intro heq
-          rw [hw] at hdead
-          exact hdead (heq.trans halive))
-        rw [hw, hsd, hdie.2] at hph'
-        cases hph'
+          exact hdead (by rw [hw]; exact heq.trans halive))
+        rw [hsd, hw] at hph'
+        rcases hdie.2 with hidle | hcr
+        · rw [hidle] at hph'
+          cases hph'
+        · rw [hcr] at hph'
+          cases hph'
       · have hM := (inv_reachable I N w hL hR).2.1
-        obtain ⟨p, hp, hps, hc⟩ := hM.bwd s dst false k hph
-        have hSem := (inv_reachable I N w hL hR).1
-        have hliveS := busy_alive I w hSem s
-          (by rw [hph]; intro he; cases he) (by rw [hph]; intro he; cases he)
-        have hoff := terminate_unparks I.desc w who s dst k hsd ⟨hph, p, hp, hps, hc⟩ halive
-          hliveS (hSem.rostered s hliveS) (apply_step I a w w' h).1
-          (by rw [hw] at hdead; exact hdead)
-        rw [hw] at hph'
-        exact absurd hph' (hoff false k')
+        rcases hM.bwd s dst false k hph with ⟨p, hp, hps, hc⟩ | ⟨hcall, _⟩
+        · have hSem := (inv_reachable I N w hL hR).1
+          have hliveS := busy_alive I w hSem s
+            (by rw [hph]; intro he; cases he) (by rw [hph]; intro he; cases he)
+          have hoff := terminate_unparks I.desc w who s dst k hsd ⟨hph, p, hp, hps, hc⟩ halive
+            hliveS (hSem.rostered s hliveS) (apply_step I a w w' h).1
+            (by rw [hw] at hdead; exact hdead)
+          rw [hw] at hph'
+          exact False.elim (hoff false k' hph')
+        · cases hcall
+    · by_cases hsd : s = dst
+      · rw [hsd] at hph'
+        rw [hcrash.2.2] at hph'
+        cases hph'
+      · -- `dst` is `.crashed`. A different sender stays parked only if the crash
+        -- did not rewrite them. The disjunct does not carry the `crashWorld`
+        -- equality, so this arm is the remaining goal.
+        exact ?_
+    · exact ?_
 
 theorem release_misses (w : World) (id : InstId) (ps : List Parked) (s : InstId)
     (h : ∀ p, p ∈ ps → p.sender ≠ s) : ((releaseParked w id ps).st s) = w.st s := by
@@ -17639,11 +17637,20 @@ theorem shape_fail (w : World) (dead i s dst : InstId) (call : Bool) (k : Cont)
       rcases h with hpark | hres | hidle | hcrash
       · unfold phaseShape
         simp only [hpark]
-        by_cases hd : dst = dead
-        · simp [hd, setActor]
-          exact Or.inr (Or.inl (proceed_resumed _ k))
-        · have hb : (dst == dead) = false := by simpa [beq_iff_eq] using hd
-          simp [hb]
+        by_cases hcall : call = false
+        · by_cases hd : dst = dead
+          · simp [hcall, hd, setActor]
+            exact Or.inr (Or.inl (proceed_resumed (w.st s) k))
+          · have hb : (dst == dead) = false := by simpa [beq_iff_eq] using hd
+            simp [hcall, hb]
+            rw [hcall] at hpark
+            exact Or.inl hpark
+        · have ht : call = true := by
+            cases call with
+            | false => exact absurd rfl hcall
+            | true => rfl
+          simp [ht]
+          rw [ht] at hpark
           exact Or.inl hpark
       · cases hk : k.rest with
         | nil =>
@@ -17875,11 +17882,7 @@ theorem await_fail (w : World) (dead i s dst : InstId) (k : Cont) (h : awaitShap
       rcases h with hawait | hidle
       · unfold awaitShape
         simp only [hawait]
-        by_cases hd : dst = dead
-        · simp [hd, setActor]
-        · have hb : (dst == dead) = false := by simpa [beq_iff_eq] using hd
-          simp [hb]
-          exact Or.inl hawait
+        exact Or.inl hawait
       · simp only [hidle]
         exact Or.inr hidle
     · have hgo : ((w.st s).life != .alive) = true := by
@@ -17909,7 +17912,7 @@ theorem release_await_or (D : Description) (w : World) (id : InstId) (a : Actor)
       ((releaseWorld D w id a).st s).phase = .crashed := by
   by_cases hs : s = id
   · exact Or.inr (Or.inl (by simpa [hs] using (releaseWorld_self_idle D w id a).2))
-  ·     have hn : ∀ d c ck, (w.st s).phase ≠ .parked d c ck := by
+  · have hn : ∀ d c ck, (w.st s).phase ≠ .parked d c ck := by
       intro d c ck hbad
       rcases h with hawait | hidle | hcrash
       · simp [hawait] at hbad
