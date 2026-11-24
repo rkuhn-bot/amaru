@@ -16684,6 +16684,83 @@ theorem release_frees_held (D : Description) (w : World) (id s : InstId) (k : Co
   rw [hbad] at hfree
   exact hfree
 
+/-- A seal does not park a sender that was already off the destination. -/
+theorem seal_preserves_off (fuel : Nat) (D : Description) :
+    ∀ (w : World) (root s dst : InstId), offDst w s dst →
+      offDst (sealBranch fuel D w root) s dst := by
+  induction fuel with
+  | zero =>
+    intro w root s dst h
+    simpa [sealBranch] using h
+  | succ fuel ih =>
+    intro w root s dst h
+    simp only [sealBranch]
+    let step (acc : World) (child : InstId) : World :=
+      if isChild acc root child then sealBranch fuel D acc child else acc
+    have hfold : ∀ (ids : List InstId) (w0 : World), offDst w0 s dst →
+        offDst (ids.foldl step w0) s dst := by
+      intro ids
+      induction ids with
+      | nil =>
+        intro w0 h0
+        simpa using h0
+      | cons c cs ihc =>
+        intro w0 h0
+        simp only [List.foldl_cons]
+        by_cases hc : isChild w0 root c = true
+        · have hgo : (isChild w0 root c) = true := hc
+          simp only [step, hgo, ite_true]
+          exact ihc _ (ih _ _ _ _ h0)
+        · have hstop : isChild w0 root c = false := by
+            cases hb : isChild w0 root c with
+            | false => rfl
+            | true => exact absurd hb hc
+          simp only [step, hstop, ite_false]
+          exact ihc _ h0
+    have hsealed : w.roster.foldl (fun acc child =>
+        if isChild acc root child then sealBranch fuel D acc child else acc) w =
+        w.roster.foldl step w := rfl
+    rw [hsealed]
+    by_cases hlive : (((w.roster.foldl step w).st root).life == .alive) = true
+    · simp only [hlive, ite_true]
+      exact releaseWorld_off D _ root _ s dst (hfold _ _ h)
+    · have hnot : (((w.roster.foldl step w).st root).life == .alive) = false := by
+        cases hb : ((w.roster.foldl step w).st root).life == .alive with
+        | false => rfl
+        | true => exact absurd hb hlive
+      simp only [hnot, ite_false]
+      exact hfold _ _ h
+
+/-- Dropping descendants seals children and does not park a sender that was off. -/
+theorem drop_preserves_off (D : Description) (w : World) (root s dst : InstId)
+    (h : offDst w s dst) : offDst (dropDescendants D w root) s dst := by
+  unfold dropDescendants
+  let step (acc : World) (child : InstId) : World :=
+    if isChild acc root child then sealBranch w.roster.length D acc child else acc
+  have hfold : ∀ (ids : List InstId) (w0 : World), offDst w0 s dst →
+      offDst (ids.foldl step w0) s dst := by
+    intro ids
+    induction ids with
+    | nil =>
+      intro w0 h0
+      simpa using h0
+    | cons c cs ihc =>
+      intro w0 h0
+      simp only [List.foldl_cons]
+      by_cases hc : isChild w0 root c = true
+      · simp only [step, hc, ite_true]
+        exact ihc _ (seal_preserves_off w.roster.length D _ _ _ _ h0)
+      · have hstop : isChild w0 root c = false := by
+          cases hb : isChild w0 root c with
+          | false => rfl
+          | true => exact absurd hb hc
+        simp only [step, hstop]
+        exact ihc _ h0
+  have hsealed : w.roster.foldl (fun acc child =>
+      if isChild acc root child then sealBranch w.roster.length D acc child else acc) w =
+      w.roster.foldl step w := rfl
+  simpa [hsealed] using hfold _ _ h
+
 theorem abort_off (D : Description) (w : World) (id s dst : InstId) (a : Actor)
     (h : offDst w s dst) : offDst (abortActor D w id a) s dst := by
   exact admit_off _ id s dst
