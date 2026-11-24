@@ -3198,14 +3198,148 @@ def Deadlock {I : Impl} {N : Nat} (ρ : Run I N) : Prop :=
     | some .peer => True
     | _ => False
 
-/-- Program length, used as the measure that makes a busy actor reach idle. -/
+mutual
+/-- Nested program size. Outcome lists count inside the effect that can run them,
+so taking `onTimeout`, `onNotAdmitted`, `onFull` or `onGone` is a smaller program. -/
+def progFuel : List Eff → Nat
+  | [] => 0
+  | e :: es => effFuel e + progFuel es
+
+def effFuel : Eff → Nat
+  | .trySend _ _ _ onFull onGone => 1 + progFuel onFull + progFuel onGone
+  | .call _ _ _ onNotAdmitted onTimedOut => 1 + progFuel onNotAdmitted + progFuel onTimedOut
+  | .peer onTimeout => 1 + progFuel onTimeout
+  | _ => 1
+end
+
+theorem effFuel_pos (e : Eff) : 0 < effFuel e := by
+  cases e <;> simp [effFuel] <;> omega
+
+theorem progFuel_tail_lt (e : Eff) (es : List Eff) : progFuel es < progFuel (e :: es) := by
+  have h := effFuel_pos e
+  simp [progFuel]
+  omega
+
+/-- Reply continuation, `onNotAdmitted` and `onTimedOut`: the three ways a call wait ends. -/
+def callFuel (k : Cont) : Nat :=
+  max (progFuel k.rest) (max (progFuel k.onNotAdmitted) (progFuel k.onTimedOut))
+
+/-- Data continuation and `onTimeout`: the two ways a peer wait ends. -/
+def peerFuel (k : Cont) : Nat :=
+  max (progFuel k.rest) (progFuel k.onTimeout)
+
+/-- Remaining program. A run counts `rest`, nested arms included. A call wait
+(`awaitReply`, or a parked call) is one more than the largest of its reply
+continuation, `onNotAdmitted` and `onTimedOut`. A peer wait is one more than
+the largest of its data continuation and `onTimeout`. An effect wait is one
+more than `rest`. The extra one makes every exit, including a timeout into a
+longer arm, strictly smaller.
+(DECISIONS.md 2026-11-19, "Every external wait carries a timeout";
+2026-11-22, "A call waits on its own outcomes".) -/
 def phaseFuel : Phase → Nat
   | .idle | .crashed => 0
-  | .run k => 2 * k.rest.length
-  | .parked _ _ k => 2 * k.rest.length + 1
-  | .awaitReply _ k => 2 * k.rest.length + 1
-  | .awaitEffect k => 2 * k.rest.length + 1
-  | .awaitPeer k => 2 * k.rest.length + 1
+  | .run k => 2 * progFuel k.rest
+  | .parked _ false k => 2 * progFuel k.rest + 1
+  | .parked _ true k => 2 * callFuel k + 1
+  | .awaitReply _ k => 2 * callFuel k + 1
+  | .awaitEffect k => 2 * progFuel k.rest + 1
+  | .awaitPeer k => 2 * peerFuel k + 1
+
+theorem phaseFuel_proceed_le (a : Actor) (k : Cont) :
+    phaseFuel (proceed a k).phase ≤ 2 * progFuel k.rest := by
+  cases hk : k.rest <;> simp [proceed, phaseFuel, progFuel, hk]
+
+theorem peer_enter_fuel (tail o : List Eff) :
+    2 * max (progFuel tail) (progFuel o) + 1 < 2 * progFuel (.peer o :: tail) := by
+  simp [progFuel, effFuel]
+  have hmax : max (progFuel tail) (progFuel o) ≤ progFuel tail + progFuel o := by
+    rw [Nat.max_le]
+    exact ⟨Nat.le_add_right _ _, Nat.le_add_left _ _⟩
+  omega
+
+theorem call_enter_fuel (dst label : String) (hint : Nat) (tail na to : List Eff) :
+    2 * max (progFuel tail) (max (progFuel na) (progFuel to)) + 1 <
+      2 * progFuel (.call dst label hint na to :: tail) := by
+  simp [progFuel, effFuel]
+  have hmax : max (progFuel tail) (max (progFuel na) (progFuel to)) ≤
+      progFuel tail + progFuel na + progFuel to := by
+    rw [Nat.max_le, Nat.max_le]
+    omega
+  omega
+
+theorem arm_enter_fuel (dst label : String) (hint : Nat) (arm other tail : List Eff) :
+    2 * progFuel arm < 2 * progFuel (.trySend dst label hint arm other :: tail) := by
+  simp [progFuel, effFuel]
+  omega
+
+theorem effect_enter_fuel (tail : List Eff) :
+    2 * progFuel tail + 1 < 2 * progFuel (.internal :: tail) := by
+  simp [progFuel, effFuel]
+  omega
+
+theorem finish_peer_drops (a : Actor) (k : Cont) :
+    phaseFuel (proceed a k).phase < phaseFuel (.awaitPeer k) := by
+  have hle := phaseFuel_proceed_le a k
+  have hrest : progFuel k.rest ≤ peerFuel k := by
+    unfold peerFuel
+    exact Nat.le_max_left _ _
+  have hgoal : phaseFuel (.awaitPeer k) = 2 * peerFuel k + 1 := by
+    simp [phaseFuel]
+  rw [hgoal]
+  omega
+
+theorem timeout_peer_drops (a : Actor) (k : Cont) :
+    phaseFuel (proceed a { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout }).phase <
+      phaseFuel (.awaitPeer k) := by
+  have hle := phaseFuel_proceed_le a
+    { k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout }
+  have hrest : ({ k with rest := k.onTimeout, toState := pickState k.toState k.toTimeout } : Cont).rest =
+      k.onTimeout := rfl
+  rw [hrest] at hle
+  have hto : progFuel k.onTimeout ≤ peerFuel k := by
+    unfold peerFuel
+    exact Nat.le_max_right _ _
+  have hgoal : phaseFuel (.awaitPeer k) = 2 * peerFuel k + 1 := by
+    simp [phaseFuel]
+  rw [hgoal]
+  omega
+
+theorem finish_effect_drops (a : Actor) (k : Cont) :
+    phaseFuel (proceed a k).phase < phaseFuel (.awaitEffect k) := by
+  have hle := phaseFuel_proceed_le a k
+  have hgoal : phaseFuel (.awaitEffect k) = 2 * progFuel k.rest + 1 := by
+    simp [phaseFuel]
+  rw [hgoal]
+  omega
+
+theorem finish_reply_drops (a : Actor) (dst : InstId) (k : Cont) :
+    phaseFuel (proceed a k).phase < phaseFuel (.awaitReply dst k) := by
+  have hle := phaseFuel_proceed_le a k
+  have hrest : progFuel k.rest ≤ callFuel k := by
+    unfold callFuel
+    exact Nat.le_max_left _ _
+  have hgoal : phaseFuel (.awaitReply dst k) = 2 * callFuel k + 1 := by
+    simp [phaseFuel]
+  rw [hgoal]
+  omega
+
+theorem finish_park_drops (a : Actor) (dst : InstId) (c : Bool) (k : Cont) :
+    phaseFuel (proceed a k).phase < phaseFuel (.parked dst c k) := by
+  have hle := phaseFuel_proceed_le a k
+  cases c with
+  | false =>
+    have hgoal : phaseFuel (.parked dst false k) = 2 * progFuel k.rest + 1 := by
+      simp [phaseFuel]
+    rw [hgoal]
+    omega
+  | true =>
+    have hrest : progFuel k.rest ≤ callFuel k := by
+      unfold callFuel
+      exact Nat.le_max_left _ _
+    have hgoal : phaseFuel (.parked dst true k) = 2 * callFuel k + 1 := by
+      simp [phaseFuel]
+    rw [hgoal]
+    omega
 
 mutual
 def replyCount : List Eff → Nat

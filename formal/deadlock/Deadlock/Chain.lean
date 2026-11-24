@@ -128,7 +128,7 @@ theorem work_slot (I : Impl) (w : World) (hS : ProgSrc I w) (id : InstId) :
 
 theorem work_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (id : InstId) (k : Cont)
-    (hph : (w.st id).phase = .run k) (hl : (w.st id).life = .alive)
+    (hph : (w.st id).phase = .run k) (hl : (w.st id).life = .alive) (hcr : w.crashed = false)
     (w' : World) (h : execHead I w id = some w') :
     work ((w'.st id).phase) < work ((w.st id).phase) := by
   cases hrest : k.rest with
@@ -137,7 +137,7 @@ theorem work_exec (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w
     cases h
     simp [work, phaseFuel, setActor_self, hph]
   | cons _ _ =>
-    have hdrop := exec_drops I hL hG N w hR id k hph hl (by simp [hrest])
+    have hdrop := exec_drops I hL hG N w hR id k hph hl hcr (by simp [hrest])
     have hw : w' = execRun I w id (w.st id) k := by
       simp [execHead, hph, hl] at h
       exact h.symm
@@ -587,7 +587,8 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           have hHere := mail_here_reachable I hL hG N w hR
           have hidx := (step_index I hG (.exec dst) w w' happ hInv.2.2 hHere hInv.1.rostered
             id dst false k k hph hstay hliveD hlive' hin).1
-          have hwork := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
+          have hwork := work_exec I hL hG N w hR dst kD hphD hliveD ((apply_step I (.exec dst) w w' happ).1) w'
+            (by simpa [apply] using happ)
           have hdebt' := send_debt_drop_work I w w' id dst hidx hwork
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
           have hty := waiting_ty_step I (.exec dst) w w' id happ
@@ -978,7 +979,8 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
               (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
               ((inv3_reachable I hL hG N w hR).1.2.1) hR'
               (reply_target_alive I hL hG N w' hR' id dst k hstay)
-            have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
+            have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD ((apply_step I (.exec dst) w w' happ).1) w'
+            (by simpa [apply] using happ)
             have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
             have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
             have hty := waiting_ty_step I (.exec dst) w w' id happ
@@ -1394,7 +1396,8 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           have hHere := mail_here_reachable I hL hG N w hR
           have hidx := (step_index I hG (.exec dst) w w' happ hInv.2.2 hHere hInv.1.rostered
             id dst true k k hph hstay hliveD hlive' hin).1
-          have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD w' (by simpa [apply] using happ)
+          have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD ((apply_step I (.exec dst) w w' happ).1) w'
+            (by simpa [apply] using happ)
           have hdebt' := call_debt_drop_work I w w' id dst hidx hworkD
           have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
           have hty := waiting_ty_step I (.exec dst) w w' id happ
