@@ -1093,27 +1093,27 @@ intermediate is the post-resume world; a parked timeout uses `occ_set`
 because both the tokens and the hold rise by the refunded slot; a
 consumed entry is credited to `budgetHolder`.
 
-## 2026-11-24 — A nested call is not a call site
+## 2026-11-24 — Checker completeness: an arm call is a call site
 
-`callSites` keeps the destination and label of a top-level `call` only
-(`Local.lean`). `effectsOk`, `spawnScope`, and `labelHandled` walk
-further. An arm call must still name a blocking call edge, and
-`labelHandled` demands an `acceptsCall` transition in every target
-state of that edge. `callTotal` does not see the arm, so it does not
-add the same demand for every state of the template.
+`callSites` is the only change. `callPairs` and `callPairEff` mirror
+`effectsOk` and `effectOk`: structural mutual recursion on the program
+and on each effect, with no fuel cutoff. A cutoff would drop a deep
+call and bring the `msgOk` failure back. The arms are `onFull`,
+`onGone`, `onNotAdmitted`, `onTimedOut`, and `onTimeout`.
 
-`msgOk` is `callFrom = none` or `callSite`. An admitted arm call has
-`callFrom = some` and is not a call site, so `MailAccepted` fails.
-`exec_call_accepted` is false for `InProg.tryFull`, `tryGone`,
-`callNa`, `callTo`, and `peerTo`. `here` and `skip` are the top-level
-cases and do put the call in `callPairs`.
+No new call edge is added. `effectOk` already requires the edge for an
+arm call, and `effReserve` already takes the max over those arms. A
+second edge would be counted twice in `totalOcc`. `labelHandled` and
+`GraphOk` still read the edges the description already has. `msgOk`
+is unchanged. It is `callFrom = none` or `callSite`. There is no
+timeout disjunct.
 
-This is not a counterexample of `call_answered`. Under compatibility
-`.all`, `labelHandled` puts a handler in every state, `deliver`
-returns that transition, and fairness takes `recvBulk` whenever the
-callee is idle with the message at the head. A groups or explicit
-relation can name fewer target states. Whether a fair run can then
-leave the callee idle in another state, with the call still queued,
-is open. The headline is not restated. `Local.lean` is unchanged.
-The Rust checker is not recorded: the gap is the Lean `callSites`
-walk against `msgOk`.
+`callTotal` now demands `acceptsCall` in every state of the callee,
+including an arm that can never fire. That is stricter than
+`targetStates`, and it is not unsound. Restricting `callTotal` to
+`targetStates` is deferred. `inProg_call_mem` states all seven
+`InProg` cases, and `callSites_pairs` is the recursive walk.
+
+Helen found no counterexample of `call_answered` under partial
+compatibility. That question is closed. The Rust checker is not
+recorded here.

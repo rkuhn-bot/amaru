@@ -13944,64 +13944,15 @@ theorem foldl_keep {α} [DecidableEq α] (acc xs : List α) (x : α) (h : x ∈ 
 theorem dedup_mem {α} [DecidableEq α] (xs : List α) (x : α) (h : x ∈ xs) : x ∈ dedup xs := by
   simpa [dedup] using foldl_keep [] xs x (Or.inr h)
 
-def callPairs (es : List Eff) : List (String × String) :=
-  es.filterMap fun e =>
-    match e with
-    | .call dst lab _ na to => some (dst, lab)
-    | _ => none
-
+/-- `callSites` is the recursive `callPairs` walk, not a top-level `filterMap`. -/
 theorem callSites_pairs (trs : List Transition) : callSites trs =
     match trs with
     | [] => []
     | tr :: ts => dedup (callPairs tr.program ++ callSites ts) := by
   cases trs <;> rfl
 
-theorem filter_call_mem (es : List Eff) (d l : String) (n : Nat) (na to : List Eff)
-    (h : Eff.call d l n na to ∈ es) :
-    (d, l) ∈ callPairs es := by
-  induction es with
-  | nil => cases h
-  | cons e es ih =>
-    cases h with
-    | head => simp [callPairs, List.filterMap]
-    | tail _ ht =>
-      cases e with
-      | call a b c na to =>
-        rw [callPairs, List.filterMap_cons]
-        exact List.mem_cons_of_mem _ (by simpa [callPairs] using ih ht)
-      | send a b c =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | trySend a b c onFull onGone =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | reply =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | selfSchedule a =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | cell a b c =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | internal =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | peer onTimeout =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | terminate =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | abort =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-      | spawn _ =>
-        rw [callPairs, List.filterMap_cons]
-        simpa [callPairs] using ih ht
-
-theorem call_in_sites (trs : List Transition) (tr : Transition) (hm : tr ∈ trs) (d l : String) (n : Nat)
-    {na to : List Eff} (h : Eff.call d l n na to ∈ tr.program) : (d, l) ∈ callSites trs := by
+theorem call_in_sites (trs : List Transition) (tr : Transition) (hm : tr ∈ trs) (d l : String)
+    (h : (d, l) ∈ callPairs tr.program) : (d, l) ∈ callSites trs := by
   induction trs with
   | nil => cases hm
   | cons x xs ih =>
@@ -14009,11 +13960,11 @@ theorem call_in_sites (trs : List Transition) (tr : Transition) (hm : tr ∈ trs
     | head =>
       rw [callSites_pairs]
       apply dedup_mem
-      exact List.mem_append_left _ (filter_call_mem tr.program d l n na to h)
+      exact List.mem_append_left _ h
     | tail _ hm =>
-      simp [callSites]
+      rw [callSites]
       apply dedup_mem
-      exact List.mem_append_right _ (by simpa [callSites] using ih hm)
+      exact List.mem_append_right _ (ih hm)
 
 theorem copy_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (hA : MailAccepted I w)
     (hb : a.box = (w.st id).box) (hp : a.parked = (w.st id).parked) :
@@ -14381,20 +14332,35 @@ theorem exec_send_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k :
   · rw [if_neg hlive]
     exact hA
 
-/-- A carried `call` is a member of the source program for `InProg.here` and
-`skip`. `tryFull`, `tryGone`, `callNa`, `callTo`, and `peerTo` put that call
-in an arm. `callPairs` never reads an arm, so those cases are not members.
-`MailAccepted` then fails, because `msgOk` asks for a call site. -/
+/-- A carried `call` is one `callPairs` records. `here` and `skip` are the
+top-level list. `tryFull`, `tryGone`, `callNa`, `callTo`, and `peerTo` are
+the outcome arms, and `callPairs` reads those arms. -/
 theorem inProg_call_mem (prog carried : List Eff) (d l : String) (n : Nat)
     (na to es : List Eff) (h : InProg prog carried)
     (hc : carried = Eff.call d l n na to :: es) :
-    Eff.call d l n na to ∈ prog := by
+    (d, l) ∈ callPairs prog := by
   induction h with
   | here prog =>
-    rw [hc]
-    exact List.mem_cons_self
+    rw [hc, callPairs, callPairEff]
+    exact List.mem_append_left _ List.mem_cons_self
   | skip e rest c h ih =>
-    exact List.mem_cons_of_mem e (ih hc)
+    rw [callPairs]
+    exact List.mem_append_right _ (ih hc)
+  | tryFull _ _ _ _ _ _ _ h ih =>
+    rw [callPairs, callPairEff]
+    exact List.mem_append_left _ (List.mem_append_left _ (ih hc))
+  | tryGone _ _ _ _ _ _ _ h ih =>
+    rw [callPairs, callPairEff]
+    exact List.mem_append_left _ (List.mem_append_right _ (ih hc))
+  | callNa _ _ _ _ _ _ _ h ih =>
+    rw [callPairs, callPairEff]
+    exact List.mem_append_left _ (List.mem_cons_of_mem _ (List.mem_append_left _ (ih hc)))
+  | callTo _ _ _ _ _ _ _ h ih =>
+    rw [callPairs, callPairEff]
+    exact List.mem_append_left _ (List.mem_cons_of_mem _ (List.mem_append_right _ (ih hc)))
+  | peerTo _ _ _ h ih =>
+    rw [callPairs, callPairEff]
+    exact List.mem_append_left _ (ih hc)
 
 theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (dst label : String) (hint : Nat) (na to es : List Eff)
@@ -14419,7 +14385,7 @@ theorem exec_call_accepted (I : Impl) (hL : LocalOk I) (w : World) (id : InstId)
       have hsite : callSite I (tname dstId) label := by
         rw [hname]
         obtain ⟨tr, hmem, _htmpl, hprog⟩ := hS id k.rest (by simp [carried, hph])
-        exact call_in_sites I.transitions tr hmem dst label hint na to
+        exact call_in_sites I.transitions tr hmem dst label
           (inProg_call_mem tr.program k.rest dst label hint na to es hprog (by simpa [hk]))
       exact enqueue_accepted I w id dstId { label := label, sender := id, callFrom := some id } true
         { afterHead k with onNotAdmitted := na, onTimedOut := to } hA (Or.inr hsite)
@@ -14484,28 +14450,40 @@ theorem exec_cell_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k :
     (dst label : String) (value : Nat) (es : List Eff) (hk : k.rest = .cell dst label value :: es)
     (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
   unfold execRun
-  simp [hk, ha]
-  let c : Cell := { value := max (w.cell dst label).value value, dirty := true }
-  let wS := setCell w dst label c
-  have hSmail : MailAccepted I wS := by
-    unfold MailAccepted at hA ⊢
-    simpa [wS, setCell] using hA
-  split
-  · exact copy_accepted I wS id (proceed (wS.st id) (afterHead k)) hSmail (proceed_box _ _) (proceed_parked _ _)
-  · let wA := setActor wS id (proceed (wS.st id) (afterHead k))
-    have hAmail := copy_accepted I wS id (proceed (wS.st id) (afterHead k)) hSmail (proceed_box _ _)
-      (proceed_parked _ _)
-    refine ⟨?_, ?_⟩
-    · intro i m hm
-      have hpre : m ∈ (wA.st i).box := by
-        have hw := (wakes_mail (readersOf wA dst) I.desc wA dst label id i).1
-        simpa [wakeReaders, wA, wS, c, hw] using hm
-      exact hAmail.1 i m hpre
-    · intro i p hp
-      have hpre : p ∈ (wA.st i).parked := by
-        have hw := (wakes_mail (readersOf wA dst) I.desc wA dst label id i).2
-        simpa [wakeReaders, wA, wS, c, hw] using hp
-      exact hAmail.2 i p hpre
+  by_cases hlive : (a.life == .alive) = true
+  · rw [if_pos hlive]
+    simp only [hk]
+    let c : Cell := { value := max (w.cell dst label).value value, dirty := true }
+    have hSmail : MailAccepted I (setCell w dst label c) := by
+      simpa [MailAccepted, setCell] using hA
+    by_cases hdirty : (w.cell dst label).dirty = true
+    · rw [if_pos hdirty]
+      exact copy_accepted I (setCell w dst label c) id
+        (proceed ((setCell w dst label c).st id) (afterHead k)) hSmail
+        (proceed_box _ _) (proceed_parked _ _)
+    · rw [if_neg hdirty]
+      have hAmail := copy_accepted I (setCell w dst label c) id
+        (proceed ((setCell w dst label c).st id) (afterHead k)) hSmail
+        (proceed_box _ _) (proceed_parked _ _)
+      -- `wakeReaders` is the fold `wakes_mail` inducts on. A `let` for that
+      -- world would not match the `rw`.
+      refine ⟨?_, ?_⟩
+      · intro i m hm
+        have hw := (wakes_mail (readersOf (setActor (setCell w dst label c) id
+            (proceed ((setCell w dst label c).st id) (afterHead k))) dst) I.desc
+          (setActor (setCell w dst label c) id
+            (proceed ((setCell w dst label c).st id) (afterHead k))) dst label id i).1
+        rw [wakeReaders] at hm
+        exact hAmail.1 i m (by simpa [c, hw] using hm)
+      · intro i p hp
+        have hw := (wakes_mail (readersOf (setActor (setCell w dst label c) id
+            (proceed ((setCell w dst label c).st id) (afterHead k))) dst) I.desc
+          (setActor (setCell w dst label c) id
+            (proceed ((setCell w dst label c).st id) (afterHead k))) dst label id i).2
+        rw [wakeReaders] at hp
+        exact hAmail.2 i p (by simpa [c, hw] using hp)
+  · rw [if_neg hlive]
+    exact hA
 
 theorem releaseParked_box (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
     ((releaseParked w id ps).st i).box = (w.st i).box := by
@@ -14535,17 +14513,13 @@ theorem releaseParked_box (w : World) (id : InstId) (ps : List Parked) (i : Inst
 
 theorem release_box_host (D : Description) (w : World) (id : InstId) (a : Actor) (i : InstId) :
     ((releaseWorld D w id a).st i).box = (if i = id then [] else (w.st i).box) := by
-  let base := refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked
-  have hbase : (base.st i).box = (w.st i).box := by
-    simp [base, refundP_box, refund_box, readCells_st]
-  let dead : Actor :=
-    { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
-  have hworld : releaseWorld D w id a = releaseParked (setActor base id dead) id a.parked := by
-    simp [releaseWorld, base, dead]
-  rw [hworld, releaseParked_box]
+  -- `releaseWorld` refunds, releases outbound, then `releaseParked`. The old
+  -- equality stopped before `releaseOutbound`, so the `let`s did not match.
+  simp only [releaseWorld]
+  rw [releaseParked_box]
   by_cases hi : i = id
-  · simp [setActor, hi, dead]
-  · simp [setActor, hi, hbase]
+  · simp [setActor, hi]
+  · simp [setActor, hi, releaseOutbound_box, refundP_box, refund_box, readCells_st]
 
 theorem failWaiter_box (w : World) (dead i dst : InstId) :
     ((failWaiter w dead i).st dst).box = (w.st dst).box := by
@@ -14553,19 +14527,19 @@ theorem failWaiter_box (w : World) (dead i dst : InstId) :
   · have hgo : ((w.st i).life != .alive) = false := by simp [hlive, bne]
     simp only [failWaiter, hgo, ite_false]
     cases hph : (w.st i).phase with
-    | parked d _ k =>
-      by_cases hd : d = dead
-      · cases hk : k.rest with
-        | nil =>
-          by_cases hj : dst = i <;> simp [hph, hd, hk, setActor, proceed, hj]
-        | cons _ _ =>
-          by_cases hj : dst = i <;> simp [hph, hd, hk, setActor, proceed, hj]
-      · simp [hph, hd]
-    | awaitReply d _ =>
-      by_cases hd : d = dead
-      · simp [hph, hd, setActor]
-        by_cases hj : dst = i <;> simp [hj]
-      · simp [hph, hd]
+    | parked d isCall k =>
+      -- Only a parked send is failed. A parked call stays for its deadline.
+      cases isCall with
+      | false =>
+        by_cases hd : d = dead
+        · cases hk : k.rest with
+          | nil =>
+            by_cases hj : dst = i <;> simp [hph, hd, hk, setActor, proceed, hj]
+          | cons _ _ =>
+            by_cases hj : dst = i <;> simp [hph, hd, hk, setActor, proceed, hj]
+        · simp [hph, hd]
+      | true => simp [hph]
+    | awaitReply _ _ => simp [hph]
     | idle => simp [hph]
     | run _ => simp [hph]
     | awaitEffect _ => simp [hph]

@@ -191,14 +191,26 @@ def transitionOk (I : Impl) (tr : Transition) : Bool :=
       (if hasTerminate tr.program then t.multiplicity == .one || t.terminable else true) &&
       bulkScopeOf I.desc tr.template tr.program
 
+mutual
+/-- Calls a program can run. The recursion is `effectsOk` / `effectOk`: the
+list walks each effect, and the effect walks its arms. There is no fuel
+cutoff. A cutoff would drop a deep call and leave `msgOk` false again.
+This collects sites only. It does not add an edge: `effectOk` already
+requires the call edge, and `effReserve` already takes the max over the arms. -/
+def callPairs : List Eff → List (String × String)
+  | [] => []
+  | e :: es => callPairEff e ++ callPairs es
+
+def callPairEff : Eff → List (String × String)
+  | .trySend _ _ _ onFull onGone => callPairs onFull ++ callPairs onGone
+  | .call d l _ na to => (d, l) :: (callPairs na ++ callPairs to)
+  | .peer onTimeout => callPairs onTimeout
+  | _ => []
+end
+
 def callSites : List Transition → List (String × String)
   | [] => []
-  | tr :: ts =>
-    let here := tr.program.filterMap fun e =>
-      match e with
-      | .call d l _ _ _ => some (d, l)
-      | _ => none
-    dedup (here ++ callSites ts)
+  | tr :: ts => dedup (callPairs tr.program ++ callSites ts)
 
 def callTotal (I : Impl) : Bool :=
   (callSites I.transitions).all fun p =>
