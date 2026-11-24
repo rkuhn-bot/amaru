@@ -25250,6 +25250,7 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
           simp [execRun, hrest]
           have hcry : carried ((w.st id).phase) = some k.rest := by simp [carried, hph]
           exact reply_tag w id k es hT hph hrest (reply_head_one I hL w hS id k es hcry hrest)
+            (inv_reachable I N w hL hR).1.idleOff
         | selfSchedule label =>
           exact schedule_tag I w hT id k label es hph hrest (fun hfresh =>
             by
