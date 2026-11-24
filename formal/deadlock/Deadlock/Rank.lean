@@ -15432,41 +15432,67 @@ theorem exec_lone_release (I : Impl) (w : World) (id : InstId) (t : Template)
     simp only [if_neg hff]
   · rw [execRun, if_neg hlive, shutdownActor, if_neg hlive]
 
+/-- A lone per-peer `terminate` resumes the parked sender, then queues a tombstone.
+The tombstone keeps that resumed phase, or crashes it. Either way the sender is
+no longer parked on the actor that shut down. The actor must be alive: a dead
+actor does not run, and the park would stay. `Multiplicity` has no `LawfulBEq`,
+so the lone branch is selected in `exec_lone_release` by cases and `rfl`. -/
 theorem terminate_unblocks (I : Impl) (w : World) (id : InstId) (t : Template) (tail : List Eff)
     (toState : String) (replyTo : Option InstId) (s : InstId) (k : Cont) (hM : MailInv w)
     (ht : templateOf I.desc (tname id) = some t) (hper : t.multiplicity = .perPeer)
     (hsub : t.subtree = "") (htm : t.terminable = true)
     (hpk : hasParkedCall (w.st id).parked = false) (hch : hasChild I.desc w id = false)
+    (hlive : (w.st id).life = .alive)
     (hph : (w.st s).phase = .parked id false k) (hne : s ≠ id) :
     waitKind ((execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩).st s) ≠
       some (.blockingSend id) := by
-  obtain ⟨p, hp, hs, hc⟩ := hM.bwd s id false k hph
-  let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
-    (tname id) (w.st id).parked
-  have hphb : (base.st s).phase = .parked id false k := by
-    simp [base, readCells_st, phase_refund, phase_refundP, hph]
-  let dead : Actor :=
-    { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
-  have hphs : ((setActor base id dead).st s).phase = .parked id false k := by
-    simp [setActor, hne, hphb]
-  have hrel := release_resumes_send (setActor base id dead) id (w.st id).parked s k
-    ⟨p, hp, hs, hc⟩ hne hphs
-  have hstep : execRun I w id (w.st id) ⟨.terminate :: tail, toState, replyTo, [], [], [], "", "", "", "", ""⟩ =
-      releaseParked (setActor base id dead) id (w.st id).parked := by
-    rw [exec_lone_release I w id t tail toState replyTo ht hper hsub htm hpk hch]
-    simp [releaseWorld, base, dead]
-  rw [hstep]
-  cases hk : k.rest with
-  | nil =>
-    simp [proceed, hk] at hrel
-    unfold waitKind
-    rw [hrel]
-    simp
-  | cons _ _ =>
-    simp [proceed, hk] at hrel
-    unfold waitKind
-    rw [hrel]
-    simp
+  rw [exec_lone_release I w id t tail toState replyTo ht hper hsub htm hpk hch]
+  have hgo : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+  simp only [shutdownActor, hgo, ite_true, sealActor]
+  -- A tombstone that is still parked was already parked on the release world,
+  -- and that release resumes `s`. `proceed` is idle or running, never parked.
+  cases hphS : ((enqueueTombstone I.desc (releaseWorld I.desc w id (w.st id)) id).st s).phase with
+  | idle => simp [waitKind, hphS]
+  | run _ => simp [waitKind, hphS]
+  | awaitReply _ _ => simp [waitKind, hphS]
+  | awaitEffect _ => simp [waitKind, hphS]
+  | awaitPeer _ => simp [waitKind, hphS]
+  | crashed => simp [waitKind, hphS]
+  | parked dst' c k' =>
+    intro hwait
+    have hwas := tombstone_keeps_parked_phase I.desc
+      (releaseWorld I.desc w id (w.st id)) id s dst' c k' hphS
+    -- `bwd` is an entry or a dead call target. This park is not a call.
+    rcases hM.bwd s id false k hph with ⟨p, hp, hs, hc⟩ | ⟨hcall, _⟩
+    case inr => cases hcall
+    let wC := readCells I.desc w id
+    let wM := refundMsgs wC (tname id) (w.st id).box
+    let wP := refundParked wM (tname id) (w.st id).parked
+    let wO := releaseOutbound wP id
+    let dead : Actor :=
+      { wO.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+    have hbody : releaseWorld I.desc w id (w.st id) =
+        releaseParked (setActor wO id dead) id (w.st id).parked := by
+      simp [releaseWorld, wC, wM, wP, wO, dead]
+    have hph0 : ((setActor wO id dead).st s).phase = .parked id false k := by
+      have hcells : (wC.st s).phase = (w.st s).phase :=
+        congrArg (·.phase) (readCells_st I.desc w id s)
+      have hmsg := phase_refund wC (tname id) (w.st id).box s
+      have hpark := phase_refundP wM (tname id) (w.st id).parked s
+      have hout := releaseOutbound_phase wP id s
+      -- `s ≠ id` is a proposition, so the branch is `if False`.
+      simp only [setActor]
+      rw [if_neg hne, hout, hpark, hmsg, hcells, hph]
+    have hgot := release_resumes_send (setActor wO id dead) id (w.st id).parked s k
+      ⟨p, hp, hs, hc⟩ hne hph0
+    rw [hbody, hgot] at hwas
+    cases hk : k.rest with
+    | nil =>
+      simp only [proceed, hk] at hwas
+      exact nomatch hwas
+    | cons _ _ =>
+      simp only [proceed, hk] at hwas
+      exact nomatch hwas
 
 theorem parkIndex_of_mem (ps : List Parked) (s : InstId) (h : ∃ p, p ∈ ps ∧ p.sender = s) :
     parkIndex ps s < ps.length := by
@@ -15544,142 +15570,278 @@ theorem reply_life (w : World) (sender : InstId) (k : Cont) (i : InstId) :
   unfold performReply
   cases hr : k.replyTo with
   | none =>
-    by_cases hi : i = sender
-    · rw [hi]
-      simp [setActor, proceed_life]
-    · simp [setActor, hi]
+    by_cases hi : i = sender <;> simp [setActor, hi, proceed_life]
   | some caller =>
     cases hph : (w.st caller).phase with
     | awaitReply dst ck =>
-      by_cases hd : dst = sender
-      · by_cases hi : i = sender
-        · rw [hi]
-          by_cases hsc : sender = caller
-          · simp [setActor, proceed_life, hph, hd, hsc]
-          · simp [setActor, proceed_life, hph, hd, hsc]
+      -- The reply finishes the caller only when the sender still owes that call.
+      by_cases howe : dst = sender ∧ (w.st sender).oweId = some (w.st caller).waitId
+      · rcases howe with ⟨hd, ho⟩
+        simp only [hph, hd, ho]
+        by_cases hi : i = sender
+        · by_cases hsc : sender = caller
+          · simp [setActor, hi, hsc, proceed_life, finishCall_life]
+          · simp [setActor, hi, hsc, proceed_life]
         · by_cases hc : i = caller
-          · rw [hc]
-            have hflip : ¬caller = sender := fun h => hi (hc.trans h)
-            simp [setActor, proceed_life, hph, hd, hflip]
-          · simp [setActor, hi, hc, hph, hd]
-      · by_cases hi : i = sender
-        · rw [hi]
-          simp [setActor, proceed_life, hph, hd]
-        · simp [setActor, hi, hph, hd]
-    | idle =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_life, hph]
-      · simp [setActor, hi, hph]
-    | run _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_life, hph]
-      · simp [setActor, hi, hph]
-    | parked _ _ _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_life, hph]
-      · simp [setActor, hi, hph]
-    | awaitEffect _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_life, hph]
-      · simp [setActor, hi, hph]
-    | awaitPeer _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_life, hph]
-      · simp [setActor, hi, hph]
-    | crashed =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_life, hph]
-      · simp [setActor, hi, hph]
+          · have hsc : ¬caller = sender := fun h => hi (hc.trans h)
+            simp [setActor, hi, hc, hsc, finishCall_life, proceed_life]
+          · simp [setActor, hi, hc]
+      · simp only [hph]
+        by_cases hd : dst = sender
+        · have ho : ¬(w.st sender).oweId = some (w.st caller).waitId :=
+            fun h => howe ⟨hd, h⟩
+          simp only [hd, ho, ite_false]
+          by_cases hi : i = sender <;> simp [setActor, hi, proceed_life]
+        · have hbit : ¬(dst = sender ∧ (w.st sender).oweId = some (w.st caller).waitId) := howe
+          simp only [hd, ite_false]
+          by_cases hi : i = sender <;> simp [setActor, hi, proceed_life]
+    | idle | run _ | parked _ _ _ | awaitEffect _ | awaitPeer _ | crashed =>
+      by_cases hi : i = sender <;> simp [setActor, hi, proceed_life, hph]
 
 theorem reply_prio (w : World) (sender : InstId) (k : Cont) (i : InstId) :
     ((performReply w sender k).st i).prio = (w.st i).prio := by
   unfold performReply
   cases hr : k.replyTo with
   | none =>
-    by_cases hi : i = sender
-    · rw [hi]
-      simp [setActor, proceed_prio]
-    · simp [setActor, hi]
+    by_cases hi : i = sender <;> simp [setActor, hi, proceed_prio]
   | some caller =>
     cases hph : (w.st caller).phase with
     | awaitReply dst ck =>
-      by_cases hd : dst = sender
-      · by_cases hi : i = sender
-        · rw [hi]
-          by_cases hsc : sender = caller
-          · simp [setActor, proceed_prio, hph, hd, hsc]
-          · simp [setActor, proceed_prio, hph, hd, hsc]
+      by_cases howe : dst = sender ∧ (w.st sender).oweId = some (w.st caller).waitId
+      · rcases howe with ⟨hd, ho⟩
+        simp only [hph, hd, ho]
+        by_cases hi : i = sender
+        · by_cases hsc : sender = caller
+          · simp [setActor, hi, hsc, proceed_prio, finishCall_prio]
+          · simp [setActor, hi, hsc, proceed_prio]
         · by_cases hc : i = caller
-          · rw [hc]
-            have hflip : ¬caller = sender := fun h => hi (hc.trans h)
-            simp [setActor, proceed_prio, hph, hd, hflip]
-          · simp [setActor, hi, hc, hph, hd]
-      · by_cases hi : i = sender
-        · rw [hi]
-          simp [setActor, proceed_prio, hph, hd]
-        · simp [setActor, hi, hph, hd]
-    | idle =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_prio, hph]
-      · simp [setActor, hi, hph]
-    | run _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_prio, hph]
-      · simp [setActor, hi, hph]
-    | parked _ _ _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_prio, hph]
-      · simp [setActor, hi, hph]
-    | awaitEffect _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_prio, hph]
-      · simp [setActor, hi, hph]
-    | awaitPeer _ =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_prio, hph]
-      · simp [setActor, hi, hph]
-    | crashed =>
-      by_cases hi : i = sender
-      · rw [hi]
-        simp [setActor, proceed_prio, hph]
-      · simp [setActor, hi, hph]
+          · have hsc : ¬caller = sender := fun h => hi (hc.trans h)
+            simp [setActor, hi, hc, hsc, finishCall_prio, proceed_prio]
+          · simp [setActor, hi, hc]
+      · simp only [hph]
+        by_cases hd : dst = sender
+        · have ho : ¬(w.st sender).oweId = some (w.st caller).waitId :=
+            fun h => howe ⟨hd, h⟩
+          simp only [hd, ho, ite_false]
+          by_cases hi : i = sender <;> simp [setActor, hi, proceed_prio]
+        · simp only [hd, ite_false]
+          by_cases hi : i = sender <;> simp [setActor, hi, proceed_prio]
+    | idle | run _ | parked _ _ _ | awaitEffect _ | awaitPeer _ | crashed =>
+      by_cases hi : i = sender <;> simp [setActor, hi, proceed_prio, hph]
 
 /-- Delivering a message reads cells and installs a phase. It does not change a life. -/
 theorem deliver_keeps_life (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
     (w1 : World) (a1 : Actor) (i : InstId) (h : deliver I w id a m = some (w1, a1)) :
     a1.life = a.life ∧ (w1.st i).life = (w.st i).life := by
   unfold deliver at h
-  have hst := readCells_st I.desc w id i
-  split at h
-  · cases h
-  · split at h
-    · split at h
-      · cases h
-      · cases h
-        exact ⟨rfl, congrArg (fun a => a.life) hst⟩
-    · next tr =>
-      split at h
-      · cases h
-      · split at h
-        · cases h
-          exact ⟨rfl, congrArg (fun a => a.life) hst⟩
-        · cases h
-          exact ⟨rfl, congrArg (fun a => a.life) hst⟩
+  have hst := congrArg (fun a => a.life) (readCells_st I.desc w id i)
+  by_cases hlive : a.life ≠ .alive
+  · simp [hlive] at h
+  · simp only [hlive, ite_false] at h
+    by_cases htomb : (m.tombstone && newerGeneration (readCells I.desc w id) m) = true
+    · simp only [htomb, ite_true] at h
+      cases h
+      exact ⟨rfl, hst⟩
+    · simp only [htomb, ite_false] at h
+      cases hfind : findDeliver I (tname id) a.typestate m with
+      | none =>
+        by_cases hstay : (m.callFrom.isSome || m.tombstone) = true
+        · simp [hfind, hstay] at h
+        · simp only [hfind, hstay, ite_false] at h
+          cases h
+          exact ⟨rfl, hst⟩
+      | some tr =>
+        by_cases hacc : (m.callFrom.isSome && !tr.acceptsCall) = true
+        · simp [hfind, hacc] at h
+        · simp only [hfind, hacc, ite_false] at h
+          injection h with hpair
+          cases hpair
+          refine ⟨?_, hst⟩
+          by_cases hempty : tr.program.isEmpty = true <;> simp [hempty]
+
+/-- A cell wake changes a life only by `crashWorld`. The flag stays set: a later
+wake sees a dead target and does not write it back. -/
+theorem try_wake_crash_flag (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) (hdead : ((tryWake D w dstId label writer).st i).life = .dead)
+    (hold : (w.st i).life = .alive) : (tryWake D w dstId label writer).crashed = true := by
+  unfold tryWake at hdead ⊢
+  by_cases hskip : (((w.st dstId).life != .alive) ||
+      (w.st dstId).prio.any (fun p => p.label == label)) = true
+  · simp only [hskip, ite_true] at hdead
+    rw [hold] at hdead
+    cases hdead
+  · have hgo : (((w.st dstId).life != .alive) ||
+        (w.st dstId).prio.any (fun p => p.label == label)) = false := by
+      cases hb : ((w.st dstId).life != .alive) || (w.st dstId).prio.any (fun p => p.label == label) with
+      | false => rfl
+      | true => exact absurd hb hskip
+    simp only [hgo, ite_false, offerPrio] at hdead ⊢
+    -- The reduced guard is `if false = true`, which `ite_false` does not match.
+    have hff : ¬(false = true) := by intro h; cases h
+    rw [if_neg hff] at hdead ⊢
+    by_cases hfull : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = true
+    · simp only [hfull, ite_true, crashWorld]
+    · have hroom : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = false := by
+        simpa [Bool.not_eq_true] using hfull
+      simp only [hroom] at hdead
+      have hffR : ¬(false = true) := by intro h; cases h
+      rw [if_neg hffR] at hdead
+      by_cases hi : i = dstId
+      · subst hi
+        simp only [setActor_self] at hdead
+        rw [hold] at hdead
+        cases hdead
+      · rw [setActor_other _ _ _ _ hi] at hdead
+        rw [hold] at hdead
+        cases hdead
+
+theorem try_wake_keeps_killed (D : Description) (w : World) (dstId : InstId) (label : String)
+    (writer i : InstId) (hcr : w.crashed = true) (hdead : (w.st i).life = .dead)
+    (hph : (w.st i).phase = .crashed) :
+    (tryWake D w dstId label writer).crashed = true ∧
+      ((tryWake D w dstId label writer).st i).life = .dead ∧
+      ((tryWake D w dstId label writer).st i).phase = .crashed := by
+  unfold tryWake
+  by_cases hskip : (((w.st dstId).life != .alive) ||
+      (w.st dstId).prio.any (fun p => p.label == label)) = true
+  · simp [hskip, hcr, hdead, hph]
+  · have hgo : (((w.st dstId).life != .alive) ||
+        (w.st dstId).prio.any (fun p => p.label == label)) = false := by
+      cases hb : ((w.st dstId).life != .alive) || (w.st dstId).prio.any (fun p => p.label == label) with
+      | false => rfl
+      | true => exact absurd hb hskip
+    simp only [hgo, ite_false, offerPrio]
+    have hff : ¬(false = true) := by intro h; cases h
+    rw [if_neg hff]
+    by_cases hfull : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = true
+    · simp only [hfull, ite_true, crashWorld]
+      by_cases hmem : decide (i ∈ w.roster) = true
+      · have hbit : ((w.st i).life == .alive) = false := by simp [hdead]
+        simp only [hmem, ite_true, crashActor, hbit]
+        have hff2 : ¬(false = true) := by intro h; cases h
+        rw [if_neg hff2]
+        exact ⟨trivial, hdead, hph⟩
+      · have hnot : decide (i ∈ w.roster) = false := by
+          cases hb : decide (i ∈ w.roster) with
+          | false => rfl
+          | true => exact absurd hb hmem
+        simp [hnot, hdead, hph]
+    · have hroom : decide (prioLoad (w.st dstId).prio >= capPrio D w.N dstId) = false := by
+        simpa [Bool.not_eq_true] using hfull
+      simp only [hroom]
+      have hffR : ¬(false = true) := by intro h; cases h
+      rw [if_neg hffR]
+      by_cases hi : i = dstId
+      · subst hi
+        refine ⟨?_, ?_, ?_⟩
+        · simpa [setActor] using hcr
+        · simpa [setActor_self] using hdead
+        · simpa [setActor_self] using hph
+      · rw [setActor_other _ _ _ _ hi]
+        exact ⟨hcr, hdead, hph⟩
+
+theorem wakes_killed_or_same (ids : List InstId) (D : Description) (w : World)
+    (dst label : String) (writer i : InstId) :
+    (((ids.foldl (fun w id => tryWake D w id label writer) w).st i).life = (w.st i).life) ∨
+      ((ids.foldl (fun w id => tryWake D w id label writer) w).crashed = true ∧
+        ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).life = .dead ∧
+        ((ids.foldl (fun w id => tryWake D w id label writer) w).st i).phase = .crashed) := by
+  induction ids generalizing w with
+  | nil =>
+    simp
+  | cons j js ih =>
+    simp only [List.foldl_cons]
+    rcases try_wake_effect D w j label writer i with ⟨hl, _⟩ | ⟨hold, hdead, hph⟩
+    · rcases ih (tryWake D w j label writer) with hsame | hkilled
+      · exact Or.inl (hsame.trans hl)
+      · exact Or.inr hkilled
+    · have hcr := try_wake_crash_flag D w j label writer i hdead hold
+      have hpres : ∀ (ids' : List InstId) (w0 : World), w0.crashed = true → (w0.st i).life = .dead →
+          (w0.st i).phase = .crashed →
+          ((ids'.foldl (fun w id => tryWake D w id label writer) w0).crashed = true ∧
+            ((ids'.foldl (fun w id => tryWake D w id label writer) w0).st i).life = .dead ∧
+            ((ids'.foldl (fun w id => tryWake D w id label writer) w0).st i).phase = .crashed) := by
+        intro ids'
+        induction ids' with
+        | nil =>
+          intro w0 hcr0 hdead0 hph0
+          exact ⟨hcr0, hdead0, hph0⟩
+        | cons j' js' ih' =>
+          intro w0 hcr0 hdead0 hph0
+          simp only [List.foldl_cons]
+          have hstep := try_wake_keeps_killed D w0 j' label writer i hcr0 hdead0 hph0
+          exact ih' _ hstep.1 hstep.2.1 hstep.2.2
+      exact Or.inr (hpres js (tryWake D w j label writer) hcr hdead hph)
+
+/-- `spawnChild` writes one fresh id, and that id is alive. Every other id keeps
+its life, so a life change names the birth. The fresh generation is off the
+roster (`maxGen_fresh`). -/
+theorem spawnChild_birth (I : Impl) (w : World) (parent : InstId) (child : String) (w' : World)
+    (i : InstId) (h : spawnChild I w parent child = some w')
+    (hchg : (w'.st i).life ≠ (w.st i).life) :
+    (w'.st i).life = .alive ∧ i ∉ w.roster := by
+  unfold spawnChild at h
+  cases ht : templateOf I.desc child with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hgo : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+        (w.st parent).life == .alive) = true
+    · simp only [hgo, ite_true] at h
+      cases hpar : parent with
+      | core _ =>
+        rw [hpar] at h
+        simp at h
+      | peer name pk gen =>
+        rw [hpar] at h
+        by_cases hblk : slotRespawnBlocked I.desc w parent child pk = true
+        · rw [hpar] at hblk
+          simp [hblk] at h
+          cases h
+          exact absurd rfl hchg
+        · have hf : slotRespawnBlocked I.desc w parent child pk = false := by
+            cases hb : slotRespawnBlocked I.desc w parent child pk with
+            | false => rfl
+            | true => exact absurd hb hblk
+          rw [hpar] at hf
+          simp only [hf, ite_false] at h
+          cases h
+          let bornId := InstId.peer child pk (maxGen w child pk)
+          let born :=
+            { bornActor I.desc w child pk t.initial with parent := some (InstId.peer name pk gen) }
+          have hlife : ((admitBorn I w bornId born).st i).life =
+              ((setActor { w with roster := w.roster ++ [bornId] } bornId born).st i).life :=
+            congrArg (fun a => a.life) (readCells_st I.desc _ bornId i)
+          by_cases hi : i = bornId
+          · subst hi
+            refine ⟨?_, ?_⟩
+            · simpa [admitBorn, born, bornId, setActor, bornActor, withKeyTokens] using hlife
+            · intro hmem
+              exact Nat.lt_irrefl _ (maxGen_fresh w child pk (maxGen w child pk) hmem)
+          · have heq : ((setActor { w with roster := w.roster ++ [bornId] } bornId born).st i).life =
+                (w.st i).life := by
+              simp [setActor, hi]
+            exact absurd (hlife.trans heq) hchg
+    · have hnot : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+          (w.st parent).life == .alive) = false := by
+        cases hb : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent) &&
+            (w.st parent).life == .alive) with
+        | false => rfl
+        | true => exact absurd hb hgo
+      simp only [hnot, ite_false] at h
+      by_cases hsup : (t.multiplicity == .perPeer && supNamed t.supervisor (tname parent)) = true
+      · simp [hsup] at h
+        cases h
+        exact absurd rfl hchg
+      · simp [hsup] at h
 
 /-- Someone else's `exec` leaves `i`'s life as it was, seals `i` inside that
-actor's stage, or crashes `i` into `.crashed`. A shutdown tombstone that does
-not fit is that crash. Siblings are not sealed. -/
+actor's stage, crashes `i` into `.crashed`, seals `i` under an `abort`, or
+births `i` with a `spawn` effect. A shutdown tombstone that does not fit is
+the crash. An abort seals the live children in this step, so a child's life
+can leave `alive` without the parent running `terminate` and without the
+roster crashing. A spawn writes one fresh id. Siblings of a stage seal are
+not sealed. -/
 theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne : i ≠ id) :
     ((execRun I w id (w.st id) k).st i).life = (w.st i).life ∨
       (∃ t, templateOf I.desc (tname id) = some t ∧
@@ -15689,93 +15851,201 @@ theorem exec_other_life (I : Impl) (w : World) (id i : InstId) (k : Cont) (hne :
         ((terminateStage I.desc w id (w.st id)).st i).life ≠ (w.st i).life) ∨
       ((execRun I w id (w.st id) k).crashed = true ∧
         ((execRun I w id (w.st id) k).st i).life = .dead ∧
-        ((execRun I w id (w.st id) k).st i).phase = .crashed) := by
-  cases hk : k.rest with
-  | nil =>
-    left
-    simp [execRun, hk, setActor, hne]
-  | cons eff tail =>
-    cases eff with
-    | send dst label hint =>
-      simp [execRun, hk]
-      cases hr : route w I.desc id dst with
-      | none =>
+        ((execRun I w id (w.st id) k).st i).phase = .crashed) ∨
+      (∃ tail, k.rest = .abort :: tail ∧
+        execRun I w id (w.st id) k =
+          commitCont (abortChildren I.desc w id) id
+            (proceed ((abortChildren I.desc w id).st id) (afterHead k)) ∧
+        ((execRun I w id (w.st id) k).st i).life ≠ (w.st i).life) ∨
+      (∃ child tail w1, k.rest = .spawn child :: tail ∧
+        spawnChild I w id child = some w1 ∧
+        execRun I w id (w.st id) k =
+          commitCont w1 id (proceed (w1.st id) (afterHead k)) ∧
+        ((execRun I w id (w.st id) k).st i).life = .alive ∧
+        ((execRun I w id (w.st id) k).st i).life ≠ (w.st i).life) := by
+  by_cases hlive : ((w.st id).life == .alive) = true
+  · cases hk : k.rest with
+    | nil =>
+      left
+      simp [execRun, hlive, hk, setActor, hne]
+    | cons eff tail =>
+      cases eff with
+      | send dst label hint =>
+        simp only [execRun, hlive, ite_true, hk]
+        cases hr : route w I.desc id dst with
+        | none =>
+          left
+          simp [hr, noteStale_st, setActor, hne]
+        | some dstId =>
+          left
+          simpa [hr] using enqueue_life w I.desc id dstId
+            { label := label, sender := id, callFrom := none } false (afterHead k) i
+      | trySend dst label hint onFull onGone =>
+        simp only [execRun, hlive, ite_true, hk]
+        cases hr : route w I.desc id dst with
+        | none =>
+          left
+          simp [hr, noteStale_st, setActor, hne]
+        | some dstId =>
+          simp only [hr]
+          split
+          · left
+            exact enqueue_life w I.desc id dstId
+              { label := label, sender := id, callFrom := none, reliable := false }
+              false (afterHead k) i
+          · split
+            · left
+              simp [setActor, hne]
+            · left
+              simp [setActor, hne]
+      | call dst label hint na to =>
+        simp only [execRun, hlive, ite_true, hk]
+        cases hr : resolveId I.desc w id dst with
+        | none =>
+          left
+          simp [hr, noteStale_st, setActor, hne]
+        | some dstId =>
+          left
+          simpa [hr] using enqueue_life w I.desc id dstId
+            { label := label, sender := id, callFrom := some id } true
+            { afterHead k with onNotAdmitted := na, onTimedOut := to } i
+      | reply =>
         left
-        simp [hr, setActor, hne, proceed_life]
-      | some dstId =>
-        left
-        simp [hr]
-        exact enqueue_life w I.desc id dstId _ false _ i
-    | trySend dst label hint onFull onGone =>
-      simp [execRun, hk]
-      cases hr : route w I.desc id dst with
-      | none =>
-        left
-        simp [hr, setActor, hne, proceed_life]
-      | some dstId =>
-        simp [hr]
+        simp only [execRun, hlive, ite_true, hk]
+        exact reply_life w id k i
+      | selfSchedule label =>
+        simp only [execRun, hlive, ite_true, hk]
         split
         · left
-          exact enqueue_life w I.desc id dstId
-            { label := label, sender := id, callFrom := none, reliable := false } false _ i
-        · left
-          simp [setActor, hne, proceed_life]
-    | call dst label hint na to =>
-      simp [execRun, hk]
-      cases hr : route w I.desc id dst with
-      | none =>
-        left
-        simp [hr, setActor, hne, proceed_life]
-      | some dstId =>
-        left
-        simp [hr]
-        exact enqueue_life w I.desc id dstId _ true _ i
-    | reply =>
-      left
-      simp [execRun, hk]
-      exact reply_life w id k i
-    | selfSchedule label =>
-      simp [execRun, hk]
-      split
-      · left
-        simp [setActor, hne, proceed_life]
-      · split
-        · left
-          simp [setActor, hne, proceed_life]
-        · left
           simp [setActor, hne]
-    | cell dst label value =>
-      simp only [execRun, hk]
-      split
-      · left
-        simp [setCell, setActor, hne, proceed_life]
-      · left
-        rw [wakeReaders]
-        rw [wakes_life _ _ _ dst label id i]
-        simp [setCell, setActor, hne, proceed_life]
-    | internal =>
-      left
-      simp [execRun, hk, setActor, hne]
-    | peer onTimeout =>
-      left
-      simp [execRun, hk, setActor, hne]
-    | terminate =>
-      rcases exec_term_world I w id k tail hk with
-        ⟨_, hkept⟩ | ⟨_, hcrash⟩ | ⟨_, _, _, _, _, _, _, _, hsh⟩ | ⟨t, _, ht, _, hdesc, hpre, hstage⟩
-      · exact Or.inl (by rw [hkept])
-      · rw [hcrash]
-        by_cases hsame : ((crashWorld w).st i).life = (w.st i).life
-        · exact Or.inl hsame
-        · have hd := crashWorld_died w i hsame
-          exact Or.inr (Or.inr ⟨rfl, hd⟩)
-      · rw [hsh]
-        by_cases hsame : ((shutdownActor I.desc w id).st i).life = (w.st i).life
-        · exact Or.inl hsame
-        · exact Or.inr (Or.inr (shutdown_bystander I.desc w id i hne hsame))
-      · by_cases hsame : ((terminateStage I.desc w id (w.st id)).st i).life = (w.st i).life
-        · rw [hstage]
-          exact Or.inl hsame
-        · exact Or.inr (Or.inl ⟨t, ht, hdesc, hpre, hstage, hsame⟩)
+        · split
+          · left
+            simp [setActor, hne]
+          · by_cases hsame : ((crashWorld w).st i).life = (w.st i).life
+            · left
+              exact hsame
+            · right; right; left
+              have hd := crashWorld_died w i hsame
+              exact ⟨rfl, hd⟩
+      | cell dst label value =>
+        simp only [execRun, hlive, ite_true, hk]
+        split
+        · left
+          simp [setCell, setActor, hne]
+        · let wPre := setActor
+            (setCell w dst label
+              { value := max (w.cell dst label).value value, dirty := true }) id
+            (proceed ((setCell w dst label
+              { value := max (w.cell dst label).value value, dirty := true }).st id)
+              (afterHead k))
+          rcases wakes_killed_or_same (readersOf wPre dst) I.desc wPre dst label id i with
+            hsame | ⟨hcr, hdead, hphC⟩
+          · left
+            have hpre : (wPre.st i).life = (w.st i).life := by
+              simp [wPre, setCell, setActor, hne]
+            simpa [wakeReaders, wPre] using hsame.trans hpre
+          · right; right; left
+            refine ⟨?_, ?_, ?_⟩
+            · simpa [wakeReaders, wPre] using hcr
+            · simpa [wakeReaders, wPre] using hdead
+            · simpa [wakeReaders, wPre] using hphC
+      | internal =>
+        left
+        simp [execRun, hlive, hk, setActor, hne]
+      | peer onTimeout =>
+        left
+        simp [execRun, hlive, hk, setActor, hne]
+      | abort =>
+        simp only [execRun, hlive, ite_true, hk]
+        by_cases hsame : ((commitCont (abortChildren I.desc w id) id
+            (proceed ((abortChildren I.desc w id).st id) (afterHead k))).st i).life =
+            (w.st i).life
+        · left
+          simp only [commitCont]
+          exact hsame
+        · right; right; right; left
+          exact ⟨tail, rfl, trivial, hsame⟩
+      | spawn child =>
+        simp only [execRun, hlive, ite_true, hk]
+        cases hw : spawnChild I w id child with
+        | none =>
+          simp only [hw]
+          by_cases hsame : ((crashWorld w).st i).life = (w.st i).life
+          · left
+            exact hsame
+          · right; right; left
+            have hd := crashWorld_died w i hsame
+            exact ⟨rfl, hd⟩
+        | some w1 =>
+          simp only [hw, commitCont]
+          by_cases hcr : w1.crashed = true
+          · simp only [hcr, ite_true]
+            by_cases hsame : (w1.st i).life = (w.st i).life
+            · left
+              exact hsame
+            · right; right; right; right
+              have hbirth := spawnChild_birth I w id child w1 i hw hsame
+              refine ⟨child, tail, w1, rfl, hw, ?_, hbirth.1, hsame⟩
+              simp [hcr]
+          · have hnot : w1.crashed = false := by
+              cases hb : w1.crashed with
+              | false => rfl
+              | true => exact absurd hb hcr
+            simp only [hnot, ite_false]
+            by_cases hi : i = id
+            · by_cases hsame : (proceed (w1.st id) (afterHead k)).life = (w.st i).life
+              · left
+                simp [setActor, hi, hsame]
+              · right; right; right; right
+                have hchg : (w1.st i).life ≠ (w.st i).life := by
+                  intro heq
+                  rw [hi] at heq hsame
+                  exact hsame ((proceed_life (w1.st id) (afterHead k)).trans heq)
+                have hbirth := spawnChild_birth I w id child w1 i hw hchg
+                refine ⟨child, tail, w1, rfl, hw, ?_, ?_, ?_⟩
+                · simp [hnot]
+                · simpa [hi, setActor, proceed_life] using hbirth.1
+                · simpa [hi, setActor, proceed_life] using hchg
+            · by_cases hsame : (w1.st i).life = (w.st i).life
+              · left
+                simp [setActor, hi, hsame]
+              · right; right; right; right
+                have hbirth := spawnChild_birth I w id child w1 i hw hsame
+                refine ⟨child, tail, w1, rfl, hw, ?_, ?_, ?_⟩
+                · simp [hnot]
+                · simpa [hi, setActor] using hbirth.1
+                · simpa [hi, setActor] using hsame
+      | terminate =>
+        rcases exec_term_world I w id k tail hk with
+          ⟨_, hkept⟩ | ⟨_, hcrash⟩ | ⟨_, _, _, _, _, _, _, _, hsh⟩ |
+            ⟨t, _, ht, _, hdesc, hpre, hstage⟩
+        · left
+          rw [hkept]
+        · rw [hcrash]
+          by_cases hsame : ((crashWorld w).st i).life = (w.st i).life
+          · left
+            exact hsame
+          · right; right; left
+            have hd := crashWorld_died w i hsame
+            exact ⟨rfl, hd⟩
+        · rw [hsh]
+          by_cases hsame : ((shutdownActor I.desc w id).st i).life = (w.st i).life
+          · left
+            exact hsame
+          · right; right; left
+            exact shutdown_bystander I.desc w id i hne hsame
+        · by_cases hsame : ((terminateStage I.desc w id (w.st id)).st i).life = (w.st i).life
+          · left
+            rw [hstage]
+            exact hsame
+          · right; left
+            exact ⟨t, ht, hdesc, hpre, hstage, hsame⟩
+  · have hf : ((w.st id).life == .alive) = false := by
+      cases hb : (w.st id).life == .alive with
+      | false => rfl
+      | true => exact absurd hb hlive
+    left
+    rw [execRun, if_neg (by simpa [hf] using hlive)]
 
 theorem bulk_life (I : Impl) (w w' : World) (id i : InstId) (h : receiveBulk I w id = some w') :
     (w'.st i).life = (w.st i).life := by
@@ -15844,37 +16114,60 @@ theorem bulk_life (I : Impl) (w w' : World) (id i : InstId) (h : receiveBulk I w
 
 theorem prio_life (I : Impl) (w w' : World) (id i : InstId) (h : receivePrio I w id = some w') :
     (w'.st i).life = (w.st i).life := by
-  unfold receivePrio at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    by_cases hready : (w.st id).life ≠ .alive ∨ (w.st id).phase ≠ .idle
-    · simp [hp, hready] at h
-    · simp [hp, hready] at h
-      split at h
-      · cases h
-      · next w1 a1 hdel =>
-        cases h
-        have hkeep := deliver_keeps_life I w id _ m w1 a1 i hdel
-        by_cases hi : i = id
-        · rw [hi]
-          simpa [setActor] using hkeep.1
-        · simpa [setActor, hi] using hkeep.2
+  dsimp only [receivePrio] at h
+  split at h
+  · cases h
+  · obtain ⟨m, _, _, w1, a1, _, _, hdel, hw⟩ :=
+      receivePrioFrom_spec I w id [] (w.st id).prio w' h
+    rw [hw]
+    have hkeep := deliver_keeps_life I w id {(w.st id) with prio := _} m w1 a1 i hdel
+    by_cases hi : i = id
+    · rw [hi]
+      simpa [setActor] using hkeep.1
+    · simpa [setActor, hi] using hkeep.2
 
 theorem spawn_life (I : Impl) (w : World) (template : String) (w' : World) (i : InstId)
     (h : spawn I w template = some w') (hl : (w.st i).life = .alive) :
     (w'.st i).life = .alive := by
   unfold spawn at h
-  split at h
-  · cases h
-  · next t ht =>
-    split at h
-    · cases h
-      simp only [readCells_st]
-      by_cases hi : i = InstId.peer template (w.nextIx template)
-      · simp [setActor, hi, withTokens]
-      · simpa [setActor, hi] using hl
-    · cases h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · simp only [hmay, ite_true] at h
+      cases hsup : t.supervisor with
+      | some name =>
+        rw [hsup] at h
+        cases h
+        simp only [placePeer, readCells_st]
+        by_cases hi : i = InstId.peer template (freshKey I.desc w t.subtree)
+            (maxGen w template (freshKey I.desc w t.subtree))
+        · simp [setActor, hi, bornActor, withKeyTokens]
+        · simpa [setActor, hi] using hl
+      | none =>
+        by_cases hsub : (t.subtree == "") = true
+        · rw [show t.supervisor = none from hsup] at h
+          simp only [hsub, ite_true] at h
+          cases h
+          simp only [placePeer, readCells_st]
+          by_cases hi : i = InstId.peer template (w.nextIx template)
+              (maxGen w template (w.nextIx template))
+          · simp [setActor, hi, bornActor, withKeyTokens]
+          · simpa [setActor, hi] using hl
+        · have hf : (t.subtree == "") = false := by
+            cases hb : t.subtree == "" with
+            | false => rfl
+            | true => exact absurd hb hsub
+          rw [show t.supervisor = none from hsup] at h
+          simp only [hf, ite_false] at h
+          cases h
+          simp only [placePeer, readCells_st]
+          by_cases hi : i = InstId.peer template (freshKey I.desc w t.subtree)
+              (maxGen w template (freshKey I.desc w t.subtree))
+          · simp [setActor, hi, bornActor, withKeyTokens]
+          · simpa [setActor, hi] using hl
+    · simp [hmay] at h
 
 /-- A life leaves `alive` only by that actor's own childless shutdown, by a
 stage seal, or by a roster crash. A core `terminate` is the crash. A sibling
@@ -15892,10 +16185,14 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
         (t.subtree = "" → t.terminable = true ∧ hasParkedCall (w.st id).parked = false) ∧
         w' = terminateStage I.desc w id (w.st id) ∧
         (i = id ∨ ((w'.st i).life ≠ (w.st i).life))) ∨
-      (w'.crashed = true ∧ (w'.st i).life = .dead ∧ (w'.st i).phase = .crashed) := by
+      (w'.crashed = true ∧ (w'.st i).life = .dead ∧ (w'.st i).phase = .crashed) ∨
+      (∃ id k tail, a = .exec id ∧ (w.st id).phase = .run k ∧ k.rest = .abort :: tail ∧
+        w' = commitCont (abortChildren I.desc w id) id
+          (proceed ((abortChildren I.desc w id).st id) (afterHead k))) := by
   cases a with
   | callTimeout id =>
-    exact hdead ((callTimeout_life w w' id i (by simpa [stepWorld] using stepOfApply h)).trans hl)
+    exact False.elim
+      (hdead ((callTimeout_life w w' id i (by simpa [stepWorld] using stepOfApply h)).trans hl))
   | stutter =>
     cases stutter_unchanged I w w' h
     exact False.elim (hdead hl)
@@ -15903,13 +16200,13 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
     have hlife := (ingress_phase I w w' who label i (by simpa [stepWorld] using stepOfApply h)).2.1
     exact False.elim (hdead (hlife.trans hl))
   | recvBulk id =>
-    exact absurd (bulk_life I w w' id i (by simpa [stepWorld] using stepOfApply h) ▸ hl) hdead
+    exact False.elim (absurd (bulk_life I w w' id i (by simpa [stepWorld] using stepOfApply h) ▸ hl) hdead)
   | recvPrio id =>
-    exact absurd (prio_life I w w' id i (by simpa [stepWorld] using stepOfApply h) ▸ hl) hdead
+    exact False.elim (absurd (prio_life I w w' id i (by simpa [stepWorld] using stepOfApply h) ▸ hl) hdead)
   | finish id =>
-    exact absurd (finish_life I w w' id i (by simpa [stepWorld] using stepOfApply h) hl) hdead
+    exact False.elim (absurd (finish_life I w w' id i (by simpa [stepWorld] using stepOfApply h) hl) hdead)
   | spawn template =>
-    exact absurd (spawn_life I w template w' i (by simpa [stepWorld] using stepOfApply h) hl) hdead
+    exact False.elim (absurd (spawn_life I w template w' i (by simpa [stepWorld] using stepOfApply h) hl) hdead)
   | exec id =>
     have h := stepOfApply h
     simp only [stepWorld] at h
@@ -15927,6 +16224,8 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
             rw [hme] at hdead
             simp [execRun, hk, setActor, hlid] at hdead
           | cons e tail =>
+            have hgo : ((w.st id).life == .alive) = true := by
+              simpa [beq_iff_eq] using hlid
             cases e with
             | terminate =>
               rcases exec_term_world I w id k tail hk with
@@ -15936,20 +16235,21 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
                 rw [hme] at hdead
                 rw [hkept] at hdead
                 exact hdead hlid
-              · rw [hcrash]
-                have hd := crashWorld_died w i (by simpa [hme] using hdead)
-                exact Or.inr (Or.inr ⟨rfl, hd⟩)
-              · exact Or.inl ⟨k, tail, t, rfl, by simpa [hme] using hph, hk,
+              · rw [hcrash] at hdead ⊢
+                have hd := crashWorld_died w i (by
+                  intro heq
+                  exact hdead (heq.trans hl))
+                exact Or.inr (Or.inr (Or.inl ⟨rfl, hd⟩))
+              · exact Or.inl ⟨k, tail, t, by simp [hme], by simpa [hme] using hph, hk,
                   by simpa [hme] using ht, hper, hsub, htm,
-                  by simpa [hme] using hpk, by simpa [hme] using hch, by
-                    rw [hme]
-                    exact hsh⟩
-              · refine Or.inr (Or.inl ⟨id, t, rfl, by simpa [hme] using ht, hdesc,
-                  by simpa [hme] using hpre, by rw [hme]; exact hstage, Or.inl hme⟩)
+                  by simpa [hme] using hpk, by simpa [hme] using hch,
+                  by simpa [hme] using hsh⟩
+              · refine Or.inr (Or.inl ⟨id, t, by simp [hme], by simpa [hme] using ht, hdesc,
+                  by simpa [hme] using hpre, hstage, Or.inl hme⟩)
             | send dst label hint =>
               exfalso
               rw [hme] at hdead
-              simp [execRun, hk] at hdead
+              simp only [execRun, hgo, ite_true, hk] at hdead
               cases hr : route w I.desc id dst with
               | none => simp [hr, setActor, proceed_life, hlid] at hdead
               | some dstId =>
@@ -15960,7 +16260,7 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
             | trySend dst label hint onFull onGone =>
               exfalso
               rw [hme] at hdead
-              simp [execRun, hk] at hdead
+              simp only [execRun, hgo, ite_true, hk] at hdead
               cases hr : route w I.desc id dst with
               | none => simp [hr, setActor, proceed_life, hlid] at hdead
               | some dstId =>
@@ -15970,83 +16270,130 @@ theorem only_terminate_kills (I : Impl) (a : Action) (w w' : World) (i : InstId)
                     ({ label := label, sender := id, callFrom := none, reliable := false } : Msg)
                     false (afterHead k) id
                   simp [heq, hlid] at hdead
-                · simp [setActor, proceed_life, hlid] at hdead
+                · split at hdead <;> simp [setActor, proceed_life, hlid] at hdead
             | call dst label hint na to =>
               exfalso
               rw [hme] at hdead
-              simp [execRun, hk] at hdead
-              cases hr : route w I.desc id dst with
-              | none => simp [hr, setActor, proceed_life, hlid] at hdead
+              simp only [execRun, hgo, ite_true, hk] at hdead
+              cases hr : resolveId I.desc w id dst with
+              | none => simp [hr, noteStale_st, setActor, finishCall_life, issueCall, hlid] at hdead
               | some dstId =>
                 simp [hr] at hdead
                 have heq := enqueue_life w I.desc id dstId
-                  ({ label := label, sender := id, callFrom := some id } : Msg) true (afterHead k) id
+                  ({ label := label, sender := id, callFrom := some id } : Msg) true
+                  { afterHead k with onNotAdmitted := na, onTimedOut := to } id
                 simp [heq, hlid] at hdead
             | reply =>
               exfalso
               rw [hme] at hdead
-              simp [execRun, hk, reply_life, hlid] at hdead
+              simp only [execRun, hgo, ite_true, hk, reply_life] at hdead
+              exact hdead hlid
             | selfSchedule label =>
               rw [hme] at hdead
-              simp [execRun, hk] at hdead
-              split at hdead
-              · simp [setActor, proceed_life, hlid] at hdead
-              · split at hdead
-                · simp [setActor, proceed_life, hlid] at hdead
-                · have hd := crashWorld_died w i hdead
-                  exact Or.inr (Or.inr ⟨rfl, hd⟩)
+              simp only [execRun, hgo, ite_true, hk] at hdead ⊢
+              split
+              next hqueued =>
+                simp only [hqueued] at hdead
+                simp [setActor, proceed_life, hlid] at hdead
+              next hnot =>
+                split
+                next hroom =>
+                  split at hdead
+                  next _hqueued =>
+                    simp [setActor, proceed_life, hlid] at hdead
+                  next _hskip =>
+                    simp [setActor, proceed_life, hlid] at hdead
+                next hfull =>
+                  split at hdead
+                  next _hqueued =>
+                    simp [setActor, proceed_life, hlid] at hdead
+                  next _hskip =>
+                    have hd := crashWorld_died w id (by
+                      intro heq
+                      exact hdead (heq.trans hlid))
+                    rw [← hme] at hd
+                    exact Or.inr (Or.inr (Or.inl ⟨rfl, hd⟩))
             | cell dst label value =>
-              exfalso
               rw [hme] at hdead
-              simp only [execRun, hk] at hdead
-              split at hdead
-              · simp [setCell, setActor, proceed_life, hlid] at hdead
-              · rw [wakeReaders] at hdead
-                rw [wakes_life (readersOf _ _) I.desc _ dst label id id] at hdead
+              simp only [execRun, hgo, ite_true, hk] at hdead ⊢
+              split
+              next hroom =>
+                simp only [hroom] at hdead
                 simp [setCell, setActor, proceed_life, hlid] at hdead
+              next hfull =>
+                simp only [hfull] at hdead
+                let wPre := setActor
+                  (setCell w dst label
+                    { value := max (w.cell dst label).value value, dirty := true }) id
+                  (proceed ((setCell w dst label
+                    { value := max (w.cell dst label).value value, dirty := true }).st id)
+                    (afterHead k))
+                rcases wakes_killed_or_same (readersOf wPre dst) I.desc wPre dst label id id with
+                  hsame | ⟨hcr, hdead', hphC⟩
+                · have hpre : (wPre.st id).life = (w.st id).life := by
+                    simp [wPre, setCell, setActor, proceed_life]
+                  simp [wakeReaders, wPre, hsame, hpre, hlid] at hdead
+                · exact Or.inr (Or.inr (Or.inl ⟨
+                    by simpa [wakeReaders, wPre] using hcr,
+                    by simpa [wakeReaders, wPre, hme] using hdead',
+                    by simpa [wakeReaders, wPre, hme] using hphC⟩))
             | internal =>
               exfalso
               rw [hme] at hdead
-              simp [execRun, hk, setActor, hlid] at hdead
+              simp only [execRun, hgo, ite_true, hk, setActor] at hdead
+              exact hdead hlid
             | peer onTimeout =>
               exfalso
               rw [hme] at hdead
-              simp [execRun, hk, setActor, hlid] at hdead
+              simp only [execRun, hgo, ite_true, hk, setActor] at hdead
+              exact hdead hlid
             | abort =>
-              rw [hme] at hdead
-              simp only [execRun, hk] at hdead
-              simp only [commitCont] at hdead
-              by_cases hcr : (abortChildren I.desc w id).crashed = true
-              · simp only [hcr, ite_true] at hdead
-                have hd := shutdownActor_died I.desc w id i (by
-                  -- a crash of the parent is not this arm; the children are
-                  exact hdead)
-                exact False.elim (by
-                  cases hd
-                  exact hdead (by
-                    skip))
-              · simp only [hcr, ite_false] at hdead
-                simp [setActor, proceed_life, hlid] at hdead
+              simp only [execRun, hgo, ite_true, hk]
+              refine Or.inr (Or.inr (Or.inr ⟨id, k, tail, by simp [hme],
+                by simpa [hme] using hph, hk, rfl⟩))
             | spawn child =>
               rw [hme] at hdead
-              simp only [execRun, hk] at hdead
+              simp only [execRun, hgo, ite_true, hk] at hdead ⊢
               cases hs : spawnChild I w id child with
               | none =>
-                simp [hs] at hdead
-                have hd := crashWorld_died w i hdead
-                exact Or.inr (Or.inr ⟨rfl, hd⟩)
+                simp only [hs] at hdead ⊢
+                have hd := crashWorld_died w id (by
+                  intro heq
+                  exact hdead (heq.trans hlid))
+                rw [← hme] at hd
+                exact Or.inr (Or.inr (Or.inl ⟨rfl, hd⟩))
               | some w1 =>
-                simp [hs, commitCont] at hdead
+                simp only [hs, commitCont] at hdead
                 by_cases hcr : w1.crashed = true
-                · simp [hcr] at hdead
-                · simp [hcr, setActor, proceed_life, hlid] at hdead
+                · simp only [hcr, ite_true] at hdead
+                  have hbirth := spawnChild_birth I w id child w1 id hs (by
+                    intro heq
+                    exact hdead (heq.trans hlid))
+                  exact absurd hbirth.1 hdead
+                · have hroom : w1.crashed = false := by
+                    cases hb : w1.crashed with
+                    | false => rfl
+                    | true => exact absurd hb hcr
+                  have hff : ¬ (false = true) := by
+                    intro h
+                    cases h
+                  simp only [hroom, if_neg hff, setActor, ite_true, proceed_life] at hdead
+                  have hbirth := spawnChild_birth I w id child w1 id hs (by
+                    intro heq
+                    exact hdead (heq.trans hlid))
+                  exact absurd hbirth.1 hdead
         · rcases exec_other_life I w id i k (fun h => hme h) with
-            hsame | ⟨t, ht, hdesc, hpre, hstage, hchanged⟩ | hcrash
+            hsame | ⟨t, ht, hdesc, hpre, hstage, hchanged⟩ | hcrash |
+            ⟨tail, hk, heq, _⟩ | ⟨_, _, _, _, _, heqS, halive', _⟩
           · exact absurd (hsame.trans hl) hdead
           · refine Or.inr (Or.inl ⟨id, t, rfl, ht, hdesc, hpre, hstage, Or.inr ?_⟩)
             rw [hstage]
             exact hchanged
-          · exact Or.inr (Or.inr hcrash)
+          · exact Or.inr (Or.inr (Or.inl hcrash))
+          · refine Or.inr (Or.inr (Or.inr ⟨id, k, tail, rfl, hph, hk, ?_⟩))
+            exact heq
+          · rw [heqS] at halive' hdead
+            exact absurd halive' hdead
       | idle => simp [hph] at h
       | parked _ _ _ => simp [hph] at h
       | awaitReply _ _ => simp [hph] at h
