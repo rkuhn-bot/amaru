@@ -16616,7 +16616,7 @@ theorem admit_off (w : World) (dead s dst : InstId) (h : offDst w s dst) :
   intro c k hbad
   exact h c k ((admitDead_phase w dead s).1 ▸ hbad)
 
-theorem resume_off (a : Actor) (dst id : InstId)
+theorem resumeSender_off (a : Actor) (dst id : InstId)
     (h : ∀ c k, a.phase ≠ .parked dst c k) :
     ∀ c k, (resumeSender a false id).phase ≠ .parked dst c k := by
   intro c k hbad
@@ -16645,7 +16645,7 @@ theorem release_keeps_off (w : World) (id : InstId) (ps : List Parked) (s dst : 
       have h' : offDst w' s dst := by
         intro c k hbad
         by_cases hs : s = p.sender
-        · have hres := resume_off (w.st p.sender) dst id
+        · have hres := resumeSender_off (w.st p.sender) dst id
             (fun c k hbad2 => h c k (by simpa [hs] using hbad2)) c k
           exact hres (by simpa [w', setActor, hs] using hbad)
         · exact h c k (by simpa [w', setActor, hs] using hbad)
@@ -16653,20 +16653,17 @@ theorem release_keeps_off (w : World) (id : InstId) (ps : List Parked) (s dst : 
 
 theorem releaseWorld_off (D : Description) (w : World) (id : InstId) (a : Actor) (s dst : InstId)
     (h : offDst w s dst) : offDst (releaseWorld D w id a) s dst := by
-  let base := refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked
-  let dead : Actor :=
-    { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
-  have hbase : offDst base s dst := by
-    intro c k hbad
-    exact h c k (by simpa [base, phase_refund, phase_refundP, readCells_st] using hbad)
-  have hset : offDst (setActor base id dead) s dst := by
-    intro c k hbad
-    by_cases hs : s = id
-    · simp [setActor, hs, dead] at hbad
-    · exact hbase c k (by simpa [setActor, hs] using hbad)
-  have hworld : releaseWorld D w id a = releaseParked (setActor base id dead) id a.parked := by
-    simp [releaseWorld, base, dead]
-  simpa [hworld] using release_keeps_off (setActor base id dead) id a.parked s dst hset
+  unfold releaseWorld
+  dsimp only
+  refine release_keeps_off _ id a.parked s dst ?_
+  intro c k hbad
+  by_cases hs : s = id
+  · simp [setActor, hs] at hbad
+  · have hph :
+        ((releaseOutbound (refundParked (refundMsgs (readCells D w id) (tname id) a.box) (tname id) a.parked) id).st s).phase =
+          (w.st s).phase := by
+      simp [releaseOutbound_phase, phase_refundP, phase_refund, readCells_st]
+    exact h c k (by simpa [setActor, hs, hph] using hbad)
 
 theorem abort_off (D : Description) (w : World) (id s dst : InstId) (a : Actor)
     (h : offDst w s dst) : offDst (abortActor D w id a) s dst := by
@@ -17093,18 +17090,20 @@ theorem bulk_send_proceed (I : Impl) (w w' : World) (id : InstId) (h : receiveBu
         exact (resume_proceed_phase _ id k (hpre.trans hph)).trans
           (proceed_phase_actor _ (w.st p.sender) k)
 
-/-- A parked phase survives abortion, or the sender has been resumed or returned to idle.
-Abortion never installs a fresh park. -/
+/-- A parked phase survives a seal, or the sender has been resumed, returned to
+idle, or crashed with the roster. A seal never installs a fresh park. -/
 abbrev phaseShape (w : World) (s dst : InstId) (call : Bool) (k : Cont) : Prop :=
-  (w.st s).phase = .parked dst call k ∨ (w.st s).phase = resumed k ∨ (w.st s).phase = .idle
+  (w.st s).phase = .parked dst call k ∨ (w.st s).phase = resumed k ∨
+    (w.st s).phase = .idle ∨ (w.st s).phase = .crashed
 
 theorem phaseShape_cast (w₁ w₂ : World) (s dst : InstId) (call : Bool) (k : Cont)
     (hph : (w₂.st s).phase = (w₁.st s).phase) (h : phaseShape w₁ s dst call k) :
     phaseShape w₂ s dst call k := by
-  rcases h with hpark | hres | hidle
+  rcases h with hpark | hres | hidle | hcrash
   · exact Or.inl (hph.trans hpark)
   · exact Or.inr (Or.inl (hph.trans hres))
-  · exact Or.inr (Or.inr (hph.trans hidle))
+  · exact Or.inr (Or.inr (Or.inl (hph.trans hidle)))
+  · exact Or.inr (Or.inr (Or.inr (hph.trans hcrash)))
 
 theorem shape_releaseParked (w : World) (id : InstId) (ps : List Parked) (s dst : InstId)
     (call : Bool) (k : Cont) (h : phaseShape w s dst call k) :
@@ -17123,17 +17122,22 @@ theorem shape_releaseParked (w : World) (id : InstId) (ps : List Parked) (s dst 
         · subst hs
           unfold phaseShape
           simp only [w', setActor]
-          rcases h with hpark | hres | hidle
+          rcases h with hpark | hres | hidle | hcrash
           · simp [resumeSender, hpark]
             exact Or.inr (Or.inl (proceed_resumed _ k))
           · cases hk : k.rest with
             | nil =>
               have hid : (w.st p.sender).phase = .idle := by simpa [resumed, hk] using hres
               simp [resumeSender, hid]
+              exact Or.inr (Or.inr (Or.inl rfl))
             | cons _ _ =>
               have hrun : (w.st p.sender).phase = .run k := by simpa [resumed, hk] using hres
               simp [resumeSender, hrun, resumed, hk]
+              exact Or.inr (Or.inl rfl)
           · simp [resumeSender, hidle]
+            exact Or.inr (Or.inr (Or.inl rfl))
+          · simp [resumeSender, hcrash]
+            exact Or.inr (Or.inr (Or.inr rfl))
         · exact phaseShape_cast w w' s dst call k
             (congrArg (·.phase) (setActor_other w p.sender s _ hs)) h
       exact ih w' h'
@@ -17155,7 +17159,8 @@ theorem shape_release (D : Description) (w : World) (id : InstId) (a : Actor) (s
   by_cases hs : s = id
   · have hidle : ((setActor wPark id dead).st s).phase = .idle := by
       simp [hs, setActor_self, dead]
-    exact shape_releaseParked (setActor wPark id dead) id a.parked s dst call k (Or.inr (Or.inr hidle))
+    exact shape_releaseParked (setActor wPark id dead) id a.parked s dst call k
+      (Or.inr (Or.inr (Or.inl hidle)))
   · have hset : ((setActor wPark id dead).st s).phase = (wPark.st s).phase := by
       rw [setActor_other wPark id s dead hs]
     exact shape_releaseParked (setActor wPark id dead) id a.parked s dst call k
@@ -17169,7 +17174,7 @@ theorem shape_fail (w : World) (dead i s dst : InstId) (call : Bool) (k : Cont)
     by_cases hlive : (w.st s).life = .alive
     · have hgo : ((w.st s).life != .alive) = false := by simp [hlive, bne]
       simp only [failWaiter, hgo, ite_false]
-      rcases h with hpark | hres | hidle
+      rcases h with hpark | hres | hidle | hcrash
       · unfold phaseShape
         simp only [hpark]
         by_cases hd : dst = dead
@@ -17182,13 +17187,15 @@ theorem shape_fail (w : World) (dead i s dst : InstId) (call : Bool) (k : Cont)
         | nil =>
           have hid : (w.st s).phase = .idle := by simpa [resumed, hk] using hres
           simp only [hid]
-          exact Or.inr (Or.inr hid)
+          exact Or.inr (Or.inr (Or.inl hid))
         | cons _ _ =>
           have hrun : (w.st s).phase = .run k := by simpa [resumed, hk] using hres
           simp only [hrun]
           exact Or.inr (Or.inl (by simpa [resumed, hk] using hrun))
       · simp only [hidle]
-        exact Or.inr (Or.inr hidle)
+        exact Or.inr (Or.inr (Or.inl hidle))
+      · simp only [hcrash]
+        exact Or.inr (Or.inr (Or.inr hcrash))
     · have hgo : ((w.st s).life != .alive) = true := by
         cases hl : (w.st s).life <;> simp_all [bne]
       simp only [failWaiter, hgo, ite_true]
