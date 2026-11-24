@@ -8817,46 +8817,115 @@ theorem lane_finish (I : Impl) (w w' : World) (id : InstId) (hLane : PrioDeclare
   exact lane_same I w _ hLane (fun i => by
     by_cases hi : i = id <;> simp [setActor, proceed_prio, hi])
 
+/-- `placePeer` adds one actor whose priority lane is empty. `next` records the
+fresh key and does not write a priority list. -/
+theorem place_lane (I : Impl) (w : World) (hLane : PrioDeclared I w) (template : String)
+    (k : Nat) (initial : String) (parent : Option InstId) (next : World → World)
+    (hnext : ∀ (w0 : World) (i : InstId), ((next w0).st i).prio = (w0.st i).prio) :
+    PrioDeclared I (placePeer I w template k initial parent next) := by
+  unfold placePeer
+  let id := InstId.peer template k (maxGen w template k)
+  let born := { bornActor I.desc w template k initial with parent := parent }
+  have hp : born.prio = [] := by simp [born, bornActor, withKeyTokens]
+  have hros : PrioDeclared I { w with roster := w.roster ++ [id] } :=
+    lane_same I w _ hLane (fun _ => rfl)
+  have hN : PrioDeclared I (next { w with roster := w.roster ++ [id] }) :=
+    lane_same I _ _ hros (fun i => hnext _ i)
+  have hempty : (laneLabels born.prio).Nodup ∧
+      ∀ m ∈ born.prio, m.tombstone = true ∨ m.label ∈ prioLabels I (tname id) := by
+    rw [hp]
+    simp [laneLabels]
+  have hset := lane_set I (next { w with roster := w.roster ++ [id] }) hN id born hempty
+  -- `readCells` is the last step of `placePeer` and does not touch priority lists.
+  refine lane_same I _ _ hset ?_
+  intro i
+  simpa using congrArg (fun b : Actor => b.prio)
+    (readCells_st I.desc (setActor (next { w with roster := w.roster ++ [id] }) id born) id i)
+
 theorem lane_spawn (I : Impl) (w w' : World) (template : String) (hLane : PrioDeclared I w)
     (h : spawn I w template = some w') : PrioDeclared I w' := by
   unfold spawn at h
-  split at h
-  · cases h
-  · next t ht =>
-    split at h
-    · cases h
-      let nid := InstId.peer template (w.nextIx template)
-      let wR : World := ({ w with roster := w.roster ++ [nid], nextIx := fun n => if n = template then w.nextIx n + 1 else w.nextIx n } : World)
-      have hR : PrioDeclared I wR := lane_same I w wR hLane (fun _ => rfl)
-      let born : Actor := withTokens I.desc template
-        { life := .alive, typestate := t.initial, phase := .idle, box := [], prio := [], parked := [],
-          tokens := fun _ => 0 }
-      have hborn : PrioDeclared I (setActor wR nid born) :=
-        lane_set I wR hR nid born (by simp [born, withTokens, laneLabels])
-      have hst : ∀ i, ((readCells I.desc (setActor wR nid born) nid).st i).prio =
-          ((setActor wR nid born).st i).prio := fun i => by simp [readCells_st]
-      simpa [nid, wR, born] using lane_same I _ _ hborn hst
-    · cases h
+  cases ht : templateOf I.desc template with
+  | none => simp [ht] at h
+  | some t =>
+    simp only [ht] at h
+    by_cases hmay : maySpawnRoot I.desc w template t = true
+    · simp only [hmay, ite_true] at h
+      cases hsup : t.supervisor with
+      | some name =>
+        simp only [hsup] at h
+        let k := freshKey I.desc w t.subtree
+        cases h
+        exact place_lane I w hLane template k t.initial (some (InstId.core name))
+          (fun w0 => { w0 with nextKey := fun s => if s = t.subtree then k + 1 else w0.nextKey s })
+          (fun _ _ => rfl)
+      | none =>
+        by_cases hsub : (t.subtree == "") = true
+        · simp only [hsup, hsub, ite_true] at h
+          let k := w.nextIx template
+          cases h
+          exact place_lane I w hLane template k t.initial none
+            (fun w0 => { w0 with nextIx := fun n => if n = template then k + 1 else w0.nextIx n })
+            (fun _ _ => rfl)
+        · have hf : (t.subtree == "") = false := by simpa [Bool.not_eq_true] using hsub
+          simp only [hsup, hf, ite_false] at h
+          let k := freshKey I.desc w t.subtree
+          cases h
+          exact place_lane I w hLane template k t.initial none
+            (fun w0 => { w0 with nextKey := fun s => if s = t.subtree then k + 1 else w0.nextKey s })
+            (fun _ _ => rfl)
+    · have hf : maySpawnRoot I.desc w template t = false := by
+        simpa [Bool.not_eq_true] using hmay
+      simp [hf] at h
+
+/-- Dropping one priority message leaves a declared lane. A tombstone is not a
+label, so removing it does not change `laneLabels`. -/
+theorem lane_drop (I : Impl) (w : World) (hLane : PrioDeclared I w) (id : InstId)
+    (pre : List Msg) (m : Msg) (suf : List Msg)
+    (hp : (w.st id).prio = pre ++ m :: suf) :
+    (laneLabels (pre ++ suf)).Nodup ∧
+      ∀ x ∈ pre ++ suf, x.tombstone = true ∨ x.label ∈ prioLabels I (tname id) := by
+  have hmem := (hLane id).2
+  have hnd := (hLane id).1
+  rw [hp] at hmem hnd
+  refine ⟨?_, ?_⟩
+  · by_cases ht : m.tombstone = true
+    · have heq : laneLabels (pre ++ m :: suf) = laneLabels (pre ++ suf) := by
+        simp [laneLabels, List.filter_append, List.map_append, ht]
+      simpa [heq] using hnd
+    · have hf : m.tombstone = false := by
+        cases hb : m.tombstone <;> simp_all
+      have hfull : laneLabels (pre ++ m :: suf) =
+          laneLabels pre ++ m.label :: laneLabels suf := by
+        simp [laneLabels, List.filter_append, List.map_append, hf]
+      have hshort : laneLabels (pre ++ suf) = laneLabels pre ++ laneLabels suf := by
+        simp [laneLabels, List.filter_append, List.map_append]
+      rw [hfull] at hnd
+      rw [hshort]
+      have hsplit := (List.nodup_append).1 hnd
+      have hcons := (List.nodup_cons).1 hsplit.2.1
+      refine (List.nodup_append).2 ⟨hsplit.1, hcons.2, ?_⟩
+      intro x hx y hy
+      exact hsplit.2.2 x hx y (List.mem_cons_of_mem _ hy)
+  · intro x hx
+    apply hmem x
+    simp [List.mem_append] at hx ⊢
+    cases hx with
+    | inl h => exact Or.inl h
+    | inr h => exact Or.inr (Or.inr h)
 
 theorem lane_prio (I : Impl) (w w' : World) (id : InstId) (hLane : PrioDeclared I w)
     (h : receivePrio I w id = some w') : PrioDeclared I w' := by
-  unfold receivePrio at h
-  cases hprio : (w.st id).prio with
-  | nil => simp [hprio] at h
-  | cons m ms =>
-    simp [hprio] at h
-    split at h
-    · simp at h
-    · next w1 a1 hdel =>
-      cases h.2
-      have hst : ∀ i, (w1.st i).prio = (w.st i).prio := fun i => by
-        simp [deliver_st I w id _ m w1 a1 i hdel]
-      have hW : PrioDeclared I w1 := lane_same I w w1 hLane hst
-      have hp : a1.prio = ms := by
-        have hdelp := deliver_prio I w id ({ (w.st id) with prio := ms }) m w1 a1 hdel
-        simpa using hdelp
-      have htail := lane_tail I w hLane id m ms hprio
-      exact lane_set I w1 hW id a1 (by simpa [hp] using htail)
+  obtain ⟨m, pre, suf, w1, a1, _, _, hp, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+  rw [hw']
+  have hst (i : InstId) : (w1.st i).prio = (w.st i).prio := by
+    simpa using congrArg (fun b : Actor => b.prio)
+      (deliver_st I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 i hdel)
+  have hW : PrioDeclared I w1 := lane_same I w w1 hLane hst
+  have hkeep := lane_drop I w hLane id pre m suf hp
+  have ha : a1.prio = pre ++ suf := by
+    simpa using deliver_prio I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 hdel
+  exact lane_set I w1 hW id a1 (by simpa [ha] using hkeep)
 
 theorem lane_bulk (I : Impl) (w w' : World) (id : InstId) (hLane : PrioDeclared I w)
     (h : receiveBulk I w id = some w') : PrioDeclared I w' := by
@@ -9397,8 +9466,8 @@ theorem enqueue_not_crashed (w : World) (hpre : NoCrash w) (D : Description) (se
           by_cases hsame : sender = dst <;> simp [hsame, setActor]
         · simp [hroom]
           by_cases hsame : sender = dst <;> simp [hsame, setActor]
-      · simp [hlive, setActor]
-        exact proceed_not_crashed _ k
+      · simp [hlive, setActor, finishCall, issueCall]
+        exact proceed_not_crashed _ (selectCall k .notAdmitted)
   · simpa [enqueue_phase_other w D sender dst msg isCall k i hi] using hpre i
 
 theorem deliver_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg)
@@ -9407,14 +9476,17 @@ theorem deliver_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor) (m 
   split at h
   · cases h
   · split at h
+    · cases h
+      simp
     · split at h
-      · cases h
-      · cases h
-        simp
-    · split at h
-      · cases h
-      · cases h
-        split <;> simp
+      · split at h
+        · cases h
+        · cases h
+          simp
+      · split at h
+        · cases h
+        · cases h
+          split <;> simp
 
 theorem release_not_crashed (w : World) (hpre : NoCrash w) (id : InstId) (ps : List Parked)
     (i : InstId) : ((releaseParked w id ps).st i).phase ≠ .crashed := by
@@ -9441,24 +9513,23 @@ theorem failWaiter_not_crashed (w : World) (dead i s : InstId) (h : (w.st s).pha
   split
   · exact h
   · next _ =>
+    -- A parked call stays until its deadline. Only a parked send is released.
     cases hph : (w.st i).phase with
-    | parked d _ k =>
-      simp [hph]
-      split
-      · by_cases hs : s = i
-        · rw [hs]
-          simp [setActor]
-          exact proceed_not_crashed _ k
-        · simpa [setActor, hs] using h
-      · exact h
-    | awaitReply d _ =>
-      simp [hph]
-      split
-      · by_cases hs : s = i
-        · rw [hs]
-          simp [setActor]
-        · simpa [setActor, hs] using h
-      · exact h
+    | parked d b k =>
+      cases b with
+      | true => simp [hph]; exact h
+      | false =>
+        by_cases hd : (d == dead) = true
+        · simp [hph, hd, setActor]
+          by_cases hs : s = i
+          · rw [hs]
+            simp [setActor]
+            exact proceed_not_crashed _ k
+          · simpa [setActor, hs] using h
+        · have hf : (d == dead) = false := by simpa [Bool.not_eq_true] using hd
+          simp [hph, hf]
+          exact h
+    | awaitReply _ _ => simp [hph]; exact h
     | idle => simp [hph]; exact h
     | run _ => simp [hph]; exact h
     | awaitEffect _ => simp [hph]; exact h
@@ -9477,68 +9548,179 @@ theorem failFold_not_crashed (w : World) (dead : InstId) (ids : List InstId) (s 
 theorem releaseWorld_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor)
     (hpre : NoCrash w) : NoCrash (releaseWorld I.desc w id a) := by
   intro i
-  unfold releaseWorld
-  let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) a.box) (tname id) a.parked
-  have hbase : NoCrash base := by
+  let w1 := readCells I.desc w id
+  let w2 := refundMsgs w1 (tname id) a.box
+  let w3 := refundParked w2 (tname id) a.parked
+  let w4 := releaseOutbound w3 id
+  have hpre4 : NoCrash w4 := by
     intro j
-    simpa [base, readCells_st, phase_refund, phase_refundP] using hpre j
+    have h1 : (w1.st j).phase = (w.st j).phase :=
+      congrArg (fun b : Actor => b.phase) (readCells_st I.desc w id j)
+    have h2 := phase_refund w1 (tname id) a.box j
+    have h3 := phase_refundP w2 (tname id) a.parked j
+    have h4 := releaseOutbound_phase w3 id j
+    have heq : (w4.st j).phase = (w.st j).phase := by
+      simpa [w1, w2, w3, w4] using h4.trans (h3.trans (h2.trans h1))
+    rw [heq]
+    exact hpre j
   let dead : Actor :=
-    { base.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
-  have hdead : NoCrash (setActor base id dead) := by
+    { w4.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+  have hdead : NoCrash (setActor w4 id dead) := by
     intro j
     by_cases hj : j = id
     · rw [hj]
       simp [setActor, dead]
-    · simpa [setActor, hj] using hbase j
-  simpa [base, dead] using release_not_crashed (setActor base id dead) hdead id a.parked i
+    · simpa [setActor, hj] using hpre4 j
+  have hbody : releaseWorld I.desc w id a =
+      releaseParked (setActor w4 id dead) id a.parked := by
+    simp [releaseWorld, w1, w2, w3, w4, dead]
+  rw [hbody]
+  exact release_not_crashed (setActor w4 id dead) hdead id a.parked i
 
-theorem abort_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor) (hpre : NoCrash w) :
-    NoCrash (abortActor I.desc w id a) := by
-  intro i
-  have hrel := releaseWorld_not_crashed I w id a hpre i
-  have hfail := failFold_not_crashed (releaseWorld I.desc w id a) id
-    (releaseWorld I.desc w id a).roster i hrel
-  rw [abortActor, (admitDead_phase (failWaiters (releaseWorld I.desc w id a) id) id i).1]
-  simpa [failWaiters] using hfail
+/-- `crashWorld` either leaves every phase uncrashed, or it turns a live roster
+member into the crashed witness. An empty live set is the first case. -/
+theorem crash_or (w : World) (hpre : NoCrash w) :
+    NoCrash (crashWorld w) ∨ WorldCrashed (crashWorld w) := by
+  by_cases hlive : ∃ id, id ∈ w.roster ∧ (w.st id).life = .alive
+  · rcases hlive with ⟨id, hmem, hl⟩
+    refine Or.inr ⟨id, ?_, ?_, ?_⟩
+    · simpa [crashWorld] using hmem
+    · simp [crashWorld, crashActor, hl, if_pos hmem]
+    · simp [crashWorld, crashActor, hl, if_pos hmem]
+  · refine Or.inl ?_
+    intro i
+    by_cases hmem : i ∈ w.roster
+    · have hn : (w.st i).life ≠ .alive := by
+        intro hl
+        exact hlive ⟨i, hmem, hl⟩
+      cases hl : (w.st i).life with
+      | alive => exact absurd hl hn
+      | absent =>
+        simp [crashWorld, crashActor, hl, if_pos hmem]
+        exact hpre i
+      | dead =>
+        simp [crashWorld, crashActor, hl, if_pos hmem]
+        exact hpre i
+    · simpa [crashWorld, if_neg hmem] using hpre i
 
-theorem abortDesc_not_crashed (fuel : Nat) (I : Impl) (w : World) (parent : InstId)
-    (hpre : NoCrash w) : NoCrash (abortDesc fuel I.desc w parent) := by
-  induction fuel generalizing w parent with
-  | zero => simpa [abortDesc] using hpre
+/-- A tombstone either preserves `NoCrash` or crashes the world. An empty label
+and a full priority lane are the crash arms; a dropped parent is the identity. -/
+theorem tombstone_or (D : Description) (w : World) (hpre : NoCrash w) (child : InstId) :
+    NoCrash (enqueueTombstone D w child) ∨ WorldCrashed (enqueueTombstone D w child) := by
+  cases hparent : (w.st child).parent with
+  | none =>
+    simp only [enqueueTombstone, hparent]
+    exact Or.inl hpre
+  | some parent =>
+    simp only [enqueueTombstone, hparent]
+    let msg := tombstoneMsg D (w.st parent) child
+    by_cases hl : (w.st parent).life = .alive
+    · have hgo : ((w.st parent).life != .alive) = false := by simp [hl, bne]
+      simp only [hgo, ite_false]
+      by_cases hlab : (msg.label == "") = true
+      · simp only [msg, hlab, ite_true]
+        exact crash_or w hpre
+      · have hlabf : (msg.label == "") = false := by simpa [Bool.not_eq_true] using hlab
+        simp only [msg, hlabf, ite_false]
+        unfold offerPrio
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · simp only [hfull, ite_true]
+          exact crash_or w hpre
+        · have hempty : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+            simpa [Bool.not_eq_true] using hfull
+          simp only [hempty, ite_false]
+          refine Or.inl ?_
+          intro i
+          by_cases hi : i = parent
+          · rw [hi]
+            simp [setActor]
+            exact hpre parent
+          · simpa [setActor, hi] using hpre i
+    · cases hlife : (w.st parent).life with
+      | alive => exact absurd hlife hl
+      | absent =>
+        simp [hlife, bne]
+        exact Or.inl hpre
+      | dead =>
+        simp [hlife, bne]
+        exact Or.inl hpre
+
+theorem seal_or (I : Impl) (w : World) (hpre : NoCrash w) (id : InstId) (a : Actor) :
+    NoCrash (sealActor I.desc w id a) ∨ WorldCrashed (sealActor I.desc w id a) := by
+  simp only [sealActor]
+  exact tombstone_or I.desc (releaseWorld I.desc w id a)
+    (releaseWorld_not_crashed I w id a hpre) id
+
+theorem shutdown_or (I : Impl) (w : World) (hpre : NoCrash w) (id : InstId) :
+    NoCrash (shutdownActor I.desc w id) ∨ WorldCrashed (shutdownActor I.desc w id) := by
+  unfold shutdownActor
+  split
+  · exact seal_or I w hpre id (w.st id)
+  · exact Or.inl hpre
+
+/-- `sealBranch` only calls `releaseWorld`. It does not enqueue a tombstone, so
+it cannot crash. -/
+theorem sealBranch_not_crashed (fuel : Nat) (I : Impl) (w : World) (id : InstId)
+    (hpre : NoCrash w) : NoCrash (sealBranch fuel I.desc w id) := by
+  revert w id hpre
+  induction fuel with
+  | zero =>
+    intro w id hpre
+    simpa [sealBranch] using hpre
   | succ fuel ih =>
-    simp only [abortDesc]
-    suffices ∀ (ids : List InstId) (w0 : World), NoCrash w0 →
-        NoCrash (ids.foldl (fun w child =>
-          if isChild I.desc parent child && (w.st child).life == .alive &&
-              childTerminable I.desc child then
-            let w := abortDesc fuel I.desc w child
-            abortActor I.desc w child (w.st child)
-          else w) w0) by
+    intro w id hpre
+    unfold sealBranch
+    let sealed := w.roster.foldl (fun acc child =>
+      if isChild acc id child then sealBranch fuel I.desc acc child else acc) w
+    have hfold : NoCrash sealed := by
+      have : ∀ (ids : List InstId) (w0 : World), NoCrash w0 →
+          NoCrash (ids.foldl (fun acc child =>
+            if isChild acc id child then sealBranch fuel I.desc acc child else acc) w0) := by
+        intro ids
+        induction ids with
+        | nil => intro w0 h0; simpa using h0
+        | cons c ids ihf =>
+          intro w0 h0
+          simp only [List.foldl_cons]
+          by_cases hgo : (isChild w0 id c) = true
+          · simp only [hgo, ite_true]
+            exact ihf _ (ih w0 c h0)
+          · simp only [hgo, ite_false]
+            exact ihf w0 h0
       exact this w.roster w hpre
+    by_cases hgo : ((sealed.st id).life == .alive) = true
+    · simp only [sealed, hgo, ite_true]
+      exact releaseWorld_not_crashed I sealed id (sealed.st id) hfold
+    · have hf : ((sealed.st id).life == .alive) = false := by simpa [Bool.not_eq_true] using hgo
+      simp only [sealed, hf, ite_false]
+      exact hfold
+
+theorem drop_not_crashed (I : Impl) (w : World) (hpre : NoCrash w) (id : InstId) :
+    NoCrash (dropDescendants I.desc w id) := by
+  unfold dropDescendants
+  have : ∀ (ids : List InstId) (w0 : World), NoCrash w0 →
+      NoCrash (ids.foldl (fun acc child =>
+        if isChild acc id child then sealBranch w.roster.length I.desc acc child else acc) w0) := by
     intro ids
     induction ids with
     | nil => intro w0 h0; simpa using h0
-    | cons c ids ihf =>
+    | cons c ids ih =>
       intro w0 h0
       simp only [List.foldl_cons]
-      by_cases hgo : (isChild I.desc parent c && (w0.st c).life == .alive &&
-          childTerminable I.desc c) = true
-      · rw [if_pos hgo]
-        exact ihf _ (abort_not_crashed I _ c ((abortDesc fuel I.desc w0 c).st c)
-          (ih w0 c h0))
-      · rw [if_neg hgo]
-        exact ihf w0 h0
+      by_cases hgo : (isChild w0 id c) = true
+      · simp only [hgo, ite_true]
+        exact ih _ (sealBranch_not_crashed w.roster.length I w0 c h0)
+      · simp only [hgo, ite_false]
+        exact ih w0 h0
+  exact this w.roster w hpre
 
+/-- `terminateStage` is a shutdown of the dropped tree. The tombstone on the
+root can crash, so the result is a disjunction. -/
 theorem terminate_not_crashed (I : Impl) (w : World) (id : InstId) (hpre : NoCrash w) :
-    NoCrash (terminateStage I.desc w id (w.st id)) := by
-  intro i
+    NoCrash (terminateStage I.desc w id (w.st id)) ∨
+      WorldCrashed (terminateStage I.desc w id (w.st id)) := by
   simp only [terminateStage]
-  let w1 := abortDesc w.roster.length I.desc w id
-  let w2 := abortActor I.desc w1 id (w1.st id)
-  have habort := abort_not_crashed I w1 id (w1.st id)
-    (abortDesc_not_crashed w.roster.length I w id hpre) i
-  intro hbad
-  exact habort ((enqueueTombstone_phase I.desc w2 id i).symm.trans hbad)
+  exact shutdown_or I (dropDescendants I.desc w id) (drop_not_crashed I w hpre id) id
 
 theorem killOne_not_crashed (w : World) (D : Description) (id s : InstId)
     (h : (w.st s).phase ≠ .crashed) : ((killOne w D id).st s).phase ≠ .crashed := by
