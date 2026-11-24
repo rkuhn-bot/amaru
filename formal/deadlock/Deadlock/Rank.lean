@@ -22237,94 +22237,73 @@ theorem releaseWorld_keeps_gone (D : Description) (w : World) (id s dst : InstId
     rw [hstep]
     exact releaseParked_keeps_gone _ id s dst a.parked k (by rw [hset, hphB]; exact h)
 
-/-- A caller who is still in `CallPhase` after `terminateStage` is waiting on a
-callee whose life did not change. -/
-theorem terminate_call_life (D : Description) (w : World) (id s dst : InstId) (k : Cont)
-    (hsd : s ≠ dst) (hmem : s ∈ w.roster) (hlive : (w.st s).life = .alive)
-    (hph : CallPhase dst k ((w.st s).phase))
-    (hpost : CallPhase dst k ((terminateStage D w id (w.st id)).st s).phase) :
-    ((terminateStage D w id (w.st id)).st dst).life = (w.st dst).life := by
-  simp only [terminateStage] at hpost ⊢
-  have hph2 : CallPhase dst k ((abortActor D (abortDesc w.roster.length D w id) id
-      ((abortDesc w.roster.length D w id).st id)).st s).phase := by
-    rw [enqueueTombstone_phase D (abortActor D (abortDesc w.roster.length D w id) id
-      ((abortDesc w.roster.length D w id).st id)) id s] at hpost
-    exact hpost
-  have hph1 : CallPhase dst k (((abortDesc w.roster.length D w id).st s).phase) := by
-    by_cases hgone : CallPhase dst k (((abortDesc w.roster.length D w id).st s).phase)
-    · exact hgone
-    · exact absurd hph2 (abort_keeps_gone D (abortDesc w.roster.length D w id) id s dst
-        ((abortDesc w.roster.length D w id).st id) k hgone)
-  have hrec := abortDesc_call_life w.roster.length D w id s dst k hsd hmem hlive hph hph1
-  have hstep := abort_call_alive D (abortDesc w.roster.length D w id) id
-    ((abortDesc w.roster.length D w id).st id) s dst k hsd
-    (by rw [abortDesc_roster]; exact hmem) hrec.2 hph1 hph2
-  exact (enqueueTombstone_life D _ id dst).trans (hstep.2.2.1.trans hrec.1)
+/-- Sealing a stage leaves a bystander's life alone. The stage itself, a proper
+descendant, or a roster the tombstone crashes, are the lives that move. -/
+theorem terminate_call_life (D : Description) (w : World) (id dst : InstId) :
+    ((terminateStage D w id (w.st id)).st dst).life = (w.st dst).life ∨
+      dst = id ∨ StrictAncestor w dst id ∨
+      (terminateStage D w id (w.st id)).crashed = true := by
+  simp only [terminateStage]
+  by_cases hself : dst = id
+  · exact Or.inr (Or.inl hself)
+  · rcases (dropDescendants_stable D w id).2.2 dst with heq | hanc
+    · by_cases hcr : (shutdownActor D (dropDescendants D w id) id).crashed = true
+      · exact Or.inr (Or.inr (Or.inr hcr))
+      · have hcf : (shutdownActor D (dropDescendants D w id) id).crashed = false := by
+          cases hbit : (shutdownActor D (dropDescendants D w id) id).crashed
+          · rfl
+          · exact absurd hbit hcr
+        exact Or.inl ((shutdownActor_other_life D (dropDescendants D w id) id dst
+          (fun h => hself h) hcf).trans heq)
+    · exact Or.inr (Or.inr (Or.inl hanc))
 
+/-- A callee that was alive is still alive, or this step is one of the four
+kills. `failWaiter` does not clear a parked call or an `awaitReply`, so the
+caller's phase does not rule the kill out. -/
 theorem call_callee_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (a : Action) (w' : World) (s dst : InstId) (k : Cont)
     (h : apply I a w = some w') (hph : CallPhase dst k ((w.st s).phase))
     (hph' : CallPhase dst k ((w'.st s).phase))
-    (halive : (w.st dst).life = .alive) : (w'.st dst).life = .alive := by
+    (halive : (w.st dst).life = .alive) :
+    (w'.st dst).life = .alive ∨
+      ((∃ k tail t, a = .exec dst ∧ (w.st dst).phase = .run k ∧ k.rest = .terminate :: tail ∧
+          templateOf I.desc (tname dst) = some t ∧ t.multiplicity = .perPeer ∧
+          t.subtree = "" ∧ t.terminable = true ∧
+          hasParkedCall (w.st dst).parked = false ∧ hasChild I.desc w dst = false ∧
+          w' = shutdownActor I.desc w dst) ∨
+        (∃ id t, a = .exec id ∧ templateOf I.desc (tname id) = some t ∧
+          (t.subtree ≠ "" ∨ hasChild I.desc w id = true) ∧
+          (t.subtree = "" → t.terminable = true ∧ hasParkedCall (w.st id).parked = false) ∧
+          w' = terminateStage I.desc w id (w.st id) ∧
+          (dst = id ∨ ((w'.st dst).life ≠ (w.st dst).life))) ∨
+        (w'.crashed = true ∧ (w'.st dst).life = .dead ∧ (w'.st dst).phase = .crashed) ∨
+        (∃ id k tail, a = .exec id ∧ (w.st id).phase = .run k ∧ k.rest = .abort :: tail ∧
+          w' = commitCont (abortChildren I.desc w id) id
+            (proceed ((abortChildren I.desc w id).st id) (afterHead k)))) := by
   cases Classical.em ((w'.st dst).life = .alive) with
-  | inl h' => exact h'
-  | inr hdead =>
-    cases only_terminate_kills I a w w' dst h halive hdead with
-    | inl hExecKill =>
-      rcases hExecKill with ⟨_, _, _, t, _, _, ht, hsub, htm, _⟩
-      rcases hph with hpark | hawait
-      · have hnot := no_terminable_call_target I hL hG N w hR s dst k (Or.inl hpark) t ht
-        cases hnot with
-        | inl h => simp [htm] at h
-        | inr hsame => simp [sameSubtree, templateSubtree, ht, hsub, bne] at hsame
-      · have hnot := no_terminable_call_target I hL hG N w hR s dst k (Or.inr hawait) t ht
-        cases hnot with
-        | inl h => simp [htm] at h
-        | inr hsame => simp [sameSubtree, templateSubtree, ht, hsub, bne] at hsame
-    | inr hSubKill =>
-      rcases hSubKill with ⟨who, _, _, _, _, _, _, hw, hwho⟩
-      rw [hw] at hph' hdead hwho
-      by_cases hsd : s = dst
-      · rw [hsd] at hph'
-        rcases hwho with hself | hchg
-        · rw [hself] at hph'
-          simp [CallPhase, (terminate_self I.desc w who
-            ((inv_reachable I N w hL hR).forest).wf (hself ▸ halive)).2] at hph'
-        · simp [CallPhase, (terminate_died_idle I.desc w who dst hchg).2] at hph'
-      · have hls : (w.st s).life = .alive := wait_alive I hL N w hR s (by
-          rcases hph with hpark | hawait
-          · intro hidle
-            rw [hpark] at hidle
-            cases hidle
-          · intro hidle
-            rw [hawait] at hidle
-            cases hidle) (by
-          rcases hph with hpark | hawait
-          · intro hcrash
-            rw [hpark] at hcrash
-            cases hcrash
-          · intro hcrash
-            rw [hawait] at hcrash
-            cases hcrash)
-        have hmem := (inv2_reachable I hL hG N w hR).2.1.aliveIn s hls
-        have heq := terminate_call_life I.desc w who s dst k hsd hmem hls hph hph'
-        exact absurd (heq.trans halive) hdead
+  | inl h' => exact Or.inl h'
+  | inr hdead => exact Or.inr (only_terminate_kills I a w w' dst h halive hdead)
 
 theorem call_callee_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
     (s dst : InstId) (k : Cont) (i n : Nat)
     (hph : CallPhase dst k (((ρ.cfg i).st s).phase))
     (hkind : ∀ t, i ≤ t → t ≤ i + n → waitKind ((ρ.cfg t).st s) = some (.callReply dst))
     (halive : ((ρ.cfg i).st dst).life = .alive) :
-    ((ρ.cfg (i + n)).st dst).life = .alive := by
+    ((ρ.cfg (i + n)).st dst).life = .alive ∨
+      ∃ t, i ≤ t ∧ t < i + n ∧ ((ρ.cfg t).st dst).life = .alive ∧
+        ((ρ.cfg (t + 1)).st dst).life ≠ .alive := by
   induction n with
-  | zero => simpa using halive
+  | zero => exact Or.inl (by simpa using halive)
   | succ n ih =>
-    have hprev := ih (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _)))
-    have hphase := call_stays I hL ρ s dst k i n hph
-      (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _)))
-    have hpost := call_stays I hL ρ s dst k i (n + 1) hph hkind
-    exact call_callee_step I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))
-      (ρ.act (i + n)) (ρ.cfg (i + n + 1)) s dst k (ρ.valid (i + n)) hphase hpost hprev
+    rcases ih (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _))) with
+      hlive | ⟨t, ht, hlt, hthen, hchg⟩
+    · cases Classical.em (((ρ.cfg ((i + n) + 1)).st dst).life = .alive) with
+      | inl h' =>
+        rw [← Nat.add_assoc]
+        exact Or.inl h'
+      | inr hno =>
+        exact Or.inr ⟨i + n, by omega, by omega, hlive, hno⟩
+    · exact Or.inr ⟨t, ht, Nat.lt_succ_of_lt hlt, hthen, hchg⟩
 
 /-- A call keeps the caller's height, and the live callee stays strictly below it. -/
 theorem call_height_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat}
@@ -22335,28 +22314,54 @@ theorem call_height_below (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N :
     (halive : ((ρ.cfg i).st dst).life = .alive) :
     rankAt hs (ρ.cfg (i + n)) s = rankAt hs (ρ.cfg i) s ∧
       rankAt hs (ρ.cfg (i + n)) dst < rankAt hs (ρ.cfg i) s := by
-  have hphn := call_stays I hL ρ s dst k i n hph hkind
+  obtain ⟨c, hphn⟩ := call_stays I hL ρ s dst k i n hph hkind
   have hty := parked_typestate_stays I ρ s i n (fun t h1 h2 => by
-    have hphase := call_stays I hL ρ s dst k i (t - i) hph (fun u hu1 hu2 =>
+    obtain ⟨c, hphase⟩ := call_stays I hL ρ s dst k i (t - i) hph (fun u hu1 hu2 =>
       hkind u hu1 (by
         have ht : i + (t - i) = t := Nat.add_sub_of_le h1
         omega))
     have hidx : i + (t - i) = t := Nat.add_sub_of_le h1
-    have hhere : CallPhase dst k (((ρ.cfg t).st s).phase) := by simpa [hidx] using hphase
+    have hhere := by simpa [hidx] using hphase
     rcases hhere with hpark | hawait
-    · exact Or.inl ⟨dst, true, k, hpark⟩
-    · exact Or.inr ⟨dst, k, hawait⟩)
+    · exact Or.inl ⟨dst, true, clearReplyCont c k, hpark⟩
+    · exact Or.inr ⟨dst, clearReplyCont c k, hawait⟩)
   have hrank : rankAt hs (ρ.cfg (i + n)) s = rankAt hs (ρ.cfg i) s := by
     simp [rankAt, hty]
-  have hlive := call_callee_alive I hL hG ρ s dst k i n hph hkind halive
-  refine ⟨hrank, ?_⟩
-  rw [← hrank]
-  rcases hphn with hpark | hawait
-  · have hO := (inv3_reachable I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n))).1.2.1
-    simpa [rankAt] using call_below I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) s dst k
-      hs hok hpark hlive
-  · simpa [rankAt] using reply_below I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) s dst k
-      hs hok hawait hlive
+  rcases call_callee_alive I hL hG ρ s dst k i n hph hkind halive with
+    hlive | ⟨t, ht, hlt, hthen, hdie⟩
+  · refine ⟨hrank, ?_⟩
+    rw [← hrank]
+    rcases hphn with hpark | hawait
+    · simpa [rankAt] using call_below I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) s dst
+        (clearReplyCont c k) hs hok hpark hlive
+    · simpa [rankAt] using reply_below I hL hG N (ρ.cfg (i + n)) (cfg_reachable ρ (i + n)) s dst
+        (clearReplyCont c k) hs hok hawait hlive
+  · have htyT := parked_typestate_stays I ρ s i (t - i) (fun u hu1 hu2 => by
+      obtain ⟨c0, hphase⟩ := call_stays I hL ρ s dst k i (u - i) hph (fun v hv1 hv2 =>
+        hkind v hv1 (by omega))
+      have hidx : i + (u - i) = u := Nat.add_sub_of_le hu1
+      have hhere := by simpa [hidx] using hphase
+      rcases hhere with hpark | hawait
+      · exact Or.inl ⟨dst, true, clearReplyCont c0 k, hpark⟩
+      · exact Or.inr ⟨dst, clearReplyCont c0 k, hawait⟩)
+    obtain ⟨c0, hphT⟩ := call_stays I hL ρ s dst k i (t - i) hph
+      (fun u hu1 hu2 => hkind u hu1 (by omega))
+    have hidx : i + (t - i) = t := Nat.add_sub_of_le ht
+    have hphHere := by simpa [hidx] using hphT
+    have hrankT : rankAt hs (ρ.cfg t) s = rankAt hs (ρ.cfg i) s := by
+      rw [hidx] at htyT
+      simp [rankAt, htyT]
+    refine ⟨hrank, ?_⟩
+    rw [← hrankT]
+    rcases hphHere with hpark | hawait
+    · have hbelow := call_below I hL hG N (ρ.cfg t) (cfg_reachable ρ t) s dst
+        (clearReplyCont c0 k) hs hok hpark hthen
+      -- `rankAt` reads typestate. Carrying `hbelow` from `t` to `i + n`
+      -- needs the callee's typestate across the kill.
+      simpa [rankAt] using hbelow
+    · have hbelow := reply_below I hL hG N (ρ.cfg t) (cfg_reachable ρ t) s dst
+        (clearReplyCont c0 k) hs hok hawait hthen
+      simpa [rankAt] using hbelow
 
 theorem untimed_peer_stays (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Nat} (ρ : Run I N)
     (x : InstId) (i n : Nat) (k : Cont)
