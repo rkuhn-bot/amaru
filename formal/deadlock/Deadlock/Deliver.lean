@@ -2618,7 +2618,9 @@ def admittedCall (a : Actor) (m : Msg) : Prop :=
 
 /-- If the call is admitted and the callee stays alive, the callee handles that
 request: a `recvBulk` of message `mid`. The caller's outcome is not part of
-the claim. `call_answered_reply_false` is the race that makes a `Reply`
+the claim. `caller_leaves_await` is the separate unconditional result that
+the caller later leaves `awaitReply`, which was the statement of this name
+at `170f0ad85`. `call_answered_reply_false` is the race that makes a `Reply`
 promise false. `Reply`, `TimedOut`, and `NotAdmitted` are the caller's three
 outcomes, each on its own continuation. -/
 theorem call_answered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I)

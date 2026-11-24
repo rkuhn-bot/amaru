@@ -170,6 +170,8 @@ import Deadlock.Json
 #print axioms Deadlock.park_local_ok
 #print axioms Deadlock.park_reachable
 #print axioms Deadlock.park_unblocks
+#print axioms Deadlock.caller_leaves_await
+#print axioms Deadlock.call_answered
 #print axioms Deadlock.fair_delivered
 #print axioms Deadlock.loss_fair
 #print axioms Deadlock.loss_not_delivered

@@ -1131,3 +1131,31 @@ including an arm that can never fire. That is stricter than
 Helen found no counterexample of `call_answered` under partial
 compatibility. That question is closed. The Rust checker is not
 recorded here.
+
+## 2026-11-24 — Caller progress is not the callee's recvBulk
+
+At `170f0ad85`, `call_answered` was this statement, and it was the fourth
+conjunct of `Delivered`:
+
+```
+theorem call_answered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc)
+    (hA : Assumptions I) {N : Nat} (ρ : Run I N) (hF : Fair ρ)
+    (i : Nat) (c d : InstId) (k : Cont)
+    (hph : ((ρ.cfg i).st c).phase = .awaitReply d k) :
+    ∃ j, i ≤ j ∧ ((ρ.cfg j).st c).phase ≠ .awaitReply d k
+```
+
+The 2026-11-20 decision "call_answered does not promise Reply" reassigned
+the name. The current `call_answered` is a different proposition: an
+admitted call, plus the callee staying alive, yields `recvBulk` of that
+`mid`. That decision does not authorize dropping the older conclusion.
+It says the callee-side guarantee and the caller-side outcome totality
+are the final form of the name, and it names `await_not_forever` as the
+fact that a live `awaitReply` does not last. `await_not_forever` still
+takes the caller's life as a hypothesis and concludes `False` from a
+universal stay. The existential above does not.
+
+`caller_leaves_await` is that existential, under the same hypotheses.
+The caller's life is derived: a wait that stays is `Stuck`, and
+`stuck_alive` reads `idleOff`. The deadline then fires. No hypothesis
+was added. The `recvBulk` theorem keeps the name `call_answered`.
