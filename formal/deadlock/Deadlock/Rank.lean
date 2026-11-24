@@ -24727,6 +24727,223 @@ theorem killFold_no_sender_parked (w : World) (D : Description) (sub : String) (
 /-- A subtree kill preserves call tags. Members die together, so a call inside the
 subtree leaves no survivor waiting. An outsider's call phase is `outsider_view`,
 and mail that names an outsider stays. -/
+theorem refundMsgs_ids (w : World) (name : String) (ms : List Msg) (i : InstId) :
+    ((refundMsgs w name ms).st i).oweId = (w.st i).oweId ∧
+      ((refundMsgs w name ms).st i).waitId = (w.st i).waitId := by
+  induction ms generalizing w with
+  | nil => simp [refundMsgs]
+  | cons m ms ih =>
+    simp only [refundMsgs, List.foldl_cons]
+    have h1 := credit_ids w name (budgetHolder w m.sender) i
+    have h2 := ih (creditLive w name m.sender)
+    exact ⟨h2.1.trans h1.2.2.1, h2.2.trans h1.2.2.2.1⟩
+
+theorem refundParked_ids (w : World) (name : String) (ps : List Parked) (i : InstId) :
+    ((refundParked w name ps).st i).oweId = (w.st i).oweId ∧
+      ((refundParked w name ps).st i).waitId = (w.st i).waitId := by
+  induction ps generalizing w with
+  | nil => simp [refundParked]
+  | cons p ps ih =>
+    simp only [refundParked, List.foldl_cons]
+    have h1 := credit_ids w name (budgetHolder w p.msg.sender) i
+    have h2 := ih (creditLive w name p.msg.sender)
+    exact ⟨h2.1.trans h1.2.2.1, h2.2.trans h1.2.2.2.1⟩
+
+theorem failWaiter_ids (w : World) (dead i j : InstId) :
+    ((failWaiter w dead i).st j).oweId = (w.st j).oweId ∧
+      ((failWaiter w dead i).st j).waitId = (w.st j).waitId := by
+  unfold failWaiter
+  by_cases hl : ((w.st i).life != .alive) = true
+  · rw [if_pos hl]
+    exact ⟨rfl, rfl⟩
+  · rw [if_neg hl]
+    cases hph : (w.st i).phase with
+    | parked d b k =>
+      cases b with
+      | false =>
+        dsimp
+        by_cases hd : (d == dead) = true
+        · rw [if_pos hd]
+          by_cases hj : j = i
+          · simp [setActor, hj, proceed_stamps]
+          · simp [setActor, hj]
+        · rw [if_neg hd]
+          exact ⟨rfl, rfl⟩
+      | true =>
+        exact ⟨rfl, rfl⟩
+    | idle => exact ⟨rfl, rfl⟩
+    | run _ => exact ⟨rfl, rfl⟩
+    | awaitReply _ _ => exact ⟨rfl, rfl⟩
+    | awaitEffect _ => exact ⟨rfl, rfl⟩
+    | awaitPeer _ => exact ⟨rfl, rfl⟩
+    | crashed => exact ⟨rfl, rfl⟩
+
+theorem failFold_ids (w : World) (dead j : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w i => failWaiter w dead i) w).st j).oweId = (w.st j).oweId ∧
+      ((ids.foldl (fun w i => failWaiter w dead i) w).st j).waitId = (w.st j).waitId := by
+  induction ids generalizing w with
+  | nil => exact ⟨rfl, rfl⟩
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    have h1 := failWaiter_ids w dead i j
+    have h2 := ih (failWaiter w dead i)
+    exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+
+theorem forgetHost_ids (w : World) (dead host i : InstId) :
+    ((forgetHost w dead host).st i).oweId = (w.st i).oweId ∧
+      ((forgetHost w dead host).st i).waitId = (w.st i).waitId := by
+  unfold forgetHost
+  by_cases h1 : (host == dead) = true
+  · rw [if_pos h1]
+    exact ⟨rfl, rfl⟩
+  · rw [if_neg h1]
+    by_cases h2 : (outboundCount dead (w.st host) == 0) = true
+    · rw [if_pos h2]
+      exact ⟨rfl, rfl⟩
+    · rw [if_neg h2]
+      have hne : host ≠ dead := by
+        intro h
+        exact h1 (by simpa [beq_iff_eq, h])
+      simp only [setActor, stripSender, addTokens]
+      by_cases hi : i = host
+      · rw [if_neg (by rw [hi]; exact hne : ¬ i = dead), if_pos hi]
+        simp [stripSender, hi]
+      · by_cases hid : i = dead
+        · rw [if_pos hid, if_neg hne.symm]
+          simp [addTokens, hid]
+        · rw [if_neg hid, if_neg hi]
+          exact ⟨rfl, rfl⟩
+
+theorem forgetFold_ids (w : World) (dead i : InstId) (ids : List InstId) :
+    ((ids.foldl (fun w host => forgetHost w dead host) w).st i).oweId = (w.st i).oweId ∧
+      ((ids.foldl (fun w host => forgetHost w dead host) w).st i).waitId = (w.st i).waitId := by
+  induction ids generalizing w with
+  | nil => exact ⟨rfl, rfl⟩
+  | cons host ids ih =>
+    simp only [List.foldl_cons]
+    have h1 := forgetHost_ids w dead host i
+    have h2 := ih (forgetHost w dead host)
+    exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+
+/-- `killOne` refunds mail and clears the victim. Neither step moves a call id. -/
+theorem killOne_ids (w : World) (D : Description) (id i : InstId) :
+    ((killOne w D id).st i).oweId = (w.st i).oweId ∧
+      ((killOne w D id).st i).waitId = (w.st i).waitId := by
+  let w1 := readCells D w id
+  have h1 : (w1.st i).oweId = (w.st i).oweId ∧ (w1.st i).waitId = (w.st i).waitId := by
+    rw [show w1.st i = w.st i from cellsSt D w id i]
+    exact ⟨rfl, rfl⟩
+  let w2 := refundMsgs w1 (tname id) (w.st id).box
+  have h2 := refundMsgs_ids w1 (tname id) (w.st id).box i
+  let w3 := refundParked w2 (tname id) (w.st id).parked
+  have h3 := refundParked_ids w2 (tname id) (w.st id).parked i
+  let w4 := failWaiters w3 id
+  have h4 : (w4.st i).oweId = (w3.st i).oweId ∧ (w4.st i).waitId = (w3.st i).waitId := by
+    simpa [w4, failWaiters] using failFold_ids w3 id i w3.roster
+  let w5 := forgetSender w4 id
+  have h5 : (w5.st i).oweId = (w4.st i).oweId ∧ (w5.st i).waitId = (w4.st i).waitId := by
+    simpa [w5, forgetSender] using forgetFold_ids w4 id i w4.roster
+  have hbody : killOne w D id =
+      setActor w5 id { w5.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] } := by
+    simp [killOne, w1, w2, w3, w4, w5, failWaiters, forgetSender]
+  rw [hbody]
+  have hchainO : (w5.st i).oweId = (w.st i).oweId :=
+    h5.1.trans (h4.1.trans (h3.1.trans (h2.1.trans h1.1)))
+  have hchainW : (w5.st i).waitId = (w.st i).waitId :=
+    h5.2.trans (h4.2.trans (h3.2.trans (h2.2.trans h1.2)))
+  by_cases hi : i = id
+  · rw [hi] at hchainO hchainW ⊢
+    rw [setActor_self]
+    exact ⟨hchainO, hchainW⟩
+  · rw [setActor_other _ _ _ _ hi]
+    exact ⟨hchainO, hchainW⟩
+
+theorem killFold_ids (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (i : InstId) :
+    ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st i).oweId =
+        (w.st i).oweId ∧
+      ((ids.foldl (fun w id =>
+        if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st i).waitId =
+        (w.st i).waitId := by
+  induction ids generalizing w with
+  | nil => exact ⟨rfl, rfl⟩
+  | cons id ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D id sub key && (w.st id).life == .alive) = true
+    · simp only [hcond, ite_true]
+      have h1 := killOne_ids w D id i
+      have h2 := ih (killOne w D id)
+      exact ⟨h2.1.trans h1.1, h2.2.trans h1.2⟩
+    · simp only [hcond, ite_false]
+      exact ih w
+
+theorem killSubtree_ids (w : World) (D : Description) (sub : String) (key : Nat) (i : InstId) :
+    ((killSubtree w D sub key).st i).oweId = (w.st i).oweId ∧
+      ((killSubtree w D sub key).st i).waitId = (w.st i).waitId := by
+  simpa [killSubtree, killMembers] using killFold_ids w D sub key w.roster i
+
+/-- A dead host is never the actor `killOne` removes, so a foreign sender's
+message stays in its box. -/
+theorem killFold_keeps_msg_dead (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (host : InstId) (m : Msg)
+    (hdead : (w.st host).life ≠ .alive) (hsend : isMember D m.sender sub key = false)
+    (hm : m ∈ (w.st host).box) :
+    m ∈ ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st host).box := by
+  induction ids generalizing w with
+  | nil => simpa using hm
+  | cons j ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true]
+      have hparts := (Bool.and_eq_true _ _).mp hcond
+      have hh : host ≠ j := by
+        intro heq
+        rw [heq] at hdead
+        exact hdead (by simpa [beq_iff_eq] using hparts.2)
+      have hs : m.sender ≠ j := by
+        intro heq
+        rw [← heq] at hparts
+        simp [hsend] at hparts
+      have hmem := killOne_keeps_msg w D j host m hh hs hm
+      have hdead' : ((killOne w D j).st host).life ≠ .alive := by
+        rw [(killOne_other_rest w D j host hh).2.2]
+        exact hdead
+      exact ih (killOne w D j) hdead' hmem
+    · simp only [hcond, ite_false]
+      exact ih w hdead hm
+
+theorem killFold_keeps_parked_dead (w : World) (D : Description) (sub : String) (key : Nat)
+    (ids : List InstId) (host : InstId) (p : Parked)
+    (hdead : (w.st host).life ≠ .alive) (hsend : isMember D p.sender sub key = false)
+    (hs : host ∈ w.roster) (hp : p ∈ (w.st host).parked) :
+    p ∈ ((ids.foldl (fun w id =>
+      if isMember D id sub key && (w.st id).life == .alive then killOne w D id else w) w).st host).parked := by
+  induction ids generalizing w with
+  | nil => simpa using hp
+  | cons j ids ih =>
+    simp only [List.foldl_cons]
+    by_cases hcond : (isMember D j sub key && (w.st j).life == .alive) = true
+    · simp only [hcond, ite_true]
+      have hparts := (Bool.and_eq_true _ _).mp hcond
+      have hh : host ≠ j := by
+        intro heq
+        rw [heq] at hdead
+        exact hdead (by simpa [beq_iff_eq] using hparts.2)
+      have hsendj : p.sender ≠ j := by
+        intro heq
+        rw [← heq] at hparts
+        simp [hsend] at hparts
+      have hmem := killOne_keeps_parked w D j host p hh hs hsendj hp
+      have hdead' : ((killOne w D j).st host).life ≠ .alive := by
+        rw [(killOne_other_rest w D j host hh).2.2]
+        exact hdead
+      have hroster : host ∈ (killOne w D j).roster := by rw [killOne_roster]; exact hs
+      exact ih (killOne w D j) hdead' hroster hmem
+    · simp only [hcond, ite_false]
+      exact ih w hdead hs hp
+
 theorem subtree_kill_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w) (sub : String) (key : Nat) :
     CallTagInv (killSubtree w I.desc sub key) := by
@@ -24743,91 +24960,186 @@ theorem subtree_kill_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : 
     rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
     · exact Or.inl ⟨m, (killSubtree_box_sub w D sub key d).subset hmem, hc⟩
     · exact Or.inr ⟨p, (killSubtree_parked_sub w D sub key d).subset hmem, hc⟩
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · intro c d k hph
-    have hkeep := (killSubtree_keeps_wait w D sub key c (Or.inr ⟨d, k, by simpa [wK] using hph⟩)).1
+    have hkeep := (killSubtree_keeps_wait w D sub key c (Or.inr ⟨d, k, by simpa [Halted, wK] using hph⟩)).1
     have hold : (w.st c).phase = .awaitReply d k := by
-      exact hkeep.symm.trans (by simpa [wK] using hph)
+      exact hkeep.symm.trans (by simpa [Halted, wK] using hph)
     have hnotC : isMember D c sub key = false := by
       by_cases hm : isMember D c sub key = true
       · have hl := wait_alive I hL N w hR c (by simp [hold]) (by simp [hold])
         have hidle := (hnotAlive c hm hl).1
-        have hbad : (wK.st c).phase = .awaitReply d k := by simpa [wK] using hph
+        have hbad : (wK.st c).phase = .awaitReply d k := by simpa [Halted, wK] using hph
         rw [hidle] at hbad
         cases hbad
       · simpa [Bool.not_eq_true] using hm
-    have hnotD : isMember D d sub key = false := by
-      exact (call_member_iff I hL hG N w hR c d k (Or.inr hold) sub key).trans hnotC
-    have hv := outsider_view I hL hG N w hR sub key d hnotD
-    have hback : mailCall w d c → mailCall wK d c := by
-      intro hm
-      rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
-      · have hsnd := hown d m c hmem hc
-        have hmem' := killFold_keeps_msg w D sub key w.roster d m hnotD
-          (by simpa [hsnd] using hnotC) hmem
-        exact Or.inl ⟨m, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
-      · rcases (hT.parkFrom d p hmem c).mp hc with ⟨hsnd, _, _⟩
-        have hlive : (w.st d).life = .alive := mailbox_alive I hL N w hR d (by
-          intro hempty
-          simp [hempty] at hmem)
-        have hmem' := killFold_keeps_parked w D sub key w.roster d p hnotD
-          (by simpa [hsnd] using hnotC) (hS.rostered d hlive) hmem
-        exact Or.inr ⟨p, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
-    have hmailIff : mailCall wK d c ↔ mailCall w d c := ⟨hmailFwd d c, hback⟩
-    rcases hT.awaiting c d k hold with hmail | hhand | hpend | hdead
-    · exact Or.inl ⟨hmailIff.mpr hmail.1,
-        fun h => hmail.2.1 ((hv.2.2.1 c).mpr h),
-        fun h => hmail.2.2 ((hv.2.2.2 c).mpr h)⟩
-    · exact Or.inr (Or.inl ⟨fun h => hhand.1 (hmailIff.mp h),
-        (hv.2.2.1 c).mp hhand.2.1,
-        fun h => hhand.2.2 ((hv.2.2.2 c).mpr h)⟩)
-    · exact Or.inr (Or.inr (Or.inl ⟨fun h => hpend.1 (hmailIff.mp h),
-        fun h => hpend.2.1 ((hv.2.2.1 c).mpr h),
-        (hv.2.2.2 c).mp hpend.2.2⟩))
-    · have hlC0 : (w.st c).life = .alive :=
-        wait_alive I hL N w hR c (by rw [hold]; intro h; cases h) (by rw [hold]; intro h; cases h)
-      have hlC : (wK.st c).life = .alive := by
-        by_cases hgone : (wK.st c).life = .alive
-        · exact hgone
-        · exact absurd (killSubtree_died w D sub key c hlC0 hgone).1
-            (by simpa [Bool.not_eq_true] using hnotC)
-      have hlD : (wK.st d).life = .dead :=
-        ((killSubtree_if_dead w D sub key d (by rw [hdead.1]; intro h; cases h)).1).trans hdead.1
-      exact Or.inr (Or.inr (Or.inr ⟨hlD, hlC,
-        fun h => hdead.2.2.1 (hmailIff.mp h),
-        fun h => hdead.2.2.2.1 ((hv.2.2.1 c).mpr h),
-        fun h => hdead.2.2.2.2 ((hv.2.2.2 c).mpr h)⟩))
+    have hlC0 : (w.st c).life = .alive :=
+      wait_alive I hL N w hR c (by rw [hold]; intro h; cases h) (by rw [hold]; intro h; cases h)
+    have hlC : (wK.st c).life = .alive := by
+      by_cases hgone : (wK.st c).life = .alive
+      · exact hgone
+      · exact absurd (killSubtree_died w D sub key c hlC0 hgone).1
+          (by simpa [Bool.not_eq_true] using hnotC)
+    by_cases hmD : isMember D d sub key = true
+    · by_cases hlD : (w.st d).life = .alive
+      · have hdead := hnotAlive d hmD hlD
+        have hlife : (wK.st d).life = .dead :=
+          (killSubtree_kills w D sub key d hmD hlD (hS.rostered d hlD)).1
+        exact Or.inr (Or.inr (Or.inr ⟨by simpa [Halted, wK, D] using hlife, hlC,
+          fun h => by
+            rcases h with ⟨_, hmem, _⟩ | ⟨_, hmem, _⟩
+            · simp [wK, D, hdead.2.1] at hmem
+            · simp [wK, D, hdead.2.2] at hmem,
+          fun h => by
+            obtain ⟨_, hk, _⟩ := h
+            simp [wK, D, hdead.1, carriedCont] at hk,
+          fun h => by
+            obtain ⟨_, hk, _⟩ := h
+            simp [wK, D, hdead.1, carriedCont] at hk⟩))
+      · have hhold : holdsPhase (w.st d).phase = true := by
+          rcases hS.idleOff d hlD with hidle | hcr
+          · simp [holdsPhase, hidle]
+          · simp [holdsPhase, hcr]
+        have hphEq := ((killSubtree_if_dead w D sub key d hlD).2.2.2.2 hhold).1
+        have hquiet (h : handlerOwes c (wK.st d).phase ∨ replyPending c (wK.st d).phase) : False := by
+          rcases hS.idleOff d hlD with hidle | hcr
+          · rcases h with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;> simp [wK, D, hphEq, hidle, carriedCont] at hk
+          · rcases h with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;> simp [wK, D, hphEq, hcr, carriedCont] at hk
+        rcases hT.awaiting c d k hold with hmail | hhand | hpend | hhalt
+        · have hback : mailCall wK d c := by
+            rcases hmail.1 with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
+            · have hsnd := hown d m c hmem hc
+              have hOcc := (inv2_reachable I hL hG N w hR).2.1
+              by_cases hdR : d ∈ w.roster
+              · have hmem' := killFold_keeps_msg_dead w D sub key w.roster d m hlD
+                  (by simpa [hsnd] using hnotC) hmem
+                exact Or.inl ⟨m, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
+              · exact False.elim (by simp [(hOcc.offEmpty d hdR).1] at hmem)
+            · have hOcc := (inv2_reachable I hL hG N w hR).2.1
+              by_cases hdR : d ∈ w.roster
+              · rcases (hT.parkFrom d p hmem c).mp hc with ⟨hsnd, _, _⟩
+                have hmem' := killFold_keeps_parked_dead w D sub key w.roster d p hlD
+                  (by simpa [hsnd] using hnotC) hdR hmem
+                exact Or.inr ⟨p, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
+              · exact False.elim (by simp [(hOcc.offEmpty d hdR).2] at hmem)
+          exact Or.inl ⟨hback, fun h => hquiet (Or.inl h), fun h => hquiet (Or.inr h)⟩
+        · obtain ⟨_, hk0, _⟩ := hhand.2.1
+          rcases hS.idleOff d hlD with hidle | hcr
+          · simp [hidle, carriedCont] at hk0
+          · simp [hcr, carriedCont] at hk0
+        · obtain ⟨_, hk0, _⟩ := hpend.2.2
+          rcases hS.idleOff d hlD with hidle | hcr
+          · simp [hidle, carriedCont] at hk0
+          · simp [hcr, carriedCont] at hk0
+        · have hlD' := (killSubtree_if_dead w D sub key d hlD).1
+          exact Or.inr (Or.inr (Or.inr ⟨by simpa [Halted, wK] using hlD'.trans hhalt.1, hlC,
+            fun h => hhalt.2.2.1 (hmailFwd d c h),
+            fun h => hquiet (Or.inl h), fun h => hquiet (Or.inr h)⟩))
+    · have hnotD : isMember D d sub key = false := by simpa [Bool.not_eq_true] using hmD
+      have hv := outsider_view I hL hG N w hR sub key d hnotD
+      have hback : mailCall w d c → mailCall wK d c := by
+        intro hm
+        rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
+        · have hsnd := hown d m c hmem hc
+          have hmem' := killFold_keeps_msg w D sub key w.roster d m hnotD
+            (by simpa [hsnd] using hnotC) hmem
+          exact Or.inl ⟨m, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
+        · rcases (hT.parkFrom d p hmem c).mp hc with ⟨hsnd, _, _⟩
+          have hOcc := (inv2_reachable I hL hG N w hR).2.1
+          by_cases hdR : d ∈ w.roster
+          · have hmem' := killFold_keeps_parked w D sub key w.roster d p hnotD
+              (by simpa [hsnd] using hnotC) hdR hmem
+            exact Or.inr ⟨p, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
+          · exact False.elim (by simp [(hOcc.offEmpty d hdR).2] at hmem)
+      have hmailIff : mailCall wK d c ↔ mailCall w d c := ⟨hmailFwd d c, hback⟩
+      rcases hT.awaiting c d k hold with hmail | hhand | hpend | hdead
+      · exact Or.inl ⟨hmailIff.mpr hmail.1,
+          fun h => hmail.2.1 ((hv.2.2.1 c).mpr h),
+          fun h => hmail.2.2 ((hv.2.2.2 c).mpr h)⟩
+      · exact Or.inr (Or.inl ⟨fun h => hhand.1 (hmailIff.mp h),
+          (hv.2.2.1 c).mp hhand.2.1,
+          fun h => hhand.2.2 ((hv.2.2.2 c).mpr h)⟩)
+      · exact Or.inr (Or.inr (Or.inl ⟨fun h => hpend.1 (hmailIff.mp h),
+          fun h => hpend.2.1 ((hv.2.2.1 c).mpr h),
+          (hv.2.2.2 c).mp hpend.2.2⟩))
+      · have hlDn : (wK.st d).life = .dead :=
+          ((killSubtree_if_dead w D sub key d (by rw [hdead.1]; intro h; cases h)).1).trans hdead.1
+        exact Or.inr (Or.inr (Or.inr ⟨hlDn, hlC,
+          fun h => hdead.2.2.1 (hmailIff.mp h),
+          fun h => hdead.2.2.2.1 ((hv.2.2.1 c).mpr h),
+          fun h => hdead.2.2.2.2 ((hv.2.2.2 c).mpr h)⟩))
   · intro c d k hph
-    have hkeep := (killSubtree_keeps_wait w D sub key c (Or.inl ⟨d, true, k, by simpa [wK] using hph⟩)).1
+    have hkeep := (killSubtree_keeps_wait w D sub key c (Or.inl ⟨d, true, k, by simpa [Halted, wK] using hph⟩)).1
     have hold : (w.st c).phase = .parked d true k := by
-      exact hkeep.symm.trans (by simpa [wK] using hph)
+      exact hkeep.symm.trans (by simpa [Halted, wK] using hph)
     have hnotC : isMember D c sub key = false := by
       by_cases hm : isMember D c sub key = true
       · have hl := wait_alive I hL N w hR c (by simp [hold]) (by simp [hold])
-        have hbad : (wK.st c).phase = .parked d true k := by simpa [wK] using hph
+        have hbad : (wK.st c).phase = .parked d true k := by simpa [Halted, wK] using hph
         rw [(hnotAlive c hm hl).1] at hbad
         cases hbad
       · simpa [Bool.not_eq_true] using hm
-    have hnotD : isMember D d sub key = false := by
-      exact (call_member_iff I hL hG N w hR c d k (Or.inl hold) sub key).trans hnotC
-    have hv := outsider_view I hL hG N w hR sub key d hnotD
-    have holdP := hT.parkedCall c d k hold
-    have hback : mailCall w d c → mailCall wK d c := by
-      intro hm
-      rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
-      · have hsnd := hown d m c hmem hc
-        have hmem' := killFold_keeps_msg w D sub key w.roster d m hnotD
-          (by simpa [hsnd] using hnotC) hmem
-        exact Or.inl ⟨m, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
-      · rcases (hT.parkFrom d p hmem c).mp hc with ⟨hsnd, _, _⟩
-        have hlive : (w.st d).life = .alive := mailbox_alive I hL N w hR d (by
-          intro hempty
-          simp [hempty] at hmem)
-        have hmem' := killFold_keeps_parked w D sub key w.roster d p hnotD
-          (by simpa [hsnd] using hnotC) (hS.rostered d hlive) hmem
-        exact Or.inr ⟨p, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
-    exact ⟨hback holdP.1, fun h => holdP.2.1 ((hv.2.2.1 c).mpr h),
-      fun h => holdP.2.2 ((hv.2.2.2 c).mpr h)⟩
+    by_cases hmD : isMember D d sub key = true
+    · by_cases hlD : (w.st d).life = .alive
+      · have hdead := hnotAlive d hmD hlD
+        have hlife := (killSubtree_kills w D sub key d hmD hlD (hS.rostered d hlD)).1
+        exact Or.inr ⟨by simpa [Halted, wK] using hlife,
+          fun h => by
+            rcases h with ⟨_, hmem, _⟩ | ⟨_, hmem, _⟩
+            · simp [D, wK, hdead.2.1] at hmem
+            · simp [D, wK, hdead.2.2] at hmem,
+          fun h => by
+            obtain ⟨_, hk, _⟩ := h
+            simp [D, wK, hdead.1, carriedCont] at hk,
+          fun h => by
+            obtain ⟨_, hk, _⟩ := h
+            simp [D, wK, hdead.1, carriedCont] at hk⟩
+      · rcases hT.parkedCall c d k hold with ⟨hl, _, _, _⟩ | ⟨hl, hnm, _, _⟩
+        · exact absurd hl hlD
+        · have hhold : holdsPhase (w.st d).phase = true := by
+            rcases hS.idleOff d hlD with hidle | hcr
+            · simp [holdsPhase, hidle]
+            · simp [holdsPhase, hcr]
+          have hphEq := ((killSubtree_if_dead w D sub key d hlD).2.2.2.2 hhold).1
+          have hlK := (killSubtree_if_dead w D sub key d hlD).1
+          exact Or.inr ⟨by simpa [Halted, wK] using hlK.trans hl,
+            fun h => hnm (hmailFwd d c h),
+            fun h => by
+              obtain ⟨_, hk, _⟩ := h
+              rcases hS.idleOff d hlD with hidle | hcr
+              · simp [wK, D, hphEq, hidle, carriedCont] at hk
+              · simp [wK, D, hphEq, hcr, carriedCont] at hk,
+            fun h => by
+              obtain ⟨_, hk, _⟩ := h
+              rcases hS.idleOff d hlD with hidle | hcr
+              · simp [wK, D, hphEq, hidle, carriedCont] at hk
+              · simp [wK, D, hphEq, hcr, carriedCont] at hk⟩
+    · have hnotD : isMember D d sub key = false := by simpa [Bool.not_eq_true] using hmD
+      have hv := outsider_view I hL hG N w hR sub key d hnotD
+      rcases hT.parkedCall c d k hold with ⟨hl, hm, ho, hp⟩ | ⟨hl, hnm, ho, hp⟩
+      · have hlK : (wK.st d).life = .alive := by
+          by_cases hgone : (wK.st d).life = .alive
+          · exact hgone
+          · exact absurd (killSubtree_died w D sub key d hl hgone).1
+              (by simpa [Bool.not_eq_true] using hnotD)
+        have hback : mailCall wK d c := by
+          rcases hm with ⟨m, hmem, hc⟩ | ⟨p, hmem, hc⟩
+          · have hsnd := hown d m c hmem hc
+            have hmem' := killFold_keeps_msg w D sub key w.roster d m hnotD
+              (by simpa [hsnd] using hnotC) hmem
+            exact Or.inl ⟨m, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
+          · rcases (hT.parkFrom d p hmem c).mp hc with ⟨hsnd, _, _⟩
+            have hOcc := (inv2_reachable I hL hG N w hR).2.1
+            by_cases hdR : d ∈ w.roster
+            · have hmem' := killFold_keeps_parked w D sub key w.roster d p hnotD
+                (by simpa [hsnd] using hnotC) hdR hmem
+              exact Or.inr ⟨p, by simpa [wK, killSubtree, killMembers] using hmem', hc⟩
+            · exact False.elim (by simp [(hOcc.offEmpty d hdR).2] at hmem)
+        exact Or.inl ⟨hlK, hback, fun h => ho ((hv.2.2.1 c).mpr h),
+          fun h => hp ((hv.2.2.2 c).mpr h)⟩
+      · have hlK := (killSubtree_if_dead w D sub key d (by rw [hl]; intro h; cases h)).1
+        exact Or.inr ⟨by simpa [Halted, wK] using hlK.trans hl, fun h => hnm (hmailFwd d c h),
+          fun h => ho ((hv.2.2.1 c).mpr h), fun h => hp ((hv.2.2.2 c).mpr h)⟩
   · intro d c hm
     have hold := hT.msgOwner d c (hmailFwd d c hm)
     have hOcc := (inv2_reachable I hL hG N w hR).2.1
@@ -24858,38 +25170,42 @@ theorem subtree_kill_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : 
     · exact Or.inl ⟨k, (hv.1 d k).mp hph⟩
     · exact Or.inr ⟨k, (hv.2.1 d k).mp hph⟩
   · intro d c ho
-    have hO := (inv_reachable I N w hL hR).2.2
-    have hSK := (killSubtree_inv I w sub key hS hM hO).1
-    have hidleOw (hidle : (wK.st d).phase = .idle) : False := by
-      rcases ho with h | h
-      · obtain ⟨k, hk, _⟩ := h
-        rw [hidle] at hk
-        cases hk
-      · obtain ⟨k, hk, _⟩ := h
-        rw [hidle] at hk
-        cases hk
+    have hquiet (hph : (wK.st d).phase = .idle ∨ (wK.st d).phase = .crashed) : False := by
+      rcases hph with hidle | hcr
+      · rcases ho with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;> simp [D, wK, hidle, carriedCont] at hk
+      · rcases ho with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;> simp [D, wK, hcr, carriedCont] at hk
     by_cases hl : (w.st d).life = .alive
     · by_cases hm : isMember D d sub key = true
-      · exact False.elim (hidleOw (hnotAlive d hm hl).1)
+      · exact False.elim (hquiet (Or.inl (hnotAlive d hm hl).1))
       · have hnotD : isMember D d sub key = false := by simpa [Bool.not_eq_true] using hm
         have hv := outsider_view I hL hG N w hR sub key d hnotD
         have hold : handlerOwes c (w.st d).phase ∨ replyPending c (w.st d).phase := by
           rcases ho with h | h
           · exact Or.inl ((hv.2.2.1 c).mpr h)
           · exact Or.inr ((hv.2.2.2 c).mpr h)
-        obtain ⟨k, hph⟩ := hT.oweOwner d c hold
-        have hnotC : isMember D c sub key = false :=
-          (call_member_iff I hL hG N w hR c d k (Or.inr hph) sub key).symm.trans hnotD
-        exact ⟨k, ((outsider_view I hL hG N w hR sub key c hnotC).1 d k).mp hph⟩
-    · have hlK : (wK.st d).life ≠ .alive := by
-        intro hlK
-        exact hl ((killSubtree_if_alive w D sub key d hlK).1)
-      exact False.elim (hidleOw (hSK.idleOff d hlK))
+        rcases hT.oweOwner d c hold with ⟨k, hph⟩ | hdead
+        · by_cases hmC : isMember D c sub key = true
+          · have hlC := wait_alive I hL N w hR c (by simp [hph]) (by simp [hph])
+            exact Or.inr (by
+              simpa [wK] using (killSubtree_kills w D sub key c hmC hlC (hS.rostered c hlC)).1)
+          · have hnotC : isMember D c sub key = false := by simpa [Bool.not_eq_true] using hmC
+            exact Or.inl ⟨k, ((outsider_view I hL hG N w hR sub key c hnotC).1 d k).mp hph⟩
+        · exact Or.inr (by
+            simpa [wK] using
+              ((killSubtree_if_dead w D sub key c (by rw [hdead]; intro h; cases h)).1).trans hdead)
+    · have hhold : holdsPhase (w.st d).phase = true := by
+        rcases hS.idleOff d hl with hidle | hcr
+        · simp [holdsPhase, hidle]
+        · simp [holdsPhase, hcr]
+      have hphEq := ((killSubtree_if_dead w D sub key d hl).2.2.2.2 hhold).1
+      rcases hS.idleOff d hl with hidle | hcr
+      · exact False.elim (hquiet (Or.inl (by simpa [wK, hphEq] using hidle)))
+      · exact False.elim (hquiet (Or.inr (by simpa [wK, hphEq] using hcr)))
   · intro id m hm
     rcases killSubtree_prio_step w D sub key id with heq | hempty
-    · have hm' : m ∈ ((killSubtree w D sub key).st id).prio := by simpa [wK] using hm
+    · have hm' : m ∈ ((killSubtree w D sub key).st id).prio := by simpa [Halted, wK] using hm
       exact hT.prioPlain id m (heq ▸ hm')
-    · have hm' : m ∈ ((killSubtree w D sub key).st id).prio := by simpa [wK] using hm
+    · have hm' : m ∈ ((killSubtree w D sub key).st id).prio := by simpa [Halted, wK] using hm
       simp [hempty] at hm'
   · intro d c
     have hbox := countCall_le _ _ c (killSubtree_box_sub w D sub key d)
@@ -24918,7 +25234,7 @@ theorem subtree_kill_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : 
     · intro ⟨hsnd, k, hph⟩
       have hnotS : isMember D s sub key = false := by
         by_cases hm : isMember D s sub key = true
-        · have hbad : (wK.st s).phase = .parked d true k := by simpa [wK] using hph
+        · have hbad : (wK.st s).phase = .parked d true k := by simpa [Halted, wK] using hph
           have hwait : isWait (wK.st s).phase := Or.inl ⟨d, true, k, hbad⟩
           have hold := ((killSubtree_keeps_wait w D sub key s hwait).1).symm.trans hbad
           have hl := wait_alive I hL N w hR s (by simp [hold]) (by simp [hold])
@@ -24928,28 +25244,65 @@ theorem subtree_kill_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : 
       have hold := ((outsider_view I hL hG N w hR sub key s hnotS).2.1 d k).mpr hph
       exact (hT.parkFrom d p hp0 s).mpr ⟨hsnd, k, hold⟩
   · intro c d k hph
-    have hkeep := (killSubtree_keeps_wait w D sub key c (Or.inl ⟨d, true, k, by simpa [wK] using hph⟩)).1
-    have hold : (w.st c).phase = .parked d true k := hkeep.symm.trans (by simpa [wK] using hph)
-    have holdP := hT.parkedOnly c d k hold
-    refine ⟨?_, ?_⟩
-    · rcases holdP.1 with ⟨p, hp, hsnd, hc⟩
-      have hnotC : isMember D c sub key = false := by
-        by_cases hm : isMember D c sub key = true
-        · have hl := wait_alive I hL N w hR c (by simp [hold]) (by simp [hold])
-          have hbad : (wK.st c).phase = .parked d true k := by simpa [wK] using hph
-          rw [(hnotAlive c hm hl).1] at hbad
-          cases hbad
-        · simpa [Bool.not_eq_true] using hm
-      have hnotD : isMember D d sub key = false :=
-        (call_member_iff I hL hG N w hR c d k (Or.inl hold) sub key).trans hnotC
-      have hlive : (w.st d).life = .alive := mailbox_alive I hL N w hR d (by
-        intro hempty
-        simp [hempty] at hp)
-      have hmem := killFold_keeps_parked w D sub key w.roster d p hnotD
-        (by simpa [hsnd] using hnotC) (hS.rostered d hlive) hp
-      exact ⟨p, by simpa [wK, killSubtree, killMembers] using hmem, hsnd, hc⟩
-    · intro ⟨m, hm, hc⟩
-      exact holdP.2 ⟨m, (killSubtree_box_sub w D sub key d).subset hm, hc⟩
+    have hkeep := (killSubtree_keeps_wait w D sub key c (Or.inl ⟨d, true, k, by simpa [Halted, wK] using hph⟩)).1
+    have hold : (w.st c).phase = .parked d true k := hkeep.symm.trans (by simpa [Halted, wK] using hph)
+    have hnotC : isMember D c sub key = false := by
+      by_cases hm : isMember D c sub key = true
+      · have hl := wait_alive I hL N w hR c (by simp [hold]) (by simp [hold])
+        have hbad : (wK.st c).phase = .parked d true k := by simpa [Halted, wK] using hph
+        rw [(hnotAlive c hm hl).1] at hbad
+        cases hbad
+      · simpa [Bool.not_eq_true] using hm
+    rcases hT.parkedOnly c d k hold with ⟨hl, ⟨p, hp, hsnd, hc⟩, hbox0⟩ | ⟨hl, hp0, hbox0⟩
+    · by_cases hmD : isMember D d sub key = true
+      · have hdead := hnotAlive d hmD hl
+        exact Or.inr ⟨by simpa [Halted, wK] using (killSubtree_kills w D sub key d hmD hl (hS.rostered d hl)).1,
+          fun ⟨_, hq, _⟩ => by simp [D, wK, hdead.2.2] at hq,
+          fun ⟨_, hm, _⟩ => by simp [D, wK, hdead.2.1] at hm⟩
+      · have hnotD : isMember D d sub key = false := by simpa [Bool.not_eq_true] using hmD
+        have hOcc := (inv2_reachable I hL hG N w hR).2.1
+        by_cases hdR : d ∈ w.roster
+        · have hmem := killFold_keeps_parked w D sub key w.roster d p hnotD
+            (by simpa [hsnd] using hnotC) hdR hp
+          have hlK : (wK.st d).life = .alive := by
+            by_cases hgone : (wK.st d).life = .alive
+            · exact hgone
+            · exact absurd (killSubtree_died w D sub key d hl hgone).1
+                (by simpa [Bool.not_eq_true] using hnotD)
+          exact Or.inl ⟨hlK, ⟨p, by simpa [wK, killSubtree, killMembers] using hmem, hsnd, hc⟩,
+            fun ⟨m, hm, hcf⟩ => hbox0 ⟨m, (killSubtree_box_sub w D sub key d).subset hm, hcf⟩⟩
+        · exact False.elim (by simp [(hOcc.offEmpty d hdR).2] at hp)
+    · have hlK := (killSubtree_if_dead w D sub key d (by rw [hl]; intro h; cases h)).1
+      exact Or.inr ⟨by simpa [Halted, wK] using hlK.trans hl,
+        fun ⟨q, hq, hcf⟩ => hp0 ⟨q, (killSubtree_parked_sub w D sub key d).subset hq, hcf⟩,
+        fun ⟨m, hm, hcf⟩ => hbox0 ⟨m, (killSubtree_box_sub w D sub key d).subset hm, hcf⟩⟩
+  · intro d c ho
+    have hids := killSubtree_ids w D sub key
+    by_cases hm : isMember D d sub key = true
+    · by_cases hl : (w.st d).life = .alive
+      · exact False.elim (by
+          have hidle := (hnotAlive d hm hl).1
+          rcases ho with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;> simp [D, wK, hidle, carriedCont] at hk)
+      · have hhold : holdsPhase (w.st d).phase = true := by
+          rcases hS.idleOff d hl with hidle | hcr
+          · simp [holdsPhase, hidle]
+          · simp [holdsPhase, hcr]
+        have hphEq := ((killSubtree_if_dead w D sub key d hl).2.2.2.2 hhold).1
+        exact False.elim (by
+          rcases hS.idleOff d hl with hidle | hcr
+          · rcases ho with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;>
+              simp [wK, D, hphEq, hidle, carriedCont] at hk
+          · rcases ho with ⟨_, hk, _⟩ | ⟨_, hk, _⟩ <;>
+              simp [wK, D, hphEq, hcr, carriedCont] at hk)
+    · have hnotD : isMember D d sub key = false := by simpa [Bool.not_eq_true] using hm
+      have hv := outsider_view I hL hG N w hR sub key d hnotD
+      have hold : handlerOwes c (w.st d).phase ∨ replyPending c (w.st d).phase := by
+        rcases ho with h | h
+        · exact Or.inl ((hv.2.2.1 c).mpr h)
+        · exact Or.inr ((hv.2.2.2 c).mpr h)
+      rw [show (wK.st d).oweId = (w.st d).oweId from by simpa [Halted, wK] using (hids d).1,
+        show (wK.st c).waitId = (w.st c).waitId from by simpa [Halted, wK] using (hids c).2]
+      exact hT.owedId d c hold
 
 /-- Killing `terminate`: the mailbox holds no call, the continuation owes no reply,
 and plain parked senders are resumed. -/
