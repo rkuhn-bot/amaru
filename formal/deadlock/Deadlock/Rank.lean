@@ -25438,25 +25438,34 @@ private def tagBreakDesc : Description where
 private def tagBreakDead (a : Actor) : Actor :=
   { a with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
 
+/-- Sealing a stage keeps the call tags when the seal does not crash.
+A killed member is idle with an empty mailbox, so a caller of that member uses
+the halted disjunct. `crashWorld` is excluded by `hcf`: a crash keeps the mail. -/
+theorem stage_seal_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
+    (w : World) (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w)
+    (hM : MailInv w) (hS : ProgSrc I w) (id : InstId) (a : Actor)
+    (hcf : (terminateStage I.desc w id a).crashed = false) :
+    CallTagInv (terminateStage I.desc w id a) := by
+  unfold terminateStage at hcf ⊢
+
 theorem terminate_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w) (hM : MailInv w)
     (hS : ProgSrc I w) (hTerm : TermOk I w) (id : InstId) (k : Cont) (es : List Eff)
-    (hph : (w.st id).phase = .run k) (hrest : k.rest = .terminate :: es) :
+    (hph : (w.st id).phase = .run k) (hrest : k.rest = .terminate :: es)
+    (hcf : (execRun I w id (w.st id) k).crashed = false) :
     CallTagInv (execRun I w id (w.st id) k) := by
   have hc : carried ((w.st id).phase) = some (.terminate :: es) := by simp [carried, hph, hrest]
   have hcount0 := terminate_suffix_quiet I hL w hS id es hc
-  have hname := hTerm id (.terminate :: es) hc (by simp [hasTerminate])
-  have hstep := exec_term_step I w id (w.st id) es k.toState k.replyTo
-  have heq : execRun I w id (w.st id) k =
-      execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ := by
-    cases k
-    simp at hrest
-    rw [hrest]
-  rw [heq]
-  generalize hw : execRun I w id (w.st id) ⟨.terminate :: es, k.toState, k.replyTo, [], [], [], "", "", "", "", ""⟩ = wR at hstep ⊢
-  cases hstep
-  · exact hT
-  · rename_i t ht hsub htm hpark hch
+  have hname := hTerm id (.terminate :: es) hc (by simp [hasTerminate, effTerminates])
+  have hlive : (w.st id).life = .alive :=
+    busy_alive I w (inv_reachable I N w hL hR).1 id
+      (by rw [hph]; intro h; cases h) (by rw [hph]; intro h; cases h)
+  have hstep := exec_term_step I w id (w.st id) k hlive ⟨es, hrest⟩
+  generalize hw : execRun I w id (w.st id) k = wR at hstep hcf ⊢
+  cases hstep with
+  | fall => simp [crashWorld] at hcf
+  | crash _ _ _ => simp [crashWorld] at hcf
+  | lone t ht _hper hsub htm hpark hch =>
     have hparkF : hasParkedCall (w.st id).parked = false := hpark
     let base := refundParked (refundMsgs (readCells I.desc w id) (tname id) (w.st id).box)
       (tname id) (w.st id).parked
@@ -25518,21 +25527,25 @@ theorem terminate_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat
     have hrel := release_plain_tag (setActor base id dead) id (w.st id).parked hDead
       (fun p1 p2 h1 h2 heq => (hM.uniq id id p1 p2 h1 h2 heq).2)
       (hM.once id) hstep
-    simpa [releaseWorld, base, dead] using hrel
-  · rename_i t ht htm hdesc hpk
-    -- A committing member aborts its own descendants and then itself. The
-    -- parent's tombstone is a plain priority message, so the call tags of that
-    -- enqueue follow from the world the aborts left.
-    simp only [terminateStage]
-    apply tombstone_tag I.desc _ id
-    · -- `abort_await_not_tag`: an `awaitReply` caller of the aborted actor is left
-      -- waiting, and `awaiting` has no dead-callee disjunct. Parked callers use
-      -- the dead disjunct of `parkedCall`.
-      skip
+    have hRel : CallTagInv (releaseWorld I.desc w id (w.st id)) := by
+      simpa [releaseWorld, base, dead] using hrel
+    have hbit : ((w.st id).life == .alive) = true := by simpa [beq_iff_eq] using hlive
+    have hseal : shutdownActor I.desc w id =
+        enqueueTombstone I.desc (releaseWorld I.desc w id (w.st id)) id := by
+      simp [shutdownActor, sealActor, hbit]
+    rw [hseal]
+    apply tombstone_tag I.desc (releaseWorld I.desc w id (w.st id)) id hRel
+    rw [← hseal]
+    exact hcf
+  | tree _ _ _ _ =>
+    exact stage_seal_tag I hL hG N w hR hT hown hM hS id (w.st id) hcf
+  | cascade _ _ _ _ _ _ _ =>
+    exact stage_seal_tag I hL hG N w hR hT hown hM hS id (w.st id) hcf
 
 theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
     (hR : Reachable I N w) (hT : CallTagInv w) (hown : BoxOwned w) (id : InstId) (w' : World)
-    (h : execHead I w id = some w') : CallTagInv w' := by
+    (h : execHead I w id = some w') : w'.crashed = false → CallTagInv w' := by
+  intro hcf
   have hM : MailInv w := (inv_reachable I N w hL hR).2.1
   have hS : ProgSrc I w := prog_src_reachable I N w hR
   have hLane : PrioDeclared I w := lane_reachable I hL hG N w hR
@@ -25639,7 +25652,7 @@ theorem exec_tag (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w 
             (by intro h; cases h) (by intro h; cases h) (by simp [carriedCont])
             (by intro d kA hbad; cases hbad) (by intro d kA hbad; cases hbad)
         | terminate =>
-          exact terminate_tag I hL hG N w hR hT hown hM hS hTerm id k es hph hrest
+          exact terminate_tag I hL hG N w hR hT hown hM hS hTerm id k es hph hrest hcf
 
 /-- A member that a kill may select: it is not in a call, nobody is in a call on it,
 and its mailbox holds no call. -/
@@ -26490,45 +26503,50 @@ theorem finish_keeps_box (I : Impl) (w w' : World) (id i : InstId)
 
 /-- Reachable worlds keep call tags, and a call message in a mailbox names its sender. -/
 theorem tag_owned_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
-    (w : World) (hR : Reachable I N w) : CallTagInv w ∧ BoxOwned w := by
+    (w : World) (hR : Reachable I N w) : (w.crashed = false → CallTagInv w) ∧ BoxOwned w := by
   induction hR with
   | init =>
-    exact ⟨call_tag_init I N, by
+    exact ⟨fun _ => call_tag_init I N, by
       intro i m c hm hc
       simp [(init_box I N i).1] at hm⟩
   | step w w' a prev happ ih =>
+    have hprev : w.crashed = false := (apply_step I a w w' happ).1
     cases a with
     | stutter =>
       cases stutter_unchanged I w w' happ
       exact ih
     | ingress dst label =>
       have hing : receiveIngress I w dst label = some w' := by simpa [stepWorld] using stepOfApply happ
-      exact ⟨ingress_tag I w dst label w' ih.1 hing, ingress_owned I w w' dst label ih.2 hing⟩
+      exact ⟨fun _ => ingress_tag I w dst label w' (ih.1 hprev) hing,
+        ingress_owned I w w' dst label ih.2 hing⟩
     | finish id =>
       have hf : finishWait I w id = some w' := by simpa [stepWorld] using stepOfApply happ
-      exact ⟨finish_tag I w id w' ih.1 hf,
+      exact ⟨fun _ => finish_tag I w id w' (ih.1 hprev) hf,
         owned_box_eq w w' ih.2 (fun i => finish_keeps_box I w w' id i hf)⟩
     | spawn template =>
       have hs : spawn I w template = some w' := by simpa [stepWorld] using stepOfApply happ
-      exact ⟨spawn_tag I w template w' (inv_reachable I N w hL prev).2.2
-          (inv2_reachable I hL hG N w prev).2.1 ih.1 hs,
+      exact ⟨fun _ => spawn_tag I w template w' (inv_reachable I N w hL prev).2.2
+          (inv2_reachable I hL hG N w prev).2.1 (ih.1 hprev) hs,
         spawn_owned I w template w' (inv_reachable I N w hL prev).2.2
           (inv2_reachable I hL hG N w prev).2.1 ih.2 hs⟩
     | recvPrio id =>
       have hp : receivePrio I w id = some w' := by simpa [stepWorld] using stepOfApply happ
-      exact ⟨prio_tag I w id w' ih.1 hp, prio_owned I w id w' ih.2 hp⟩
+      exact ⟨fun _ => prio_tag I w id w' (ih.1 hprev) hp, prio_owned I w id w' ih.2 hp⟩
     | recvBulk id =>
       have hb : receiveBulk I w id = some w' := by simpa [stepWorld] using stepOfApply happ
-      exact ⟨recvBulk_tag I hL w w' id (inv_reachable I N w hL prev).2.1 ih.1 hb,
-        recv_owned I w id w' ih.1 (inv2_reachable I hL hG N w prev).2.1 ih.2 hb⟩
+      exact ⟨fun _ => recvBulk_tag I hL w w' id (inv_reachable I N w hL prev).2.1 (ih.1 hprev) hb,
+        recv_owned I w id w' (ih.1 hprev) (inv2_reachable I hL hG N w prev).2.1 ih.2 hb⟩
     | exec id =>
       have hhead : execHead I w id = some w' := by simpa [stepWorld] using stepOfApply happ
-      exact ⟨exec_tag I hL hG N w prev ih.1 ih.2 id w' hhead,
-        exec_owned I w id w' ih.1 (inv2_reachable I hL hG N w prev).2.1.parkMsg ih.2 hhead⟩
+      exact ⟨exec_tag I hL hG N w prev (ih.1 hprev) ih.2 id w' hhead,
+        exec_owned I w id w' (ih.1 hprev) (inv2_reachable I hL hG N w prev).2.1.parkMsg ih.2 hhead⟩
 
+/-- A crashed roster keeps its mail and is never stepped again, so the call-tag
+burden is the worlds that can still take a step. `crashWorld` is why the
+crashed bit is a hypothesis. -/
 theorem call_tag_reachable (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat) (w : World)
-    (hR : Reachable I N w) : CallTagInv w :=
-  (tag_owned_reachable I hL hG N w hR).1
+    (hR : Reachable I N w) (hcf : w.crashed = false) : CallTagInv w :=
+  tag_owned_reachable I hL hG N w hR |>.1 hcf
 
 /-- Index of the first bulk message that names `c`, or the length when there is none. -/
 def callPos : List Msg → InstId → Nat
@@ -27386,6 +27404,7 @@ theorem call_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Na
       simpa [Nat.add_sub_of_le hj] using hmono.2
     have hM := (inv_reachable I N (ρ.cfg j) hL (cfg_reachable ρ j)).2.1
     have hT := call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j)
+      (run_not_crashed ρ j)
     have hrecv : receiveBulk I (ρ.cfg j) d = some (ρ.cfg (j + 1)) := by
       simpa [apply, hact] using ρ.valid j
     rcases recv_box_progress I hL (ρ.cfg j) (ρ.cfg (j + 1)) d c k hrecv hM hT (hstay j hj) hlenj with
@@ -27409,6 +27428,7 @@ theorem call_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Na
       simpa [Nat.add_sub_of_le hj] using hmono.2
     have hM := (inv_reachable I N (ρ.cfg j) hL (cfg_reachable ρ j)).2.1
     have hT := call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j)
+      (run_not_crashed ρ j)
     have hrecv : receiveBulk I (ρ.cfg j) d = some (ρ.cfg (j + 1)) := by
       simpa [apply, hact] using ρ.valid j
     rcases recv_box_progress I hL (ρ.cfg j) (ρ.cfg (j + 1)) d c k hrecv hM hT (hstay j hj) hlenj with
@@ -27420,6 +27440,7 @@ theorem call_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) {N : Na
       have hmail : mailCall (ρ.cfg (j + 1)) d c := hdrop.2.1
       have hph1 : ((ρ.cfg (j + 1)).st c).phase = .awaitReply d k := hdrop.1
       have hT1 := call_tag_reachable I hL hG N (ρ.cfg (j + 1)) (cfg_reachable ρ (j + 1))
+        (run_not_crashed ρ (j + 1))
       have hlen1 := (await_mail_in_box (ρ.cfg (j + 1)) hT1 c d k hph1 hmail).1
       obtain ⟨j1, hj1, hmail1, howe1, hphj⟩ := ih (j + 1)
         (fun t ht => hstay t (Nat.le_trans (Nat.le_trans hj (Nat.le_succ j)) ht))
@@ -30067,7 +30088,7 @@ theorem prio_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
         (Nat.max n i0) (Nat.le_max_right _ _)
       exact ⟨j, Nat.le_trans (Nat.le_max_left _ _) hj,
         recv_prio_enabled I (ρ.cfg j) r label
-          (call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j))
+          (call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j) (run_not_crashed ρ j))
           hId.1 hId.2 (hstay j (Nat.le_trans (Nat.le_max_right _ _) hj))⟩
     obtain ⟨k, hk, hact⟩ := hF.prio r hio i0
     exact False.elim (hex ⟨k, hk, hact⟩)

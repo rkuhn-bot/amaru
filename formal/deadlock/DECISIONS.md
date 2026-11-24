@@ -1174,3 +1174,17 @@ The field is restated as: the caller is in `awaitReply`, or the caller's
 life is `.dead`. `owedId` stays. A live caller is still in `awaitReply`
 (`owe_alive`). This is an internal invariant, not a headline. No headline
 has been shown false.
+
+## 2026-11-24 — A crash keeps the mail, so tags are for a live roster
+
+`crashWorld` sets `crashed` and turns every alive actor to `.crashed`, and
+it leaves boxes and parked lists in place. `msgOwner` and `parkFrom` then
+fail: the sender is no longer in `awaitReply` or a call park, and the entry
+is still there. `entry_align` already records that workaround for a live
+host. A crashed roster is never stepped again, so the call-tag burden is
+the worlds that can still move.
+
+`call_tag_reachable` therefore takes `w.crashed = false`. `exec_tag` returns
+that implication. A `terminate` that falls through to `crashWorld` is the
+contradiction of the bit, not a tag proof. No headline changes. The
+non-crashing lone and stage arms are still open.
