@@ -140,3 +140,22 @@ Line numbers are from the Amaru tree this model was read against.
   cell label and reader. This is in SEMANTICS.md under "Later" and in
   CHANGES-R5.md under "Later".
 - Status: pending (later)
+
+## 10. A pending call fails only at its deadline when the callee terminates
+
+- Location: simulation
+  `crates/amaru-pure-stage/src/simulation/running/resume.rs:228-266` and
+  `running/mod.rs:1618-1623`; tokio
+  `crates/amaru-pure-stage/src/tokio.rs:618-665`. The deadline wakeup and
+  `await_call` fail the call. `terminate_stage` leaves the queued call in
+  place until that deadline. A closed mailbox or a dropped reply does not
+  finish the call early. In this tree `running/mod.rs:1494-1499` is the
+  end of `run_effect`, not this path.
+- Change: none. Both runtimes fail a pending call whose callee terminates
+  only at its deadline, and the model matches, so no Rust change is
+  needed.
+- Decision: DECISIONS.md, 2026-11-23, "Sealing the callee drops a parked
+  call". The caller stays parked until the deadline.
+- Test gap: `terminate_drops_the_callers_parked_call`
+  (`running/mod.rs:2112-2117`) kills the caller, not the callee.
+- Status: no change
