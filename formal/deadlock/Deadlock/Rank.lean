@@ -16407,6 +16407,54 @@ theorem dead_stays_idle (I : Impl) (a : Action) (w w' : World) (i : InstId)
     (h : apply I a w = some w') (hdead : (w.st i).life ≠ .alive)
     (hidle : (w.st i).phase = .idle) : (w'.st i).phase = .idle := by
   cases a with
+  | callTimeout id =>
+    have hto := stepOfApply h
+    simp only [stepWorld] at hto
+    by_cases hi : i = id
+    · rw [hi] at hdead
+      have hnot : ((w.st id).life != .alive) = true := by
+        cases hlife : (w.st id).life with
+        | alive => exact absurd hlife hdead
+        | dead => rfl
+        | absent => rfl
+      simp [callTimeout, hnot] at hto
+    · cases callTimeout_view w w' id hto with
+      | await dst k _ hw =>
+        rw [hw, setActor_other _ id i _ hi]
+        by_cases hdst : i = dst
+        · rw [hdst, setActor_self, detach_phase_owe (w.st dst) id (w.st id).waitId]
+          have hidst : (w.st dst).phase = .idle := by simpa [hdst] using hidle
+          split <;> simp [clearReplyPhase, hidst]
+        · rw [setActor_other _ dst i _ hdst, hidle]
+      | park dst k _ hw =>
+        rw [hw, setActor_other _ id i _ hi]
+        unfold refundParkedCall
+        dsimp only
+        split
+        · exact hidle
+        · have hkeep : ((setActor w dst { (w.st dst) with parked := (w.st dst).parked.filter (fun p => !(p.sender == id && p.isCall)) }).st i).phase = (w.st i).phase := by
+            by_cases hdst : i = dst
+            · rw [hdst, setActor_self]
+            · rw [setActor_other w dst i _ hdst, hidle]
+          have hfold : ∀ (ps : List Parked) (w0 : World),
+              (w0.st i).phase = (w.st i).phase →
+              ((ps.foldl (fun w _ => creditSender w (tname dst) id) w0).st i).phase =
+                (w.st i).phase := by
+            intro ps
+            induction ps with
+            | nil =>
+              intro _ hbase
+              exact hbase
+            | cons p ps ih =>
+              intro w0 hbase
+              simp only [List.foldl_cons]
+              apply ih
+              unfold creditSender bumpToken
+              simp [setActor, hi, hbase]
+          exact (hfold ((w.st dst).parked.filter (fun p => p.sender == id && p.isCall)) _ hkeep).trans
+            hidle
+      | peer _ _ hw =>
+        rw [hw, setActor_other _ id i _ hi, hidle]
   | stutter =>
     cases stutter_unchanged I w w' h
     assumption
@@ -16457,20 +16505,10 @@ theorem dead_stays_idle (I : Impl) (a : Action) (w w' : World) (i : InstId)
   | recvPrio id =>
     have h := stepOfApply h
     simp only [stepWorld] at h
-    unfold receivePrio at h
-    cases hprio : (w.st id).prio with
-    | nil => simp [hprio] at h
-    | cons m ms =>
-      simp [hprio] at h
-      by_cases hi : i = id
-      · have hdead' : (w.st id).life ≠ .alive := by rw [← hi]; exact hdead
-        simp [hdead'] at h
-      · split at h
-        · simp at h
-        · next w1 a1 hdel =>
-          simp at h
-          rcases h with ⟨_, hw⟩
-          rw [← hw, setActor_other w1 id i a1 hi, deliver_st I w id _ m w1 a1 i hdel, hidle]
+    obtain ⟨_m, _pre, _suf, w1, a1, hlife, _, _, _, hdel, hw'⟩ := receivePrio_spec I w w' id h
+    by_cases hi : i = id
+    · exact absurd (hi ▸ hlife) hdead
+    · rw [hw', setActor_other w1 id i a1 hi, deliver_st I w id _ _ w1 a1 i hdel, hidle]
   | finish id =>
     have h := stepOfApply h
     simp only [stepWorld] at h
@@ -16483,17 +16521,10 @@ theorem dead_stays_idle (I : Impl) (a : Action) (w w' : World) (i : InstId)
   | spawn template =>
     have h := stepOfApply h
     simp only [stepWorld] at h
-    unfold spawn at h
-    split at h
-    · cases h
-    · next t ht =>
-      split at h
-      · cases h
-        let nid := InstId.peer template (w.nextIx template)
-        by_cases hi : i = nid
-        · simp [nid, readCells_st, setActor, hi, withTokens]
-        · simp [nid, readCells_st, setActor, hi, hidle]
-      · cases h
+    rcases spawn_phase I w w' template i h with ⟨_, hidle', _⟩ | hsame
+    · exact hidle'
+    · rw [hsame]
+      exact hidle
 
 /-- A reachable phase that is neither idle nor crashed belongs to a live actor.
 `SemInv.idleOff` says a life that is not alive is idle or crashed. A crashed
@@ -16545,18 +16576,25 @@ theorem failWaiter_off (w : World) (dead i s dst : InstId) (h : offDst w s dst) 
     · exact h c k (by simpa [hs] using hbad)
     · cases hph : (w.st i).phase with
       | parked d b ck =>
-        simp [hph] at hbad
-        split at hbad
-        · rw [hs] at hbad
-          simp [setActor] at hbad
-          cases hk : ck.rest <;> simp [proceed, hk] at hbad
-        · exact h c k (by simpa [hs] using hbad)
+        simp only [hph] at hbad
+        cases b with
+        | true =>
+          simp at hbad
+          exact h c k (by simpa [hs] using hbad)
+        | false =>
+          cases hb : (d == dead) with
+          | false =>
+            simp only [hb, ite_false] at hbad
+            exact h c k (by simpa [hs] using hbad)
+          | true =>
+            simp only [hb, ite_true] at hbad
+            rw [hs] at hbad
+            cases hk : ck.rest with
+            | nil => simp [setActor, proceed, hk] at hbad
+            | cons _ _ => simp [setActor, proceed, hk] at hbad
       | awaitReply d ck =>
         simp [hph] at hbad
-        split at hbad
-        · rw [hs] at hbad
-          simp [setActor] at hbad
-        · exact h c k (by simpa [hs] using hbad)
+        exact h c k (by simpa [hs] using hbad)
       | idle => simp [hph] at hbad; exact h c k (by simpa [hs] using hbad)
       | run _ => simp [hph] at hbad; exact h c k (by simpa [hs] using hbad)
       | awaitEffect _ => simp [hph] at hbad; exact h c k (by simpa [hs] using hbad)
