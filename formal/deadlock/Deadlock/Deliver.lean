@@ -2074,7 +2074,8 @@ theorem wake_dead_prio (D : Description) (ids : List InstId) (w : World) (label 
   | nil => simpa using hempty
   | cons j js ih =>
     simp only [List.foldl_cons]
-    exact ih _ (by rw [try_wake_life]; exact hdead) (tryWake_dead_prio D w j label writer i hdead ▸ hempty)
+    exact ih _ (by rw [try_wake_keeps_dead D w j label writer i hdead]; exact hdead)
+      (tryWake_dead_prio D w j label writer i hdead ▸ hempty)
 
 theorem exec_keeps_dead_prio (I : Impl) (w : World) (id : InstId) (k : Cont) (i : InstId)
     (hdead : (w.st i).life ≠ .alive) (hne : i ≠ id) (hempty : (w.st i).prio = []) :

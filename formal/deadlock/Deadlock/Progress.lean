@@ -493,14 +493,20 @@ theorem reply_target_alive (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
     · exact Or.inl (mailbox_alive I hL N w hR dst (by
         intro hempty
         simp [hempty] at hp))
-  · exact Or.inl (busy_alive I N w hR dst (by
+  · exact Or.inl (wait_alive I hL N w hR dst (by
       intro hidle
       rcases hhand.2.1 with ⟨_, hcar, _⟩
-      simp [carriedCont, hidle] at hcar))
-  · exact Or.inl (busy_alive I N w hR dst (by
+      simp [carriedCont, hidle] at hcar) (by
+      intro hcrash
+      rcases hhand.2.1 with ⟨_, hcar, _⟩
+      simp [carriedCont, hcrash] at hcar))
+  · exact Or.inl (wait_alive I hL N w hR dst (by
       intro hidle
       rcases hpend.2.2 with ⟨_, hcar, _⟩
-      simp [carriedCont, hidle] at hcar))
+      simp [carriedCont, hidle] at hcar) (by
+      intro hcrash
+      rcases hpend.2.2 with ⟨_, hcar, _⟩
+      simp [carriedCont, hcrash] at hcar))
   · exact Or.inr hdead.1
 
 theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumptions I) (N : Nat)
@@ -622,7 +628,8 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
             ⟨hliveD, by simp [hphD]⟩ with ⟨act, hchain, hen⟩ | ⟨kP, hkP, _⟩
           · exact Or.inl ⟨act, on_partner w id dst act (waits_on_reply w id dst k hph) hchain, hen⟩
           · rw [hphD] at hkP; cases hkP
-      · have hl := busy_alive I N w hR id (by rw [hph]; intro h; cases h)
+      · have hl := wait_alive I hL N w hR id (by rw [hph]; intro h; cases h)
+          (by rw [hph]; intro h; cases h)
         exact Or.inl ⟨.callTimeout id,
           by simp [OnChain, actionSubject, InChain.refl],
           by unfold Enabled; simp [apply, callTimeout, hl, hph, bne]⟩
@@ -835,17 +842,14 @@ theorem off_idle_step (I : Impl) (a : Action) (w w' : World)
           intro d ck hbad
           rw [hidle] at hbad
           cases hbad
-        cases exec_keeps_quiet I w id (w.st id) k s hne hnpark hnreply with
-        | inl hkeep =>
-          refine ⟨hkeep.1.trans hidle, ?_⟩
+        rcases exec_keeps_quiet I w id (w.st id) k s hne hnpark hnreply with
+          hkeep | ⟨hold, _, _⟩ | ⟨hold, _, _⟩ | ⟨_, _, hmem, _⟩
+        · refine ⟨hkeep.1.trans hidle, ?_⟩
           rw [hkeep.2]
           exact hdead
-        | inr hdie =>
-          rcases hdie with ⟨hdead', hidle'⟩
-          refine ⟨hidle', ?_⟩
-          rw [hdead']
-          intro h
-          cases h
+        · exact absurd hold (absent_ne_alive hdead)
+        · exact absurd hold (absent_ne_alive hdead)
+        · exact absurd hmem hs
       | idle => simp [hph] at h
       | parked _ _ _ => simp [hph] at h
       | awaitReply _ _ => simp [hph] at h

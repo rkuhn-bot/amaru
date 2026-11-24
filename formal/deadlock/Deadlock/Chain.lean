@@ -453,14 +453,20 @@ theorem queue_mono_life (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : N
       · rcases h1.1 with ⟨m, hm, _⟩ | ⟨p, hp, _⟩
         · exact absurd (box_alive I hL hG N w' hR' dst (fun e => by simp [e] at hm)) hnot
         · exact absurd (mailbox_alive I hL N w' hR' dst (fun e => by simp [e] at hp)) hnot
-      · exact absurd (busy_alive I N w' hR' dst (by
+      · exact absurd (wait_alive I hL N w' hR' dst (by
           intro hidle
           rcases h2.2.1 with ⟨_, hcar, _⟩
-          simp [carriedCont, hidle] at hcar)) hnot
-      · exact absurd (busy_alive I N w' hR' dst (by
+          simp [carriedCont, hidle] at hcar) (by
+          intro hcrash
+          rcases h2.2.1 with ⟨_, hcar, _⟩
+          simp [carriedCont, hcrash] at hcar)) hnot
+      · exact absurd (wait_alive I hL N w' hR' dst (by
           intro hidle
           rcases h3.2.2 with ⟨_, hcar, _⟩
-          simp [carriedCont, hidle] at hcar)) hnot
+          simp [carriedCont, hidle] at hcar) (by
+          intro hcrash
+          rcases h3.2.2 with ⟨_, hcar, _⟩
+          simp [carriedCont, hcrash] at hcar)) hnot
       · exact h4.2.2.1
     rw [queue_zero_of_no_mail w' id dst hnom]
     exact Nat.zero_le _
@@ -1077,31 +1083,39 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
               omega
             exact ⟨[.recvBulk dst], w', ChainRun.cons w (.recvBulk dst) w' [] hchain happ (ChainRun.nil w'),
               by simp [runFrom, happ], Reachable.step w w' (.recvBulk dst) hR happ, hnot, hwk⟩
-    · have hl := busy_alive I N w hR id (by rw [hph]; intro h; cases h)
+    · have hl := wait_alive I hL N w hR id (by rw [hph]; intro h; cases h)
+        (by rw [hph]; intro h; cases h)
       have hen : Enabled I w (.callTimeout id) := by
         unfold Enabled
         simp [apply, callTimeout, hl, hph, bne]
       cases happ : apply I (.callTimeout id) w with
       | none => exact False.elim (hen happ)
       | some w' =>
-        rcases callTimeout_self w w' id (by simpa [apply] using happ) with hawait | hpark
+        rcases callTimeout_self w w' id (by simpa [stepWorld] using
+            (apply_step I (.callTimeout id) w w' happ).2) with hawait | hpark | hpeer
         · rcases hawait with ⟨_, kA, hpre, hpost⟩
           have hjoin := hpre.symm.trans hph
           injection hjoin with _ hk
-          have hph' : (w'.st id).phase = (proceed (w.st id) k).phase := by rw [hpost, hk]
+          have hph' : (w'.st id).phase =
+              (proceed (w.st id) (selectCall k .timedOut)).phase := by rw [hpost, hk]
           have hnot : ¬ Blocked w' id := by
             intro hB
             simp [Blocked, hph'] at hB
-            cases hr : k.rest <;> simp [proceed, hr] at hB <;> cases hB
+            cases hr : (selectCall k .timedOut).rest <;> simp [proceed, hr] at hB <;> cases hB
           have hwk : work ((w'.st id).phase) < work ((w.st id).phase) := by
             rw [hph']
-            simp [hph]
-            exact work_proceed_reply (w.st id) dst k
+            simp [hph, work, phaseFuel]
+            cases hr : (selectCall k .timedOut).rest <;> simp [proceed, hr, work, phaseFuel]
+            · omega
+            · omega
           exact ⟨[.callTimeout id], w',
             ChainRun.cons w (.callTimeout id) w' []
               (by simp [OnChain, actionSubject, InChain.refl]) happ (ChainRun.nil w'),
             by simp [runFrom, happ], Reachable.step w w' (.callTimeout id) hR happ, hnot, hwk⟩
         · rcases hpark with ⟨_, _, hpre, _⟩
+          rw [hph] at hpre
+          cases hpre
+        · rcases hpeer with ⟨_, hpre, _⟩
           rw [hph] at hpre
           cases hpre
 
