@@ -14453,16 +14453,32 @@ theorem exec_try_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : 
     (hk : k.rest = .trySend dst label hint onFull onGone :: es)
     (hA : MailAccepted I w) (ha : a = w.st id) : MailAccepted I (execRun I w id a k) := by
   unfold execRun
-  simp [hk, ha]
-  cases hr : route w I.desc id dst with
-  | none => exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
-  | some dstId =>
-    simp only [hr]
-    split
-    · exact enqueue_accepted I w id dstId
-        { label := label, sender := id, callFrom := none, reliable := false } false
-        (afterHead k) hA (Or.inl rfl)
-    · exact copy_accepted I w id (proceed (w.st id) (afterHead k)) hA (proceed_box _ _) (proceed_parked _ _)
+  by_cases hlive : (a.life == .alive) = true
+  · rw [if_pos hlive]
+    simp only [hk]
+    cases hr : route w I.desc id dst with
+    | none =>
+      simp only [hr]
+      exact copy_accepted I (noteStale w id dst) id
+        (proceed a { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone })
+        (note_accepted I w id dst hA)
+        (by rw [proceed_box, ha, noteStale_st])
+        (by rw [proceed_parked, ha, noteStale_st])
+    | some dstId =>
+      simp only [hr]
+      split
+      · exact enqueue_accepted I w id dstId
+          { label := label, sender := id, callFrom := none, reliable := false } false
+          (afterHead k) hA (Or.inl rfl)
+      · split
+        · exact copy_accepted I w id
+            (proceed a { afterHead k with rest := onFull, toState := pickState (afterHead k).toState (afterHead k).toFull })
+            hA (by rw [proceed_box, ha]) (by rw [proceed_parked, ha])
+        · exact copy_accepted I w id
+            (proceed a { afterHead k with rest := onGone, toState := pickState (afterHead k).toState (afterHead k).toGone })
+            hA (by rw [proceed_box, ha]) (by rw [proceed_parked, ha])
+  · rw [if_neg hlive]
+    exact hA
 
 theorem exec_cell_accepted (I : Impl) (w : World) (id : InstId) (a : Actor) (k : Cont)
     (dst label : String) (value : Nat) (es : List Eff) (hk : k.rest = .cell dst label value :: es)
