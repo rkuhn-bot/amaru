@@ -211,58 +211,103 @@ theorem bound_of_hold (w : World) (h : AcceptHold w) : boundFields w = true := b
     have hsum : decide ((w.st acceptId).tokens "accept" +
         ((w.st acceptId).box.length : Int) = 1) = true :=
       decide_eq_true (by simp [hbox, htok])
-    simp [boundFields, hc, hl, hp, ht, hk, hq, hlen, hall, hsum]
+    simp [boundFields, hc, hl, hp, ht, hk, hq, hlen, hall]
+    exact of_decide_eq_true hsum
   · have hlen : decide ((w.st acceptId).box.length ≤ 1) = true := decide_eq_true (by simp [hbox])
     have hall : ((w.st acceptId).box.all fun m => acceptResult m.label) = true := by
       simp [hbox, hres]
     have hsum : decide ((w.st acceptId).tokens "accept" +
         ((w.st acceptId).box.length : Int) = 1) = true :=
       decide_eq_true (by simp [hbox, htok])
-    simp [boundFields, hc, hl, hp, ht, hk, hq, hlen, hall, hsum]
+    simp [boundFields, hc, hl, hp, ht, hk, hq, hlen, hall]
+    exact of_decide_eq_true hsum
 
 theorem budget_accept : budget acceptDesc "accept" "accept" = 1 := by decide
 
 theorem debt_accept : debt acceptDesc "accept" "idle" "accept" = 1 := by decide
 
 theorem read_accept (w : World) : readCells acceptDesc w acceptId = w := by
-  simp [readCells, cellLabels, acceptDesc, result, tname, acceptId]
+  have hlab : cellLabels acceptDesc "accept" = [] := by decide
+  simp [readCells, hlab, tname, acceptId]
 
-theorem roster_accept : coreRoster acceptDesc = [acceptId] := by
-  simp [coreRoster, acceptDesc, acceptT, acceptId]
+theorem roster_accept : coreRoster acceptDesc = [acceptId] := by decide
 
-theorem gate_idle (a : Actor) (h : a.phase = .idle) :
+theorem gate_idle (a : Actor) (h : a.phase = .idle) (hty : a.typestate = "idle") :
     gateHold acceptDesc "accept" "accept" a = 0 := by
-  simp [gateHold, tokenHold, h, landFloor, budget_accept, debt_accept]
+  simp [gateHold, tokenHold, h, hty, landFloor, budget_accept, debt_accept]
 
 theorem lone_accept : loneTerminableB acceptDesc "accept" = false := by decide
 
 theorem has_result (label : String) (h : acceptResult label = true) :
     hasIngress acceptDesc "accept" label = true := by
-  cases hA : label == "Accepted" <;> cases hE : label == "AcceptError" <;>
-    simp [hasIngress, acceptResult, acceptDesc, result, hA, hE] at h ⊢
+  simp only [acceptResult, Bool.or_eq_true] at h
+  rcases h with hA | hE
+  · have hl : label = "Accepted" := by simpa [beq_iff_eq] using hA
+    subst hl
+    decide
+  · have hl : label = "AcceptError" := by simpa [beq_iff_eq] using hE
+    subst hl
+    decide
 
 theorem allow_one (N : Nat) (label : String) (h : acceptResult label = true) :
     Nat.max (ingressAllowance acceptDesc N "accept" label) 1 = 1 := by
-  cases hA : label == "Accepted" <;> cases hE : label == "AcceptError" <;>
-    simp [acceptResult, hA, hE] at h <;>
-    simp [ingressAllowance, acceptDesc, result, Affine.eval, Affine.ofNat, hA, hE]
+  simp only [acceptResult, Bool.or_eq_true] at h
+  rcases h with hA | hE
+  · have hl : label = "Accepted" := by simpa [beq_iff_eq] using hA
+    subst hl
+    have hfind : (acceptDesc.edges.find? fun e =>
+        e.ingress && e.dst == "accept" && e.label == "Accepted") =
+        some (result "Accepted" 1 1) := by decide
+    simp [ingressAllowance, hfind, result, Affine.eval, Affine.ofNat, Nat.zero_mul, Nat.zero_add,
+      Nat.max_self]
+  · have hl : label = "AcceptError" := by simpa [beq_iff_eq] using hE
+    subst hl
+    have hfind : (acceptDesc.edges.find? fun e =>
+        e.ingress && e.dst == "accept" && e.label == "AcceptError") =
+        some (result "AcceptError" 0 0) := by decide
+    simp [ingressAllowance, hfind, result, Affine.eval, Affine.ofNat, Nat.zero_mul, Nat.add_zero]
 
 theorem accept_no_spawn (w : World) (template : String) : spawn acceptImpl w template = none := by
-  cases ht : templateOf acceptDesc template with
-  | none => simp [spawn, acceptImpl, ht]
-  | some t =>
-    have ht' : t = acceptT := by
-      simp [templateOf, acceptDesc, acceptT] at ht
-      cases hname : template == "accept" <;> simp [hname, acceptT] at ht
-      · exact ht
-    simp [spawn, acceptImpl, ht, ht', maySpawnRoot, acceptT]
+  cases hname : template == "accept" with
+  | false =>
+    have hne : ¬"accept" = template := by
+      intro h
+      simp [beq_iff_eq, h.symm] at hname
+    have hto : templateOf acceptDesc template = none := by
+      simp [templateOf, acceptDesc, List.findSome?, hne, acceptT]
+    simp [spawn, acceptImpl, hto]
+  | true =>
+    have heq : "accept" = template := by
+      have h : template = "accept" := by simpa [beq_iff_eq] using hname
+      exact h.symm
+    have hto : templateOf acceptDesc template = some acceptT := by
+      simp [templateOf, acceptDesc, List.findSome?, heq, acceptT]
+    have hmul : (acceptT.multiplicity == .perPeer) = false := by decide
+    have hmay : maySpawnRoot acceptDesc w template acceptT = false := by
+      simp [maySpawnRoot, hmul]
+    simp [spawn, acceptImpl, hto, hmay]
 
 theorem ingress_bad (w : World) (label : String) (hl : (w.st acceptId).life = .alive)
     (hp : (w.st acceptId).phase = .idle) (h : acceptResult label = false) :
     receiveIngress acceptImpl w acceptId label = none := by
   have hno : hasIngress acceptDesc "accept" label = false := by
-    cases hA : label == "Accepted" <;> cases hE : label == "AcceptError" <;>
-      simp [hasIngress, acceptResult, acceptDesc, result, hA, hE] at h ⊢
+    cases hA : label == "Accepted" <;> cases hE : label == "AcceptError"
+    · have hneA : label ≠ "Accepted" := by simpa [beq_iff_eq] using hA
+      have hneE : label ≠ "AcceptError" := by simpa [beq_iff_eq] using hE
+      have hL : ("Accepted" == label) = false := by
+        cases hcmp : ("Accepted" == label)
+        · rfl
+        · have heq : "Accepted" = label := by simpa [beq_iff_eq] using hcmp
+          exact absurd heq.symm hneA
+      have hR : ("AcceptError" == label) = false := by
+        cases hcmp : ("AcceptError" == label)
+        · rfl
+        · have heq : "AcceptError" = label := by simpa [beq_iff_eq] using hcmp
+          exact absurd heq.symm hneE
+      simp [hasIngress, acceptDesc, result, List.any_cons, List.any_nil, hL, hR]
+    · simp [acceptResult, hA, hE] at h
+    · simp [acceptResult, hA, hE] at h
+    · simp [acceptResult, hA, hE] at h
   simp [receiveIngress, acceptImpl, hl, hp, ingressOpen, hno]
 
 theorem ingress_absent (w : World) (dst : InstId) (label : String)
@@ -279,22 +324,9 @@ theorem ingress_empty (w : World) (label : String) (hH : AcceptHold w)
           [{ label := label, sender := acceptId, callFrom := none, reliable := true,
              mid := (w.st acceptId).nextMid }],
         nextMid := (w.st acceptId).nextMid + 1 }) := by
-  have hguard :
-      (decide ((w.st acceptId).life ≠ .alive) ||
-        (ingressOpen (w.st acceptId).phase == false)) = false := by
-    simp [hH.life, hH.phase, ingressOpen]
-  have hhas : (hasIngress acceptDesc "accept" label == false) = false := by
-    simp [has_result label hr]
-  have hcap : (decide (capBulk acceptDesc w.N acceptId ≤ (w.st acceptId).box.length)) = false := by
-    simp [accept_cap, hbox]
-  have hlone : (loneTerminableB acceptDesc "accept" == true) = false := by simp [lone_accept]
-  have hneed : ((w.st acceptId).tokens "accept" <
-      ((gateHold acceptDesc "accept" "accept" (w.st acceptId) : Nat) + 1 : Int)) = false := by
-    simp [gate_idle (w.st acceptId) hH.phase, htok]
-  have hallow : ((w.st acceptId).tokens "accept" <
-      (Nat.max (ingressAllowance acceptDesc w.N "accept" label) 1 : Int)) = false := by
-    simp [allow_one w.N label hr, htok]
-  simp [receiveIngress, acceptImpl, hguard, hhas, hcap, hlone, hneed, hallow]
+  simp [receiveIngress, acceptImpl, hH.life, hH.phase, ingressOpen, has_result label hr, hbox,
+    accept_cap, lone_accept, tname, acceptId,
+    gate_idle (w.st acceptId) hH.phase hH.ty, allow_one w.N label hr, htok]
 
 theorem hold_after_ingress (w : World) (label : String) (hH : AcceptHold w)
     (hbox : (w.st acceptId).box = []) (htok : (w.st acceptId).tokens "accept" = 1)
@@ -313,8 +345,8 @@ theorem hold_after_ingress (w : World) (label : String) (hH : AcceptHold w)
       nextMid := (w.st acceptId).nextMid + 1 } := by
     rw [hw] at heq
     exact Option.some.inj heq
-  let msg : Msg := { label := label, sender := acceptId, callFrom := none, reliable := true,
-    mid := (w.st acceptId).nextMid }
+  let msg : Msg :=
+    { label := label, sender := acceptId, callFrom := none, reliable := true, mid := (w.st acceptId).nextMid }
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · simp [hw', setActor, hH.crash]
   · simp [hw', setActor, hH.roster]
@@ -345,8 +377,8 @@ theorem bulk_one (w : World) (m : Msg) (hH : AcceptHold w)
     (htok : (w.st acceptId).tokens "accept" = 0) :
     receiveBulk acceptImpl w acceptId =
       some (creditLive (setActor (readCells acceptDesc w acceptId) acceptId
-        { { (w.st acceptId) with box := [] } with oweId := none, phase := .idle,
-          typestate := "idle" }) "accept" acceptId) := by
+        { { (w.st acceptId) with box := [] } with oweId := none, phase := .idle, typestate := "idle" })
+        "accept" acceptId) := by
   have hdel := deliver_result (readCells acceptDesc w acceptId)
     { (w.st acceptId) with box := [] } m
     (by simp [hH.life]) (by simp [hH.ty]) hc ht hres
@@ -361,8 +393,8 @@ theorem hold_after_bulk (w : World) (m : Msg) (hH : AcceptHold w)
   have hw := bulk_one w m hH hbox hres hc ht hsend htok
   rw [hw] at heq
   cases heq
-  let a' : Actor := { { (w.st acceptId) with box := [] } with oweId := none, phase := .idle,
-    typestate := "idle" }
+  let a' : Actor :=
+    { { (w.st acceptId) with box := [] } with oweId := none, phase := .idle, typestate := "idle" }
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · simp [creditLive, creditSender, budgetHolder, setActor, hH.crash]
   · simp [creditLive, creditSender, budgetHolder, setActor, hH.roster]

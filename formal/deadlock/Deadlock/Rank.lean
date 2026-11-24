@@ -10537,6 +10537,33 @@ theorem resume_call_waits (a : Actor) (dst : InstId) (k : Cont)
     (h : a.phase = .parked dst true k) : (resumeSender a true dst).phase = .awaitReply dst k := by
   simp [resumeSender, h]
 
+/-- `resumeSender` rewrites a parked phase even when the actor is dead. A call
+entry becomes `awaitReply` of the mailbox that held the entry, which need not
+be the mailbox named in the phase. A non-call entry runs `proceed`. -/
+theorem parked_eq_mb {a b : InstId} {c d : Bool} {k1 k2 : Cont}
+    (h : Phase.parked a c k1 = Phase.parked b d k2) : a = b := by
+  cases h
+  rfl
+
+theorem parked_call_bit {a b : InstId} {c d : Bool} {k1 k2 : Cont}
+    (h : Phase.parked a c k1 = Phase.parked b d k2) : c = d := by
+  cases h
+  rfl
+
+theorem resume_parked_or (a : Actor) (src mb : InstId) (isCall : Bool) (k : Cont)
+    (h : a.phase = .parked src true k) :
+    (resumeSender a isCall mb).phase = .awaitReply mb k ∨
+      (resumeSender a isCall mb).phase = .idle ∨
+      (resumeSender a isCall mb).phase = .run k := by
+  cases isCall
+  · cases hk : k.rest
+    · apply Or.inr; apply Or.inl
+      simp [resumeSender, h, proceed, hk]
+    · apply Or.inr; apply Or.inr
+      simp [resumeSender, h, proceed, hk]
+  · apply Or.inl
+    simp [resumeSender, h]
+
 /-- Installing the receiver and crediting some sender leaves a different actor's phase. -/
 theorem install_sender_phase (w w1 : World) (id : InstId) (installed : Actor) (who sender : InstId)
     (hne : sender ≠ id) (hst : w1.st sender = w.st sender) :
@@ -19668,6 +19695,11 @@ theorem clearReply_witness (k : Cont) : ∃ c, clearReplyCont c k = k := by
 
 /-- Clearing twice is one clear: a second caller sees `replyTo` already empty,
 or the first clear was already the identity. -/
+theorem clearReply_callFuel (c : InstId) (k : Cont) :
+    callFuel (clearReplyCont c k) = callFuel k := by
+  unfold clearReplyCont
+  split <;> rfl
+
 theorem clearReply_comp (c d : InstId) (k : Cont) :
     ∃ e, clearReplyCont e k = clearReplyCont c (clearReplyCont d k) := by
   cases hr : k.replyTo with
@@ -21576,11 +21608,15 @@ theorem release_keeps_call_phase (D : Description) (w : World) (id s : InstId) (
   rw [hworld]
   exact (release_keeps_caller wS id a.parked s hcalls).trans hpre
 
-/-- A parked call is admitted, stays parked, resumes, idles, or crashes. -/
+/-- A parked call is admitted, stays parked, resumes, idles, or crashes.
+Admission and a resume both land in `awaitReply`. The mailbox is the one
+`resumeSender` was given. It is the call's own target, or another lane when
+that function rewrites a sender whose life is already `.dead`. -/
 theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : Cont)
     (hM : MailInv w) (hO : OpenSlots w) (h : apply I a w = some w')
     (hph : (w.st s).phase = .parked dst true k) :
-    (w'.st s).phase = .parked dst true k ∨ (w'.st s).phase = .awaitReply dst k ∨
+    (w'.st s).phase = .parked dst true k ∨
+      (∃ mb, (w'.st s).phase = .awaitReply mb k ∧ ((w.st s).life = .dead ∨ mb = dst)) ∨
       (w'.st s).phase = .idle ∨ (w'.st s).phase = .run k ∨
       (w'.st s).phase = .crashed ∨
       (∃ c, (w'.st s).phase = .parked dst true (clearReplyCont c k)) ∨
@@ -21676,8 +21712,8 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
               exact (hM.uniq dst dst p0 p hp0 hmem (hs0.trans hhead)).2 ▸ hc0
             have hrecv : receiveBulk I w dst = some w' := by
               simpa [hjd] using h
-            exact Or.inr (Or.inl (bulk_admits_call I w w' dst hrecv p ps hpk s hhead
-              (by simpa [hjd] using hsj) k (by simpa [hjd] using hph) hc))
+            exact Or.inr (Or.inl ⟨dst, bulk_admits_call I w w' dst hrecv p ps hpk s hhead
+              (by simpa [hjd] using hsj) k (by simpa [hjd] using hph) hc, Or.inr rfl⟩)
           · unfold receiveBulk at h
             by_cases hready : (w.st j).life ≠ .alive ∨ (w.st j).phase ≠ .idle
             · simp [hready] at h
@@ -21748,11 +21784,6 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
             | nil => simp [hbox, hpark] at h
             | cons q qs =>
               simp [hbox, hpark] at h
-              have hns : s ≠ q.sender := by
-                intro heq
-                obtain ⟨p0, hp0, hs0, _⟩ := hM.bwd s dst true k hph
-                have hmemq : q ∈ (w.st j).parked := by simp [hpark]
-                exact hjd ((hM.uniq j dst q p0 hmemq hp0 (heq.symm.trans hs0.symm)).1)
               split at h
               · cases h
               · next w1 a1 hdel =>
@@ -21761,8 +21792,25 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                 have hset : ((setActor w1 j a1).st s).phase = (w.st s).phase := by
                   simpa [setActor, hsj, hst] using hph
                 have hcred := (creditLive_keeps (setActor w1 j a1) (tname j) q.msg.sender s).2.2.1
-                simp only [setActor, hns, ite_false]
-                exact Or.inl ((hcred.trans hset).trans hph)
+                by_cases hns : s = q.sender
+                · rw [hns] at hcred hset hph ⊢
+                  have hphC :
+                      ((creditLive (setActor w1 j a1) (tname j) q.msg.sender).st q.sender).phase =
+                        .parked dst true k :=
+                    (hcred.trans hset).trans hph
+                  rw [setActor_self]
+                  rcases resume_parked_or _ dst j q.isCall k hphC with hawait | hidle | hrun
+                  · by_cases hdead : (w.st q.sender).life = .dead
+                    · exact Or.inr (Or.inl ⟨j, hawait, Or.inl hdead⟩)
+                    · have hmem : q ∈ (w.st j).parked := by simp [hpark]
+                      rcases hM.fwd j q hmem with ⟨k0, hk0⟩ | hhalt
+                      · rw [hph] at hk0
+                        exact absurd (parked_eq_mb hk0).symm hjd
+                      · exact absurd hhalt hdead
+                  · exact Or.inr (Or.inr (Or.inl hidle))
+                  · exact Or.inr (Or.inr (Or.inr (Or.inl hrun)))
+                · rw [setActor_other _ q.sender s _ hns]
+                  exact Or.inl ((hcred.trans hset).trans hph)
           | cons m ms =>
             cases hpark : (w.st j).parked with
             | nil =>
@@ -21778,11 +21826,6 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                 exact Or.inl ((hcred.trans hset).trans hph)
             | cons q qs =>
               simp [hbox, hpark] at h
-              have hns : s ≠ q.sender := by
-                intro heq
-                obtain ⟨p0, hp0, hs0, _⟩ := hM.bwd s dst true k hph
-                have hmemq : q ∈ (w.st j).parked := by simp [hpark]
-                exact hjd ((hM.uniq j dst q p0 hmemq hp0 (heq.symm.trans hs0.symm)).1)
               split at h
               · cases h
               · next w1 a1 hdel =>
@@ -21792,8 +21835,25 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                 have hset : ((setActor w1 j admitted).st s).phase = (w.st s).phase := by
                   simpa [setActor, admitted, hsj, hst] using hph
                 have hcred := (creditLive_keeps (setActor w1 j admitted) (tname j) m.sender s).2.2.1
-                simp only [setActor, hns, ite_false]
-                exact Or.inl ((hcred.trans hset).trans hph)
+                by_cases hns : s = q.sender
+                · rw [hns] at hcred hset hph ⊢
+                  have hphC :
+                      ((creditLive (setActor w1 j admitted) (tname j) m.sender).st q.sender).phase =
+                        .parked dst true k :=
+                    (hcred.trans hset).trans hph
+                  rw [setActor_self]
+                  rcases resume_parked_or _ dst j q.isCall k hphC with hawait | hidle | hrun
+                  · by_cases hdead : (w.st q.sender).life = .dead
+                    · exact Or.inr (Or.inl ⟨j, hawait, Or.inl hdead⟩)
+                    · have hmem : q ∈ (w.st j).parked := by simp [hpark]
+                      rcases hM.fwd j q hmem with ⟨k0, hk0⟩ | hhalt
+                      · rw [hph] at hk0
+                        exact absurd (parked_eq_mb hk0).symm hjd
+                      · exact absurd hhalt hdead
+                  · exact Or.inr (Or.inr (Or.inl hidle))
+                  · exact Or.inr (Or.inr (Or.inr (Or.inl hrun)))
+                · rw [setActor_other _ q.sender s _ hns]
+                  exact Or.inl ((hcred.trans hset).trans hph)
   | exec j =>
     have h := stepOfApply h
     simp only [stepWorld] at h
@@ -21853,7 +21913,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
               · split
                 · exact Or.inl (by simp [setActor, hsj, hph])
                 · rcases crash_phase_or w s with hphC | hsame
-                  · exact Or.inr (Or.inr (Or.inr (Or.inr hphC)))
+                  · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hphC))))
                   · exact Or.inl (hsame.trans hph)
             | cell name label value =>
               simp only [execRun, hk, hlj]
@@ -21863,7 +21923,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
               · simp only [if_neg hdirty]
                 rcases wakes_phase_or (readersOf _ name) I.desc _ label j s with hsame | hcr
                 · exact Or.inl (hsame.trans (by simp [setCell, setActor, hsj, hph]))
-                · exact Or.inr (Or.inr (Or.inr (Or.inr hcr)))
+                · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hcr))))
             | internal => exact Or.inl (by simp [execRun, hk, hlj, setActor, hsj, hph])
             | peer onTimeout => exact Or.inl (by simp [execRun, hk, hlj, setActor, hsj, hph])
             | abort =>
@@ -21879,7 +21939,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                 | cons _ _ =>
                   exact Or.inr (Or.inr (Or.inr (Or.inl (by simpa [resumed, hkrest] using hres))))
               · exact Or.inr (Or.inr (Or.inl hidle))
-              · exact Or.inr (Or.inr (Or.inr (Or.inr hcrashP)))
+              · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hcrashP))))
             | spawn child =>
               simp only [execRun, hk, hlj]
               have hlive : (Life.alive == Life.alive) = true := rfl
@@ -21888,7 +21948,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
               | none =>
                 simp only [hsc]
                 rcases crash_phase_or w s with hphC | hsame
-                · exact Or.inr (Or.inr (Or.inr (Or.inr hphC)))
+                · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hphC))))
                 · exact Or.inl (hsame.trans hph)
               | some w1 =>
                 simp only [hsc]
@@ -21910,20 +21970,19 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
               · exact Or.inl (by rw [hkept]; exact hph)
               · rw [hcrashW]
                 rcases crash_phase_or w s with hphC | hsame
-                · exact Or.inr (Or.inr (Or.inr (Or.inr hphC)))
+                · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hphC))))
                 · exact Or.inl (hsame.trans hph)
               · rw [hsh]
-                have hcalls : ∀ p, p ∈ (w.st j).parked → p.sender = s → p.isCall = true := by
-                  intro p hp hsnd
-                  rcases hM.fwd j p hp with ⟨k0, hk0⟩ | hhalt
-                  · rw [hsnd, hph] at hk0
-                    cases hk0
-                    rfl
-                  · simp [Halted] at hhalt
-                have hrel := release_keeps_call_phase I.desc w j s hsj hcalls
-                rcases shutdown_phase_or_crashed I.desc w j s hl with hsame | hcr
-                · exact Or.inl ((hsame.trans hrel).trans hph)
-                · exact Or.inr (Or.inr (Or.inr (Or.inr hcr)))
+                rcases shape_shutdown I.desc w j s dst true k (Or.inl hph) with
+                  hstay | hres | hidle | hcrash
+                · exact Or.inl hstay
+                · cases hkrest : k.rest with
+                  | nil =>
+                    exact Or.inr (Or.inr (Or.inl (by simpa [resumed, hkrest] using hres)))
+                  | cons _ _ =>
+                    exact Or.inr (Or.inr (Or.inr (Or.inl (by simpa [resumed, hkrest] using hres))))
+                · exact Or.inr (Or.inr (Or.inl hidle))
+                · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hcrash))))
               · rw [hkill]
                 rcases terminate_block I.desc w j s dst true k hph with hstay | hres | hidle | hcrashP
                 · exact Or.inl hstay
@@ -21933,7 +21992,7 @@ theorem call_park_next (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (
                   | cons _ _ =>
                     exact Or.inr (Or.inr (Or.inr (Or.inl (by simpa [resumed, hkrest] using hres))))
                 · exact Or.inr (Or.inr (Or.inl hidle))
-                · exact Or.inr (Or.inr (Or.inr (Or.inr hcrashP)))
+                · exact Or.inr (Or.inr (Or.inr (Or.inr (Or.inl hcrashP))))
         | idle => simp [hp] at h
         | parked _ _ _ => simp [hp] at h
         | awaitReply _ _ => simp [hp] at h
@@ -21950,35 +22009,69 @@ theorem call_step (I : Impl) (a : Action) (w w' : World) (s dst : InstId) (k : C
     (hM : MailInv w) (hO : OpenSlots w) (h : apply I a w = some w')
     (hph : CallPhase dst k ((w.st s).phase))
     (hkind : waitKind ((w'.st s)) = some (.callReply dst)) :
-    CallPhase dst k ((w'.st s).phase) := by
+    ∃ c, CallPhase dst (clearReplyCont c k) ((w'.st s).phase) := by
   rcases hph with hpark | hawait
-  · rcases call_park_next I a w w' s dst k hM hO h hpark with hstay | hadm | hidle | hrun | hcrash
-    · exact Or.inl hstay
-    · exact Or.inr hadm
+  · rcases call_park_next I a w w' s dst k hM hO h hpark with
+      hstay | hadm | hidle | hrun | hcrash | hclr | hto
+    · obtain ⟨c, hc⟩ := clearReply_witness k
+      exact ⟨c, Or.inl (by simpa [hc] using hstay)⟩
+    · rcases hadm with ⟨mb, hA, _⟩
+      have hmb : mb = dst := by
+        have h1 : (some (WaitKind.callReply mb) : Option WaitKind) = some (WaitKind.callReply dst) := by
+          simpa [waitKind, hA] using hkind
+        injection h1 with h
+        injection h with hmb
+      obtain ⟨c, hc⟩ := clearReply_witness k
+      exact ⟨c, Or.inr (by simpa [hc, hmb] using hA)⟩
     · simp [waitKind, hidle] at hkind
     · simp [waitKind, hrun] at hkind
     · simp [waitKind, hcrash] at hkind
-  · rcases await_next I a w w' s dst k hM hO h hawait with hstay | hpro | hidle | hcrash
-    · exact Or.inr hstay
-    · have hwk : waitKind ((w'.st s)) = waitKind (proceed ((w.st s)) k) := by simp [waitKind, hpro]
-      exact absurd (hwk.symm.trans hkind) (proceed_not_reply ((w.st s)) k dst)
+    · rcases hclr with ⟨c, hC⟩
+      exact ⟨c, Or.inl hC⟩
+    · have hproc : (w'.st s).phase =
+          (proceed ((refundParkedCall w s dst).st s) (selectCall k .notAdmitted)).phase := by
+        simpa [finishCall] using hto
+      have hwk : waitKind (w'.st s) =
+          waitKind (proceed ((refundParkedCall w s dst).st s) (selectCall k .notAdmitted)) := by
+        simp [waitKind, hproc]
+      exact absurd (hwk.symm.trans hkind) (proceed_not_reply _ (selectCall k .notAdmitted) dst)
+  · rcases await_next I a w w' s dst k hM hO h hawait with hstay | hpro | hidle | hcrash | hto | hclr
+    · obtain ⟨c, hc⟩ := clearReply_witness k
+      exact ⟨c, Or.inr (by simpa [hc] using hstay)⟩
+    · have hwk : waitKind (w'.st s) = waitKind (proceed (w.st s) k) := by simp [waitKind, hpro]
+      exact absurd (hwk.symm.trans hkind) (proceed_not_reply (w.st s) k dst)
     · simp [waitKind, hidle] at hkind
     · simp [waitKind, hcrash] at hkind
+    · have hproc : (w'.st s).phase =
+          (proceed (w.st s) (selectCall k .timedOut)).phase := by
+        simpa [finishCall] using hto
+      have hwk : waitKind (w'.st s) =
+          waitKind (proceed (w.st s) (selectCall k .timedOut)) := by
+        simp [waitKind, hproc]
+      exact absurd (hwk.symm.trans hkind) (proceed_not_reply _ (selectCall k .timedOut) dst)
+    · rcases hclr with ⟨c, hC⟩
+      exact ⟨c, Or.inr hC⟩
 
 theorem call_stays (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
     (s dst : InstId) (k : Cont) (i n : Nat)
     (hph : CallPhase dst k (((ρ.cfg i).st s).phase))
     (hkind : ∀ t, i ≤ t → t ≤ i + n → waitKind ((ρ.cfg t).st s) = some (.callReply dst)) :
-    CallPhase dst k (((ρ.cfg (i + n)).st s).phase) := by
+    ∃ c, CallPhase dst (clearReplyCont c k) (((ρ.cfg (i + n)).st s).phase) := by
   induction n with
-  | zero => simpa using hph
+  | zero =>
+    obtain ⟨c, hc⟩ := clearReply_witness k
+    exact ⟨c, by simpa [hc] using hph⟩
   | succ n ih =>
-    have hprev := ih (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _)))
+    obtain ⟨d, hprev⟩ := ih (fun t h1 h2 => hkind t h1 (Nat.le_trans h2 (Nat.le_succ _)))
     have hR := cfg_reachable ρ (i + n)
     have hM := (inv_reachable I N (ρ.cfg (i + n)) hL hR).2.1
     have hO := (inv_reachable I N (ρ.cfg (i + n)) hL hR).2.2.1
-    exact call_step I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) s dst k hM hO
-      (ρ.valid (i + n)) hprev (hkind (i + n + 1) (by omega) (by omega))
+    obtain ⟨c, hstep⟩ := call_step I (ρ.act (i + n)) (ρ.cfg (i + n)) (ρ.cfg (i + n + 1)) s dst
+      (clearReplyCont d k) hM hO (ρ.valid (i + n)) hprev
+      (hkind (i + n + 1) (by omega) (by omega))
+    obtain ⟨e, he⟩ := clearReply_comp c d k
+    rw [Nat.add_assoc] at hstep
+    exact ⟨e, by simpa [he] using hstep⟩
 
 /-- The first step that leaves a call reply drops `phaseFuel`. -/
 theorem call_drops_at (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
@@ -21988,44 +22081,66 @@ theorem call_drops_at (I : Impl) (hL : LocalOk I) {N : Nat} (ρ : Run I N)
     (hdiff : waitKind ((ρ.cfg j).st s) ≠ some (.callReply dst)) :
     phaseFuel (((ρ.cfg j).st s).phase) < phaseFuel (((ρ.cfg i).st s).phase) := by
   have hle : i ≤ j - 1 := by omega
-  have hpre := call_stays I hL ρ s dst k i ((j - 1) - i) hph
+  obtain ⟨c0, hpre⟩ := call_stays I hL ρ s dst k i ((j - 1) - i) hph
     (fun t h1 h2 => hbefore t h1 (by omega))
   have hidx : i + ((j - 1) - i) = j - 1 := Nat.add_sub_of_le hle
-  have hph1 : CallPhase dst k (((ρ.cfg (j - 1)).st s).phase) := by simpa [hidx] using hpre
+  have hph1 : CallPhase dst (clearReplyCont c0 k) (((ρ.cfg (j - 1)).st s).phase) := by
+    simpa [hidx] using hpre
   have hR := cfg_reachable ρ (j - 1)
-  have hM := (inv_reachable I N (ρ.cfg (j - 1)) hL hR).2.1
-  have hO := (inv_reachable I N (ρ.cfg (j - 1)) hL hR).2.2
+  have hInv := inv_reachable I N (ρ.cfg (j - 1)) hL hR
+  have hM := hInv.2.1
+  have hO := hInv.2.2.1
   have hv := ρ.valid (j - 1)
   have hj1 : (j - 1) + 1 = j := by omega
   rw [hj1] at hv
+  have hfuel0 : phaseFuel (((ρ.cfg (j - 1)).st s).phase) =
+      phaseFuel (((ρ.cfg i).st s).phase) := by
+    rcases hph1 with hpark1 | hawait1
+    · rcases hph with hpark0 | hawait0
+      · simp [phaseFuel, hpark1, hpark0, clearReply_callFuel]
+      · simp [phaseFuel, hpark1, hawait0, clearReply_callFuel]
+    · rcases hph with hpark0 | hawait0
+      · simp [phaseFuel, hawait1, hpark0, clearReply_callFuel]
+      · simp [phaseFuel, hawait1, hawait0, clearReply_callFuel]
   rcases hph1 with hpark | hawait
-  · have hstep := call_park_next I (ρ.act (j - 1)) (ρ.cfg (j - 1)) (ρ.cfg j) s dst k hM hO hv hpark
-    rcases hstep with hstay | hadm | hdead
+  · have hstep := call_park_next I (ρ.act (j - 1)) (ρ.cfg (j - 1)) (ρ.cfg j) s dst
+      (clearReplyCont c0 k) hM hO hv hpark
+    rcases hstep with hstay | hadm | hidle | hrun | hcrash | hclr | hto
     · exact absurd (by simp [waitKind, hstay]) hdiff
-    · exact absurd (by simp [waitKind, hadm]) hdiff
-    · rcases hdead with hidle | hrun
-      · have hdrop : phaseFuel (((ρ.cfg j).st s).phase) < phaseFuel (((ρ.cfg (j - 1)).st s).phase) := by
-          rw [hidle, hpark]; simp only [phaseFuel]; omega
-        have heq : phaseFuel (((ρ.cfg (j - 1)).st s).phase) = phaseFuel (((ρ.cfg i).st s).phase) := by
-          rw [hpark]
-          rcases hph with hpark0 | hawait0
-          · rw [hpark0]
-          · rw [hawait0]; simp only [phaseFuel]
-        exact Nat.lt_of_lt_of_eq hdrop heq
-      · have hdrop : phaseFuel (((ρ.cfg j).st s).phase) < phaseFuel (((ρ.cfg (j - 1)).st s).phase) := by
-          rw [hrun, hpark]; simp only [phaseFuel]; omega
-        have heq : phaseFuel (((ρ.cfg (j - 1)).st s).phase) = phaseFuel (((ρ.cfg i).st s).phase) := by
-          rw [hpark]
-          rcases hph with hpark0 | hawait0
-          · rw [hpark0]
-          · rw [hawait0]; simp only [phaseFuel]
-        exact Nat.lt_of_lt_of_eq hdrop heq
-  · have hdrop := await_fuel I (ρ.act (j - 1)) (ρ.cfg (j - 1)) (ρ.cfg j) s dst k hM hO hv hawait hdiff
-    have heq : phaseFuel (((ρ.cfg (j - 1)).st s).phase) = phaseFuel (((ρ.cfg i).st s).phase) := by
-      rcases hph with hpark0 | hawait0
-      · simp [phaseFuel, hawait, hpark0]
-      · simp [phaseFuel, hawait, hawait0]
-    omega
+    · rcases hadm with ⟨mb, hA, hwhy⟩
+      rcases hwhy with hdead | hmb
+      · have hlive := busy_alive I (ρ.cfg (j - 1)) hInv.1 s
+          (by rw [hpark]; intro h; cases h) (by rw [hpark]; intro h; cases h)
+        rw [hdead] at hlive
+        cases hlive
+      · exact absurd (by simp [waitKind, hA, hmb]) hdiff
+    · have hdrop : phaseFuel (((ρ.cfg j).st s).phase) <
+          phaseFuel (((ρ.cfg (j - 1)).st s).phase) := by
+        rw [hidle, hpark]; simp only [phaseFuel]; omega
+      exact Nat.lt_of_lt_of_eq hdrop hfuel0
+    · have hdrop : phaseFuel (((ρ.cfg j).st s).phase) <
+          phaseFuel (((ρ.cfg (j - 1)).st s).phase) := by
+        rw [hrun, hpark]; simp only [phaseFuel, progFuel, callFuel]; omega
+      exact Nat.lt_of_lt_of_eq hdrop hfuel0
+    · have hdrop : phaseFuel (((ρ.cfg j).st s).phase) <
+          phaseFuel (((ρ.cfg (j - 1)).st s).phase) := by
+        rw [hcrash, hpark]; simp only [phaseFuel]; omega
+      exact Nat.lt_of_lt_of_eq hdrop hfuel0
+    · rcases hclr with ⟨_, hC⟩
+      exact absurd (by simp [waitKind, hC]) hdiff
+    · have hproc : (((ρ.cfg j).st s).phase) =
+          (proceed (((refundParkedCall (ρ.cfg (j - 1)) s dst).st s))
+            (selectCall (clearReplyCont c0 k) .notAdmitted)).phase := by
+        simpa [finishCall] using hto
+      have hdrop : phaseFuel (((ρ.cfg j).st s).phase) <
+          phaseFuel (((ρ.cfg (j - 1)).st s).phase) := by
+        rw [hproc, hpark]
+        simp only [phaseFuel, proceed, finishCall, selectCall, callFuel]
+        cases (clearReplyCont c0 k).onNotAdmitted <;> simp [progFuel, callFuel] <;> omega
+      exact Nat.lt_of_lt_of_eq hdrop hfuel0
+  · have hdrop := await_fuel I (ρ.act (j - 1)) (ρ.cfg (j - 1)) (ρ.cfg j) s dst
+      (clearReplyCont c0 k) hM hO hv hawait hdiff
+    exact Nat.lt_of_lt_of_eq hdrop hfuel0
 
 theorem call_is_wait (dst : InstId) (k : Cont) (ph : Phase) (h : CallPhase dst k ph) : PhaseWait ph := by
   rcases h with h | h
@@ -22044,19 +22159,17 @@ theorem failWaiter_keeps_gone (w : World) (dead i s dst : InstId) (k : Cont)
   · simpa [hdead] using h
   · simp only [hdead, ite_false]
     cases hph : (w.st i).phase with
-    | parked d _ ck =>
-      by_cases hd : (d == dead) = true
-      · by_cases hs : s = i
-        · simp [hph, hd, hs, setActor]
-          exact proceed_not_callphase (w.st i) ck k dst
-        · simpa [hph, hd, setActor, hs] using h
-      · simpa [hph, hd] using h
-    | awaitReply d _ =>
-      by_cases hd : (d == dead) = true
-      · by_cases hs : s = i
-        · simp [hph, hd, hs, setActor, CallPhase]
-        · simpa [hph, hd, setActor, hs] using h
-      · simpa [hph, hd] using h
+    | parked d c ck =>
+      cases c with
+      | false =>
+        by_cases hd : (d == dead) = true
+        · by_cases hs : s = i
+          · simp [hph, hd, hs, setActor]
+            exact proceed_not_callphase (w.st i) ck k dst
+          · simpa [hph, hd, setActor, hs] using h
+        · simpa [hph, hd] using h
+      | true => simpa [hph] using h
+    | awaitReply _ _ => simpa [hph] using h
     | idle => simpa [hph] using h
     | run _ => simpa [hph] using h
     | awaitEffect _ => simpa [hph] using h
@@ -22071,36 +22184,6 @@ theorem failFold_keeps_gone (w : World) (dead s dst : InstId) (k : Cont) (ids : 
   | cons i ids ih =>
     simp only [List.foldl_cons]
     exact ih _ (failWaiter_keeps_gone w dead i s dst k h)
-
-theorem failWaiter_drops_call (w : World) (s dst : InstId) (k : Cont)
-    (hlive : (w.st s).life = .alive) (hph : CallPhase dst k ((w.st s).phase)) :
-    ¬CallPhase dst k ((failWaiter w dst s).st s).phase := by
-  have hgo : ((w.st s).life != .alive) = false := by simp [hlive, bne]
-  have hd : (dst == dst) = true := by simp
-  rcases hph with hpark | hawait
-  · simp [failWaiter, hgo, hpark, hd, setActor]
-    exact proceed_not_callphase (w.st s) k k dst
-  · simp [failWaiter, hgo, hawait, hd, setActor, CallPhase]
-
-theorem failFold_drops_call (w : World) (dst s : InstId) (k : Cont) (ids : List InstId)
-    (hmem : s ∈ ids) (hlive : (w.st s).life = .alive)
-    (hph : CallPhase dst k ((w.st s).phase)) :
-    ¬CallPhase dst k ((ids.foldl (fun w i => failWaiter w dst i) w).st s).phase := by
-  induction ids generalizing w with
-  | nil => cases hmem
-  | cons i ids ih =>
-    simp only [List.foldl_cons] at hmem ⊢
-    by_cases hs : s = i
-    · subst hs
-      exact failFold_keeps_gone (failWaiter w dst s) dst s dst k ids
-        (failWaiter_drops_call w s dst k hlive hph)
-    · have hact := failWaiter_other w dst i s hs
-      have hmem' : s ∈ ids := by
-        rcases List.mem_cons.mp hmem with h | hmem
-        · exact absurd h hs
-        · exact hmem
-      exact ih _ hmem' (by rw [congrArg (fun a => a.life) hact]; exact hlive)
-        (by rw [congrArg (fun a => a.phase) hact]; exact hph)
 
 theorem resume_false_gone (a : Actor) (dst0 dst : InstId) (k : Cont)
     (h : ¬CallPhase dst k a.phase) : ¬CallPhase dst k (resumeSender a false dst0).phase := by
