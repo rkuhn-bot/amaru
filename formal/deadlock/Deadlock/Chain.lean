@@ -514,6 +514,9 @@ theorem send_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         exact Or.inr (fun hempty => by simp [hempty] at hp)
       have hen := can_receive_enabled I hL w dst
         ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+        (fun m hm => (birth_reachable I hL hG N w hR).plainBox dst m hm)
+        (fun p hp => (birth_reachable I hL hG N w hR).plainParked dst p hp)
+        (alive_crashed_false I hL N w hR dst hliveD)
         ⟨⟨hliveD, hphD⟩, hmail⟩
       cases happ : apply I (.recvBulk dst) w with
       | none => exact False.elim (hen happ)
@@ -1019,6 +1022,9 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
             cases hdeadC.1
         have hen := can_receive_enabled I hL w dst
           ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+          (fun m hm => (birth_reachable I hL hG N w hR).plainBox dst m hm)
+          (fun p hp => (birth_reachable I hL hG N w hR).plainParked dst p hp)
+          (alive_crashed_false I hL N w hR dst hliveD)
           ⟨⟨hliveD, hphD⟩, hmail⟩
         cases happ : apply I (.recvBulk dst) w with
         | none => exact False.elim (hen happ)
@@ -1424,6 +1430,9 @@ theorem call_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
         exact Or.inr (fun hempty => by simp [hempty] at hp)
       have hen := can_receive_enabled I hL w dst
         ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+        (fun m hm => (birth_reachable I hL hG N w hR).plainBox dst m hm)
+        (fun p hp => (birth_reachable I hL hG N w hR).plainParked dst p hp)
+        (alive_crashed_false I hL N w hR dst hliveD)
         ⟨⟨hliveD, hphD⟩, hmail⟩
       cases happ : apply I (.recvBulk dst) w with
       | none => exact False.elim (hen happ)

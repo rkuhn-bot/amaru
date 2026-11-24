@@ -1092,3 +1092,28 @@ caller is alive; the target's death is not a conjunct; the admit
 intermediate is the post-resume world; a parked timeout uses `occ_set`
 because both the tokens and the hold rise by the refunded slot; a
 consumed entry is credited to `budgetHolder`.
+
+## 2026-11-24 — A nested call is not a call site
+
+`callSites` keeps the destination and label of a top-level `call` only
+(`Local.lean`). `effectsOk`, `spawnScope`, and `labelHandled` walk
+further. An arm call must still name a blocking call edge, and
+`labelHandled` demands an `acceptsCall` transition in every target
+state of that edge. `callTotal` does not see the arm, so it does not
+add the same demand for every state of the template.
+
+`msgOk` is `callFrom = none` or `callSite`. An admitted arm call has
+`callFrom = some` and is not a call site, so `MailAccepted` fails.
+`exec_call_accepted` is false for `InProg.tryFull`, `tryGone`,
+`callNa`, `callTo`, and `peerTo`. `here` and `skip` are the top-level
+cases and do put the call in `callPairs`.
+
+This is not a counterexample of `call_answered`. Under compatibility
+`.all`, `labelHandled` puts a handler in every state, `deliver`
+returns that transition, and fairness takes `recvBulk` whenever the
+callee is idle with the message at the head. A groups or explicit
+relation can name fewer target states. Whether a fair run can then
+leave the callee idle in another state, with the call still queued,
+is open. The headline is not restated. `Local.lean` is unchanged.
+The Rust checker is not recorded: the gap is the Lean `callSites`
+walk against `msgOk`.

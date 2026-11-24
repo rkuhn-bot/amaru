@@ -718,7 +718,7 @@ theorem box_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
           intro hempty
           simp [hempty, posOf] at hmail
         exact ⟨j, Nat.le_trans (Nat.le_max_left s i) hj,
-          enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) id ⟨hId, Or.inl hne⟩⟩
+          enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) (run_not_crashed ρ j) id ⟨hId, Or.inl hne⟩⟩
       obtain ⟨j, hj, hact⟩ := hF.bulk id hio i
       exact False.elim (hex ⟨j, hj, hact⟩)
 
@@ -968,7 +968,7 @@ theorem fair_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumpt
       have hbox : ((ρ.cfg j).st id).box ≠ [] :=
         hne j (Nat.le_trans (Nat.le_max_right t i) hj)
       exact ⟨j, Nat.le_trans (Nat.le_max_left t i) hj,
-        enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) id ⟨hId, Or.inl hbox⟩⟩
+        enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) (run_not_crashed ρ j) id ⟨hId, Or.inl hbox⟩⟩
     have htake : ∀ t, i ≤ t → ∃ j, t ≤ j ∧ ρ.act j = .recvBulk id ∧ hot j = true := by
       intro t ht
       obtain ⟨j, hj, hact⟩ := hF.bulk id hio t
@@ -1015,7 +1015,7 @@ theorem fair_parked (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
       have hpark : ((ρ.cfg j).st id).parked ≠ [] :=
         hne j (Nat.le_trans (Nat.le_max_right t i) hj)
       exact ⟨j, Nat.le_trans (Nat.le_max_left t i) hj,
-        enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) id ⟨hId, Or.inr hpark⟩⟩
+        enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) (run_not_crashed ρ j) id ⟨hId, Or.inr hpark⟩⟩
     have htake : ∀ t, i ≤ t → ∃ j, t ≤ j ∧ ρ.act j = .recvBulk id ∧ hot j = true := by
       intro t ht
       obtain ⟨j, hj, hact⟩ := hF.bulk id hio t
@@ -1987,7 +1987,7 @@ theorem park_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
           intro hempty
           simp [hempty, posOf] at hmail
         exact ⟨j, Nat.le_trans (Nat.le_max_left s i) hj,
-          enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) id ⟨hId, Or.inr hne⟩⟩
+          enabled_of_can I hL hG N (ρ.cfg j) (cfg_reachable ρ j) (run_not_crashed ρ j) id ⟨hId, Or.inr hne⟩⟩
       obtain ⟨j, hj, hact⟩ := hF.bulk id hio i
       exact False.elim (hex ⟨j, hj, hact⟩)
 

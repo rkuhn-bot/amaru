@@ -553,6 +553,9 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
           on_partner w id dst (.recvBulk dst) (waits_on_park w id dst isCall k hph) (on_self_bulk w dst),
           can_receive_enabled I hL w dst
           ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+          (fun m hm => (birth_reachable I hL hG N w hR).plainBox dst m hm)
+          (fun p hp => (birth_reachable I hL hG N w hR).plainParked dst p hp)
+          (alive_crashed_false I hL N w hR dst hliveD)
           ⟨⟨hliveD, hphD⟩, hmail⟩⟩
       | run kD =>
         exact Or.inl ⟨.exec dst,
@@ -601,6 +604,9 @@ theorem blocked_go (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assum
             on_partner w id dst (.recvBulk dst) (waits_on_reply w id dst k hph) (on_self_bulk w dst),
             can_receive_enabled I hL w dst
             ((inv3_reachable I hL hG N w hR).1.2.2.1) (mail_accepted_reachable I hL N w hR)
+            (fun m hm => (birth_reachable I hL hG N w hR).plainBox dst m hm)
+            (fun p hp => (birth_reachable I hL hG N w hR).plainParked dst p hp)
+            (alive_crashed_false I hL N w hR dst hliveD)
             ⟨⟨hliveD, hphD⟩, hmail⟩⟩
         | run kD =>
           exact Or.inl ⟨.exec dst,
