@@ -3135,6 +3135,12 @@ structure Run (I : Impl) (N : Nat) where
   start : cfg 0 = initWorld I N
   valid : ∀ i, apply I (act i) (cfg i) = some (cfg (i + 1))
 
+/-- Every world of a `Run` stepped, so none of them is the absorbing crash.
+A crashed world takes no further action, so it cannot sit at an index of a run. -/
+theorem run_not_crashed {I : Impl} {N : Nat} (ρ : Run I N) (i : Nat) :
+    (ρ.cfg i).crashed = false :=
+  (apply_step I (ρ.act i) (ρ.cfg i) (ρ.cfg (i + 1)) (ρ.valid i)).1
+
 def alive (w : World) (id : InstId) : Prop := (w.st id).life = .alive
 
 def Idle (w : World) (id : InstId) : Prop := alive w id ∧ (w.st id).phase = .idle
@@ -7294,6 +7300,28 @@ theorem release_self_dead (w : World) (id : InstId) (ps : List Parked)
       · simp [hs] at hskip
       · exact ih _ (by simp [setActor, hs, h])
 
+/-- Resuming other senders does not touch the actor being released. A parked
+entry whose sender is that actor is skipped, and every other resume writes a
+different id. `Inv2.releaseParked_self` is the same fact for the whole actor. -/
+theorem releaseParked_spares (w : World) (id : InstId) (ps : List Parked) :
+    ((releaseParked w id ps).st id).phase = (w.st id).phase ∧
+      ((releaseParked w id ps).st id).life = (w.st id).life := by
+  induction ps generalizing w with
+  | nil => simp [releaseParked]
+  | cons p ps ih =>
+    simp only [releaseParked, List.foldl_cons]
+    split
+    · next => exact ih _
+    · next hskip =>
+      have hne : p.sender ≠ id := by
+        intro hs
+        exact hskip (by simp [hs])
+      have hst : (setActor w p.sender (resumeSender (w.st p.sender) false id)).st id = w.st id := by
+        simp [setActor, Ne.symm hne]
+      have hih := ih (setActor w p.sender (resumeSender (w.st p.sender) false id))
+      rw [hst] at hih
+      exact hih
+
 /-- Resuming parked senders does not change anyone's life. -/
 theorem releaseParked_life (w : World) (id : InstId) (ps : List Parked) (i : InstId) :
     ((releaseParked w id ps).st i).life = (w.st i).life := by
@@ -7648,6 +7676,19 @@ theorem crashWorld_keeps_dead (w : World) (i : InstId) (h : (w.st i).life = .dea
     simp [hgo, h]
   · simpa [hmem] using h
 
+/-- `crashActor` rewrites only an alive actor. A stage already installed dead
+and idle stays dead and idle when a later tombstone crashes the roster. -/
+theorem crashWorld_keeps_idle (w : World) (i : InstId)
+    (hdead : (w.st i).life = .dead) (hidle : (w.st i).phase = .idle) :
+    ((crashWorld w).st i).life = .dead ∧ ((crashWorld w).st i).phase = .idle := by
+  simp only [crashWorld]
+  by_cases hmem : decide (i ∈ w.roster) = true
+  · simp only [hmem, ite_true, crashActor]
+    have hgo : ((w.st i).life == .alive) = false := by
+      simp [hdead]
+    simp [hgo, hdead, hidle]
+  · simpa [hmem] using ⟨hdead, hidle⟩
+
 /-- A tombstone step that leaves `i` alive did not create that life. A crash,
 a missing label, or a full lane does not leave an alive actor that was absent. -/
 theorem enqueueTombstone_life (D : Description) (w : World) (child i : InstId)
@@ -7712,6 +7753,41 @@ theorem enqueueTombstone_keeps_dead (D : Description) (w : World) (child i : Ins
             simp [setActor, h]
           · simpa [setActor, hi] using h
 
+/-- Queueing a tombstone, or crashing because it does not fit, leaves a dead
+idle actor dead and idle. The crash rewrites alive actors only, and a
+successful offer changes the supervisor's priority lane, not this phase. -/
+theorem enqueueTombstone_keeps_idle (D : Description) (w : World) (child i : InstId)
+    (hdead : (w.st i).life = .dead) (hidle : (w.st i).phase = .idle) :
+    ((enqueueTombstone D w child).st i).life = .dead ∧
+      ((enqueueTombstone D w child).st i).phase = .idle := by
+  unfold enqueueTombstone
+  cases hpar : (w.st child).parent with
+  | none => simpa [hpar] using ⟨hdead, hidle⟩
+  | some parent =>
+    simp only [hpar]
+    by_cases hlive : ((w.st parent).life != .alive) = true
+    · simp only [hlive, ite_true]
+      exact ⟨hdead, hidle⟩
+    · have hliveF : ((w.st parent).life != .alive) = false := by
+        simpa [Bool.not_eq_true] using hlive
+      simp only [hliveF, ite_false]
+      by_cases hlab : ((tombstoneMsg D (w.st parent) child).label == "") = true
+      · simp only [hlab, ite_true]
+        exact crashWorld_keeps_idle w i hdead hidle
+      · have hlabF : ((tombstoneMsg D (w.st parent) child).label == "") = false := by
+          simpa [Bool.not_eq_true] using hlab
+        simp only [hlabF, ite_false]
+        by_cases hfull : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = true
+        · simp only [hfull, ite_true, offerPrio]
+          exact crashWorld_keeps_idle w i hdead hidle
+        · have hroom : decide (prioLoad (w.st parent).prio >= capPrio D w.N parent) = false := by
+            simpa [Bool.not_eq_true] using hfull
+          simp only [hroom, ite_false, offerPrio]
+          by_cases hi : i = parent
+          · rw [hi] at hdead hidle ⊢
+            simp [setActor, hdead, hidle]
+          · simpa [setActor, hi] using ⟨hdead, hidle⟩
+
 /-- A tombstone that leaves a core alive did not create that life. Crashing the
 roster kills every alive core, so the equality of lives does not hold. -/
 theorem tombstone_core_life (D : Description) (w : World) (child : InstId) (name : String)
@@ -7723,6 +7799,38 @@ theorem sealActor_self_dead (D : Description) (w : World) (id : InstId) (a : Act
     ((sealActor D w id a).st id).life = .dead := by
   unfold sealActor
   exact enqueueTombstone_keeps_dead D (releaseWorld D w id a) id id (releaseWorld_self_dead D w id a)
+
+/-- Releasing `id` installs it dead and idle, then resumes other senders.
+Those resumes never write `id`. -/
+theorem releaseWorld_self_idle (D : Description) (w : World) (id : InstId) (a : Actor) :
+    ((releaseWorld D w id a).st id).life = .dead ∧
+      ((releaseWorld D w id a).st id).phase = .idle := by
+  let w1 := releaseOutbound (refundParked (refundMsgs (readCells D w id) (tname id) a.box)
+    (tname id) a.parked) id
+  let dead : Actor :=
+    { w1.st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }
+  have hworld : releaseWorld D w id a = releaseParked (setActor w1 id dead) id a.parked := by
+    simp [releaseWorld, w1, dead]
+  have hv := releaseParked_spares (setActor w1 id dead) id a.parked
+  have hset : ((setActor w1 id dead).st id).life = .dead ∧
+      ((setActor w1 id dead).st id).phase = .idle := by
+    simp [setActor, dead]
+  rw [hworld]
+  exact ⟨hv.2.trans hset.1, hv.1.trans hset.2⟩
+
+/-- Sealing a live actor leaves it dead and idle, including when the tombstone
+does not fit and the roster crashes. `releaseWorld` installs the dead idle
+actor before the offer, and `crashActor` does not rewrite an actor that is
+already dead. -/
+theorem shutdownActor_alive_idle (D : Description) (w : World) (id : InstId)
+    (hl : (w.st id).life = .alive) :
+    ((shutdownActor D w id).st id).life = .dead ∧
+      ((shutdownActor D w id).st id).phase = .idle := by
+  unfold shutdownActor
+  have hbit : ((w.st id).life == .alive) = true := by simp [hl]
+  simp only [hbit, ite_true, sealActor]
+  have hrel := releaseWorld_self_idle D w id (w.st id)
+  exact enqueueTombstone_keeps_idle D (releaseWorld D w id (w.st id)) id id hrel.1 hrel.2
 
 theorem shutdownActor_prev (D : Description) (w : World) (id i : InstId)
     (h : ((shutdownActor D w id).st i).life = .alive) : (w.st i).life = .alive := by
@@ -8376,6 +8484,28 @@ theorem dropDescendants_stable (D : Description) (w : World) (root : InstId) :
         simp only [hf, ite_false]
         exact ih w0 hp hc hl
   exact hfold w.roster w (fun _ => rfl) rfl (fun _ => Or.inl rfl)
+
+/-- Sealing descendants does not change the root's life. The only other
+disjunct of `dropDescendants_stable` is that the root is its own strict
+ancestor, which a forest forbids. -/
+theorem drop_root_life (D : Description) (w : World) (root : InstId) (hacy : ParentAcyclic w) :
+    ((dropDescendants D w root).st root).life = (w.st root).life := by
+  rcases (dropDescendants_stable D w root).2.2 root with heq | hanc
+  · exact heq
+  · exact absurd hanc (ParentAcyclic.no_self hacy root)
+
+/-- A live stage that terminates is dead and idle afterwards. Descendants are
+sealed first and cannot kill the stage, because a stage is not its own
+ancestor. The stage's own tombstone may still crash the roster; that crash
+does not rewrite the stage, which `releaseWorld` has already installed dead. -/
+theorem terminate_alive_idle (D : Description) (w : World) (id : InstId)
+    (hacy : ParentAcyclic w) (hl : (w.st id).life = .alive) :
+    ((terminateStage D w id (w.st id)).st id).life = .dead ∧
+      ((terminateStage D w id (w.st id)).st id).phase = .idle := by
+  simp only [terminateStage]
+  have hstay : ((dropDescendants D w id).st id).life = .alive := by
+    rw [drop_root_life D w id hacy, hl]
+  exact shutdownActor_alive_idle D (dropDescendants D w id) id hstay
 
 theorem abortChildren_parent (D : Description) (w : World) (parent i : InstId) :
     ((abortChildren D w parent).st i).parent = (w.st i).parent := by

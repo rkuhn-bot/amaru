@@ -735,11 +735,11 @@ theorem terminable_name_iff (D : Description) (name : String) :
       cases ht
       exact htm
 
-theorem dead_box_empty (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
+theorem dead_box_empty (I : Impl) (hL : LocalOk I) (N : Nat) (w : World) (hR : Reachable I N w)
     (id : InstId) (hdead : (w.st id).life ≠ .alive) : (w.st id).box = [] := by
   induction hR generalizing id with
   | init => exact (init_box I N id).1
-  | step w w' a _ ha ih =>
+  | step w w' a prev ha ih =>
     by_cases hprev : (w.st id).life = .alive
     · cases only_terminate_kills I a w w' id ha hprev hdead with
       | inl hExecKill =>
@@ -748,7 +748,8 @@ theorem dead_box_empty (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
           simp [apply, hact, execHead, hprev, hrun] at ha
           exact ha.symm
         rw [hstep]
-        exact kill_box_empty I w id t tail toState replyTo ht hsub htm hpk
+        exact kill_box_empty I w id t tail toState replyTo ht hsub htm hpk hprev
+          ((inv_reachable I N w hL prev).forest).wf
       | inr hRest =>
         cases hRest with
         | inl hKill =>
@@ -810,11 +811,11 @@ theorem enough_drops {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (start : 
     refine ⟨j - start + 1, ?_⟩
     omega
 
-theorem mail_alive (I : Impl) (N : Nat) (w : World) (hR : Reachable I N w)
+theorem mail_alive (I : Impl) (hL : LocalOk I) (N : Nat) (w : World) (hR : Reachable I N w)
     (id : InstId) (hne : (w.st id).box ≠ []) : (w.st id).life = .alive := by
   by_cases hl : (w.st id).life = .alive
   · exact hl
-  · exact False.elim (hne (dead_box_empty I N w hR id hl))
+  · exact False.elim (hne (dead_box_empty I hL N w hR id hl))
 
 /-- The largest height recorded for the residual graph. A missing node reads as 0. -/
 def maxHeight : List (Node × Nat) → Nat
@@ -850,7 +851,7 @@ theorem rank_bound (hs : List (Node × Nat)) (w : World) (id : InstId) :
       exact lookup_le hs _ v hlu
   omega
 
-theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : Nat)
+theorem alive_while_box {I : Impl} {N : Nat} (hL : LocalOk I) (ρ : Run I N) (id : InstId) (i : Nat)
     (h0 : ((ρ.cfg i).st id).life = .alive)
     (hne : ∀ j, i ≤ j → ((ρ.cfg j).st id).box ≠ []) :
     ∀ t, i ≤ t → ((ρ.cfg t).st id).life = .alive := by
@@ -874,7 +875,8 @@ theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : N
               simp [apply, hact, execHead, ih, hrun] at hv
               exact hv.symm
             rw [hstep]
-            exact kill_box_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hsub htm hpk
+            exact kill_box_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hsub htm hpk ih
+              ((inv_reachable I N (ρ.cfg (i + n)) hL (cfg_reachable ρ (i + n))).forest).wf
           | inr hRest =>
             cases hRest with
             | inl hKill =>
@@ -891,7 +893,7 @@ theorem alive_while_box {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : N
         exact False.elim (hne (i + n + 1) (by omega) hempty)
   simpa [Nat.add_sub_of_le ht] using hall (t - i)
 
-theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i : Nat)
+theorem alive_while_parked {I : Impl} {N : Nat} (hL : LocalOk I) (ρ : Run I N) (id : InstId) (i : Nat)
     (h0 : ((ρ.cfg i).st id).life = .alive)
     (hne : ∀ j, i ≤ j → ((ρ.cfg j).st id).parked ≠ []) :
     ∀ t, i ≤ t → ((ρ.cfg t).st id).life = .alive := by
@@ -915,7 +917,8 @@ theorem alive_while_parked {I : Impl} {N : Nat} (ρ : Run I N) (id : InstId) (i 
               simp [apply, hact, execHead, ih, hrun] at hv
               exact hv.symm
             rw [hstep]
-            exact kill_park_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hsub htm hpk
+            exact kill_park_empty I (ρ.cfg (i + n)) id t tail toState replyTo htpl hsub htm hpk ih
+              ((inv_reachable I N (ρ.cfg (i + n)) hL (cfg_reachable ρ (i + n))).forest).wf
           | inr hRest =>
             cases hRest with
             | inl hKill =>
@@ -948,8 +951,8 @@ theorem fair_box (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assumpt
       intro j hj hempty
       exact hnever ⟨j, hj, hempty⟩
     have hlive0 : ((ρ.cfg i).st id).life = .alive :=
-      mail_alive I N (ρ.cfg i) (cfg_reachable ρ i) id (fun hempty => by simp [hempty] at hn)
-    have halive := alive_while_box ρ id i hlive0 hne
+      mail_alive I hL N (ρ.cfg i) (cfg_reachable ρ i) id (fun hempty => by simp [hempty] at hn)
+    have halive := alive_while_box hL ρ id i hlive0 hne
     obtain ⟨hs, hok⟩ := hG.ranked
     let hot : Nat → Bool := fun t => !((ρ.cfg t).st id).box.isEmpty
     have hio : ∀ t, ∃ j, t ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk id) := by
@@ -996,7 +999,7 @@ theorem fair_parked (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : Assu
       exact hnever ⟨j, hj, hempty⟩
     have hlive0 : ((ρ.cfg i).st id).life = .alive :=
       mailbox_alive I hL N (ρ.cfg i) (cfg_reachable ρ i) id (fun hempty => by simp [hempty] at hn)
-    have halive := alive_while_parked ρ id i hlive0 hne
+    have halive := alive_while_parked hL ρ id i hlive0 hne
     obtain ⟨hs, hok⟩ := hG.ranked
     let hot : Nat → Bool := fun t => !((ρ.cfg t).st id).parked.isEmpty
     have hio : ∀ t, ∃ j, t ≤ j ∧ Enabled I (ρ.cfg j) (.recvBulk id) := by
@@ -1670,13 +1673,15 @@ theorem reliable_free_step (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N 
                 by_cases hi : id = who
                 · refine ⟨?_, ?_, ?_⟩
                   · intro m hm
-                    have hempty := kill_box_empty I w who t es k.toState k.replyTo ht hsub htm hpk
+                    have hempty := kill_box_empty I w who t es k.toState k.replyTo ht hsub htm hpk hrun
+                      ((inv_reachable I N w hL hR).forest).wf
                     rw [heq] at hempty
                     rw [hi] at hm
                     rw [hempty] at hm
                     cases hm
                   · intro p hp
-                    have hempty := kill_park_empty I w who t es k.toState k.replyTo ht hsub htm hpk
+                    have hempty := kill_park_empty I w who t es k.toState k.replyTo ht hsub htm hpk hrun
+                      ((inv_reachable I N w hL hR).forest).wf
                     rw [heq] at hempty
                     rw [hi] at hp
                     rw [hempty] at hp
@@ -2552,7 +2557,7 @@ theorem box_delivered (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : As
     intro hf
     have hbad := hf.1 m hm
     simp [hr] at hbad)
-  have hlive := mail_alive I N (ρ.cfg i) hR id (by intro hempty; simp [hempty] at hm)
+  have hlive := mail_alive I hL N (ρ.cfg i) hR id (by intro hempty; simp [hempty] at hm)
   have hpos := pos_mem m.mid _ m hm rfl
   exact box_mid_taken I hL hG hA ρ hF id m.mid i hterm hlive hpos
 
