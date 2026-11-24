@@ -1159,3 +1159,18 @@ universal stay. The existential above does not.
 The caller's life is derived: a wait that stays is `Stuck`, and
 `stuck_alive` reads `idleOff`. The deadline then fires. No hypothesis
 was added. The `recvBulk` theorem keeps the name `call_answered`.
+
+## 2026-11-24 — A killed caller can leave an outsider owing a reply
+
+`oweOwner` said that a handler which still owes `c` has `c` in
+`awaitReply`. That is false after a stage kill. A per-peer caller can
+be in `awaitReply` of an unterminable outsider (a core is allowed by
+`call_edge_unterminable`). `terminate` of the caller's subtree kills
+the caller and leaves the outsider's handler in place: `killOne` resumes
+only a plain park, and it does not rewrite a running callee. The caller
+is then dead and idle, and the outsider still owes the reply.
+
+The field is restated as: the caller is in `awaitReply`, or the caller's
+life is `.dead`. `owedId` stays. A live caller is still in `awaitReply`
+(`owe_alive`). This is an internal invariant, not a headline. No headline
+has been shown false.
