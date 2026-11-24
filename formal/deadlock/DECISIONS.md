@@ -557,6 +557,20 @@ by `.internal`, the abort step leaves the parent running that `.internal`
 with the child dead and the tombstone queued, and `finish` then `recvPrio`
 takes the tombstone.
 
+## 2026-11-24 — A non-crashing abort is a fourth kill
+
+`only_terminate_kills` keeps four disjuncts. A childless shutdown, a stage seal, and a roster crash are three of them. The fourth is `Eff.abort`.
+
+`abortChildren` seals each live child by `shutdownActor (dropDescendants child) child`, the same world as `terminateStage` of that child. `commitCont` then proceeds the parent when the enqueue did not crash. The action is `.exec` of the parent. The child is dead, the parent is not sealed, and `crashed` is still false, so the successor is neither `shutdownActor` of the child, nor `terminateStage` of the parent, nor a crash.
+
+`effectOk`'s catch-all accepts `.abort`, and `memberEffectOk` has an `.abort` arm. `Deadlock/AbortCont.lean` is this step. An empty label or a full lane is the crash disjunct, recorded in the next entry.
+
+## 2026-11-24 — A deadline may clear replyTo on a parked callee
+
+A handler that was entered by a call has `replyTo` set to the caller and `oweId` set to that call. Parking on a blocking send keeps both. `callTimeout` of the caller runs `detachReply`. When `oweId` matches, the callee's phase stays `.parked dst false`, and the continuation loses that `replyTo`. `waitKind` and `phaseFuel` do not read `replyTo`. `clearReplyCont` keeps `rest` and `toState`.
+
+`blocking_next` therefore has a fifth disjunct: the park is unchanged except for `clearReplyCont`. `blocking_stays` returns that cleared continuation, not the original `Cont`. The same clear applies to an `awaitReply` and to a parked call. Timing the waiter out is a further disjunct of `await_next`: the phase becomes `finishCall` of `.timedOut`, whose program is `onTimedOut`. `callFuel` is at least that program, so the wait's fuel still drops. It does not change `Deadlock`, `fair_delivered`, or `call_answered`: the call that timed out is answered by `TimedOut`, and the callee no longer owes it.
+
 ## 2026-11-21 — Abort after a tombstone crash leaves the parent running
 
 The continuation above is unconditional. `enqueueTombstone` still crashes
