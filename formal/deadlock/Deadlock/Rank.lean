@@ -11373,15 +11373,25 @@ theorem abortDesc_park_move (fuel : Nat) (D : Description) (w : World) (parent h
 
 theorem tombstone_parked (D : Description) (w : World) (child i : InstId) :
     ((enqueueTombstone D w child).st i).parked = (w.st i).parked := by
-  cases hsup : supervisorOf D child with
-  | none => simp [enqueueTombstone, hsup]
+  -- The parent is `(w.st child).parent`, not `supervisorOf`. A crash and an
+  -- `offerPrio` both keep parked lists (`crashWorld_parked`).
+  cases hparent : (w.st child).parent with
+  | none => simp [enqueueTombstone, hparent]
   | some parent =>
-    simp [enqueueTombstone, hsup]
+    have hdef : enqueueTombstone D w child =
+        (if ((w.st parent).life != .alive) = true then w
+          else if ((tombstoneMsg D (w.st parent) child).label == "") = true then crashWorld w
+          else offerPrio D w parent (tombstoneMsg D (w.st parent) child)) := by
+      simp [enqueueTombstone, hparent]
+    rw [hdef]
     split
-    · by_cases hs : i = parent
-      · simp [setActor, hs]
-      · simp [setActor, hs]
     · rfl
+    · split
+      · exact crashWorld_parked w i
+      · simp only [offerPrio]
+        split
+        · exact crashWorld_parked w i
+        · by_cases hs : i = parent <;> simp [setActor, hs]
 
 theorem terminate_park_move (D : Description) (w : World) (id host : InstId) :
     ∃ keep : InstId → Bool, ((terminateStage D w id (w.st id)).st host).parked =
