@@ -8818,7 +8818,8 @@ theorem lane_finish (I : Impl) (w w' : World) (id : InstId) (hLane : PrioDeclare
     by_cases hi : i = id <;> simp [setActor, proceed_prio, hi])
 
 /-- `placePeer` adds one actor whose priority lane is empty. `next` records the
-fresh key and does not write a priority list. -/
+fresh key and does not write a priority list. The bindings are `let`: Lean
+4.35 has no `set` tactic. `readCells` is the last step and does not touch lanes. -/
 theorem place_lane (I : Impl) (w : World) (hLane : PrioDeclared I w) (template : String)
     (k : Nat) (initial : String) (parent : Option InstId) (next : World → World)
     (hnext : ∀ (w0 : World) (i : InstId), ((next w0).st i).prio = (w0.st i).prio) :
@@ -8879,7 +8880,9 @@ theorem lane_spawn (I : Impl) (w w' : World) (template : String) (hLane : PrioDe
       simp [hf] at h
 
 /-- Dropping one priority message leaves a declared lane. A tombstone is not a
-label, so removing it does not change `laneLabels`. -/
+label, so removing it does not change `laneLabels`. `List.Disjoint` takes the
+two elements and then their membership proofs, and `simp` turns
+`x ∈ pre ++ m :: suf` into `x ∈ pre ∨ x = m ∨ x ∈ suf`. -/
 theorem lane_drop (I : Impl) (w : World) (hLane : PrioDeclared I w) (id : InstId)
     (pre : List Msg) (m : Msg) (suf : List Msg)
     (hp : (w.st id).prio = pre ++ m :: suf) :
@@ -9545,6 +9548,8 @@ theorem failFold_not_crashed (w : World) (dead : InstId) (ids : List InstId) (s 
     simp only [List.foldl_cons]
     exact ih _ (failWaiter_not_crashed w dead i s h)
 
+/-- `releaseWorld` preserves `NoCrash`. The phase chain includes
+`releaseOutbound`; stopping at `refundParked` does not match the definition. -/
 theorem releaseWorld_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor)
     (hpre : NoCrash w) : NoCrash (releaseWorld I.desc w id a) := by
   intro i
@@ -9578,7 +9583,9 @@ theorem releaseWorld_not_crashed (I : Impl) (w : World) (id : InstId) (a : Actor
   exact release_not_crashed (setActor w4 id dead) hdead id a.parked i
 
 /-- `crashWorld` either leaves every phase uncrashed, or it turns a live roster
-member into the crashed witness. An empty live set is the first case. -/
+member into the crashed witness. An empty live set is the first case. The
+branch is `if id ∈ roster`, so the proof uses `if_pos` on the membership
+proof rather than on `decide`. -/
 theorem crash_or (w : World) (hpre : NoCrash w) :
     NoCrash (crashWorld w) ∨ WorldCrashed (crashWorld w) := by
   by_cases hlive : ∃ id, id ∈ w.roster ∧ (w.st id).life = .alive
@@ -9659,7 +9666,9 @@ theorem shutdown_or (I : Impl) (w : World) (hpre : NoCrash w) (id : InstId) :
   · exact Or.inl hpre
 
 /-- `sealBranch` only calls `releaseWorld`. It does not enqueue a tombstone, so
-it cannot crash. -/
+it cannot crash. `w`, `id`, and `hpre` are reverted before induction: the
+child of a recursive call is a different id, and `generalizing` left the
+outer id fixed in the induction hypothesis. -/
 theorem sealBranch_not_crashed (fuel : Nat) (I : Impl) (w : World) (id : InstId)
     (hpre : NoCrash w) : NoCrash (sealBranch fuel I.desc w id) := by
   revert w id hpre
