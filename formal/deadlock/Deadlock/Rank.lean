@@ -16665,6 +16665,25 @@ theorem releaseWorld_off (D : Description) (w : World) (id : InstId) (a : Actor)
       simp [releaseOutbound_phase, phase_refundP, phase_refund, readCells_st]
     exact h c k (by simpa [setActor, hs, hph] using hbad)
 
+/-- Releasing the holder of a blocking send resumes that sender. The refunds and
+the outbound filter keep the sender's phase, and `releaseParked` runs `proceed`. -/
+theorem release_frees_held (D : Description) (w : World) (id s : InstId) (k : Cont)
+    (h : heldSend w s id k) (hne : s ≠ id) :
+    offDst (releaseWorld D w id (w.st id)) s id := by
+  obtain ⟨p, hp, hsender, hcall⟩ := h.2
+  unfold releaseWorld
+  dsimp only
+  have hph : ((setActor (releaseOutbound (refundParked (refundMsgs (readCells D w id) (tname id) (w.st id).box) (tname id) (w.st id).parked) id) id { (releaseOutbound (refundParked (refundMsgs (readCells D w id) (tname id) (w.st id).box) (tname id) (w.st id).parked) id).st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }).st s).phase = .parked id false k := by
+    rw [setActor_other _ id s _ hne]
+    simpa [releaseOutbound_phase, phase_refundP, phase_refund, readCells_st] using h.1
+  have hrel := release_resumes_send _ id (w.st id).parked s k ⟨p, hp, hsender, hcall⟩ hne hph
+  intro c k' hbad
+  have hfree : notParked ((releaseParked (setActor (releaseOutbound (refundParked (refundMsgs (readCells D w id) (tname id) (w.st id).box) (tname id) (w.st id).parked) id) id { (releaseOutbound (refundParked (refundMsgs (readCells D w id) (tname id) (w.st id).box) (tname id) (w.st id).parked) id).st id with life := .dead, phase := .idle, box := [], prio := [], parked := [] }) id (w.st id).parked).st s).phase := by
+    rw [hrel]
+    exact proceed_not_parked _ k
+  rw [hbad] at hfree
+  exact hfree
+
 theorem abort_off (D : Description) (w : World) (id s dst : InstId) (a : Actor)
     (h : offDst w s dst) : offDst (abortActor D w id a) s dst := by
   exact admit_off _ id s dst
