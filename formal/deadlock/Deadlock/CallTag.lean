@@ -7439,39 +7439,58 @@ theorem prio_keep_tag (w : World) (id : InstId) (prio : List Msg) (n : Nat) (hT 
       (fun i => by by_cases hi : i = id <;> simp [w', setActor, hi])
       (fun i => by by_cases hi : i = id <;> simp [w', setActor, hi]) d c ho
 
-/-- A wake is a plain priority message, or no change. -/
+/-- A wake never clears a crash. A full lane crashes the roster; every other
+branch keeps the flag. -/
+theorem tryWake_keeps_crashed (D : Description) (w : World) (dst : InstId) (label : String)
+    (writer : InstId) (h : w.crashed = true) :
+    (tryWake D w dst label writer).crashed = true := by
+  cases hskip : ((w.st dst).life != .alive || (w.st dst).prio.any (fun p => p.label == label))
+  · cases hfull : decide (prioLoad (w.st dst).prio >= capPrio D w.N dst)
+    · simp [tryWake, offerPrio, hskip, hfull, setActor, h]
+    · simp [tryWake, offerPrio, hskip, hfull, crashWorld]
+  · simp [tryWake, hskip, h]
+
+theorem tryWake_fold_keeps (D : Description) (ids : List InstId) (w : World) (label : String)
+    (writer : InstId) (h : w.crashed = true) :
+    (ids.foldl (fun w id => tryWake D w id label writer) w).crashed = true := by
+  induction ids generalizing w with
+  | nil => simpa using h
+  | cons i ids ih =>
+    simp only [List.foldl_cons]
+    exact ih _ (tryWake_keeps_crashed D w i label writer h)
+
+/-- A wake is a plain priority message, or no change. A full lane crashes the
+roster instead of queueing, and a crashed world has no call-tag burden
+(DECISIONS.md, 2026-11-20). -/
 theorem try_wake_tag (D : Description) (w : World) (dst : InstId) (label : String) (writer : InstId)
-    (hT : CallTagInv w) : CallTagInv (tryWake D w dst label writer) := by
-  by_cases hif : ((w.st dst).life == .alive &&
-      decide (prioLoad (w.st dst).prio < capPrio D w.N dst) &&
-      !((w.st dst).prio.any fun p => p.label == label)) = true
-  · simp [tryWake, hif]
-    let wake : Msg :=
-      { label := label, sender := writer, callFrom := none, reliable := false,
-        mid := (w.st dst).nextMid }
-    have hmiss : ((w.st dst).prio.any fun p => p.label == wake.label) = false := by
-      simp only [Bool.and_eq_true, Bool.not_eq_true] at hif
-      simpa [wake] using hif.2
-    have hup : upsertPrio (w.st dst).prio wake = (w.st dst).prio ++ [wake] := by
-      simp [upsertPrio, hmiss]
-    apply prio_keep_tag w dst (upsertPrio (w.st dst).prio wake) ((w.st dst).nextMid + 1) hT
-    intro m hm
-    rw [hup] at hm
-    simp [List.mem_append, List.mem_singleton] at hm
-    rcases hm with hold | heq
-    · exact hT.prioPlain dst m hold
-    · simp [heq, wake]
-  · simp [tryWake, hif]
-    exact hT
+    (hT : CallTagInv w) (hcr : (tryWake D w dst label writer).crashed = false) :
+    CallTagInv (tryWake D w dst label writer) := by
+  cases hskip : ((w.st dst).life != .alive || (w.st dst).prio.any (fun p => p.label == label))
+  · cases hfull : decide (prioLoad (w.st dst).prio >= capPrio D w.N dst)
+    · simp [tryWake, offerPrio, hskip, hfull] at hcr ⊢
+      apply prio_keep_tag w dst _ ((w.st dst).nextMid + 1) hT
+      intro m hm
+      simp [List.mem_append, List.mem_singleton] at hm
+      rcases hm with hold | rfl
+      · exact hT.prioPlain dst m hold
+      · rfl
+    · simp [tryWake, offerPrio, hskip, hfull, crashWorld] at hcr
+  · simpa [tryWake, hskip] using hT
 
 theorem wake_readers_tag (D : Description) (w : World) (dst label : String) (writer : InstId)
-    (ids : List InstId) (hT : CallTagInv w) :
+    (ids : List InstId) (hT : CallTagInv w)
+    (hcr : (ids.foldl (fun w id => tryWake D w id label writer) w).crashed = false) :
     CallTagInv (ids.foldl (fun w id => tryWake D w id label writer) w) := by
   induction ids generalizing w with
-  | nil => simpa
+  | nil => simpa using hT
   | cons i ids ih =>
-    simp
-    exact ih _ (try_wake_tag D w i label writer hT)
+    simp only [List.foldl_cons] at hcr ⊢
+    have hstep : (tryWake D w i label writer).crashed = false := by
+      cases hc : (tryWake D w i label writer).crashed with
+      | false => rfl
+      | true =>
+        simp [tryWake_fold_keeps D ids (tryWake D w i label writer) label writer hc] at hcr
+    exact ih (tryWake D w i label writer) (try_wake_tag D w i label writer hT hstep) hcr
 
 /-- Moving a running handler into `awaitEffect` or `awaitPeer` keeps its reply. -/
 theorem carry_step_tag (w : World) (id : InstId) (kRun : Cont) (e : Eff) (es : List Eff) (ph : Phase)
@@ -8106,41 +8125,49 @@ theorem schedule_tag (I : Impl) (w : World) (hT : CallTagInv w) (id : InstId) (k
       prioLoad (w.st id).prio < capPrio I.desc w.N id) :
     CallTagInv (execRun I w id (w.st id) k) := by
   simp [execRun, hrest]
-  cases hany : ((w.st id).prio.any fun p => p.label == label)
-  · have hlt : prioLoad (w.st id).prio < capPrio I.desc w.N id := hroom hany
-    rw [List.any_eq_false] at hany
-    have hno : ¬ ∃ x, x ∈ (w.st id).prio ∧ x.label = label := by
-      intro ⟨x, hx, hl⟩
-      have hf := hany x hx
-      rw [(beq_iff_eq).mpr hl] at hf
-      simp at hf
-    simp [hno, hlt]
-    let msg : Msg :=
-      { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }
-    let grown := upsertPrio (w.st id).prio msg
-    let armed : Actor := { (w.st id) with prio := grown, nextMid := (w.st id).nextMid + 1 }
-    have hplain : ∀ m, m ∈ grown → m.callFrom = none := by
-      intro m hm
-      simp [upsertPrio, grown, msg, hno, List.mem_append, List.mem_singleton] at hm
-      rcases hm with hold | heq
-      · exact hT.prioPlain id m hold
-      · rw [heq]
-    have hP := prio_keep_tag w id grown ((w.st id).nextMid + 1) hT hplain
-    have hphP : ((setActor w id armed).st id).phase = .run k := by
-      simp [setActor, armed, hph]
-    have hrun := run_tail_tag (setActor w id armed) id k
-      (.selfSchedule label) es hP hphP hrest (by intro h; cases h) (by intro h; cases h)
-      (by simp [effReplies]) (by simp [termBefore]) huni
-    have hself : (setActor w id armed).st id = armed := by simp [setActor]
-    rw [setActor_same, hself] at hrun
-    simpa [grown, msg, armed] using hrun
-  · rw [List.any_eq_true] at hany
-    obtain ⟨x, hx, hb⟩ := hany
-    have hyes : ∃ x, x ∈ (w.st id).prio ∧ x.label = label := ⟨x, hx, (beq_iff_eq).mp hb⟩
-    simp [hyes]
-    exact run_tail_tag w id k (.selfSchedule label) es hT hph hrest
-      (by intro h; cases h) (by intro h; cases h)
-      (by simp [effReplies]) (by simp [termBefore]) huni
+  by_cases hl : (w.st id).life = .alive
+  case neg =>
+    simp [hl]
+    exact hT
+  case pos =>
+    simp [hl]
+    cases hany : ((w.st id).prio.any fun p => p.label == label) with
+    | false =>
+      have hlt : prioLoad (w.st id).prio < capPrio I.desc w.N id := hroom hany
+      rw [List.any_eq_false] at hany
+      have hno : ¬ ∃ x, x ∈ (w.st id).prio ∧ x.label = label := by
+        intro ⟨x, hx, heq⟩
+        have hf := hany x hx
+        rw [(beq_iff_eq).mpr heq] at hf
+        simp at hf
+      simp [hno, hlt]
+      let msg : Msg :=
+        { label := label, sender := id, callFrom := none, reliable := true, mid := (w.st id).nextMid }
+      let grown := upsertPrio (w.st id).prio msg
+      let armed : Actor := { (w.st id) with prio := grown, nextMid := (w.st id).nextMid + 1 }
+      have hplain : ∀ m, m ∈ grown → m.callFrom = none := by
+        intro m hm
+        simp [upsertPrio, grown, msg, hno, List.mem_append, List.mem_singleton] at hm
+        rcases hm with hold | heq
+        · exact hT.prioPlain id m hold
+        · rw [heq]
+      have hP := prio_keep_tag w id grown ((w.st id).nextMid + 1) hT hplain
+      have hphP : ((setActor w id armed).st id).phase = .run k := by
+        simp [setActor, armed, hph]
+      have hrun := run_tail_tag (setActor w id armed) id k
+        (.selfSchedule label) es hP hphP hrest (by intro h; cases h) (by intro h; cases h)
+        (by simp [effReplies]) (by simp [termBefore]) huni
+      have hself : (setActor w id armed).st id = armed := by simp [setActor]
+      rw [setActor_same, hself] at hrun
+      simpa [grown, msg, armed, hl] using hrun
+    | true =>
+      rw [List.any_eq_true] at hany
+      obtain ⟨x, hx, hb⟩ := hany
+      have hyes : ∃ x, x ∈ (w.st id).prio ∧ x.label = label := ⟨x, hx, (beq_iff_eq).mp hb⟩
+      simp [hyes]
+      exact run_tail_tag w id k (.selfSchedule label) es hT hph hrest
+        (by intro h; cases h) (by intro h; cases h)
+        (by simp [effReplies]) (by simp [termBefore]) huni
 
 /-- Going idle and dropping a mailbox that holds no call tag. -/
 theorem idle_clear_tag (w : World) (id : InstId) (hT : CallTagInv w)
@@ -8329,152 +8356,39 @@ theorem deliver_running (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Ms
   split at h
   · cases h
   · split at h
+    · cases h
+      exact Or.inl rfl
     · split at h
-      · cases h
-      · cases h
-        exact Or.inl rfl
-    · next tr _ =>
-      split at h
-      · cases h
-      · cases h
-        cases tr.program with
-        | nil => exact Or.inl rfl
-        | cons _ _ => exact Or.inr ⟨_, rfl⟩
-
-theorem recvPrio_keeps_call (I : Impl) (w w' : World) (id caller callee : InstId) (k : Cont)
-    (h : apply I (.recvPrio id) w = some w')
-    (hc : CallWait (w'.st caller).phase callee k) : CallWait (w.st caller).phase callee k := by
-  simp only [apply] at h
-  unfold receivePrio at h
-  cases hp : (w.st id).prio with
-  | nil => simp [hp] at h
-  | cons m ms =>
-    by_cases hlive : (w.st id).life = .alive
-    · by_cases hidle : (w.st id).phase = .idle
-      · simp only [hp, hlive, hidle] at h
+      · split at h
+        · cases h
+        · cases h
+          exact Or.inl rfl
+      · next tr _ =>
         split at h
         · cases h
         · split at h
           · cases h
-          · next w1 a1 hd =>
-            cases h
-            have hst := deliver_st I w id _ m w1 a1 caller hd
-            by_cases hcaller : caller = id
-            · rw [hcaller] at hc
-              simp [setActor] at hc
-              rcases deliver_running I w id _ m w1 a1 hd with hidlePh | ⟨_, hr⟩
-              · simp [hidlePh, CallWait] at hc
-              · simp [hr, CallWait] at hc
-            · simpa [setActor, hcaller, hst] using hc
-      · simp [hp, hlive, hidle] at h
-    · simp [hp, hlive] at h
+            exact Or.inl rfl
+          · cases h
+            exact Or.inr ⟨_, rfl⟩
 
-theorem bulk_credit_call (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (m : Msg)
-    (caller callee : InstId) (k : Cont) (hd : deliver I w id a m = some (w1, a1))
-    (hc : CallWait ((creditSender (setActor w1 id a1) (tname id) m.sender).st caller).phase callee k) :
-    CallWait (w.st caller).phase callee k := by
-  have hcred := (credit_phase_life (setActor w1 id a1) (tname id) m.sender caller).1
-  rw [hcred] at hc
-  by_cases hcaller : caller = id
-  · rw [hcaller] at hc
+theorem recvPrio_keeps_call (I : Impl) (w w' : World) (id caller callee : InstId) (k : Cont)
+    (h : apply I (.recvPrio id) w = some w')
+    (hc : CallWait (w'.st caller).phase callee k) : CallWait (w.st caller).phase callee k := by
+  have hrecv : receivePrio I w id = some w' := by
+    simpa [stepWorld] using (apply_step I (.recvPrio id) w w' h).2
+  obtain ⟨m, pre, suf, w1, a1, _, _, _, _, hdel, hw'⟩ := receivePrio_spec I w w' id hrecv
+  subst hw'
+  by_cases hself : caller = id
+  · have hrun := deliver_running I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 hdel
+    rw [hself] at hc
     simp [setActor] at hc
-    rcases deliver_running I w id _ m w1 a1 hd with hidle | ⟨_, hr⟩
-    · simp [hidle, CallWait] at hc
-    · simp [hr, CallWait] at hc
-  · have hst := deliver_st I w id _ m w1 a1 caller hd
-    simpa [setActor, hcaller, hst] using hc
+    rcases hrun with hidle | ⟨k', hk'⟩
+    · simp [CallWait, hidle] at hc
+    · simp [CallWait, hk'] at hc
+  · have hst := deliver_st I w id ({ (w.st id) with prio := pre ++ suf }) m w1 a1 caller hdel
+    simpa [setActor, hself, hst] using hc
 
-theorem resume_bit_call (a : Actor) (dst callee : InstId) (c : Bool) (ck k : Cont)
-    (hph : a.phase = .parked dst c ck)
-    (h : CallWait (resumeSender a c dst).phase callee k) : CallWait a.phase callee k := by
-  cases c with
-  | false =>
-    cases hk : ck.rest <;> simp [resumeSender, hph, hk, proceed, CallWait] at h
-  | true =>
-    simp [resumeSender, hph, CallWait] at h
-    rcases h with ⟨rfl, rfl⟩
-    exact Or.inl hph
-
-theorem not_call_runner (w : World) (id : InstId) (a : Actor) (caller callee : InstId) (k : Cont)
-    (hnot : ¬ CallWait a.phase callee k)
-    (hc : CallWait ((setActor w id a).st caller).phase callee k) :
-    CallWait (w.st caller).phase callee k := by
-  by_cases hcaller : caller = id
-  · rw [hcaller] at hc
-    simp [setActor] at hc
-    exact absurd hc hnot
-  · simpa [setActor, hcaller] using hc
-
-theorem deliver_not_call (I : Impl) (w : World) (id : InstId) (a : Actor) (m : Msg) (w1 : World)
-    (a1 : Actor) (callee : InstId) (k : Cont) (hd : deliver I w id a m = some (w1, a1)) :
-    ¬ CallWait a1.phase callee k := by
-  intro h
-  rcases deliver_running I w id a m w1 a1 hd with hidle | ⟨_, hr⟩
-  · simp [hidle, CallWait] at h
-  · simp [hr, CallWait] at h
-
-/-- Resuming the parked sender of a delivered message does not create a call wait.
-The sender was already parked on this mailbox, and every other phase is unchanged
-or is the idle-or-running phase `deliver` just installed. -/
-theorem installed_resume_call (I : Impl) (w w1 : World) (id : InstId) (a : Actor) (dm : Msg)
-    (installed a1 : Actor) (p : Parked) (credited : InstId) (hM : MailInv w)
-    (caller callee : InstId) (k : Cont) (hp : p ∈ (w.st id).parked)
-    (hd : deliver I w id a dm = some (w1, a1)) (hphase : installed.phase = a1.phase)
-    (hc : CallWait ((setActor (creditSender (setActor w1 id installed) (tname id) credited) p.sender
-      (resumeSender ((creditSender (setActor w1 id installed) (tname id) credited).st p.sender)
-        p.isCall id)).st caller).phase callee k) :
-    CallWait (w.st caller).phase callee k := by
-  let wA := setActor w1 id installed
-  let wB := creditSender wA (tname id) credited
-  let resumed := resumeSender (wB.st p.sender) p.isCall id
-  have hc0 : CallWait ((setActor wB p.sender resumed).st caller).phase callee k := by
-    simpa [wA, wB, resumed] using hc
-  have hcred (i : InstId) : (wB.st i).phase = (wA.st i).phase :=
-    (credit_phase_life wA (tname id) credited i).1
-  by_cases hself : p.sender = id
-  · have hseen : (wB.st id).phase = a1.phase := by rw [hcred id]; simp [wA, setActor, hphase]
-    have hres : resumed.phase = a1.phase := by
-      rcases deliver_running I w id a dm w1 a1 hd with hidle | ⟨_, hr⟩
-      · simp [resumed, resumeSender, hself, hseen, hidle]
-      · simp [resumed, resumeSender, hself, hseen, hr]
-    by_cases hcaller : caller = id
-    · rw [hcaller, hself] at hc0
-      simp [setActor] at hc0
-      rw [hres] at hc0
-      exact absurd hc0 (deliver_not_call I w id a dm w1 a1 callee k hd)
-    · have hstep : ((setActor wB p.sender resumed).st caller).phase = (wB.st caller).phase := by
-        simp [setActor, hcaller, hself]
-      rw [hstep] at hc0
-      rw [hcred caller] at hc0
-      have hA : (wA.st caller).phase = (w.st caller).phase := by
-        have hset := setActor_other w1 id caller installed hcaller
-        simpa [wA, hset] using (congrArg (·.phase) (deliver_st I w id a dm w1 a1 caller hd))
-      simpa [hA] using hc0
-  · have hseen : (wB.st p.sender).phase = (w.st p.sender).phase := by
-      rw [hcred p.sender]
-      have hset := setActor_other w1 id p.sender installed hself
-      simpa [wA, hset] using (congrArg (·.phase) (deliver_st I w id a dm w1 a1 p.sender hd))
-    by_cases hcaller : caller = p.sender
-    · obtain ⟨k0, hparked⟩ := hM.fwd id p hp
-      rw [hcaller] at hc0
-      simp [setActor] at hc0
-      have hbit := resume_bit_call (wB.st p.sender) id callee p.isCall k0 k
-        (by rw [hseen]; exact hparked) hc0
-      rw [hseen] at hbit
-      rw [hcaller]
-      exact hbit
-    · have hstep : ((setActor wB p.sender resumed).st caller).phase = (wB.st caller).phase := by
-        simp [setActor, hcaller]
-      rw [hstep, hcred caller] at hc0
-      by_cases hid : caller = id
-      · rw [hid] at hc0
-        simp [wA, setActor] at hc0
-        rw [hphase] at hc0
-        exact absurd hc0 (deliver_not_call I w id a dm w1 a1 callee k hd)
-      · have hA : (wA.st caller).phase = (w.st caller).phase := by
-          have hset := setActor_other w1 id caller installed hid
-          simpa [wA, hset] using (congrArg (·.phase) (deliver_st I w id a dm w1 a1 caller hd))
-        simpa [hA] using hc0
 
 theorem bulk_resume_call (I : Impl) (w w1 : World) (id : InstId) (a a1 : Actor) (p : Parked)
     (ps : List Parked) (hM : MailInv w) (caller callee : InstId) (k : Cont)
@@ -8579,6 +8493,17 @@ theorem route_name (w : World) (D : Description) (sender : InstId) (dst : String
         simp [hk] at h
         rcases h with ⟨_, rfl⟩
         rfl
+
+/-- Installing `a` at `id` cannot create a call wait. A phase that is not a call
+wait stays one, and every other actor is untouched. -/
+theorem not_call_runner (w : World) (id : InstId) (a : Actor) (caller callee : InstId) (k : Cont)
+    (hnot : ¬ CallWait a.phase callee k)
+    (hc : CallWait ((setActor w id a).st caller).phase callee k) :
+    CallWait (w.st caller).phase callee k := by
+  by_cases h : caller = id
+  · simp [setActor, h] at hc
+    exact absurd hc hnot
+  · simpa [setActor, h] using hc
 
 theorem enqueue_plain_call (w : World) (D : Description) (sender dst : InstId) (msg : Msg) (k : Cont)
     (caller callee : InstId) (ck : Cont)
