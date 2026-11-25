@@ -923,12 +923,13 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
     (hlive : (w.st r).life = .alive)
     (hhas : ∃ m, m ∈ (w.st r).prio ∧ m.tombstone = false ∧ m.label = label) :
     ∃ act, Enabled I w act ∧ forced act = true ∧ ((w.st r).phase = .idle → act = .recvPrio r) := by
-  have hlabel : hasLabel ((w.st r).prio) label := by
-    rcases hhas with ⟨m, hm, _, hl⟩
-    exact ⟨m, hm, hl⟩
+  have hready : ∃ m, m ∈ (w.st r).prio ∧ tombstoneWaits w m = false := by
+    rcases hhas with ⟨m, hm, ht, _⟩
+    exact ⟨m, hm, waits_plain w m ht⟩
   cases hph : (w.st r).phase with
   | idle =>
-    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR hcf) hcf hlive hph hlabel,
+    exact ⟨.recvPrio r,
+      recv_prio_enabled I hL hG N w hR r (call_tag_reachable I hL hG N w hR hcf) hcf hlive hph hready,
       rfl, fun _ => rfl⟩
   | run k =>
     exact ⟨.exec r, run_enabled I w r k hph hlive, rfl, fun hbad => by simp [hph] at hbad⟩
