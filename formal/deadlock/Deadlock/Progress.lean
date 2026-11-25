@@ -918,7 +918,8 @@ theorem fin_exec_no_blocked (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (h
 /-- A live reader with `label` still on its priority lane can take a step.
 Idle, that step is `recvPrio`, which runs `readCells` and clears the wake. -/
 theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
-    (N : Nat) (w : World) (hR : Reachable I N w) (r : InstId) (label : String)
+    (N : Nat) (w : World) (hR : Reachable I N w) (hcf : w.crashed = false)
+    (r : InstId) (label : String)
     (hlive : (w.st r).life = .alive)
     (hhas : ∃ m, m ∈ (w.st r).prio ∧ m.tombstone = false ∧ m.label = label) :
     ∃ act, Enabled I w act ∧ forced act = true ∧ ((w.st r).phase = .idle → act = .recvPrio r) := by
@@ -927,7 +928,7 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
     exact ⟨m, hm, hl⟩
   cases hph : (w.st r).phase with
   | idle =>
-    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR) hlive hph hlabel,
+    exact ⟨.recvPrio r, recv_prio_enabled I w r label (call_tag_reachable I hL hG N w hR hcf) hcf hlive hph hlabel,
       rfl, fun _ => rfl⟩
   | run k =>
     exact ⟨.exec r, run_enabled I w r k hph hlive, rfl, fun hbad => by simp [hph] at hbad⟩
@@ -961,11 +962,12 @@ theorem cell_wake_enabled (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA 
 
 /-- A stopped execution has no live reader still holding a priority wake. -/
 theorem fin_exec_no_wake (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA : Assumptions I)
-    {N : Nat} (e : FinExec I N) (r : InstId) (label : String)
+    {N : Nat} (e : FinExec I N) (hcf : (e.cfg e.len).crashed = false)
+    (r : InstId) (label : String)
     (hlive : ((e.cfg e.len).st r).life = .alive)
     (hhas : ∃ m, m ∈ ((e.cfg e.len).st r).prio ∧ m.tombstone = false ∧ m.label = label) : False := by
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
-  obtain ⟨act, hen, hf, _⟩ := cell_wake_enabled I hG hL hA N (e.cfg e.len) hR r label hlive hhas
+  obtain ⟨act, hen, hf, _⟩ := cell_wake_enabled I hG hL hA N (e.cfg e.len) hR hcf r label hlive hhas
   have hoff : ∀ s, s ∉ (e.cfg e.len).roster →
       ((e.cfg e.len).st s).life ≠ .alive ∧ ((e.cfg e.len).st s).phase = .idle := by
     intro s hs
@@ -974,20 +976,23 @@ theorem fin_exec_no_wake (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (hA :
   exact quiet_no_forced I (e.cfg e.len) hoff e.maximal act hf hen
 
 theorem fin_exec_not_blocked_on_idle (I : Impl) {N : Nat} (e : FinExec I N)
+    (hcf : (e.cfg e.len).crashed = false)
     (hM : MailInv (e.cfg e.len)) (id dst : InstId) (k : Cont)
     (hph : ((e.cfg e.len).st id).phase = .parked dst false k)
     (hl : ((e.cfg e.len).st dst).life = .alive)
     (hidle : ((e.cfg e.len).st dst).phase = .idle)
     (hc : ∀ p, p ∈ ((e.cfg e.len).st dst).parked → p.msg.callFrom = none)
+    (ht : ∀ p, p ∈ ((e.cfg e.len).st dst).parked → p.msg.tombstone = false)
     (hbox : ((e.cfg e.len).st dst).box = [] ∨
-      ∃ m ms, ((e.cfg e.len).st dst).box = m :: ms ∧ m.callFrom = none) : False := by
+      ∃ m ms, ((e.cfg e.len).st dst).box = m :: ms ∧ m.callFrom = none ∧ m.tombstone = false) :
+    False := by
   have hen : Enabled I (e.cfg e.len) (.recvBulk dst) := by
     obtain ⟨p, hmem, _, _⟩ := hM.bwd id dst false k hph
     cases hpark : ((e.cfg e.len).st dst).parked with
     | nil => simp [hpark] at hmem
     | cons q qs =>
-      exact parked_idle_enabled I (e.cfg e.len) dst hl hidle q qs hpark
-        (hc q (by simp [hpark])) hbox
+      exact parked_idle_enabled I (e.cfg e.len) dst hcf hl hidle q qs hpark
+        (hc q (by simp [hpark])) (ht q (by simp [hpark])) hbox
   have hR := fin_exec_reachable I e e.len (Nat.le_refl _)
   have hmem : dst ∈ (e.cfg e.len).roster := by
     by_cases hin : dst ∈ (e.cfg e.len).roster

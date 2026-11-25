@@ -2544,7 +2544,8 @@ theorem prio_mid_taken (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (hA : A
         | cons m ms =>
           exact ⟨j, Nat.le_trans (Nat.le_max_left s i) hj,
             recv_prio_enabled I (ρ.cfg j) id m.label
-              (call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j))
+              (call_tag_reachable I hL hG N (ρ.cfg j) (cfg_reachable ρ j) (run_not_crashed ρ j))
+              (run_not_crashed ρ j)
               hId.1 hId.2 ⟨m, by simp [hp], rfl⟩⟩
       obtain ⟨j, hj, hact⟩ := hF.prio id hio i
       exact False.elim (hex ⟨j, hj, hact⟩)
