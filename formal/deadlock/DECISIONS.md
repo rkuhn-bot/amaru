@@ -1188,3 +1188,21 @@ the worlds that can still move.
 that implication. A `terminate` that falls through to `crashWorld` is the
 contradiction of the bit, not a tag proof. No headline changes. The
 non-crashing lone and stage arms are still open.
+
+## 2026-11-25 — A sealed caller can leave the call in the box
+
+`releaseWorld` clears the sealed actor and does not take that actor's call
+back out of the callee's box. The comment on the definition says so: nothing
+there clears a sibling's mailbox. A caller in `awaitReply` can therefore die
+while `mailCall` of the callee stays true, and the world need not crash.
+
+`msgOwner` is restated in the same shape as `oweOwner`: the sender is in
+`awaitReply`, or in a call park, or the sender's life is `.dead`.
+`box_awaits` returns that same disjunction. A live sender is still waiting
+(`msg_alive`). `run_unnamed` takes `life ≠ .dead`, because a dead running
+actor is not a case the phase alone rules out. `seal_slot_tag` installs
+the dead actor without `LifeKeep`: a caller of the victim uses the halted
+disjunct, and a call the victim left in another box uses the dead
+disjunct. `release_keep` then resumes the plain parks. `stage_seal_tag`
+and the lone arm of `terminate_tag` go through that lemma. This is an
+internal invariant, not a headline. No headline has been shown false.

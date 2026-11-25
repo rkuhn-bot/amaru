@@ -378,15 +378,16 @@ theorem reply_debt_drop (I : Impl) (w w' : World) (id dst : InstId)
     exact Nat.add_lt_add_left hwork _
 
 theorem not_mail_not_any (w : World) (hT : CallTagInv w) (c d : InstId) (k : Cont)
-    (hph : (w.st c).phase = .awaitReply d k) (hno : ¬ mailCall w d c) : ¬ anyCall w c := by
+    (hph : (w.st c).phase = .awaitReply d k) (hlive : (w.st c).life = .alive)
+    (hno : ¬ mailCall w d c) : ¬ anyCall w c := by
   intro h
   rcases h with ⟨i, m, hm, hc⟩ | ⟨i, p, hp, hc⟩
-  · rcases hT.msgOwner i c (Or.inl ⟨m, hm, hc⟩) with ⟨k', hk⟩ | ⟨k', hk⟩
+  · rcases msg_alive hT i c hlive (Or.inl ⟨m, hm, hc⟩) with ⟨k', hk⟩ | ⟨k', hk⟩
     · rw [hph] at hk
       cases hk
       exact hno (Or.inl ⟨m, hm, hc⟩)
     · simp [hph] at hk
-  · rcases hT.msgOwner i c (Or.inr ⟨p, hp, hc⟩) with ⟨k', hk⟩ | ⟨k', hk⟩
+  · rcases msg_alive hT i c hlive (Or.inr ⟨p, hp, hc⟩) with ⟨k', hk⟩ | ⟨k', hk⟩
     · rw [hph] at hk
       cases hk
       exact hno (Or.inr ⟨p, hp, hc⟩)
@@ -398,7 +399,7 @@ theorem queue_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action
     (id dst : InstId) (k : Cont) (h : apply I a w = some w')
     (hph : (w.st id).phase = .awaitReply dst k) (hph' : (w'.st id).phase = .awaitReply dst k)
     (hM : MailInv w) (hT : CallTagInv w) (hH : MailHere I.desc w) (hOcc : OccInv I w)
-    (hlive' : (w'.st dst).life = .alive) :
+    (hlive' : (w'.st dst).life = .alive) (hliveC : (w.st id).life = .alive) :
     queuePos w' id dst ≤ queuePos w id dst := by
   by_cases hq : callPos ((w.st dst).box) id < ((w.st dst).box).length
   · by_cases hrecv : a = .recvBulk dst
@@ -424,7 +425,7 @@ theorem queue_mono (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (a : Action
   · have hmail : ¬ mailCall w dst id := by
       intro hm
       exact hq (await_mail_in_box w hT id dst k hph hm).1
-    have hany := not_mail_not_any w hT id dst k hph hmail
+    have hany := not_mail_not_any w hT id dst k hph hliveC hmail
     have hany' := no_new_mailCall I a w w' id dst k h hph hph' hany
     have hmail' : ¬ mailCall w' dst id := fun hm => hany' (anyCall_mail w' dst id hm)
     have hz := queue_zero_of_no_mail w id dst hmail
@@ -438,11 +439,13 @@ theorem queue_mono_life (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : N
     (h : apply I a w = some w')
     (hph : (w.st id).phase = .awaitReply dst k) (hph' : (w'.st id).phase = .awaitReply dst k)
     (hM : MailInv w) (hT : CallTagInv w) (hH : MailHere I.desc w) (hOcc : OccInv I w)
-    (hR' : Reachable I N w')
+    (hR' : Reachable I N w') (hS : SemInv I w)
     (hlive : (w'.st dst).life = .alive ∨ (w'.st dst).life = .dead) :
     queuePos w' id dst ≤ queuePos w id dst := by
+  have hliveC : (w.st id).life = .alive :=
+    busy_alive I w hS id (by rw [hph]; intro h; cases h) (by rw [hph]; intro h; cases h)
   rcases hlive with hlive | hdead
-  · exact queue_mono I hL hG a w w' id dst k h hph hph' hM hT hH hOcc hlive
+  · exact queue_mono I hL hG a w w' id dst k h hph hph' hM hT hH hOcc hlive hliveC
   · have hT' := call_tag_reachable I hL hG N w' hR'
     have hnot : (w'.st dst).life ≠ .alive := by
       rw [hdead]
@@ -772,7 +775,7 @@ theorem reply_absorb (I : Impl) (hL : LocalOk I) (hG : GraphOk I.desc) (N : Nat)
     · have hR' := Reachable.step w w' a hR hA
       have hq := queue_mono_life I hL hG N a w w' root dst k hA hph hstay hInv.2.1
         (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
-        ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+        ((inv3_reachable I hL hG N w hR).1.2.1) hR' hInv
         (reply_target_alive I hL hG N w' hR' root dst k hstay)
       obtain ⟨acts1, w1, hC1, hrun1, hR1, hor⟩ := ih hR' hstay
       rcases hor with hdone | hfull
@@ -903,7 +906,7 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           · have hR' := Reachable.step w w' (.finish dst) hR happ
             have hq := queue_mono_life I hL hG N (.finish dst) w w' id dst k happ hph hstay hInv.2.1
               (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
-              ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+              ((inv3_reachable I hL hG N w hR).1.2.1) hR' hInv
               (reply_target_alive I hL hG N w' hR' id dst k hstay)
             have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
             have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
@@ -944,7 +947,7 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           · have hR' := Reachable.step w w' (.finish dst) hR happ
             have hq := queue_mono_life I hL hG N (.finish dst) w w' id dst k happ hph hstay hInv.2.1
               (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
-              ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+              ((inv3_reachable I hL hG N w hR).1.2.1) hR' hInv
               (reply_target_alive I hL hG N w' hR' id dst k hstay)
             have hdebt' := reply_debt_drop I w w' id dst hq hworkD (prog_src_reachable I N w' hR')
             have hfuel := Nat.lt_of_lt_of_le hdebt' hdebt
@@ -980,7 +983,7 @@ theorem reply_go (I : Impl) (hG : GraphOk I.desc) (hL : LocalOk I) (N : Nat)
           · have hR' := Reachable.step w w' (.exec dst) hR happ
             have hq := queue_mono_life I hL hG N (.exec dst) w w' id dst k happ hph hstay hInv.2.1
               (call_tag_reachable I hL hG N w hR) (mail_here_reachable I hL hG N w hR)
-              ((inv3_reachable I hL hG N w hR).1.2.1) hR'
+              ((inv3_reachable I hL hG N w hR).1.2.1) hR' hInv
               (reply_target_alive I hL hG N w' hR' id dst k hstay)
             have hworkD := work_exec I hL hG N w hR dst kD hphD hliveD ((apply_step I (.exec dst) w w' happ).1) w'
             (by simpa [apply] using happ)
